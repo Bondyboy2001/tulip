@@ -22,7 +22,7 @@ import { findEmbeds, embedSpec, renderEmbed } from './assets.js'
 
 /* ---------------------------------------------------------------- theme */
 
-export const tulipTheme = EditorView.theme({
+const tulipTheme = EditorView.theme({
   '&': { color: 'var(--ink)', backgroundColor: 'transparent', height: '100%' },
   '.cm-gutters': { display: 'none' },
   // Padding cancelled by an equal negative margin: the highlight band extends
@@ -123,7 +123,7 @@ class LangChipWidget extends WidgetType {
 /* Resolving an embed needs the vault's file list, which lives in the renderer.
    A facet carries it in rather than a module-level variable, so the decoration
    builder stays a function of editor state. */
-export const embedResolver = Facet.define({
+const embedResolver = Facet.define({
   combine: (values) => values[0] || (() => null)
 })
 

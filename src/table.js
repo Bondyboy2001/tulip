@@ -72,7 +72,7 @@ function alignments (delimiterRow) {
 }
 
 /** Every table in the document, as line ranges plus their parsed contents. */
-export function findTables (state) {
+function findTables (state) {
   const tables = []
   const total = state.doc.lines
 

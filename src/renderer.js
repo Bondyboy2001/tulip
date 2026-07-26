@@ -448,7 +448,7 @@ function clickFile (path, event) {
       // The range's far end becomes current without disturbing the anchor,
       // so a second shift-click re-extends from the same place. markPicked
       // runs after, because opening a note resets the status line.
-      openNote(path, { keepSelection: true }).then(markPicked)
+      openNote(path).then(markPicked)
       markPicked()
       return
     }
@@ -464,7 +464,7 @@ function clickFile (path, event) {
   state.picked = new Set([path])
   state.pickAnchor = path
   markPicked()
-  openNote(path, { keepSelection: true })
+  openNote(path)
 }
 
 el.tree.addEventListener('mousedown', (e) => {
@@ -671,7 +671,7 @@ const cssEscape = (s) => (window.CSS?.escape ? CSS.escape(s) : s.replace(/"/g, '
 
 /* ------------------------------------------------------------- open/save */
 
-async function openNote (path, { focus = true, keepSelection = false, history = true, place = null } = {}) {
+async function openNote (path, { focus = true, history = true, place = null } = {}) {
   if (state.dirty) await saveNow()
 
   let text

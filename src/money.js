@@ -25,7 +25,7 @@ const MONEY_AT = new RegExp(MONEY.source, 'y')
 const escaped = (text, i) => text[i - 1] === '\\' || text[i - 1] === '$'
 
 /** Every price in `text`, skipping any that falls inside a maths span. */
-export function findMoney (text) {
+function findMoney (text) {
   const maths = findMath(text)
   const inMath = (from, to) => maths.some((m) => from < m.to && to > m.from)
 

@@ -25,7 +25,7 @@ import { EditorView, Decoration, ViewPlugin, WidgetType } from '@codemirror/view
  * malformed one renders as the offending source in the error colour rather
  * than taking the surrounding render down with it.
  */
-export function renderMath (tex, displayMode = false) {
+function renderMath (tex, displayMode = false) {
   return katex.renderToString(tex, {
     displayMode,
     throwOnError: false,
@@ -37,7 +37,7 @@ export function renderMath (tex, displayMode = false) {
   })
 }
 
-export function renderMathInto (el, tex, displayMode = false) {
+function renderMathInto (el, tex, displayMode = false) {
   try {
     katex.render(tex, el, {
       displayMode,
