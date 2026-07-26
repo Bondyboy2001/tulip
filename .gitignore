@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.DS_Store
+*.log
+
+# The packaged .app that scripts/build-app.sh assembles — ~280MB of copied
+# Electron, rebuildable from source in one command.
+build/
+
+# SwiftPM's cache, left over from the pre-Electron Tulip.
+.build/

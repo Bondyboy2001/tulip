@@ -1,0 +1,7 @@
+{
+  "_comment": "The one list of what a note can embed, and how each kind is shown. Read by electron/main.js (require) and by src/assets.js (bundled in at build time), so adding a format is one edit. Lives in electron/ because packaging ships only electron/ and dist/.",
+  "image": ["png", "jpg", "jpeg", "gif", "webp", "avif", "svg", "bmp", "ico", "heic"],
+  "video": ["mp4", "webm", "mov", "m4v", "ogv"],
+  "audio": ["mp3", "wav", "m4a", "aac", "flac", "ogg", "opus"],
+  "file": ["pdf"]
+}
