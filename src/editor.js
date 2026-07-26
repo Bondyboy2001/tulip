@@ -647,5 +647,26 @@ export function createEditor ({
   /** Redraw the parts that read from outside the document — the inline title. */
   view.refresh = () => { view.dispatch({ effects: refreshEffect.of(null) }) }
 
+  /* Reading position, expressed as a line of the file rather than a pixel
+     offset. Pixels do not survive the trip to another view — the reading view
+     is a different scroll container, and even edit-to-raw changes every line's
+     height by unhiding the markup. The line is the one thing all three agree
+     on. */
+
+  /** The source line at the top of the visible area. 1-based. */
+  view.topLine = () => {
+    const box = view.scrollDOM.getBoundingClientRect()
+    const pos = view.posAtCoords({ x: box.left + 8, y: box.top + 2 }, false)
+    if (pos == null) return 1
+    return view.state.doc.lineAt(Math.max(0, Math.min(pos, view.state.doc.length))).number
+  }
+
+  /** Put that line back at the top. */
+  view.scrollToLine = (n) => {
+    const { doc } = view.state
+    const line = doc.line(Math.max(1, Math.min(n, doc.lines)))
+    view.dispatch({ effects: EditorView.scrollIntoView(line.from, { y: 'start', yMargin: 0 }) })
+  }
+
   return view
 }

@@ -10,6 +10,7 @@ import {
   assetIndex, embedSpec, renderEmbed, parseEmbedSuffix, isAsset
 } from './assets.js'
 import { attachRunControl } from './runcode.js'
+import { attachManim, isManim } from './manim.js'
 
 const api = window.tulip
 const $ = (id) => document.getElementById(id)
@@ -160,6 +161,18 @@ md.core.ruler.after('inline', 'task_lists', (mdState) => {
   }
 })
 
+/* Every block carries the line of the file it started on. Switching views has
+   to land you in the same place in the note, and a pixel offset cannot say
+   where that is — the two views are different scroll containers laying the
+   same text out differently. A line number is the one address both understand.
+   (markdown-it fills `token.map` for block tokens; inline tokens have none.) */
+const renderToken = md.renderer.renderToken.bind(md.renderer)
+md.renderer.renderToken = (tokens, i, options) => {
+  const token = tokens[i]
+  if (token.map && token.nesting !== -1) token.attrSet('data-line', String(token.map[0]))
+  return renderToken(tokens, i, options)
+}
+
 md.renderer.rules.taskbox = (tokens, i) => {
   const { checked, line } = tokens[i].meta
   // Without a source line there is nothing to write back to, so the box stays
@@ -172,7 +185,12 @@ md.renderer.rules.taskbox = (tokens, i) => {
    highlighted spans are built from the DOM afterwards, where the language pack
    can be loaded without blocking the render. */
 md.renderer.rules.fence = (tokens, i) => {
-  const lang = (tokens[i].info || '').trim().split(/\s+/)[0]
+  const info = (tokens[i].info || '').trim()
+  const lang = info.split(/\s+/)[0]
+  // Everything after the language is kept: a manim block names its scene there.
+  const rest = info.slice(lang.length).trim()
+  // Built as a string rather than from attrs, so it has to carry its own line.
+  const line = tokens[i].map ? ` data-line="${tokens[i].map[0]}"` : ''
   // The fence's content keeps its closing newline, which renders as a blank
   // final line inside the box.
   const code = tokens[i].content.replace(/\n$/, '')
@@ -182,7 +200,8 @@ md.renderer.rules.fence = (tokens, i) => {
   // it. Being a sibling also keeps them still while the code scrolls.
   const numbers = lines.map((_, n) => n + 1).join('\n')
 
-  return `<div class="code-wrap"${lang ? ` data-lang="${escapeAttr(lang)}"` : ''}>` +
+  return `<div class="code-wrap"${line}${lang ? ` data-lang="${escapeAttr(lang)}"` : ''}` +
+         `${rest ? ` data-info="${escapeAttr(rest)}"` : ''}>` +
          '<div class="code-body">' +
          `<pre class="code-nums" aria-hidden="true">${numbers}</pre>` +
          `<pre class="code-text"><code>${escapeHtml(code)}</code></pre>` +
@@ -1008,15 +1027,71 @@ function dressCodeBlocks (root, token) {
 
     const code = wrap.querySelector('code')
     if (!code) continue
-    // The button goes in the header beside the language mark, and the output
-    // box after the frame. Blocks in a language Tulip cannot run are untouched.
-    if (head) attachRunControl(wrap, head, lang, code.textContent)
-    highlightInto(code, code.textContent, lang).catch(() => {})
+
+    if (head && isManim(lang)) {
+      // A scene is shown as the film it renders to, not as the source that
+      // describes it — so this block gets the manim treatment instead of a
+      // Run control it has no use for.
+      attachManim(wrap, head, code.textContent, {
+        noteName: state.current?.name || 'Untitled',
+        scene: wrap.dataset.info || ''
+      })
+    } else if (head) {
+      // The button goes in the header beside the language mark, and the output
+      // box after the frame. Blocks in a language Tulip cannot run are untouched.
+      attachRunControl(wrap, head, lang, code.textContent)
+    }
+
+    // Manim scenes are Python, and read as Python behind the video.
+    highlightInto(code, code.textContent, isManim(lang) ? 'python' : lang).catch(() => {})
     if (token !== readingToken) return
   }
 }
 
+/**
+ * Where the reader is, as a line of the file.
+ *
+ * Each view scrolls its own box and lays the same text out differently, so a
+ * pixel offset means nothing once you leave. Every block in the reading view
+ * carries the line it came from, and the editor can answer for the line at the
+ * top of its viewport, which makes the line number the common address.
+ */
+function viewportLine () {
+  if (!state.current) return 1
+  if (!reading()) return editor.topLine()
+
+  const top = el.reading.getBoundingClientRect().top
+  let line = 1
+  for (const node of el.reading.querySelectorAll('[data-line]')) {
+    // The first block whose top edge is below the fold ends the search; the one
+    // before it is the block being read.
+    if (node.getBoundingClientRect().top - top > 2) break
+    line = Number(node.dataset.line) + 1        // markdown-it counts from zero
+  }
+  return line
+}
+
+function scrollToLine (line) {
+  if (!state.current) return
+  if (!reading()) { editor.scrollToLine(line); return }
+
+  let target = null
+  for (const node of el.reading.querySelectorAll('[data-line]')) {
+    if (Number(node.dataset.line) + 1 > line) break
+    target = node
+  }
+  el.reading.scrollTop = target
+    ? el.reading.scrollTop + target.getBoundingClientRect().top -
+      el.reading.getBoundingClientRect().top
+    : 0
+}
+
+/* Called with the current view too — at boot, where it is what marks the
+   active button — so it must not shortcut when nothing is changing. */
 function setView (view) {
+  // Read before anything moves, restore after everything has.
+  const line = viewportLine()
+
   state.view = view
   el.reading.hidden = view !== 'read'
   el.editorHost.hidden = view === 'read'
@@ -1029,6 +1104,12 @@ function setView (view) {
 
   if (view === 'read') renderReading()
   else if (state.current) editor.focus()
+
+  scrollToLine(line)
+  // Pictures and highlighted code settle a frame later and can move the ground
+  // under the anchor, so it is placed once more once they have.
+  requestAnimationFrame(() => scrollToLine(line))
+
   api.config.set({ view })
 }
 
@@ -1782,7 +1863,10 @@ window.addEventListener('beforeunload', () => { if (state.dirty) saveNow() })
 document.addEventListener('visibilitychange', () => { if (document.hidden) saveNow() })
 
 // Handle for the DevTools console and the scripts/drive.mjs test harness.
-window.__tulip = { state, editor, api, openNote, runCommand, openOverlay, showZoom }
+window.__tulip = {
+  state, editor, api, openNote, runCommand, openOverlay, showZoom,
+  viewportLine, scrollToLine, goHistory
+}
 
 ;(async function boot () {
   window.__systemTheme = await api.systemTheme()
