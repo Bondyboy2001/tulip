@@ -342,9 +342,20 @@ function buildDecorations (view) {
         if (name === 'FencedCode' || name === 'CodeBlock') {
           const first = state.doc.lineAt(node.from).number
           const last = state.doc.lineAt(node.to).number
+          /* A finished block ends on a line holding nothing but the fence. That
+             line's markers are hidden, so it can be collapsed to the padding it
+             reads as, and the room it was taking moves up to the last line of
+             real code — where a click aimed just under the code belongs.
+
+             A block still being typed at the end of the note has no such line:
+             its last line is code, and has to stay a line of code. */
+          const closed = last > first && /^\s*(```|~~~)\s*$/.test(state.doc.line(last).text)
           for (let n = first; n <= last; n++) {
             const edge =
-              (n === first ? ' tk-code-top' : '') + (n === last ? ' tk-code-bottom' : '')
+              (n === first ? ' tk-code-top' : '') +
+              (n === last ? ' tk-code-bottom' : '') +
+              (closed && n === last ? ' tk-code-fence' : '') +
+              (closed && n === last - 1 && n > first ? ' tk-code-last' : '')
             ranges.push(
               Decoration.line({ class: `tk-code-block${edge}` }).range(state.doc.line(n).from)
             )

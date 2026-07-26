@@ -7,6 +7,7 @@ const path = require('node:path')
 const fs = require('node:fs/promises')
 const fsSync = require('node:fs')
 const os = require('node:os')
+const crypto = require('node:crypto')
 const { spawn } = require('node:child_process')
 const { pathToFileURL } = require('node:url')
 
@@ -851,6 +852,63 @@ const RUNNERS = new Map([
   ['sh', 'sh'], ['shell', 'sh'], ['bash', 'bash'], ['zsh', 'zsh']
 ])
 
+/**
+ * The PATH to run snippets with.
+ *
+ * An app launched from Finder or the Dock inherits launchd's PATH, not the one
+ * your shell spends a login building — so Homebrew, nvm, pyenv, volta and
+ * everything else people actually install with are invisible, and `node` is
+ * reported "not installed" on a machine where it plainly is. (On Apple silicon
+ * Homebrew lives in /opt/homebrew/bin, which launchd has never heard of.)
+ *
+ * So ask the login shell, once, for the PATH it would hand an interactive
+ * session. The well-known locations below are a fallback for when that fails,
+ * and a backstop for shells that only export PATH for interactive use.
+ */
+const FALLBACK_PATHS = [
+  '/opt/homebrew/bin', '/opt/homebrew/sbin',   // Homebrew, Apple silicon
+  '/usr/local/bin', '/usr/local/sbin',         // Homebrew, Intel — and much else
+  '/opt/local/bin',                            // MacPorts
+  path.join(os.homedir(), '.local/bin'),
+  path.join(os.homedir(), '.cargo/bin')
+]
+
+let loginPath = null        // resolved once, at startup
+
+function readLoginPath () {
+  return new Promise((resolve) => {
+    const shell = process.env.SHELL || '/bin/zsh'
+    // -l runs the profile files, -i because an interactive session is where
+    // most people's PATH edits actually take effect. The value is fenced so a
+    // chatty profile's banner cannot be mistaken for it.
+    const child = spawn(shell, ['-lic', 'printf "\\0%s\\0" "$PATH"'], {
+      stdio: ['ignore', 'pipe', 'ignore']
+    })
+
+    let out = ''
+    let settled = false
+    const finish = (value) => { if (!settled) { settled = true; resolve(value) } }
+
+    child.stdout.setEncoding('utf8')
+    child.stdout.on('data', (chunk) => { out += chunk })
+    child.on('error', () => finish(null))
+    child.on('close', () => finish(out.split('\0')[1]?.trim() || null))
+    // A profile that waits for input would otherwise hang this forever.
+    const bail = setTimeout(() => { try { process.kill(-child.pid) } catch {} ; finish(null) }, 4000)
+    bail.unref?.()
+  })
+}
+
+/** Longest-first, de-duplicated, in preference order. */
+function runnerPath () {
+  const seen = new Set()
+  return [loginPath, process.env.PATH, ...FALLBACK_PATHS]
+    .filter(Boolean)
+    .flatMap((part) => part.split(path.delimiter))
+    .filter((dir) => dir && !seen.has(dir) && seen.add(dir))
+    .join(path.delimiter)
+}
+
 /* Enough output to be worth reading, capped so a runaway `yes` cannot grow the
    main process without bound. Each stream gets its own budget. */
 const MAX_RUN_BYTES = 256 * 1024
@@ -871,36 +929,24 @@ function scriptName (cmd, code) {
 }
 
 /**
- * A run is a file in a private temp directory rather than a here-string on
- * stdin: an interpreter that has a file can report the line a failure happened
- * on, and `sh` can still read from stdin itself.
+ * Spawns one command, streams it to the page under `id`, and resolves when it
+ * is over. Both the Run control and Manim go through here, so the timeout, the
+ * output cap, the process-group kill and the shape of what the renderer hears
+ * are written once.
+ *
+ * @returns {Promise<{code:number|null, signal:string|null, timedOut:boolean, error?:string}>}
  */
-ipcMain.handle('run:start', async (_e, lang, code) => {
-  const cmd = runnerFor(lang)
-  if (!cmd) throw new Error(`Tulip cannot run "${lang}" blocks.`)
-  if (typeof code !== 'string') throw new Error('Nothing to run.')
-
-  const id = ++nextRunId
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tulip-run-'))
-  const file = path.join(dir, scriptName(cmd, code))
-  await fs.writeFile(file, code, 'utf8')
-
-  const timeoutMs = Number(readConfig().runTimeout) > 0
-    ? Math.min(600, Number(readConfig().runTimeout)) * 1000
-    : DEFAULT_TIMEOUT_MS
-
-  // The vault is the working directory, so a snippet's relative paths mean what
-  // they mean in the note. Without one, the scratch directory stands in.
-  const child = spawn(cmd, [file], {
-    cwd: vaultPath || dir,
-    env: { ...process.env, TULIP_VAULT: vaultPath || '' },
+function startRun (id, cmd, args, { cwd, timeoutMs, cleanup = null }) {
+  const child = spawn(cmd, args, {
+    cwd,
+    env: { ...process.env, PATH: runnerPath(), TULIP_VAULT: vaultPath || '' },
     // Its own process group, so killing a shell takes the pipeline it started
     // with it rather than leaving orphans behind.
     detached: true,
     stdio: ['ignore', 'pipe', 'pipe']
   })
 
-  const run = { child, dir, done: false, timer: null, killTimer: null, timedOut: false }
+  const run = { child, done: false, timer: null, killTimer: null, timedOut: false }
   runs.set(id, run)
 
   const started = Date.now()
@@ -921,32 +967,61 @@ ipcMain.handle('run:start', async (_e, lang, code) => {
   pipe(child.stdout, 'stdout')
   pipe(child.stderr, 'stderr')
 
-  const finish = (payload) => {
-    if (run.done) return
-    run.done = true
-    clearTimeout(run.timer)
-    clearTimeout(run.killTimer)
-    runs.delete(id)
-    fs.rm(dir, { recursive: true, force: true }).catch(() => {})
-    send('run:done', { id, ms: Date.now() - started, truncated, ...payload })
-  }
+  return new Promise((resolve) => {
+    const finish = (payload) => {
+      if (run.done) return
+      run.done = true
+      clearTimeout(run.timer)
+      clearTimeout(run.killTimer)
+      runs.delete(id)
+      if (cleanup) fs.rm(cleanup, { recursive: true, force: true }).catch(() => {})
+      resolve({ ms: Date.now() - started, truncated, ...payload })
+    }
 
-  child.on('error', (err) => {
-    // The commonest failure by far: the interpreter is not installed.
-    const missing = err.code === 'ENOENT'
-    finish({
-      code: null,
-      error: missing ? `${cmd} is not installed, or not on Tulip's PATH.` : err.message
+    child.on('error', (err) => {
+      // The commonest failure by far: the command is not installed.
+      finish({
+        code: null,
+        error: err.code === 'ENOENT'
+          ? `${cmd} could not be found. Tulip looked in ${runnerPath()}`
+          : err.message
+      })
     })
-  })
-  child.on('close', (code, signal) => {
-    finish({ code, signal, timedOut: run.timedOut })
-  })
+    child.on('close', (code, signal) => finish({ code, signal, timedOut: run.timedOut }))
 
-  run.timer = setTimeout(() => {
-    run.timedOut = true
-    stopRun(id)
-  }, timeoutMs)
+    run.timer = setTimeout(() => {
+      run.timedOut = true
+      stopRun(id)
+    }, timeoutMs)
+  })
+}
+
+function runTimeoutMs (key, fallback) {
+  const seconds = Number(readConfig()[key])
+  return seconds > 0 ? Math.min(3600, seconds) * 1000 : fallback
+}
+
+/**
+ * A run is a file in a private temp directory rather than a here-string on
+ * stdin: an interpreter that has a file can report the line a failure happened
+ * on, and `sh` can still read from stdin itself.
+ */
+ipcMain.handle('run:start', async (_e, lang, code) => {
+  const cmd = runnerFor(lang)
+  if (!cmd) throw new Error(`Tulip cannot run "${lang}" blocks.`)
+  if (typeof code !== 'string') throw new Error('Nothing to run.')
+
+  const id = ++nextRunId
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tulip-run-'))
+  const file = path.join(dir, scriptName(cmd, code))
+  await fs.writeFile(file, code, 'utf8')
+
+  const timeoutMs = runTimeoutMs('runTimeout', DEFAULT_TIMEOUT_MS)
+
+  // The vault is the working directory, so a snippet's relative paths mean what
+  // they mean in the note. Without one, the scratch directory stands in.
+  startRun(id, cmd, [file], { cwd: vaultPath || dir, timeoutMs, cleanup: dir })
+    .then((result) => send('run:done', { id, ...result }))
 
   return { id, cmd, timeoutMs }
 })
@@ -971,6 +1046,152 @@ ipcMain.handle('run:kill', (_e, id) => stopRun(Number(id)))
 function stopAllRuns () {
   for (const id of [...runs.keys()]) stopRun(id)
 }
+
+/* --------------------------------------------------------------- manim
+   A ```manim block is a scene, and what a scene is *for* is the video. So it
+   renders to a real file in the vault and the reading view shows that instead
+   of the code.
+
+   The video is named after a hash of the code, which is the whole caching
+   story: the same block always asks for the same file, so a note that has been
+   rendered once opens with its videos already there and nothing re-runs. Edit
+   the block and it asks for a name that does not exist yet, which is exactly
+   when a re-render is wanted. Nothing is written into the .md — the note keeps
+   saying what you wrote, and the video sits beside it as an attachment. */
+
+const MANIM_TIMEOUT_MS = 5 * 60 * 1000
+
+/** Manim CE's quality flags, smallest first. Medium is 720p30. */
+const MANIM_QUALITIES = new Set(['l', 'm', 'h', 'p', 'k'])
+
+/** Where a note's rendered scenes live, and what one is called. */
+function manimTarget (noteName, code, quality) {
+  const digest = crypto.createHash('sha1').update(`${quality}\n${code}`).digest('hex').slice(0, 10)
+  const folder = path.join(ATTACHMENT_DIR, String(noteName || 'Untitled').replace(/[/\\]/g, '-'))
+  return safePath(path.join(folder, `manim-${digest}.mp4`))
+}
+
+/**
+ * The scene to render. Manim asks interactively when a file holds several and
+ * none was named, which would hang a run forever with nobody to answer — so one
+ * is always chosen here. The fence may name it (```manim MyScene); otherwise
+ * the last class in the block wins, which is the one people write last and mean.
+ */
+function sceneName (code, requested) {
+  if (requested && /^[A-Za-z_]\w*$/.test(requested)) return requested
+  const found = [...code.matchAll(/^\s*class\s+([A-Za-z_]\w*)\s*\(([^)]*)\)\s*:/gm)]
+    .filter((m) => /Scene\b/.test(m[2]))
+    .map((m) => m[1])
+  return found.length ? found[found.length - 1] : null
+}
+
+/** The newest .mp4 anywhere under `dir` — manim's own layout is a deep tree
+ *  whose shape has changed between releases, so the file is found, not guessed. */
+async function newestVideo (dir) {
+  let best = null
+  const walk = async (at) => {
+    let entries
+    try { entries = await fs.readdir(at, { withFileTypes: true }) } catch { return }
+    for (const entry of entries) {
+      const abs = path.join(at, entry.name)
+      if (entry.isDirectory()) { await walk(abs); continue }
+      if (path.extname(entry.name).toLowerCase() !== '.mp4') continue
+      // Manim writes partial clips into a `partial_movie_files` folder and
+      // stitches them; the assembled scene is the one outside it.
+      if (abs.includes('partial_movie_files')) continue
+      const stat = await fs.stat(abs).catch(() => null)
+      if (stat && (!best || stat.mtimeMs > best.mtime)) best = { abs, mtime: stat.mtimeMs }
+    }
+  }
+  await walk(dir)
+  return best?.abs || null
+}
+
+/** Manim on the PATH, else the module under python3 — both are normal installs. */
+async function manimCommand () {
+  const configured = readConfig().manimCommand
+  if (configured) return String(configured).split(/\s+/)
+  return new Promise((resolve) => {
+    const probe = spawn('manim', ['--version'], { stdio: 'ignore' })
+    probe.on('error', () => resolve(['python3', '-m', 'manim']))
+    probe.on('close', (code) => resolve(code === 0 ? ['manim'] : ['python3', '-m', 'manim']))
+  })
+}
+
+/** Has this block already been rendered? Answered without running anything, so
+ *  the reading view can show the video the moment the note opens. */
+ipcMain.handle('manim:lookup', async (_e, noteName, code, scene) => {
+  if (!vaultPath) return null
+  const quality = manimQuality()
+  const target = manimTarget(noteName, code, quality)
+  try {
+    await fs.access(target)
+    return { path: rel(target), scene: sceneName(code, scene) }
+  } catch {
+    return null
+  }
+})
+
+function manimQuality () {
+  const q = String(readConfig().manimQuality || 'm').toLowerCase()
+  return MANIM_QUALITIES.has(q) ? q : 'm'
+}
+
+ipcMain.handle('manim:render', async (_e, noteName, code, scene) => {
+  if (!vaultPath) throw new Error('Open a vault first — the video is saved into it.')
+  if (typeof code !== 'string' || !code.trim()) throw new Error('Nothing to render.')
+
+  const name = sceneName(code, scene)
+  if (!name) throw new Error('No Scene class found in this block.')
+
+  const quality = manimQuality()
+  const target = manimTarget(noteName, code, quality)
+  const id = ++nextRunId
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tulip-manim-'))
+
+  // Started before the work so the page can show progress and offer a Stop.
+  queueMicrotask(() => send('run:out', {
+    id, stream: 'stdout', text: `Rendering ${name}…\n`
+  }))
+
+  const finish = async () => {
+    const file = path.join(dir, 'scene.py')
+    await fs.writeFile(file, code, 'utf8')
+
+    const [cmd, ...lead] = await manimCommand()
+    const result = await startRun(
+      id,
+      cmd,
+      [...lead, 'render', '--media_dir', path.join(dir, 'media'),
+        '--format', 'mp4', '--quality', quality, file, name],
+      { cwd: dir, timeoutMs: runTimeoutMs('manimTimeout', MANIM_TIMEOUT_MS) }
+    )
+
+    if (result.error || result.code !== 0) {
+      await fs.rm(dir, { recursive: true, force: true }).catch(() => {})
+      return { ...result, path: null }
+    }
+
+    const produced = await newestVideo(path.join(dir, 'media'))
+    if (!produced) {
+      await fs.rm(dir, { recursive: true, force: true }).catch(() => {})
+      return { ...result, path: null, error: 'Manim finished but produced no video.' }
+    }
+
+    await fs.mkdir(path.dirname(target), { recursive: true })
+    // Copied rather than renamed: the temp dir is often on a different volume,
+    // where rename fails outright.
+    await fs.copyFile(produced, target)
+    await fs.rm(dir, { recursive: true, force: true }).catch(() => {})
+    return { ...result, path: rel(target) }
+  }
+
+  finish()
+    .catch((err) => ({ code: null, ms: 0, error: err.message, path: null }))
+    .then((result) => send('run:done', { id, ...result }))
+
+  return { id, scene: name, quality }
+})
 
 ipcMain.handle('zoom:reset', () => applyZoom(1))
 ipcMain.handle('config:get', () => readConfig())
@@ -997,6 +1218,10 @@ app.whenReady().then(async () => {
       return new Response('Not found', { status: 404 })
     }
   })
+
+  // Warmed now rather than on the first Run, so clicking Run does not wait on
+  // a login shell. A failure here is not fatal — the fallbacks still apply.
+  readLoginPath().then((value) => { loginPath = value }).catch(() => {})
 
   buildMenu()
   createWindow()

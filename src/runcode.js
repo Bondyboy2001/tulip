@@ -67,8 +67,23 @@ function held (id) {
   return box
 }
 
+/**
+ * A blank run state. Manim keeps its own view but streams through the same
+ * machinery, so the two cannot drift over what "running" looks like.
+ */
+export function runState () {
+  return {
+    status: 'idle',
+    stdout: '',
+    stderr: '',
+    code: null,
+    painters: new Set(),
+    render () { for (const paint of this.painters) paint() }
+  }
+}
+
 /** Hand a started run its view, replaying anything that arrived first. */
-function adopt (id, state) {
+export function adopt (id, state) {
   const box = inbox.get(id)
   if (box) {
     inbox.delete(id)
@@ -88,16 +103,9 @@ function stateFor (code) {
   let state = results.get(code)
   if (state) return state
 
-  state = {
-    status: 'idle',
-    stdout: '',
-    stderr: '',
-    code: null,
-    /* One state can be on screen more than once — the same snippet twice in a
-       note — so every panel showing it registers its own painter. */
-    painters: new Set(),
-    render () { for (const paint of this.painters) paint() }
-  }
+  /* One state can be on screen more than once — the same snippet twice in a
+     note — so every panel showing it registers its own painter. */
+  state = runState()
   if (results.size >= MAX_RESULTS) results.delete(results.keys().next().value)
   results.set(code, state)
   return state

@@ -16,6 +16,9 @@ const ENTRIES = [
   { id: 'typescript', label: 'TypeScript', short: 'TS', color: '#3178C6', alias: ['ts', 'mts', 'cts'] },
   { id: 'tsx', label: 'TSX', short: 'TSX', color: '#3178C6' },
   { id: 'python', label: 'Python', short: 'PY', color: '#3776AB', alias: ['py', 'python3'] },
+  /* Manim blocks are Python, but they are their own kind of block — what comes
+     out is a film, not a program's output — so they get their own tile. */
+  { id: 'manim', label: 'Manim', short: 'MAN', color: '#63C9B0', ink: DARK_INK },
   { id: 'ruby', label: 'Ruby', short: 'RB', color: '#CC342D', alias: ['rb'] },
   { id: 'rust', label: 'Rust', short: 'RS', color: '#CE422B', alias: ['rs'] },
   { id: 'go', label: 'Go', short: 'GO', color: '#00ADD8', alias: ['golang'] },

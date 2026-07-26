@@ -1202,6 +1202,59 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   padding-top: 6px;
 }
 
+/* ---------------------------------------------------------------- manim
+   A rendered scene stands where its code did, so it is set as a figure and
+   not as output: the film is the content here, and the source is the thing
+   behind it. The frame matches the code frame it replaces — same radius, same
+   hairline — so a note of scenes and a note of code blocks have the same
+   rhythm down the page. */
+
+.reading .manim {
+  margin: 0 0 1.05em;
+  background: var(--sunk);
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.reading .manim[hidden] { display: none; }
+
+/* Black behind the video: a manim scene is letterboxed more often than not,
+   and the bars should read as the film's own edge rather than as a gap in the
+   page. */
+.reading .manim-stage {
+  display: flex;
+  background: #000;
+  line-height: 0;
+}
+.reading .manim-stage .embed-media {
+  width: 100%;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+}
+
+.reading .manim-foot {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 7px 10px 7px 14px;
+}
+.manim-spacer { flex: 1; }
+.manim-scene {
+  font-family: var(--font-ui);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.reading .manim-foot .run-btn[hidden] { display: none; }
+.run-btn:disabled { color: var(--faint); cursor: default; background: none; }
+
+/* Manim takes minutes, so the line it is on now is worth showing. One line,
+   not the whole log — the log is only interesting when it fails. */
+.reading .manim-status { margin-top: -.75em; }
+
 /* ------------------------------------------------------- inline title */
 /* The note's name, set where a title belongs. Frontmatter no longer has to
    masquerade as one. */
@@ -1495,6 +1548,31 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .cm-content .cm-line.tk-code-bottom {
   padding-top: 2px;
   padding-bottom: 14px;
+}
+
+/* The closing fence, when it really is one, has its ``` hidden — so what is
+   left is an empty line box holding a full line of height for nothing, plus
+   14px of padding under it. The room below a block is split between two lines
+   instead: enough on the last line of code that a click aimed just under the
+   code lands on the code, and enough left on the fence line that it is still
+   somewhere you can put the caret.
+
+   The fence keeps a real height for that reason. Collapsed to nothing it read
+   as tidy and clicked as a hairline. */
+.cm-content .cm-line.tk-code-last { padding-bottom: 10px; }
+
+.cm-content .cm-line.tk-code-fence {
+  font-size: 0;
+  line-height: 8px;
+  padding-top: 0;
+  padding-bottom: 6px;
+}
+/* Put the caret on it and it is a line of source again, like every other line
+   the editor reveals when you are standing on it. */
+.cm-content .cm-line.tk-code-fence.cm-activeLine {
+  font-size: 12.5px;
+  line-height: 1.62;
+  padding-bottom: 10px;
 }
 
 /* The widget standing in for the reading view's gutter. Its width and gap are

@@ -50,6 +50,14 @@ contextBridge.exposeInMainWorld('tulip', {
     start: (lang, code) => ipcRenderer.invoke('run:start', lang, code),
     kill: (id) => ipcRenderer.invoke('run:kill', id)
   },
+
+  /* Manim renders to a real file in the vault rather than to the page, so it
+     answers with a path. `lookup` asks whether a block has been rendered
+     already without running anything. */
+  manim: {
+    lookup: (noteName, code, scene) => ipcRenderer.invoke('manim:lookup', noteName, code, scene),
+    render: (noteName, code, scene) => ipcRenderer.invoke('manim:render', noteName, code, scene)
+  },
   search: (query) => ipcRenderer.invoke('search:vault', query),
   config: {
     get: () => ipcRenderer.invoke('config:get'),
