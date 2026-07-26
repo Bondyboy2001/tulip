@@ -30,7 +30,12 @@ folders sort above files. Changes made outside the app are picked up by a file
 watcher. Deletes go to the system Trash, not `unlink`.
 
 **Links.** `[[Note name]]` links between notes, with completion after `[[`.
-Following a link to a note that does not exist creates it.
+Following a link to a note that does not exist creates it. Renaming or moving a
+note rewrites the links that named it, leaving alone any written inside code.
+
+**Getting back.** `⌘[` and `⌘]` walk the trail you followed, returning you to
+the place in each note you were reading rather than to its top. The side buttons
+on a mouse do the same.
 
 **Saving.** Edits autosave 600 ms after you stop typing, and on note switch,
 window hide, and quit. The dot beside the note name means unsaved.
@@ -39,6 +44,7 @@ window hide, and quit. The dot beside the note name means unsaved.
 
 | | |
 |---|---|
+| `⌘[` / `⌘]` | Back / forward |
 | `⌘O` | Jump to a note |
 | `⌘P` | Command palette |
 | `⌘⇧F` | Search the vault |

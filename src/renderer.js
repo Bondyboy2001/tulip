@@ -23,6 +23,8 @@ const state = {
   assetsKey: '',      // the attachment list as last seen, to skip no-op rebuilds
   resolveAsset: () => null,
   current: null,      // { path, name, dir }
+  history: [],        // { path, at, top } — where you have been, and where in it
+  historyAt: -1,
   dirty: false,
   view: 'edit',       // 'edit' (live preview) | 'read' (rendered) | 'raw' (source)
   expanded: new Set(),
@@ -596,6 +598,7 @@ async function moveInto (destDir) {
     try {
       const { path: next, links } = await api.file.move(path, destDir)
       moved.push({ from: path, to: next })
+      retraceHistory(path, next)
       relinked += links
     } catch (err) {
       toast(err.message || `“${path}” could not be moved.`)
@@ -649,7 +652,7 @@ const cssEscape = (s) => (window.CSS?.escape ? CSS.escape(s) : s.replace(/"/g, '
 
 /* ------------------------------------------------------------- open/save */
 
-async function openNote (path, { focus = true, keepSelection = false } = {}) {
+async function openNote (path, { focus = true, keepSelection = false, history = true, place = null } = {}) {
   if (state.dirty) await saveNow()
 
   let text
@@ -658,8 +661,12 @@ async function openNote (path, { focus = true, keepSelection = false } = {}) {
   } catch {
     toast('That note could not be opened. Refreshing the vault.')
     await loadTree()
-    return
+    return false
   }
+
+  // Before the document is swapped, while the editor still holds the note
+  // being left — that is the only moment its caret position can be recorded.
+  if (history) pushHistory(path)
 
   state.current = noteRef(path)
   state.dirty = false
@@ -667,6 +674,11 @@ async function openNote (path, { focus = true, keepSelection = false } = {}) {
   editor.setDoc(text)
   el.empty.hidden = true
   el.stage.classList.add('has-doc')
+
+  if (place) {
+    editor.dispatch({ selection: { anchor: Math.min(place.at, text.length) } })
+    editor.scrollDOM.scrollTop = place.top
+  }
 
   renderCrumbs()
   renderTree()
@@ -676,6 +688,80 @@ async function openNote (path, { focus = true, keepSelection = false } = {}) {
   if (focus && !reading()) editor.focus()
 
   api.config.set({ lastNote: path })
+  return true
+}
+
+/* ------------------------------------------------------------ history */
+
+/**
+ * Where you have been, and where you were in it.
+ *
+ * Following a wikilink is the common way to move around a vault, and it is a
+ * one-way trip without this — the sidebar can find a note again but not the
+ * place in it you were reading. Entries therefore carry a caret offset and a
+ * scroll position, recorded at the moment a note is left rather than
+ * continuously.
+ */
+const HISTORY_MAX = 50
+
+/** Record the place in the note currently on screen, if it is the one the
+ *  cursor of the history is pointing at. */
+function markPlace () {
+  const entry = state.history[state.historyAt]
+  if (!entry || entry.path !== state.current?.path) return
+  entry.at = editor.state.selection.main.head
+  entry.top = editor.scrollDOM.scrollTop
+}
+
+function pushHistory (path) {
+  markPlace()
+  if (state.history[state.historyAt]?.path === path) return
+
+  // Opening something new after stepping back drops what was ahead, the way a
+  // browser does — the forward stack described a future you did not take.
+  state.history.length = state.historyAt + 1
+  state.history.push({ path, at: 0, top: 0 })
+  if (state.history.length > HISTORY_MAX) state.history.shift()
+  state.historyAt = state.history.length - 1
+}
+
+async function goHistory (delta) {
+  const target = state.historyAt + delta
+  if (target < 0 || target >= state.history.length) {
+    setStatusRight(delta < 0 ? 'Nothing further back' : 'Nothing further forward')
+    return
+  }
+
+  markPlace()
+  const entry = state.history[target]
+  const opened = await openNote(entry.path, { history: false, place: entry })
+
+  if (!opened) {
+    // The note is gone. Drop it and keep going the same way, so a deleted note
+    // in the middle of the trail does not become a wall.
+    state.history.splice(target, 1)
+    if (state.historyAt > target) state.historyAt--
+    return goHistory(delta)
+  }
+
+  state.historyAt = target
+  revealInTree(entry.path)
+}
+
+/* The side buttons on a mouse mean back and forward everywhere else, and the
+   browser default they would otherwise trigger does nothing useful here. */
+window.addEventListener('mouseup', (e) => {
+  if (e.button !== 3 && e.button !== 4) return
+  e.preventDefault()
+  goHistory(e.button === 3 ? -1 : 1)
+})
+
+/** Keep the trail pointing at notes that moved rather than at where they were. */
+function retraceHistory (from, to) {
+  for (const entry of state.history) {
+    if (entry.path === from) entry.path = to
+    else if (entry.path.startsWith(from + '/')) entry.path = to + entry.path.slice(from.length)
+  }
 }
 
 /**
@@ -1000,6 +1086,8 @@ const COMMANDS = [
   { id: 'new-note', title: 'New note', key: '⌘N' },
   { id: 'new-folder', title: 'New folder', key: '⌘⇧N' },
   { id: 'switcher', title: 'Jump to a note', key: '⌘O' },
+  { id: 'back', title: 'Back', key: '⌘[' },
+  { id: 'forward', title: 'Forward', key: '⌘]' },
   { id: 'search', title: 'Search the vault', key: '⌘⇧F' },
   { id: 'view-edit', title: 'Editing view', key: '⌘1' },
   { id: 'view-read', title: 'Reading view', key: '⌘2' },
@@ -1411,6 +1499,7 @@ function beginRename (node, row) {
         api.config.set({ lastNote: path })
       }
       await loadTree()
+      retraceHistory(node.path, path)
       // Silence when nothing else pointed at it; otherwise say what was
       // changed, because notes the user never opened were just edited.
       if (links) toast(linkNote(links))
@@ -1466,6 +1555,8 @@ function runCommand (id) {
   switch (id) {
     case 'new-note': createNote(state.current?.dir || ''); break
     case 'new-folder': createFolder(state.current?.dir || ''); break
+    case 'back': goHistory(-1); break
+    case 'forward': goHistory(1); break
     case 'switcher': openOverlay('switcher'); break
     case 'search': openOverlay('search'); break
     case 'commands': openOverlay('commands'); break

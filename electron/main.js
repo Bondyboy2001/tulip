@@ -576,6 +576,9 @@ function buildMenu () {
     {
       label: 'View',
       submenu: [
+        { label: 'Back', accelerator: 'Cmd+[', click: () => send('menu', 'back') },
+        { label: 'Forward', accelerator: 'Cmd+]', click: () => send('menu', 'forward') },
+        { type: 'separator' },
         { label: 'Quick Switcher', accelerator: 'Cmd+O', click: () => send('menu', 'switcher') },
         { label: 'Command Palette', accelerator: 'Cmd+P', click: () => send('menu', 'commands') },
         { type: 'separator' },
