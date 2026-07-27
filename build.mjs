@@ -16,7 +16,9 @@ const options = {
   target: ['chrome130'],
   // KaTeX's stylesheet references its own woff2 files. Emitting them next to
   // the bundle keeps the app offline and satisfies the page's font-src 'self'.
-  loader: { '.woff': 'file', '.woff2': 'file', '.ttf': 'file' },
+  // Logo artwork that is not in Simple Icons ships as the brand's own SVG,
+  // imported as text and inlined — the page's CSP forbids fetching anything.
+  loader: { '.woff': 'file', '.woff2': 'file', '.ttf': 'file', '.svg': 'text' },
   assetNames: 'fonts/[name]',
   sourcemap: watch,
   minify: !watch,

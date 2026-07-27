@@ -19,6 +19,7 @@ const ENTRIES = [
   /* Manim blocks are Python, but they are their own kind of block — what comes
      out is a film, not a program's output — so they get their own tile. */
   { id: 'manim', label: 'Manim', short: 'MAN', color: '#63C9B0', ink: DARK_INK },
+  { id: 'lean', label: 'Lean', short: 'L∀N', color: '#0000FF', alias: ['lean4'] },
   { id: 'ruby', label: 'Ruby', short: 'RB', color: '#CC342D', alias: ['rb'] },
   { id: 'rust', label: 'Rust', short: 'RS', color: '#CE422B', alias: ['rs'] },
   { id: 'go', label: 'Go', short: 'GO', color: '#00ADD8', alias: ['golang'] },

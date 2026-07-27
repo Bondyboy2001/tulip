@@ -11,6 +11,7 @@ import {
 } from './assets.js'
 import { attachRunControl } from './runcode.js'
 import { attachManim, isManim } from './manim.js'
+import { mountAssistant } from './ai.js'
 
 const api = window.tulip
 const $ = (id) => document.getElementById(id)
@@ -27,6 +28,7 @@ const state = {
   history: [],        // { path, at, top } — where you have been, and where in it
   historyAt: -1,
   dirty: false,
+  patching: false,    // the assistant is writing into the buffer, not the user
   view: 'edit',       // 'edit' (live preview) | 'read' (rendered) | 'raw' (source)
   expanded: new Set(),
   picked: new Set(),   // multi-selected file paths in the tree
@@ -57,7 +59,17 @@ const el = {
   toast: $('toast'),
   ctx: $('ctx'),
   viewSwitch: $('view-switch'),
-  zoom: $('zoom')
+  zoom: $('zoom'),
+  aiPanel: $('ai'),
+  aiLog: $('ai-log'),
+  aiInput: $('ai-input'),
+  aiSend: $('ai-send'),
+  aiStop: $('ai-stop'),
+  aiClose: $('ai-close'),
+  aiProvider: $('ai-provider'),
+  aiStatus: $('ai-status'),
+  aiAttach: $('ai-attach'),
+  aiWrite: $('ai-write')
 }
 
 const reading = () => state.view === 'read'
@@ -259,10 +271,15 @@ const escapeAttr = escapeHtml
 const editor = createEditor({
   parent: el.editorHost,
   onChange: (text) => {
-    state.dirty = true
+    // An edit the assistant made is already on disk — the buffer is catching
+    // up to the file, not running ahead of it, so there is nothing to save and
+    // no reason to show the note as modified.
+    if (!state.patching) {
+      state.dirty = true
+      queueSave()
+    }
     renderCrumbs()
     updateStatus(text)
-    queueSave()
   },
   onOpenLink: (link) => {
     if (link.type === 'url') api.openExternal(link.target)
@@ -799,13 +816,82 @@ async function reloadCurrent () {
   try { text = await api.file.read(state.current.path) } catch { return }
   if (text === editor.state.doc.toString()) return
 
-  const at = Math.min(editor.state.selection.main.head, text.length)
-  editor.setDoc(text)
-  editor.dispatch({ selection: { anchor: at } })
+  state.patching = true
+  try {
+    // Applied as an edit, not a replacement: whatever moved the file — a link
+    // rewrite, the assistant, a sync client — the caret and the undo history
+    // belong to the person at the keyboard and should outlive it.
+    if (reading()) { editor.setDoc(text); renderReading() } else { editor.patch(text) }
+  } finally {
+    state.patching = false
+  }
   state.dirty = false
   updateStatus(text)
-  if (reading()) renderReading()
 }
+
+/* ------------------------------------------------------------ assistant */
+
+/**
+ * A note the assistant just wrote to. If it is the one on screen, the change
+ * is applied as an edit rather than a reload — see `editor.patch` — so the
+ * caret, the selection and the undo history all survive it and the rewritten
+ * lines light up. Any other note only needs the tree redrawn.
+ */
+async function absorbAgentEdit (relPath) {
+  await loadTree()
+  if (!relPath || relPath !== state.current?.path) return
+
+  let text
+  try { text = await api.file.read(state.current.path) } catch { return }
+
+  state.patching = true
+  try {
+    if (reading()) { editor.setDoc(text); renderReading() } else { editor.patch(text) }
+  } finally {
+    state.patching = false
+  }
+  state.dirty = false
+  updateStatus(text)
+  renderCrumbs()
+}
+
+const assistant = mountAssistant({
+  el: {
+    app: el.app,
+    panel: el.aiPanel,
+    log: el.aiLog,
+    input: el.aiInput,
+    send: el.aiSend,
+    stop: el.aiStop,
+    provider: el.aiProvider,
+    status: el.aiStatus,
+    attach: el.aiAttach,
+    write: el.aiWrite
+  },
+  api,
+  // Awaited before every turn: an unsaved buffer would otherwise send the
+  // agent to read a stale copy of the very note being discussed.
+  context: async () => {
+    if (state.dirty) await saveNow()
+    const selection = reading()
+      ? ''
+      : editor.state.sliceDoc(editor.state.selection.main.from, editor.state.selection.main.to)
+    return {
+      note: state.current?.path || '',
+      selection: selection.length > 4000 ? '' : selection
+    }
+  },
+  // A failure here means the note on screen has quietly fallen behind the file
+  // on disk, which is the one state this feature must never reach silently.
+  onEdited: (relPath) => {
+    absorbAgentEdit(relPath).catch((err) => {
+      console.error('absorbing an assistant edit failed', err)
+      toast('The assistant changed this note but the editor could not follow. Reopen it.')
+    })
+  }
+})
+
+el.aiClose.addEventListener('click', () => assistant.close())
 
 function renderCrumbs () {
   if (!state.current) { el.crumbs.replaceChildren(); return }
@@ -892,76 +978,17 @@ async function openWikilink (target) {
 /* ---------------------------------------------------------- reading view */
 
 /**
- * Frontmatter is not prose and must not be rendered as prose — left alone,
- * markdown-it reads the closing `---` as a setext underline and prints the
- * whole block as a heading. It is blanked rather than cut so every line below
- * keeps the number it has in the file, which is what the task checkboxes and
- * the search jump write back through.
+ * Frontmatter is metadata, not prose — Tulip neither renders it nor shows a
+ * properties panel for it (a panel existed once and was removed on purpose).
+ * It cannot simply be left in, though: markdown-it reads the closing `---` as
+ * a setext underline and prints the whole block as a heading. It is blanked
+ * rather than cut so every line below keeps the number it has in the file,
+ * which is what the task checkboxes and the search jump write back through.
  */
-function splitFrontmatter (text) {
-  const match = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/.exec(text)
-  if (!match) return { body: text, props: [] }
-  const blanks = '\n'.repeat(match[0].replace(/[^\n]/g, '').length)
-  return { body: blanks + text.slice(match[0].length), props: parseProps(match[1]) }
-}
-
-/** Enough YAML for the shape frontmatter actually takes: scalars, inline
- *  `[a, b]` lists, and block lists of `- item`. Anything else is left as text. */
-function parseProps (yaml) {
-  const props = []
-  for (const raw of yaml.split(/\r?\n/)) {
-    if (!raw.trim() || raw.trim().startsWith('#')) continue
-
-    const item = /^\s*-\s+(.*)$/.exec(raw)
-    if (item) {
-      const last = props[props.length - 1]
-      if (last) (last.values ||= []).push(clean(item[1]))
-      continue
-    }
-
-    const pair = /^([\w .-]+)\s*:\s*(.*)$/.exec(raw)
-    if (!pair) continue
-    const [, key, rest] = pair
-    const value = rest.trim()
-
-    if (!value) { props.push({ key: key.trim(), values: [] }); continue }
-    if (/^\[.*\]$/.test(value)) {
-      props.push({
-        key: key.trim(),
-        values: value.slice(1, -1).split(',').map(clean).filter(Boolean)
-      })
-      continue
-    }
-    props.push({ key: key.trim(), text: clean(value) })
-  }
-  return props
-}
-
-const clean = (s) => s.trim().replace(/^['"]|['"]$/g, '').trim()
-
-function propertiesBlock (props) {
-  const dl = document.createElement('dl')
-  dl.className = 'properties'
-
-  for (const prop of props) {
-    const dt = document.createElement('dt')
-    dt.textContent = prop.key
-    const dd = document.createElement('dd')
-
-    if (prop.values) {
-      for (const value of prop.values) {
-        const pill = document.createElement('span')
-        pill.className = 'prop-pill'
-        pill.textContent = value
-        dd.append(pill)
-      }
-    } else {
-      dd.textContent = prop.text
-    }
-
-    dl.append(dt, dd)
-  }
-  return dl
+function stripFrontmatter (text) {
+  const match = /^---[ \t]*\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/.exec(text)
+  if (!match) return text
+  return '\n'.repeat(match[0].replace(/[^\n]/g, '').length) + text.slice(match[0].length)
 }
 
 /* Bumped on every render so the async syntax highlighting from a superseded
@@ -982,8 +1009,7 @@ function renderReading () {
   title.textContent = state.current.name
   col.append(title)
 
-  const { body, props } = splitFrontmatter(editor.state.doc.toString())
-  if (props.length) col.append(propertiesBlock(props))
+  const body = stripFrontmatter(editor.state.doc.toString())
 
   const rendered = document.createElement('div')
   rendered.className = 'reading-body'
@@ -1174,6 +1200,7 @@ const COMMANDS = [
   { id: 'view-read', title: 'Reading view', key: '⌘2' },
   { id: 'view-raw', title: 'Raw view', key: '⌘3' },
   { id: 'sidebar', title: 'Toggle sidebar', key: '⌘\\' },
+  { id: 'assistant', title: 'Toggle assistant', key: '⌘⇧A' },
   { id: 'themes', title: 'Change theme…' },
   { id: 'theme', title: 'Toggle light and dark', key: '⌘⇧L' },
   { id: 'reveal', title: 'Reveal note in Finder' },
@@ -1646,6 +1673,7 @@ function runCommand (id) {
     case 'view-read': setView('read'); break
     case 'view-raw': setView('raw'); break
     case 'sidebar': toggleSidebar(); break
+    case 'assistant': assistant.toggle(); break
     case 'themes': openOverlay('themes'); break
     case 'theme': cycleTheme(); break
     case 'save': saveNow(); break
@@ -1874,6 +1902,9 @@ window.__tulip = {
 
   applyTheme(cfg.theme || 'system')
   el.app.dataset.sidebar = cfg.sidebar || 'open'
+  // Closed unless it was left open: the assistant only starts a process once
+  // the panel is actually shown.
+  assistant.restore(cfg)
   state.expanded = new Set(cfg.expanded || [])
 
   const vault = await api.vault.current()

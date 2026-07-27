@@ -10,6 +10,7 @@ const os = require('node:os')
 const crypto = require('node:crypto')
 const { spawn } = require('node:child_process')
 const { pathToFileURL } = require('node:url')
+const ai = require('./ai')
 
 const CONFIG_PATH = () => path.join(app.getPath('userData'), 'config.json')
 
@@ -584,6 +585,7 @@ function buildMenu () {
         { label: 'Command Palette', accelerator: 'Cmd+P', click: () => send('menu', 'commands') },
         { type: 'separator' },
         { label: 'Toggle Sidebar', accelerator: 'Cmd+\\', click: () => send('menu', 'sidebar') },
+        { label: 'Toggle Assistant', accelerator: 'Cmd+Shift+A', click: () => send('menu', 'assistant') },
         { label: 'Reading View', accelerator: 'Cmd+1', click: () => send('menu', 'view-read') },
         { label: 'Editing View', accelerator: 'Cmd+2', click: () => send('menu', 'view-edit') },
         { label: 'Raw View', accelerator: 'Cmd+3', click: () => send('menu', 'view-raw') },
@@ -842,15 +844,128 @@ ipcMain.handle('asset:write', async (_e, noteName, ext, bytes) => {
    Output is streamed back and held only by the page that asked for it — it is
    never written into the note, so a run leaves the file on disk untouched. */
 
-/* The word after the fence, mapped to the interpreter that should see it.
-   Nothing else is runnable: a `json` or `diff` block is data, and a language
-   Tulip merely highlights is not one it can promise to execute. */
-const RUNNERS = new Map([
-  ['js', 'node'], ['javascript', 'node'], ['node', 'node'],
-  ['mjs', 'node'], ['cjs', 'node'],
-  ['py', 'python3'], ['python', 'python3'], ['python3', 'python3'],
-  ['sh', 'sh'], ['shell', 'sh'], ['bash', 'bash'], ['zsh', 'zsh']
-])
+/* The word after the fence, mapped to what turns that block into a running
+   program. Nothing else is runnable: a `json` or `diff` block is data, and a
+   language Tulip merely highlights is not one it can promise to execute.
+
+   Not every language has an interpreter to hand the file to. Rust has to be
+   compiled first, so a runner is a *sequence* of commands rather than one, and
+   the sequence stops at the first that fails — which is how a program that does
+   not compile shows you the compiler's complaint instead of a missing binary.
+
+   `file` is what the block is written as: extensions carry meaning to these
+   tools, and `go run` will not look at anything that is not a .go file. */
+const RUNNERS = new Map()
+
+const runner = (spec, ...langs) => { for (const lang of langs) RUNNERS.set(lang, spec) }
+
+/* Marks a step as a build rather than the program. A build is not what the
+   timeout is about — "ten seconds" should mean ten seconds of your code
+   running, not ten seconds minus however long rustc took — so it gets its own
+   generous budget and its time is reported separately. */
+const BUILD = { build: true }
+const BUILD_TIMEOUT_MS = 120_000
+
+const sha1 = (text) => crypto.createHash('sha1').update(text).digest('hex').slice(0, 16)
+
+/* Compiled blocks' binaries, surviving restarts so a note full of Rust opens
+   ready to re-run. Bounded: the newest stay, the rest go. */
+const RUN_CACHE_KEEP = 64
+
+function runCacheDir () {
+  const dir = path.join(app.getPath('userData'), 'run-cache')
+  fsSync.mkdirSync(dir, { recursive: true })
+  return dir
+}
+
+async function pruneRunCache () {
+  let entries
+  try { entries = await fs.readdir(runCacheDir()) } catch { return }
+  const stats = []
+  for (const name of entries) {
+    const abs = path.join(runCacheDir(), name)
+    // A .tmp is a build that never finished; it is junk at any age.
+    if (name.endsWith('.tmp')) { fs.rm(abs, { force: true }).catch(() => {}); continue }
+    const stat = await fs.stat(abs).catch(() => null)
+    if (stat) stats.push({ abs, mtime: stat.mtimeMs })
+  }
+  stats.sort((a, b) => b.mtime - a.mtime)
+  for (const { abs } of stats.slice(RUN_CACHE_KEEP)) {
+    fs.rm(abs, { force: true }).catch(() => {})
+  }
+}
+
+runner({
+  // Node needs `.mjs` before it will accept a top-level `import`, and `.js`
+  // before it will accept `require`.
+  file: (code) => (/^\s*(import\s|export\s)/m.test(code) ? 'block.mjs' : 'block.js'),
+  steps: (file) => [['node', [file]]]
+}, 'js', 'javascript', 'node', 'mjs', 'cjs')
+
+runner({ file: 'block.py', steps: (f) => [['python3', [f]]] }, 'py', 'python', 'python3')
+runner({ file: 'block.sh', steps: (f) => [['sh', [f]]] }, 'sh', 'shell')
+runner({ file: 'block.sh', steps: (f) => [['bash', [f]]] }, 'bash')
+runner({ file: 'block.sh', steps: (f) => [['zsh', [f]]] }, 'zsh')
+
+/* Julia compiles as it goes, and the first second or three of any run is the
+   language starting up rather than the block doing anything. Holding it to the
+   same clock as a shell one-liner would kill working code. */
+/* --startup-file=no: a snippet runs in isolation, not inside whatever
+   ~/.julia/config/startup.jl sets up — and skipping it takes measured startup
+   from ~600ms to ~160ms. (--compile=min would shave a little more and was
+   measured too, but it deoptimises the code the block actually came to run.) */
+runner({
+  file: 'block.jl',
+  timeout: 60_000,
+  steps: (f) => [['julia', ['--startup-file=no', f]]]
+}, 'jl', 'julia')
+
+/* `go run` compiles and runs in one command, but only for a file that is a
+   whole `package main` — which is what a Go snippet worth running is anyway.
+   Because the compile is inside that one command it cannot be timed
+   separately, so the whole thing gets the longer clock. */
+runner({ file: 'main.go', timeout: 60_000, steps: (f) => [['go', ['run', f]]] }, 'go', 'golang')
+
+/* Lean means two different things by "run". `lean file` *checks* the file and
+   prints what its #eval lines say — which is how Lean is mostly written — and
+   `lean --run` additionally executes `main`. The block says which it wants by
+   whether it defines one. Startup is the language's, not the block's, so it
+   shares the compiled languages' clock. */
+runner({
+  file: 'block.lean',
+  timeout: 60_000,
+  steps: (f, _dir, code) => [
+    ['lean', /^\s*(unsafe\s+|partial\s+)?def\s+main\b/m.test(code) ? ['--run', f] : [f]]
+  ]
+}, 'lean', 'lean4')
+
+/* Rust is the reason steps are a list. rustc is asked for an edition
+   explicitly: called bare it still defaults to 2015, where `async` is not a
+   keyword and `dyn` is optional — not what anyone writing Rust today means.
+
+   The binary is kept, keyed by a hash of the code, because the compile is not
+   even the slow part: macOS validates every executable it has never seen
+   (measured at 200ms–2.6s on first exec, 7ms after). Compiling into a fresh
+   temp dir made every run a first exec. Building into the cache — via a
+   same-volume `mv`, so the file appears whole and keeps its inode — means an
+   unchanged block re-runs in milliseconds, and the validation is paid once
+   per edit rather than once per click. */
+runner({
+  file: 'main.rs',
+  steps: (file, _dir, code) => {
+    const bin = path.join(runCacheDir(), 'rs-' + sha1(`2021\n${code}`))
+    if (fsSync.existsSync(bin)) {
+      // A hit is a use; the prune keeps recently-used, not recently-built.
+      try { fsSync.utimesSync(bin, new Date(), new Date()) } catch {}
+      return [[bin, []]]
+    }
+    return [
+      ['rustc', ['--edition', '2021', '-A', 'dead_code', '-o', `${bin}.tmp`, file], BUILD],
+      ['/bin/mv', [`${bin}.tmp`, bin], BUILD],
+      [bin, []]
+    ]
+  }
+}, 'rs', 'rust')
 
 /**
  * The PATH to run snippets with.
@@ -870,7 +985,8 @@ const FALLBACK_PATHS = [
   '/usr/local/bin', '/usr/local/sbin',         // Homebrew, Intel — and much else
   '/opt/local/bin',                            // MacPorts
   path.join(os.homedir(), '.local/bin'),
-  path.join(os.homedir(), '.cargo/bin')
+  path.join(os.homedir(), '.cargo/bin'),
+  path.join(os.homedir(), '.elan/bin')            // Lean, via elan
 ]
 
 let loginPath = null        // resolved once, at startup
@@ -919,13 +1035,6 @@ let nextRunId = 0
 
 function runnerFor (lang) {
   return RUNNERS.get(String(lang || '').trim().toLowerCase()) || null
-}
-
-/** The extension the interpreter expects. Node needs `.mjs` before it will
- *  accept a top-level `import`, and `.js` before it will accept `require`. */
-function scriptName (cmd, code) {
-  if (cmd !== 'node') return cmd === 'python3' ? 'block.py' : 'block.sh'
-  return /^\s*(import\s|export\s)/m.test(code) ? 'block.mjs' : 'block.js'
 }
 
 /**
@@ -1006,28 +1115,80 @@ function runTimeoutMs (key, fallback) {
  * stdin: an interpreter that has a file can report the line a failure happened
  * on, and `sh` can still read from stdin itself.
  */
+/**
+ * Runs a language's steps in order, stopping at the first that does not
+ * succeed. The clock is the whole sequence's, not each step's: "ten seconds"
+ * has to mean ten seconds from pressing Run, or a language that compiles first
+ * would quietly get twice the budget of one that does not.
+ */
+async function runSequence (id, steps, { cwd, timeoutMs, cleanup }) {
+  let left = timeoutMs        // the program's remaining budget
+  let ms = 0                  // wall clock across every step, build included
+  let buildMs = 0
+  let result = null
+
+  for (const [cmd, args, opts = {}] of steps) {
+    // Stop pressed between a compile and the program it produced: without this
+    // the kill lands on a process that has already exited and the next step
+    // starts anyway.
+    if (cancelled.has(id)) {
+      result = { ...(result || {}), signal: 'SIGTERM', code: null }
+      break
+    }
+    if (!opts.build && left <= 0) {
+      result = { ...(result || {}), timedOut: true, code: null }
+      break
+    }
+
+    result = await startRun(id, cmd, args, {
+      cwd,
+      timeoutMs: opts.build ? BUILD_TIMEOUT_MS : left
+    })
+
+    ms += result.ms
+    if (opts.build) buildMs += result.ms
+    else left -= result.ms
+
+    if (result.error || result.timedOut || result.signal || result.code !== 0) break
+  }
+
+  cancelled.delete(id)
+  if (cleanup) await fs.rm(cleanup, { recursive: true, force: true }).catch(() => {})
+  // The reported time is the whole thing — a run that took four seconds should
+  // not claim 182ms because most of it was the compiler.
+  return { ...(result || { code: null }), ms, buildMs }
+}
+
 ipcMain.handle('run:start', async (_e, lang, code) => {
-  const cmd = runnerFor(lang)
-  if (!cmd) throw new Error(`Tulip cannot run "${lang}" blocks.`)
+  const spec = runnerFor(lang)
+  if (!spec) throw new Error(`Tulip cannot run "${lang}" blocks.`)
   if (typeof code !== 'string') throw new Error('Nothing to run.')
 
   const id = ++nextRunId
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tulip-run-'))
-  const file = path.join(dir, scriptName(cmd, code))
+  const file = path.join(dir, typeof spec.file === 'function' ? spec.file(code) : spec.file)
   await fs.writeFile(file, code, 'utf8')
 
-  const timeoutMs = runTimeoutMs('runTimeout', DEFAULT_TIMEOUT_MS)
+  const steps = spec.steps(file, dir, code)
+  // A language that spends its first seconds starting itself up says so; the
+  // `runTimeout` setting still overrides whatever it asked for.
+  const timeoutMs = runTimeoutMs('runTimeout', spec.timeout || DEFAULT_TIMEOUT_MS)
 
   // The vault is the working directory, so a snippet's relative paths mean what
   // they mean in the note. Without one, the scratch directory stands in.
-  startRun(id, cmd, [file], { cwd: vaultPath || dir, timeoutMs, cleanup: dir })
+  runSequence(id, steps, { cwd: vaultPath || dir, timeoutMs, cleanup: dir })
     .then((result) => send('run:done', { id, ...result }))
 
-  return { id, cmd, timeoutMs }
+  return { id, cmd: steps[0][0], timeoutMs }
 })
+
+/* Runs the page has asked to stop. Kept separately from `runs` because a
+   sequence is only *in* `runs` while one of its steps is actually running. */
+const cancelled = new Set()
 
 /** SIGTERM first so a program can tidy up, SIGKILL if it will not go. */
 function stopRun (id) {
+  cancelled.add(id)
   const run = runs.get(id)
   if (!run || run.done) return false
 
@@ -1112,7 +1273,12 @@ async function manimCommand () {
   const configured = readConfig().manimCommand
   if (configured) return String(configured).split(/\s+/)
   return new Promise((resolve) => {
-    const probe = spawn('manim', ['--version'], { stdio: 'ignore' })
+    // The same PATH a run gets, so the probe and the render cannot disagree
+    // about which manim is installed.
+    const probe = spawn('manim', ['--version'], {
+      stdio: 'ignore',
+      env: { ...process.env, PATH: runnerPath() }
+    })
     probe.on('error', () => resolve(['python3', '-m', 'manim']))
     probe.on('close', (code) => resolve(code === 0 ? ['manim'] : ['python3', '-m', 'manim']))
   })
@@ -1166,6 +1332,9 @@ ipcMain.handle('manim:render', async (_e, noteName, code, scene) => {
         '--format', 'mp4', '--quality', quality, file, name],
       { cwd: dir, timeoutMs: runTimeoutMs('manimTimeout', MANIM_TIMEOUT_MS) }
     )
+    // A render is one command, so nothing reads this flag afterwards — but a
+    // stopped render would otherwise leave its id in the set for good.
+    cancelled.delete(id)
 
     if (result.error || result.code !== 0) {
       await fs.rm(dir, { recursive: true, force: true }).catch(() => {})
@@ -1192,6 +1361,27 @@ ipcMain.handle('manim:render', async (_e, noteName, code, scene) => {
 
   return { id, scene: name, quality }
 })
+
+/* --------------------------------------------------------- the assistant */
+
+/* The assistant is a subprocess, not a service — see electron/ai.js. It is
+   handed the vault and the login PATH and otherwise left to itself; everything
+   it says arrives on one channel. */
+ai.attach(
+  (event) => send('ai:event', event),
+  () => runnerPath()
+)
+
+ipcMain.handle('ai:start', (_e, opts) => {
+  ai.setVault(vaultPath)
+  return ai.start(opts || {})
+})
+ipcMain.handle('ai:send', (_e, text, context) => {
+  ai.setVault(vaultPath)
+  return ai.send(String(text || ''), context || null)
+})
+ipcMain.handle('ai:stop', () => ai.stop())
+ipcMain.handle('ai:status', () => ai.status())
 
 ipcMain.handle('zoom:reset', () => applyZoom(1))
 ipcMain.handle('config:get', () => readConfig())
@@ -1222,6 +1412,7 @@ app.whenReady().then(async () => {
   // Warmed now rather than on the first Run, so clicking Run does not wait on
   // a login shell. A failure here is not fatal — the fallbacks still apply.
   readLoginPath().then((value) => { loginPath = value }).catch(() => {})
+  pruneRunCache().catch(() => {})
 
   buildMenu()
   createWindow()
@@ -1243,4 +1434,4 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
-app.on('before-quit', () => { if (watcher) watcher.close(); stopAllRuns() })
+app.on('before-quit', () => { if (watcher) watcher.close(); stopAllRuns(); ai.stop() })

@@ -21,6 +21,12 @@
   --stem:      #4F6B4B;
   --sel:       #A63A5A24;
 
+  /* Emphasis is a colour as well as a weight or a slant. Bold takes the warm
+     side of the palette and italic the cool one, in every theme, so the two
+     stay told apart at a glance and neither is mistaken for a link. */
+  --strong:    #A6472C;
+  --emph:      #3F5A73;
+
   /* Code tokens. Six hues, all pulled toward the paper's warmth so a fenced
      block reads as part of the page rather than a pasted-in terminal. */
   --code-keyword:  #9B3B63;
@@ -55,7 +61,12 @@
 
   --measure: 34rem;
   --rail: 248px;
+  --chat: 340px;
   --ease: cubic-bezier(.22, .61, .36, 1);
+
+  /* The assistant's edits, marked in the accent so they read as the app
+     speaking rather than as a selection. */
+  --agent-flash: color-mix(in srgb, var(--accent) 20%, transparent);
 }
 
 [data-theme="dark"] {
@@ -72,6 +83,8 @@
   --accent-dim:#E87D9B2E;
   --stem:      #8CB286;
   --sel:       #E87D9B2E;
+  --strong:    #E0906F;
+  --emph:      #9FB6CC;
 
   --code-keyword:  #E58AAE;
   --code-atom:     #D6A05E;
@@ -119,6 +132,8 @@
   --accent-dim:#FF79C62E;
   --stem:      #50FA7B;
   --sel:       #BD93F93D;
+  --strong:    #FFB86C;
+  --emph:      #BD93F9;
 
   --code-keyword:  #FF79C6;
   --code-atom:     #BD93F9;
@@ -154,6 +169,8 @@
   --accent-dim:#F926722E;
   --stem:      #A6E22E;
   --sel:       #FFFFFF24;
+  --strong:    #FD971F;
+  --emph:      #AE81FF;
 
   --code-keyword:  #F92672;
   --code-atom:     #AE81FF;
@@ -189,6 +206,8 @@
   --accent-dim:#FFC60030;
   --stem:      #A5FF90;
   --sel:       #0088FF4D;
+  --strong:    #FF9D00;
+  --emph:      #9EFFFF;
 
   --code-keyword:  #FF9D00;
   --code-atom:     #FF628C;
@@ -224,6 +243,8 @@
   --accent-dim:#6AA6F82E;
   --stem:      #7FD88F;
   --sel:       #6AA6F833;
+  --strong:    #F0A868;
+  --emph:      #A78BFA;
 
   --code-keyword:  #A78BFA;
   --code-atom:     #F0A868;
@@ -271,7 +292,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 
 .app {
   display: grid;
-  grid-template-columns: var(--rail) 1fr;
+  grid-template-columns: var(--rail) 1fr var(--chat);
   /* An auto row would size to content and overflow the viewport, which leaves
      the editor unable to scroll. minmax(0,1fr) pins it to the window. */
   grid-template-rows: minmax(0, 1fr);
@@ -279,7 +300,9 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   transition: grid-template-columns .26s var(--ease);
 }
 .app > * { min-height: 0; }
-.app[data-sidebar="closed"] { grid-template-columns: 0 1fr; }
+.app[data-sidebar="closed"] { grid-template-columns: 0 1fr var(--chat); }
+.app[data-ai="closed"] { grid-template-columns: var(--rail) 1fr 0; }
+.app[data-sidebar="closed"][data-ai="closed"] { grid-template-columns: 0 1fr 0; }
 
 .titlebar {
   position: fixed;
@@ -498,6 +521,13 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .reading h4 { font-size: 1em; color: var(--ink-soft); }
 .reading p, .reading ul, .reading ol, .reading blockquote { margin: 0 0 1.05em; }
 .reading a { color: var(--accent); text-underline-offset: .18em; }
+/* The same pair of emphasis colours the editor sets on t.strong and t.emphasis,
+   so a bold word does not change hue when the view does. Headings keep their
+   own colour: bold inside one is the heading, not emphasis within it. */
+.reading strong, .reading b { color: var(--strong); font-weight: 650; }
+.reading em, .reading i { color: var(--emph); }
+.reading h1 strong, .reading h2 strong, .reading h3 strong,
+.reading h4 strong, .reading h5 strong, .reading h6 strong { color: inherit; }
 .reading code {
   font-family: var(--font-mono);
   font-size: .85em;
@@ -1122,13 +1152,16 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 
 /* --------------------------------------------------------- running code
    The run control sits at the right of the header, opposite the language
-   mark, and the output arrives in a box below the frame.
+   mark, and the output arrives in the bottom of the same box.
 
-   The box deliberately does not look like the code frame it follows. It is
-   what the machine said, not what the note says: no border on three sides, a
-   rule down the left in the accent, and a label above it. Nothing here is ever
-   written back into the .md file, so it must never be mistakable for a part of
-   the note. */
+   Output belongs to its block, so it is drawn as part of it: the frame grows a
+   second compartment under a hairline rather than a separate panel floating
+   below. A block and its output are one thing on the page, and the earlier
+   design — a bare rule down the left, detached, in the accent colour — read as
+   a quotation from somewhere else.
+
+   Inside that compartment the machine's voice is set apart from the note's by
+   a shade of tint, not by loudness. */
 
 /* Set to the same small caps as the language name opposite it, and — with the
    line-height collapsed — kept just under the language mark's height, so a
@@ -1148,35 +1181,53 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .run-btn:hover { color: var(--accent); background: var(--accent-dim); }
 .run-btn.is-running { color: var(--accent); background: var(--accent-dim); }
 
+/* The block above gives up its bottom edge so the two become one box. The
+   :has() is what lets the frame respond to output it does not contain — the
+   panel is a sibling, because a long output line has to scroll in its own box
+   rather than widening the code. */
+.reading .code-wrap:has(+ .run-out:not([hidden])),
+.reading .code-wrap:has(+ .manim[hidden] + .run-out:not([hidden])),
+.reading .manim:has(+ .run-out:not([hidden])) {
+  margin-bottom: 0;
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
 .run-out {
-  margin: -.75em 0 1.4em;
-  padding-left: 14px;
-  border-left: 2px solid var(--accent-dim);
+  margin: 0 0 1.05em;
+  background: color-mix(in srgb, var(--ink) 3.5%, var(--sunk));
+  border: 1px solid var(--line-soft);
+  border-top: 0;
+  border-radius: 0 0 8px 8px;
+  padding: 9px 16px 12px;
 }
 .run-out[hidden] { display: none; }
 
+/* The status line is only the verdict, kept to the right where the Run
+   control sits in the header above — no "OUTPUT" caption; the compartment
+   speaks for itself. Only failure is coloured: a green EXIT 0 on every
+   successful run is a celebration of nothing. */
 .run-out-head {
   display: flex;
   align-items: baseline;
-  gap: 10px;
+  justify-content: flex-end;
+  gap: 12px;
   font-family: var(--font-ui);
-  font-size: 10.5px;
-  letter-spacing: .08em;
-  text-transform: uppercase;
-  padding-bottom: 5px;
+  font-size: 10px;
+  padding-bottom: 7px;
+  color: var(--faint);
 }
-.run-out-label { color: var(--faint); font-weight: 500; }
-.run-out-verdict { font-variant-numeric: tabular-nums; letter-spacing: .04em; }
-.run-out-verdict.is-ok { color: var(--stem); }
-.run-out-verdict.is-bad { color: var(--accent); }
-.run-out-verdict.is-warn { color: var(--muted); }
-/* The one thing on the page that is still happening. */
-.run-out-verdict.is-running { color: var(--muted); }
+.run-out-verdict {
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+.run-out-verdict.is-bad { color: var(--code-removed); }
 
 /* Same face and measure as the code above, so output and source read as one
    column even though they are two different kinds of thing. Scoped under
    .reading because `.reading pre` draws a frame on every <pre> it finds, and
-   this one already has its rule down the left. */
+   this one is already inside the block's own frame. */
 .reading .run-out-stream {
   margin: 0;
   padding: 0;
@@ -1191,15 +1242,22 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   overflow-wrap: anywhere;
   overflow-x: auto;
 }
-.reading .run-out-stream + .run-out-stream { margin-top: .4em; }
-.reading .run-out-stream.is-stderr { color: var(--code-removed); }
+/* Consecutive streams are one transcript, not two paragraphs. */
+.reading .run-out-stream + .run-out-stream { margin-top: 0; }
+
+/* stderr is marked, not alarmed. The palette's red is tuned to carry a deleted
+   line in a diff, which at full strength turns every warning into a failure —
+   pulled back toward the body colour it still reads as the other channel. */
+.reading .run-out-stream.is-stderr {
+  color: color-mix(in oklab, var(--code-removed) 55%, var(--ink-soft));
+}
 .reading .run-out-stream.is-empty { color: var(--faint); font-style: italic; }
 
 .run-out-note {
   font-family: var(--font-ui);
   font-size: 11px;
   color: var(--faint);
-  padding-top: 6px;
+  padding-top: 8px;
 }
 
 /* ---------------------------------------------------------------- manim
@@ -1278,36 +1336,6 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .tk-title {
   margin-bottom: 0;
   padding-bottom: calc(.5em + .12em);
-}
-
-.properties {
-  display: grid;
-  grid-template-columns: minmax(0, 7.5em) 1fr;
-  gap: 3px 14px;
-  margin: 0 0 1.6em;
-  padding: 0 0 1.1em;
-  border-bottom: 1px solid var(--line-soft);
-  font-family: var(--font-ui);
-  font-size: 12.5px;
-  line-height: 1.55;
-}
-.properties dt {
-  color: var(--faint);
-  letter-spacing: .02em;
-  overflow-wrap: anywhere;
-}
-.properties dd {
-  margin: 0;
-  color: var(--ink-soft);
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-.prop-pill {
-  color: var(--stem);
-  background: color-mix(in srgb, var(--stem) 12%, transparent);
-  border-radius: 3px;
-  padding: .08em .38em;
 }
 
 /* -------------------------------------------------------- view switch */
@@ -1452,6 +1480,13 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   height: 15px;
   display: block;
 }
+/* Manim's mark is the project's own sidebar logo, which is a wide lockup —
+   an M with the three shapes — not a square silhouette. It keeps its own
+   proportions at tile height rather than being crushed into the square. */
+.lang-mark .lang-logo.is-manim {
+  width: auto;
+  aspect-ratio: 78.6 / 52.3;   /* the cropped viewBox logos.js sets */
+}
 
 
 /* ------------------------------------------------- tables (editing view)
@@ -1575,6 +1610,19 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   padding-bottom: 10px;
 }
 
+/* A fence with no language has no nested parser behind it, so its text arrives
+   carrying markdown's generic `monospace` tag — the same tag `code` spans use,
+   and therefore the inline-code chip: smaller type on a tinted pill, inside a
+   block that already is one. Inside a block the chip is undone, leaving the
+   block's own 12.5px, which is what a fence with a language already gets from
+   its syntax tokens. */
+.cm-content .cm-line.tk-code-block .tk-inline-code {
+  font-size: inherit;
+  background: none;
+  padding: 0;
+  border-radius: 0;
+}
+
 /* The widget standing in for the reading view's gutter. Its width and gap are
    measured the same way, so a number lands in the same place in both views. */
 .tk-linenum {
@@ -1655,3 +1703,224 @@ audio.embed-media { width: 100%; border-radius: 999px; }
 .cm-line .embed-missing { margin: .3em 0; }
 .cm-line .embed-img,
 .cm-line .embed-media { display: block; }
+
+/* ----------------------------------------------------------- assistant */
+
+/* A third column, collapsing the same way the note rail does. It borders on
+   the left only, so with both panels open the writing surface sits in a
+   channel between two quieter greys. */
+.ai {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--sunk);
+  border-left: 1px solid var(--line);
+  overflow: hidden;
+}
+.app[data-ai="closed"] .ai { border-left-color: transparent; }
+
+.ai-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 46px 10px 10px 14px;
+  flex: none;
+  -webkit-app-region: drag;
+}
+.ai-head > * { -webkit-app-region: no-drag; }
+.ai-head-end { display: flex; align-items: center; gap: 6px; }
+
+.ai-title {
+  font: 600 12.5px/1 var(--font-ui);
+  letter-spacing: .02em;
+  color: var(--muted);
+}
+
+.ai-status {
+  font: 11.5px/1 var(--font-ui);
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+  margin-right: 2px;
+}
+
+.ai-log {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 14px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.msg {
+  font: 13.5px/1.6 var(--font-ui);
+  color: var(--ink-soft);
+  overflow-wrap: anywhere;
+}
+.msg > :first-child { margin-top: 0; }
+.msg > :last-child { margin-bottom: 0; }
+.msg p { margin: 0 0 .55em; }
+
+/* The reader's own words sit in a card; the assistant's run as plain prose,
+   so a long answer is a page rather than a wall of tinted boxes. */
+.msg-you {
+  align-self: flex-end;
+  max-width: 88%;
+  background: var(--surface);
+  border: 1px solid var(--line-soft);
+  border-radius: 10px 10px 3px 10px;
+  padding: 7px 10px;
+  color: var(--ink);
+}
+
+.msg-bot code {
+  font: 12px/1.5 var(--font-mono);
+  background: var(--sunk);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+.msg-bot pre {
+  background: var(--surface);
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  padding: 8px 10px;
+  overflow-x: auto;
+}
+.msg-bot pre code { background: none; padding: 0; }
+
+/* Tool calls are the assistant's footwork, not its speech. */
+.msg-step {
+  font: 12px/1.5 var(--font-mono);
+  color: var(--faint);
+  padding-left: 13px;
+  position: relative;
+  overflow-wrap: anywhere;
+}
+.msg-step::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: .55em;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--stem);
+}
+.msg-step.is-error { color: var(--accent); }
+.msg-step.is-error::before { background: var(--accent); }
+
+.msg-note { font-size: 12.5px; color: var(--faint); font-style: italic; }
+.msg-warn {
+  font-size: 12.5px;
+  color: var(--accent);
+  background: var(--accent-dim);
+  border-radius: 6px;
+  padding: 6px 9px;
+}
+
+/* The composer is one object: a bordered well holding the field and the
+   controls that act on it, rather than a box with a toolbar bolted beneath.
+   The border lifts to the accent on focus, so the whole thing answers the
+   caret. */
+.ai-compose {
+  flex: none;
+  margin: 0 10px 11px;
+  padding: 9px 9px 7px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  transition: border-color .16s var(--ease), box-shadow .16s var(--ease);
+}
+.ai-compose:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
+
+/* Borderless, because the well around it is the input as far as the eye is
+   concerned. */
+.ai-input {
+  width: 100%;
+  resize: none;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  font: 13.5px/1.55 var(--font-ui);
+  padding: 2px 3px;
+  max-height: 190px;
+  overflow-y: auto;
+}
+.ai-input:focus { outline: none; }
+.ai-input::placeholder { color: var(--faint); }
+
+.ai-tools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.ai-tools-start, .ai-tools-end { display: flex; align-items: center; gap: 4px; }
+.ai-tools-end { gap: 6px; }
+
+.ai-chip {
+  display: grid;
+  place-items: center;
+  width: 27px;
+  height: 27px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+.ai-chip:hover { background: var(--hover); color: var(--ink); }
+
+/* A pressed control is ringed rather than filled: the assistant being allowed
+   to write is a standing condition, and a solid block of accent down here
+   would compete with the send button beside it. */
+.ai-chip[aria-pressed="true"] {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  box-shadow: 0 0 0 2px var(--accent-dim);
+}
+
+/* Native select, stripped to its text and given our own caret — the same
+   trick the view switcher uses, and the only way to keep the OS menu. */
+.ai-picker { display: flex; align-items: center; gap: 1px; color: var(--muted); }
+.ai-picker:hover { color: var(--ink-soft); }
+.ai-provider {
+  appearance: none;
+  -webkit-appearance: none;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: 500 12px/1 var(--font-ui);
+  padding: 5px 1px 5px 5px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.ai-provider:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.ai-caret { flex: none; pointer-events: none; }
+
+.ai-go {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 0;
+  cursor: pointer;
+  background: var(--sunk);
+  color: var(--muted);
+}
+.ai-go.is-send { background: var(--accent); color: #fff; }
+.ai-go.is-send:disabled { opacity: .35; cursor: default; }
+.ai-go:not(.is-send):hover { background: var(--hover); color: var(--ink); }
+
+/* While a turn is running the model is fixed — switching mid-answer would
+   orphan the process still writing into the log. */
+.ai[data-busy="yes"] .ai-picker { pointer-events: none; opacity: .5; }

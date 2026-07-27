@@ -58,6 +58,18 @@ contextBridge.exposeInMainWorld('tulip', {
     lookup: (noteName, code, scene) => ipcRenderer.invoke('manim:lookup', noteName, code, scene),
     render: (noteName, code, scene) => ipcRenderer.invoke('manim:render', noteName, code, scene)
   },
+  /**
+   * The assistant. It is a CLI subprocess with the vault as its working
+   * directory, so the renderer never passes it a file — only what to do and
+   * which note is open. Everything it says comes back on `ai:event`.
+   */
+  ai: {
+    start: (opts) => ipcRenderer.invoke('ai:start', opts),
+    send: (text, context) => ipcRenderer.invoke('ai:send', text, context),
+    stop: () => ipcRenderer.invoke('ai:stop'),
+    status: () => ipcRenderer.invoke('ai:status')
+  },
+
   search: (query) => ipcRenderer.invoke('search:vault', query),
   config: {
     get: () => ipcRenderer.invoke('config:get'),
@@ -70,7 +82,7 @@ contextBridge.exposeInMainWorld('tulip', {
   on: (channel, fn) => {
     const allowed = [
       'vault:changed', 'vault:opened', 'menu', 'theme:system', 'zoom',
-      'run:out', 'run:done'
+      'run:out', 'run:done', 'ai:event'
     ]
     if (!allowed.includes(channel)) return () => {}
     const listener = (_e, payload) => fn(payload)

@@ -18,7 +18,11 @@ const api = window.tulip
 const RUNNABLE = new Set([
   'js', 'javascript', 'node', 'mjs', 'cjs',
   'py', 'python', 'python3',
-  'sh', 'shell', 'bash', 'zsh'
+  'sh', 'shell', 'bash', 'zsh',
+  'jl', 'julia',
+  'go', 'golang',
+  'rs', 'rust',
+  'lean', 'lean4'
 ])
 
 export function isRunnable (lang) {
@@ -129,15 +133,27 @@ function reason (err) {
   return at === -1 ? text : text.slice(at + 'Error: '.length)
 }
 
-/** How a finished run is summarised in a line: what happened, and how long. */
+/**
+ * How a finished run is summarised in a line: what happened, and how long.
+ *
+ * The exit code is always stated — it is the one fact a run has to report — but
+ * a successful one is said quietly. Only a failure earns the colour, so a page
+ * of blocks that all worked has nothing shouting on it.
+ */
 function verdict (state) {
+  const time = (n) => (n < 1000 ? `${n} ms` : `${(n / 1000).toFixed(1)} s`)
+  const ms = time(state.ms)
   if (state.error) return { text: state.error, tone: 'bad' }
-  if (state.timedOut) return { text: `Timed out after ${(state.ms / 1000).toFixed(1)}s`, tone: 'bad' }
-  if (state.signal) return { text: 'Stopped', tone: 'warn' }
-  const ms = state.ms < 1000 ? `${state.ms} ms` : `${(state.ms / 1000).toFixed(1)} s`
-  return state.code === 0
-    ? { text: `Exit 0 · ${ms}`, tone: 'ok' }
-    : { text: `Exit ${state.code} · ${ms}`, tone: 'bad' }
+  if (state.timedOut) return { text: `timed out · ${ms}`, tone: 'bad' }
+  if (state.signal) return { text: `stopped · ${ms}`, tone: 'plain' }
+
+  // A compiled language spent most of that on the compiler, and saying so is
+  // the difference between "Rust is slow" and "rustc is slow".
+  const built = state.buildMs ? `${ms} · ${time(state.buildMs)} building` : ms
+  return {
+    text: `exit ${state.code} · ${built}`,
+    tone: state.code === 0 ? 'plain' : 'bad'
+  }
 }
 
 /**
@@ -150,8 +166,9 @@ function drawOutput (panel, state) {
   if (state.status === 'idle') { panel.hidden = true; return }
   panel.hidden = false
 
+  /* No "OUTPUT" caption — the compartment under the code, in the code's own
+     face, already says what it is. The header row carries only the verdict. */
   const head = el('div', 'run-out-head')
-  head.append(el('span', 'run-out-label', 'Output'))
 
   if (state.status === 'running') {
     head.append(el('span', 'run-out-verdict is-running', 'Running…'))

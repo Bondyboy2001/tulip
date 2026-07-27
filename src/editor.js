@@ -64,7 +64,14 @@ const tulipTheme = EditorView.theme({
     backgroundColor: 'var(--accent-dim)',
     outline: 'none'
   },
-  '.cm-placeholder': { color: 'var(--faint)', fontStyle: 'italic' }
+  '.cm-placeholder': { color: 'var(--faint)', fontStyle: 'italic' },
+  // Where the assistant just wrote. It fades rather than clears, so a run of
+  // edits reads as a hand moving down the page.
+  '.cm-agentEdit': {
+    background: 'var(--agent-flash)',
+    borderRadius: '2px',
+    transition: 'background .9s var(--ease)'
+  }
 })
 
 /* Markdown's own tags come first; the code tokens after them own everything
@@ -72,8 +79,11 @@ const tulipTheme = EditorView.theme({
    the other. */
 const highlight = HighlightStyle.define([
   { tag: t.processingInstruction, class: 'tk-mark' },
-  { tag: t.strong, fontWeight: '650' },
-  { tag: t.emphasis, fontStyle: 'italic' },
+  // Emphasis carries a colour of its own — warm for bold, cool for italic —
+  // so the two are told apart at a glance rather than by weight and slant
+  // alone, which a serif at reading size gives away only faintly.
+  { tag: t.strong, fontWeight: '650', color: 'var(--strong)' },
+  { tag: t.emphasis, fontStyle: 'italic', color: 'var(--emph)' },
   { tag: t.strikethrough, textDecoration: 'line-through', color: 'var(--faint)' },
   { tag: t.link, class: 'tk-link' },
   { tag: t.url, class: 'tk-mark' },
@@ -524,6 +534,55 @@ function titleFor (noteTitle) {
   })
 }
 
+/* -------------------------------------------------- the assistant's edits */
+
+/* Marks the span the assistant just rewrote, so a change arriving from outside
+   the keyboard is seen happening rather than discovered afterwards. */
+const flashEffect = StateEffect.define()   // { from, to } | null
+
+/**
+ * A state field, so the mark rides the document: text typed above the flashed
+ * span moves it, and a second edit landing before the first has faded remaps
+ * the first rather than leaving it stranded over the wrong words.
+ */
+const agentFlash = StateField.define({
+  create: () => Decoration.none,
+  update (deco, tr) {
+    for (const effect of tr.effects) {
+      if (!effect.is(flashEffect)) continue
+      if (!effect.value) return Decoration.none
+      const { from, to } = effect.value
+      if (to <= from) return Decoration.none
+      return Decoration.set([Decoration.mark({ class: 'cm-agentEdit' }).range(from, to)])
+    }
+    return deco.map(tr.changes)
+  },
+  provide: (field) => EditorView.decorations.from(field)
+})
+
+/**
+ * The smallest single change that turns `a` into `b` — everything between the
+ * first and last character they disagree on.
+ *
+ * A whole-document replacement would be simpler and is what a naive reload
+ * does, but it discards the cursor, the selection, the scroll position and the
+ * undo history. This keeps all four, because the parts of the note that did not
+ * change are never touched. Edits scattered across a note collapse into one
+ * wide span; the document still ends up right, and the flash is merely broader
+ * than it strictly needs to be.
+ */
+export function diffRange (a, b) {
+  if (a === b) return null
+  const limit = Math.min(a.length, b.length)
+  let start = 0
+  while (start < limit && a.charCodeAt(start) === b.charCodeAt(start)) start++
+  let endA = a.length
+  let endB = b.length
+  while (endA > start && endB > start &&
+         a.charCodeAt(endA - 1) === b.charCodeAt(endB - 1)) { endA--; endB-- }
+  return { from: start, to: endA, insert: b.slice(start, endB) }
+}
+
 /* Everything that renders rather than annotates. Named once because raw view
    swaps the whole set out and back — restoring a subset here is how tables and
    equations quietly stopped coming back after a trip through ⌘3. A rendered
@@ -594,6 +653,7 @@ export function createEditor ({
         markdown({ base: markdownLanguage, codeLanguages: languages, addKeymap: false }),
         syntaxHighlighting(highlight),
         titleFor(noteTitle),
+        agentFlash,
         embedResolver.of(resolveEmbed || (() => null)),
         // Raw view empties this compartment: same document, same history, no
         // decorations standing between you and the markup.
@@ -657,6 +717,28 @@ export function createEditor ({
 
   /** Redraw the parts that read from outside the document — the inline title. */
   view.refresh = () => { view.dispatch({ effects: refreshEffect.of(null) }) }
+
+  /**
+   * Bring the buffer to `text` as an edit rather than a replacement, and mark
+   * what moved. Used when the assistant writes to the note that is open: the
+   * caret stays where it was, ⌘Z still walks back through it, and the changed
+   * lines light up for a moment.
+   */
+  let fade = null
+  view.patch = (text) => {
+    const change = diffRange(view.state.doc.toString(), text)
+    if (!change) return false
+    view.dispatch({
+      changes: change,
+      effects: flashEffect.of({ from: change.from, to: change.from + change.insert.length }),
+      // The assistant's writing should not steal the page from someone reading
+      // elsewhere in it; only a change at the caret follows the caret.
+      scrollIntoView: false
+    })
+    clearTimeout(fade)
+    fade = setTimeout(() => view.dispatch({ effects: flashEffect.of(null) }), 1400)
+    return true
+  }
 
   /* Reading position, expressed as a line of the file rather than a pixel
      offset. Pixels do not survive the trip to another view — the reading view

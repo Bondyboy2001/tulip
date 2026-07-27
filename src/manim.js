@@ -37,7 +37,22 @@ function el (tag, className, text) {
    other embed — the resolver is trivial here only because main already answered
    the question resolution exists to answer. */
 function videoFor (path) {
-  return renderEmbed(embedSpec(path, { resolve: () => path }))
+  const video = renderEmbed(embedSpec(path, { resolve: () => path }))
+
+  /* A scene almost always *builds* to its picture, so frame zero is a black
+     rectangle and a note full of scenes reads as a note full of empty boxes.
+     Parking on the last frame shows what the scene made.
+
+     Seeking to exactly the duration is what makes this safe: the element is
+     then "ended", and play() is specified to rewind to the start from there —
+     so the still costs nothing at playback time. */
+  video.addEventListener('loadedmetadata', () => {
+    if (Number.isFinite(video.duration) && video.duration > 0) {
+      video.currentTime = video.duration
+    }
+  }, { once: true })
+
+  return video
 }
 
 /** A line of manim's own output worth showing while it works. */
@@ -103,6 +118,9 @@ export function attachManim (wrap, head, code, { noteName, scene }) {
     showCode.textContent = codeVisible ? 'Video' : 'Code'
     showCode.title = codeVisible ? 'Back to the video' : 'Show the scene’s source'
     showCode.hidden = !videoPath
+    // With the film on screen the header is gone and the figure's own footer
+    // carries the controls — two Re-render buttons on one block is one too many.
+    button.hidden = !codeVisible
   }
 
   function setVideo (path) {
@@ -110,6 +128,7 @@ export function attachManim (wrap, head, code, { noteName, scene }) {
     stage.replaceChildren(videoFor(path))
     sceneName.textContent = scene || ''
     show('video')
+    paint()
   }
 
   const paint = () => {
@@ -128,7 +147,6 @@ export function attachManim (wrap, head, code, { noteName, scene }) {
     if (state.status === 'idle') { status.hidden = true; return }
 
     const bar = el('div', 'run-out-head')
-    bar.append(el('span', 'run-out-label', 'Manim'))
 
     if (state.status === 'running') {
       bar.append(el('span', 'run-out-verdict is-running', 'Rendering…'))
