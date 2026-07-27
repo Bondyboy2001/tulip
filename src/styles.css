@@ -1243,7 +1243,56 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   overflow-x: auto;
 }
 /* Consecutive streams are one transcript, not two paragraphs. */
-.reading .run-out-stream + .run-out-stream { margin-top: 0; }
+.reading .run-out-stream + .run-out-stream,
+.tk-run .run-out-stream + .run-out-stream { margin-top: 0; }
+
+/* ------------------------------------------- running code (editing view)
+   The same control, drawn as a block widget under the fence. The bar and the
+   panel continue the frame the code lines draw above them, so the block, its
+   control and its output are one box in the editing view exactly as they are
+   in the reading view. Widgets live in the preview compartment, so the raw
+   view shows none of this. */
+
+/* The closed fence line above hands its bottom edge to the widget. */
+.cm-content .cm-line.tk-code-bottom:has(+ .tk-run),
+.cm-content .cm-line.tk-code-bottom:has(+ .cm-widgetBuffer + .tk-run) {
+  border-bottom: 0;
+  border-radius: 0;
+  padding-bottom: 4px;
+}
+
+.tk-run { font-family: var(--font-ui); }
+.tk-run-bar {
+  display: flex;
+  justify-content: flex-end;
+  background: var(--sunk);
+  border-inline: 1px solid var(--line-soft);
+  padding: 0 8px 6px;
+}
+/* No output yet — the bar itself is the bottom of the frame. */
+.tk-run:has(.run-out[hidden]) .tk-run-bar {
+  border-bottom: 1px solid var(--line-soft);
+  border-radius: 0 0 8px 8px;
+}
+.tk-run .run-out {
+  margin: 0;
+  border-radius: 0 0 8px 8px;
+}
+/* The output text keeps the code's face, not the note's serif. */
+.tk-run .run-out-stream {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.62;
+  color: var(--ink-soft);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow-x: auto;
+}
+.tk-run .run-out-stream.is-stderr {
+  color: color-mix(in oklab, var(--code-removed) 55%, var(--ink-soft));
+}
+.tk-run .run-out-stream.is-empty { color: var(--faint); font-style: italic; }
 
 /* stderr is marked, not alarmed. The palette's red is tuned to carry a deleted
    line in a diff, which at full strength turns every warning into a failure —
@@ -1888,39 +1937,101 @@ audio.embed-media { width: 100%; border-radius: 999px; }
   box-shadow: 0 0 0 2px var(--accent-dim);
 }
 
-/* Native select, stripped to its text and given our own caret — the same
-   trick the view switcher uses, and the only way to keep the OS menu. */
-.ai-picker { display: flex; align-items: center; gap: 1px; color: var(--muted); }
-.ai-picker:hover { color: var(--ink-soft); }
-.ai-provider {
-  appearance: none;
-  -webkit-appearance: none;
+/* Provider is a two-way choice, so it is shown as one — a segmented pill
+   rather than a menu you have to open to discover it only had two entries. */
+.ai-seg {
+  display: flex;
+  padding: 2px;
+  gap: 2px;
+  border-radius: 8px;
+  background: var(--sunk);
+}
+.ai-seg button {
   border: 0;
   background: none;
-  color: inherit;
-  font: 500 12px/1 var(--font-ui);
-  padding: 5px 1px 5px 5px;
+  color: var(--faint);
+  font: 550 11.5px/1 var(--font-ui);
+  padding: 5px 7px;
   border-radius: 6px;
   cursor: pointer;
 }
-.ai-provider:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.ai-caret { flex: none; pointer-events: none; }
+.ai-seg button:hover { color: var(--ink-soft); }
+.ai-seg button[aria-checked="true"] {
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: 0 1px 2px #0000000f;
+}
 
+/* How hard to think. Four stops rather than a continuum, because the levels
+   the CLIs accept are named, not numeric — and on its own line, because a
+   slider squeezed between two buttons is a slider nobody can aim at. */
+.ai-effort {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 1px 3px 0;
+  cursor: pointer;
+}
+.ai-effort-name {
+  font: 500 11px/1 var(--font-ui);
+  color: var(--faint);
+}
+.ai-effort input {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: 1;
+  min-width: 0;
+  height: 14px;
+  background: none;
+  cursor: pointer;
+}
+.ai-effort input::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--line);
+}
+.ai-effort input::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 11px;
+  height: 11px;
+  margin-top: -4px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--surface);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.ai-effort input:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.ai-effort-label {
+  font: 500 11px/1 var(--font-ui);
+  color: var(--ink-soft);
+  min-width: 3.4em;
+  text-align: right;
+}
+
+/* One button, two jobs. Send and stop are never both available — the icon
+   swaps rather than a second control appearing beside it, so the corner has a
+   fixed shape whatever the assistant is doing. */
 .ai-go {
   display: grid;
   place-items: center;
   width: 28px;
   height: 28px;
+  flex: none;
   border-radius: 50%;
   border: 0;
   cursor: pointer;
-  background: var(--sunk);
-  color: var(--muted);
+  background: var(--accent);
+  color: #fff;
 }
-.ai-go.is-send { background: var(--accent); color: #fff; }
-.ai-go.is-send:disabled { opacity: .35; cursor: default; }
-.ai-go:not(.is-send):hover { background: var(--hover); color: var(--ink); }
+.ai-go:disabled { opacity: .35; cursor: default; }
+.ai-go > svg { grid-area: 1 / 1; }
+.ai-go .ai-go-stop { display: none; }
+.ai[data-busy="yes"] .ai-go .ai-go-send { display: none; }
+.ai[data-busy="yes"] .ai-go .ai-go-stop { display: block; }
 
-/* While a turn is running the model is fixed — switching mid-answer would
-   orphan the process still writing into the log. */
-.ai[data-busy="yes"] .ai-picker { pointer-events: none; opacity: .5; }
+/* While a turn is running the assistant and its effort are fixed: both are
+   flags on the process still writing into the log, and neither can change
+   without starting a new one. */
+.ai[data-busy="yes"] .ai-seg,
+.ai[data-busy="yes"] .ai-effort { pointer-events: none; opacity: .45; }

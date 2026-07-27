@@ -198,26 +198,19 @@ function drawOutput (panel, state) {
  * @param {string} lang       the word after the fence
  * @param {string} code       the block's source
  */
-export function attachRunControl (wrap, head, lang, code) {
-  if (!isRunnable(lang)) return
-
+/**
+ * The wiring both views share: a Run/Stop button, an output panel, and the
+ * painter that keeps them true to the block's state. The state itself is keyed
+ * by the code, so the same block running in the editing view and the reading
+ * view is one run seen from two places.
+ */
+function wireRun (button, panel, lang, code) {
   const state = stateFor(code)
 
-  const button = el('button', 'run-btn')
-  button.type = 'button'
-
-  const panel = el('div', 'run-out')
-  panel.setAttribute('role', 'group')
-  panel.setAttribute('aria-label', 'Output')
-  panel.setAttribute('aria-live', 'polite')
-  // A sibling of the frame rather than a child, so a long output line scrolls
-  // in its own box instead of widening the code above it.
-  wrap.after(panel)
-
   const paint = () => {
-    // The reading view rebuilds wholesale, so a panel from a previous render is
-    // detached and has nothing left to say. It drops itself the first time it
-    // is asked to draw.
+    // Both views rebuild their DOM wholesale, so a panel from a previous
+    // render is detached and has nothing left to say. It drops itself the
+    // first time it is asked to draw.
     if (!panel.isConnected && panel.dataset.drawn) {
       state.painters.delete(paint)
       return
@@ -261,6 +254,47 @@ export function attachRunControl (wrap, head, lang, code) {
     }
   })
 
-  head.append(button)
   paint()
+}
+
+function makeButton () {
+  const button = el('button', 'run-btn')
+  button.type = 'button'
+  return button
+}
+
+function makePanel () {
+  const panel = el('div', 'run-out')
+  panel.setAttribute('role', 'group')
+  panel.setAttribute('aria-label', 'Output')
+  panel.setAttribute('aria-live', 'polite')
+  return panel
+}
+
+/** The reading view's form: button into the block's header, panel after it. */
+export function attachRunControl (wrap, head, lang, code) {
+  if (!isRunnable(lang)) return
+
+  const button = makeButton()
+  const panel = makePanel()
+  // A sibling of the frame rather than a child, so a long output line scrolls
+  // in its own box instead of widening the code above it.
+  wrap.after(panel)
+  head.append(button)
+  wireRun(button, panel, lang, code)
+}
+
+/**
+ * The editing view's form: one element carrying both, for the block widget
+ * that stands under a fence (see runblocks.js).
+ */
+export function runBlockUI (lang, code) {
+  const root = el('div', 'tk-run')
+  const bar = el('div', 'tk-run-bar')
+  const button = makeButton()
+  const panel = makePanel()
+  bar.append(button)
+  root.append(bar, panel)
+  wireRun(button, panel, lang, code)
+  return root
 }

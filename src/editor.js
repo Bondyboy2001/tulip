@@ -17,6 +17,7 @@ import { tags as t } from '@lezer/highlight'
 import { mathPreview } from './math.js'
 import { moneyPreview } from './money.js'
 import { codeBlockKeymap, proseBrackets, codeLineNumbers } from './codeblock.js'
+import { runBlocks } from './runblocks.js'
 import { tablePreview } from './table.js'
 import { findEmbeds, embedSpec, renderEmbed } from './assets.js'
 
@@ -587,7 +588,7 @@ export function diffRange (a, b) {
    swaps the whole set out and back — restoring a subset here is how tables and
    equations quietly stopped coming back after a trip through ⌘3. A rendered
    table in the "raw" view would make the view a lie, so they travel together. */
-const RENDERED = [livePreview, mathPreview, tablePreview, moneyPreview]
+const RENDERED = [livePreview, mathPreview, tablePreview, moneyPreview, runBlocks]
 
 /* ------------------------------------------------------------ shortcuts */
 
