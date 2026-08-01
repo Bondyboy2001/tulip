@@ -7,7 +7,6 @@
 
 import { tags as t, tagHighlighter, highlightCode } from '@lezer/highlight'
 import { LanguageDescription } from '@codemirror/language'
-import { languages } from '@codemirror/language-data'
 
 export const codeTokens = [
   { tag: [t.keyword, t.controlKeyword, t.operatorKeyword, t.definitionKeyword,
@@ -46,13 +45,51 @@ const loading = new Map()
 
 function support (desc) {
   if (desc.support) return desc.support
-  if (!loading.has(desc.name)) loading.set(desc.name, desc.load())
+  if (!loading.has(desc.name)) {
+    const request = desc.load()
+    /* A failed fetch must not be remembered as the answer — cached, it turned
+       one offline moment into a language that never highlighted again. The
+       next block asks fresh. */
+    request.catch(() => loading.delete(desc.name))
+    loading.set(desc.name, request)
+  }
   return loading.get(desc.name)
 }
 
 /* Parsing is linear but not free, and a pasted 200kB payload is not something
    anyone reads token by token. */
 const MAX_HIGHLIGHT = 120_000
+
+/* Fences whose word names something Tulip does with the block rather than the
+   language it is written in. A Manim scene is Python and a TikZ picture is
+   LaTeX — they are called what they are because of what Tulip renders them
+   into — so they are parsed as the languages they are written in. An SVG
+   drawing is XML for the same reason. */
+const FENCE_ALIAS = { manim: 'python', tikz: 'latex', svg: 'xml' }
+const descriptions = new Map()
+
+/**
+ * The parser for a fence's language word, aliases resolved. Both views ask
+ * through here, so a word that colours in one of them colours in the other.
+ */
+export function languageFor (token) {
+  const word = String(token || '').trim().split(/\s+/)[0].toLowerCase()
+  if (!word) return null
+  const name = FENCE_ALIAS[word] || word
+  if (!descriptions.has(name)) {
+    descriptions.set(name, LanguageDescription.of({
+      name,
+      alias: [name],
+      async load () {
+        const { languages } = await import('@codemirror/language-data')
+        const real = LanguageDescription.matchLanguageName(languages, name, true)
+        if (!real) throw new Error(`Unknown code language: ${name}`)
+        return support(real)
+      }
+    }))
+  }
+  return descriptions.get(name)
+}
 
 /**
  * Replace `el`'s contents with highlighted spans for `code`.
@@ -63,7 +100,7 @@ const MAX_HIGHLIGHT = 120_000
 export async function highlightInto (el, code, token) {
   if (!token || code.length > MAX_HIGHLIGHT) return false
 
-  const desc = LanguageDescription.matchLanguageName(languages, token, true)
+  const desc = languageFor(token)
   if (!desc) return false
 
   let support_

@@ -1,34 +1,56 @@
 import { EditorView, Decoration, ViewPlugin, WidgetType, keymap, drawSelection,
          rectangularSelection, dropCursor, highlightActiveLine } from '@codemirror/view'
-import { EditorState, Prec, StateEffect, StateField, Compartment, Facet } from '@codemirror/state'
+import { EditorState, EditorSelection, Prec, StateEffect, StateField,
+         Compartment, Facet } from '@codemirror/state'
 import { syntaxTree, HighlightStyle, syntaxHighlighting, indentOnInput,
-         bracketMatching } from '@codemirror/language'
-import { codeTokens } from './highlight.js'
+         bracketMatching, indentUnit, foldService, codeFolding, foldEffect,
+         unfoldEffect, foldedRanges, foldKeymap } from '@codemirror/language'
+import { codeTokens, languageFor } from './highlight.js'
 import { languageChip } from './languages.js'
 
 export { openSearchPanel }
-import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
-import { searchKeymap, highlightSelectionMatches, openSearchPanel } from '@codemirror/search'
+import { defaultKeymap, history, historyKeymap, indentWithTab, undo, redo } from '@codemirror/commands'
+import { search, searchKeymap, highlightSelectionMatches, openSearchPanel } from '@codemirror/search'
+import { findConfig } from './find.js'
+import { EXTERNAL_SCHEME, flashTarget } from './links.js'
 import { autocompletion, closeBrackets, closeBracketsKeymap,
          completionKeymap } from '@codemirror/autocomplete'
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
-import { languages } from '@codemirror/language-data'
 import { tags as t } from '@lezer/highlight'
-import { mathPreview } from './math.js'
+import { mathPreview, equationIndex } from './math.js'
 import { moneyPreview } from './money.js'
-import { codeBlockKeymap, proseBrackets, codeLineNumbers } from './codeblock.js'
+import { codeBlockKeymap, proseBrackets, codeBlockView } from './codeblock.js'
 import { runBlocks } from './runblocks.js'
-import { tablePreview } from './table.js'
-import { findEmbeds, embedSpec, renderEmbed } from './assets.js'
+import { languageTableMode, tableAssetResolver, tableCursorGuard, tablePreview } from './table.js'
+import {
+  findEmbeds, specForEmbed, renderEmbed, destroyEmbeds, withEmbedSize,
+  embedResizeGrip, wireEmbedResize
+} from './assets.js'
+import { calloutHead, calloutIcon } from './callouts.js'
+import { slashCommands, fenceLanguages, calloutKinds } from './slash.js'
+import { mermaidBlocks } from './mermaid.js'
+import { tikzBlocks, tikzNote } from './tikz.js'
+import { svgBlocks } from './svg.js'
+import { headings, blockReferences, blockReferenceOnLine } from './headings.js'
+import { findInlineHighlights } from './marks.js'
+import { findCitations } from './citations.js'
+import { fileDiff } from './linediff.js'
 
 /* ---------------------------------------------------------------- theme */
 
 const tulipTheme = EditorView.theme({
   '&': { color: 'var(--ink)', backgroundColor: 'transparent', height: '100%' },
   '.cm-gutters': { display: 'none' },
-  // Padding cancelled by an equal negative margin: the highlight band extends
-  // past the text on both sides without shifting the text itself.
-  '.cm-line': { padding: '0 10px', margin: '0 -10px' },
+  /* Padding cancelled by an equal negative margin: the highlight band extends
+     past the text on both sides without shifting the text itself.
+
+     24px, matching .cm-content's own padding, and not a smaller bleed: CodeMirror
+     draws multi-line selections out to `contentRect edge + this padding` (it
+     reads the first .cm-line's computed style — see rectanglesForRange in
+     @codemirror/view). At 24px that edge is exactly where a code block's frame
+     sits, so a selection through a block ends flush with the frame; at 10px it
+     jutted 14px past the frame on both sides and read as broken. */
+  '.cm-line': { padding: '0 24px', margin: '0 -24px' },
   // CodeMirror injects its base theme into the head at runtime, after our
   // stylesheet, so a plain .cm-scroller rule loses the tie. Setting type here
   // puts it in the theme layer, which wins.
@@ -39,7 +61,9 @@ const tulipTheme = EditorView.theme({
     padding: '40px 0 0'
   },
   '.cm-content': {
-    maxWidth: 'var(--measure)',
+    // The measure, or the room there is — whichever is less, so a zoomed-in
+    // window narrows the column instead of running it off the right edge.
+    maxWidth: 'min(var(--measure), 100%)',
     marginInline: 'auto',
     padding: '0 24px',
     caretColor: 'var(--accent)'
@@ -52,7 +76,24 @@ const tulipTheme = EditorView.theme({
     borderLeftWidth: '2px'
   },
   '&.cm-focused .cm-cursor': { borderLeftColor: 'var(--accent)' },
-  '.cm-selectionBackground, &.cm-focused .cm-selectionBackground': {
+  /* A rendered language table replaces the source lines with one block
+     widget, but CodeMirror still owns a document selection at the hidden
+     boundary. Suppress the cursor itself in the theme layer: unlike the page
+     stylesheet, this is injected alongside CodeMirror's cursor rules and
+     cannot lose to their adopted stylesheet. The focused contenteditable cell
+     continues to draw its ordinary, line-height caret. */
+  '&.is-language-table-editor .cm-cursor': { display: 'none' },
+  /* Both states, and the focused one spelled out the long way on purpose.
+     CodeMirror's base theme paints the focused selection with
+     `.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground`
+     — four classes. A plain `&.cm-focused .cm-selectionBackground` is three,
+     so the base rule outranked it and every focused selection came out in
+     CodeMirror's stock light-theme lavender (rgb(215,212,240)) rather than the
+     theme's own. Unfocused it looked right, which is what made it easy to
+     miss. Matching the shape of the rule matches its specificity, and theme
+     styles are injected after the base ones, so this one wins. */
+  '.cm-selectionBackground': { background: 'var(--sel)' },
+  '&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground': {
     background: 'var(--sel)'
   },
   // The line under the cursor is the one showing raw markup, so marking it
@@ -66,12 +107,126 @@ const tulipTheme = EditorView.theme({
     outline: 'none'
   },
   '.cm-placeholder': { color: 'var(--faint)', fontStyle: 'italic' },
-  // Where the assistant just wrote. It fades rather than clears, so a run of
+  // Where the copilot just wrote. It fades rather than clears, so a run of
   // edits reads as a hand moving down the page.
   '.cm-agentEdit': {
     background: 'var(--agent-flash)',
     borderRadius: '2px',
     transition: 'background .9s var(--ease)'
+  },
+  /* A Copilot edit is shown as a familiar diff without putting any of the
+     removed text back into the Markdown. Added source lines are the real
+     document; removed ones are read-only block widgets beside them. */
+  '&.is-raw .cm-agent-added-line': {
+    position: 'relative',
+    background: 'color-mix(in srgb, var(--code-added) 14%, transparent)',
+    boxShadow: 'inset 3px 0 0 color-mix(in srgb, var(--code-added) 72%, transparent)'
+  },
+  '&.is-raw .cm-agent-added-line::before': {
+    content: '"+"',
+    position: 'absolute',
+    left: '7px',
+    color: 'var(--code-added)',
+    fontFamily: 'var(--font-mono)',
+    fontWeight: '650',
+    userSelect: 'none'
+  },
+  '.cm-agent-working-line': {
+    background: 'color-mix(in srgb, var(--accent) 12%, transparent)',
+    boxShadow: 'inset 3px 0 0 color-mix(in srgb, var(--accent) 65%, transparent)'
+  },
+  /* Text the copilot is still writing. It sits in the flow at the size and
+     leading of the paragraph it is joining, so a sentence appearing reads as
+     part of the note — but held back a shade, because until the tool runs none
+     of it is on disk and a reader should be able to tell. */
+  '.cm-agent-draft': {
+    whiteSpace: 'pre-wrap',
+    color: 'color-mix(in srgb, var(--ink) 68%, transparent)',
+    background: 'color-mix(in srgb, var(--accent) 7%, transparent)',
+    borderRadius: '2px'
+  },
+  '.cm-agent-typing-cursor': {
+    display: 'inline-block',
+    width: '2px',
+    height: '1.18em',
+    margin: '0 1px',
+    verticalAlign: '-0.18em',
+    borderRadius: '1px',
+    background: 'var(--accent)',
+    boxShadow: '0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent)'
+  },
+  '.cm-agent-deleted': {
+    display: 'none'
+  },
+  '&.is-raw .cm-agent-deleted': {
+    display: 'block',
+    margin: '1px -24px',
+    color: 'var(--code-removed)',
+    background: 'color-mix(in srgb, var(--code-removed) 13%, transparent)',
+    boxShadow: 'inset 3px 0 0 color-mix(in srgb, var(--code-removed) 72%, transparent)',
+    fontFamily: 'var(--font-body)',
+    fontSize: '17px',
+    lineHeight: '1.68'
+  },
+  '.cm-agent-deleted-line': {
+    display: 'grid',
+    gridTemplateColumns: '24px minmax(0, 1fr)',
+    padding: '0 24px',
+    whiteSpace: 'pre-wrap',
+    overflowWrap: 'anywhere'
+  },
+  '.cm-agent-diff-mark': {
+    color: 'color-mix(in srgb, var(--code-removed) 75%, transparent)',
+    fontFamily: 'var(--font-mono)',
+    userSelect: 'none'
+  },
+
+  /* The completion tooltip — the `[[` note list and the slash menu. Styled
+     here rather than in styles.css for the same adoptedStyleSheets reason as
+     the cursor above: the library's base theme lands after the document's
+     sheets, so its light-grey card and monospace rows beat any plain rule of
+     equal specificity. Theme rules carry the editor's own scope class and
+     win. */
+  '.cm-tooltip': {
+    background: 'var(--surface)',
+    border: '1px solid var(--line)',
+    borderRadius: '8px',
+    boxShadow: '0 10px 30px -10px rgb(0 0 0 / .5)',
+    overflow: 'hidden'
+  },
+  '.cm-tooltip.cm-tooltip-autocomplete > ul': {
+    fontFamily: 'var(--font-ui)',
+    fontSize: '12.5px',
+    maxHeight: '19em',
+    minWidth: '220px'
+  },
+  '.cm-tooltip.cm-tooltip-autocomplete > ul > li': {
+    padding: '4px 12px',
+    color: 'var(--ink-soft)',
+    lineHeight: '1.45'
+  },
+  '.cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected]': {
+    background: 'var(--accent-dim)',
+    color: 'var(--ink)'
+  },
+  // The group headers the slash menu sets — quiet, like the sidebar's labels.
+  '.cm-tooltip.cm-tooltip-autocomplete > ul > completion-section': {
+    padding: '7px 12px 2px',
+    fontSize: '10px',
+    fontWeight: '650',
+    letterSpacing: '.07em',
+    textTransform: 'uppercase',
+    color: 'var(--faint)',
+    borderBottom: 'none',
+    opacity: '1'
+  },
+  // What a command inserts, kept to a whisper on the right edge.
+  '.cm-completionDetail': {
+    float: 'right',
+    marginLeft: '18px',
+    fontStyle: 'normal',
+    fontSize: '11px',
+    color: 'var(--faint)'
   }
 })
 
@@ -85,7 +240,9 @@ const highlight = HighlightStyle.define([
   // alone, which a serif at reading size gives away only faintly.
   { tag: t.strong, fontWeight: '650', color: 'var(--strong)' },
   { tag: t.emphasis, fontStyle: 'italic', color: 'var(--emph)' },
-  { tag: t.strikethrough, textDecoration: 'line-through', color: 'var(--faint)' },
+  // A class, not inline styles: the active line strips the decoration (see
+  // .tk-strike in styles.css) so the text being edited reads as source.
+  { tag: t.strikethrough, class: 'tk-strike' },
   { tag: t.link, class: 'tk-link' },
   { tag: t.url, class: 'tk-mark' },
   { tag: t.monospace, class: 'tk-inline-code' },
@@ -93,7 +250,9 @@ const highlight = HighlightStyle.define([
   { tag: t.quote, color: 'var(--ink-soft)' },
   // t.list covers a whole list item, not just its mark, so colouring it here
   // tinted every task's text. The bullet gets its colour from BulletWidget.
-  { tag: t.contentSeparator, color: 'var(--line)' },
+  /* The `---` under the cursor. A *text* colour, not --line: the hairline
+     border colour vanishes into the active-line band on dark themes. */
+  { tag: t.contentSeparator, class: 'tk-mark' },
   ...codeTokens
 ])
 
@@ -105,15 +264,78 @@ const HIDDEN_MARKS = new Set([
   'LinkMark', 'QuoteMark', 'SubscriptMark', 'SuperscriptMark'
 ])
 
-/** The note's name, set above the first line the way Obsidian does it — the
- *  document's own title rather than a line of frontmatter pretending to be one. */
+/**
+ * The note's name, and the place it is renamed.
+ *
+ * A field rather than a line of text: the title is the file's name, so typing
+ * over it is the rename — the same edit the sidebar's row makes, made where the
+ * name is actually being read. An `<input>` rather than a contenteditable div,
+ * because the editor's own content is contenteditable and CodeMirror would take
+ * every keystroke inside one for a change to the document; an input's value is
+ * not part of the DOM it watches.
+ */
 class TitleWidget extends WidgetType {
-  constructor (text) { super(); this.text = text }
-  eq (other) { return other.text === this.text }
+  constructor (text, rename, flag = '', editable = true) {
+    super()
+    this.text = text
+    this.rename = rename
+    this.flag = flag
+    this.canRename = editable
+  }
+  eq (other) {
+    return other.text === this.text &&
+      other.flag === this.flag &&
+      other.canRename === this.canRename
+  }
   toDOM () {
     const h = document.createElement('div')
     h.className = 'tk-title'
-    h.textContent = this.text
+    // Not the editor's text, so the caret cannot land in it by arrowing off the
+    // top of the document, and CodeMirror leaves what is inside alone.
+    h.contentEditable = 'false'
+
+    const input = document.createElement('input')
+    input.className = 'tk-title-field'
+    input.type = 'text'
+    input.value = this.text
+    input.spellcheck = false
+    input.setAttribute('aria-label', 'Note name')
+    input.readOnly = !this.canRename
+    if (!this.canRename) {
+      input.classList.add('is-locked')
+      input.setAttribute('aria-readonly', 'true')
+      input.title = 'Rename language tables from the file explorer'
+    }
+    h.append(input)
+
+    if (this.flag) {
+      const flag = document.createElement('span')
+      flag.className = 'tk-title-flag'
+      flag.textContent = this.flag
+      flag.setAttribute('aria-label', 'Language country flag')
+      h.append(flag)
+    }
+
+    const was = this.text
+    const rename = this.rename
+    /* Leaving the field is what commits it, and both keys leave: Enter as it
+       stands, Escape with the old name put back — which the unchanged test then
+       reads as nothing having been asked for. One commit site, so there is no
+       second one to keep in step. */
+    input.addEventListener('blur', () => {
+      const next = input.value.trim()
+      if (!next || next === was) { input.value = was; return }
+      rename?.(next)
+    })
+    input.addEventListener('keydown', (event) => {
+      // The editor's keymap is bound to the whole content area; a name being
+      // typed is not a document being edited.
+      event.stopPropagation()
+      if (event.key === 'Escape') { event.preventDefault(); input.value = was }
+      else if (event.key !== 'Enter') return
+      event.preventDefault()
+      input.blur()
+    })
     return h
   }
   ignoreEvent () { return true }
@@ -134,9 +356,21 @@ class LangChipWidget extends WidgetType {
 /* Resolving an embed needs the vault's file list, which lives in the renderer.
    A facet carries it in rather than a module-level variable, so the decoration
    builder stays a function of editor state. */
-const embedResolver = Facet.define({
-  combine: (values) => values[0] || (() => null)
-})
+
+/* The same bridge for the other thing `![[…]]` can name: a note. Kept apart
+   from the asset resolver because they answer differently — an attachment
+   resolves relative to the note's folder, a note by name across the vault. */
+const embedNoteResolver = Facet.define({ combine: (v) => v[0] || (() => null) })
+
+/* A picture deliberately keeps its geometry when the caret crosses its line.
+   This is the explicit way through that rule: the image's own source button
+   names the exact replaced range that should open as Markdown. */
+const embedSourceEffect = StateEffect.define()
+
+/* What a line may hold beside an embed and still count as holding only that
+   embed: indentation, a bullet, a quote mark, and the two halves of the link
+   a badge is usually written inside. */
+const LINE_FURNITURE = /^(?:\s|[-*+>]|\[|\]\([^()\s]*\))*$/
 
 /**
  * A picture, standing where its markup was written.
@@ -147,8 +381,13 @@ const embedResolver = Facet.define({
  * source, the same rule the rest of the live preview follows.
  */
 class EmbedWidget extends WidgetType {
-  /** @param spec the shape `embedSpec()` returns — see src/assets.js */
-  constructor (spec) { super(); this.spec = spec }
+  /**
+   * @param spec the shape `embedSpec()` returns — see src/assets.js
+   * @param figure whether the embed is the whole line, and so stands on one of
+   *   its own rather than in a row — the editing view's answer to the question
+   *   `standsAlone` answers about a paragraph in src/renderer.js
+   */
+  constructor (spec, figure) { super(); this.spec = spec; this.figure = figure }
 
   // Compared field by field rather than by identity: a fresh spec object is
   // built on every decoration pass, and an identity check would re-create the
@@ -156,8 +395,14 @@ class EmbedWidget extends WidgetType {
   eq (other) {
     const a = this.spec
     const b = other.spec
-    return a.kind === b.kind && a.path === b.path && a.label === b.label &&
-           a.alt === b.alt && a.width === b.width && a.height === b.height
+    /* `url` and not just `path`: a remote embed has no path, and a YouTube one
+       has a fixed label too, so without this every video in a note compared
+       equal to every other and editing the id left the old player running. */
+    return a.kind === b.kind && a.path === b.path && a.url === b.url &&
+           a.label === b.label && a.alt === b.alt &&
+           a.width === b.width && a.height === b.height && a.page === b.page &&
+           a.start === b.start && a.anchor === b.anchor &&
+           this.figure === other.figure
   }
 
   toDOM (view) {
@@ -165,10 +410,246 @@ class EmbedWidget extends WidgetType {
     // already measured the line by then. Asking for a re-measure is what keeps
     // the cursor and the scrollbar from sitting a picture too high — and it is
     // the one thing here the reading view has no equivalent of.
-    return renderEmbed(this.spec, () => view.requestMeasure())
+    const embed = renderEmbed(this.spec, () => view.requestMeasure())
+    if (this.spec.kind === 'image') {
+      const host = sizerFor(embed, view)
+      if (this.figure) host.classList.add('is-figure')
+      return host
+    }
+    if (this.figure) embed.classList.add('is-figure')
+    return embed
   }
 
-  // Clicks have to reach the media controls and the file chip.
+  // An embedded PDF holds a parsed document; CodeMirror says when the widget
+  // is gone for good, and that is the moment to let the document go too.
+  destroy (dom) { destroyEmbeds(dom) }
+
+  // Clicks have to reach the media controls and the file chip — but the
+  // image controls are the widget's own, and the editor starting a text
+  // selection under either one would fight the click or drag.
+  ignoreEvent (event) {
+    return event.target instanceof Element && !!event.target.closest(
+      '.tk-embed-control, .tk-embed-grip, ' +
+      '.transclude-edit, .transclude-source, .transclude-edit-controls'
+    )
+  }
+}
+
+/**
+ * A picture the pointer can resize. Dragging the handle writes the width back
+ * into the note as the `|400` suffix both views already read — the size is a
+ * fact about the note, not about this session, so it survives the round trip
+ * through disk and shows the same in the reading view.
+ */
+function sizerFor (img, view) {
+  const host = document.createElement('span')
+  host.className = 'tk-embed-sizer'
+
+  const source = document.createElement('button')
+  source.type = 'button'
+  source.className = 'tk-embed-control tk-embed-source'
+  source.title = 'Show this image’s Markdown'
+  source.setAttribute('aria-label', 'Show this image’s Markdown')
+  source.innerHTML =
+    '<svg viewBox="0 0 16 16" aria-hidden="true">' +
+      '<path d="m6 4-4 4 4 4M10 4l4 4-4 4" fill="none" stroke="currentColor" ' +
+        'stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>' +
+    '</svg>'
+
+  const grip = embedResizeGrip()
+  host.append(img, source, grip)
+
+  /* Keep the editor's caret where it is until the click selects the exact
+     source range below. Otherwise mousedown first moves it to whichever side
+     of the replacement CodeMirror happens to hit-test. */
+  source.addEventListener('mousedown', (event) => {
+    event.preventDefault()
+    event.stopPropagation()
+  })
+  source.addEventListener('click', (event) => {
+    event.preventDefault()
+    event.stopPropagation()
+    revealEmbedSource(view, host)
+  })
+
+  wireEmbedResize(grip, {
+    image: img,
+    host,
+    /* No wider than the column it sits in: past that a CSS cap holds the
+       picture still while the number in the note keeps growing, which reads as
+       a dead drag. */
+    limit: () => {
+      const line = host.closest('.cm-line')
+      if (!line) return Infinity
+      const style = getComputedStyle(line)
+      return line.clientWidth -
+        (Number.parseFloat(style.paddingLeft) || 0) -
+        (Number.parseFloat(style.paddingRight) || 0)
+    },
+    commit: (width) => commitEmbedWidth(view, host, width),
+    // A picture that changed height changed the height of its line with it.
+    settle: () => view.requestMeasure()
+  })
+
+  return host
+}
+
+/** The embed under one image widget, as absolute document positions. */
+function embedRangeAtDOM (view, host) {
+  const pos = view.posAtDOM(host)
+  if (pos == null || pos < 0) return null
+  const line = view.state.doc.lineAt(pos)
+  const at = pos - line.from
+  const embed = findEmbeds(line.text).find((entry) => entry.from <= at && at < entry.to)
+  return embed
+    ? { from: line.from + embed.from, to: line.from + embed.to, embed }
+    : null
+}
+
+/** Replace the picture with, and select, the exact Markdown that produced it. */
+function revealEmbedSource (view, host) {
+  const range = embedRangeAtDOM(view, host)
+  if (!range) return
+  view.dispatch({
+    selection: EditorSelection.range(range.from, range.to),
+    effects: embedSourceEffect.of({ from: range.from, to: range.to }),
+    scrollIntoView: true
+  })
+  view.focus()
+}
+
+/**
+ * Show the reader the equation a reference points at.
+ *
+ * The caret is deliberately left where it is. A rendered equation gives up its
+ * source when the caret enters it, so selecting the label — which is what a
+ * click on `\eqref{clt}` used to do — replaced the very thing the reference was
+ * asking to be shown with the TeX that draws it. Scrolling to the equation and
+ * washing it in the accent colour says where it is and leaves it standing; it
+ * is also exactly what the reading view does with the same click, which is the
+ * point (see `revealAnchorTarget` in src/links.js).
+ */
+function revealEquation (view, label) {
+  const at = view.state.doc.toString().indexOf(`\\label{${label}}`)
+  if (at === -1) return
+  view.dispatch({ effects: EditorView.scrollIntoView(at, { y: 'center' }) })
+  /* The widget exists only once CodeMirror has drawn the line carrying it, and
+     a moment ago that line may have been outside the viewport entirely — so
+     the element is looked for after the scroll, not before it. */
+  view.requestMeasure({
+    read: () => view.dom.querySelector(`[data-equation="${CSS.escape(label)}"]`),
+    write: (found) => flashTarget(found)
+  })
+}
+
+/**
+ * Show the reader the other end of a footnote.
+ *
+ * The same move as `revealEquation`, for the same reason: a marker asks where
+ * its note is, and the answer is to put it on screen and wash it in the accent
+ * colour rather than to move the caret there. Clicking `[^1]` goes down to the
+ * definition; clicking the definition goes back up to the first marker, which
+ * is what the reading view's back-arrow does.
+ */
+function revealFootnote (view, id, { toDefinition }) {
+  const text = view.state.doc.toString()
+  const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  /* A definition is `[^id]:` at the head of a line; a marker is the same span
+     anywhere else. Written as one regex so the two searches cannot drift. */
+  const pattern = toDefinition
+    ? new RegExp(`^\\[\\^${escaped}\\]:`, 'm')
+    : new RegExp(`(?<!^)\\[\\^${escaped}\\]|^\\[\\^${escaped}\\](?!:)`, 'm')
+  const at = text.search(pattern)
+  if (at === -1) return
+  view.dispatch({ effects: EditorView.scrollIntoView(at, { y: 'center' }) })
+  const selector = toDefinition
+    ? `[data-footnote-def="${CSS.escape(id)}"]`
+    : `[data-footnote-ref="${CSS.escape(id)}"]`
+  /* Looked for after the scroll, not before it: the line carrying the mark may
+     have been outside the viewport, in which case CodeMirror had not drawn it.
+     A marker can appear more than once, so the one nearest the scroll target
+     wins rather than whichever the document holds first. */
+  view.requestMeasure({
+    read: () => {
+      const found = [...view.dom.querySelectorAll(selector)]
+      if (found.length < 2) return found[0] || null
+      return found.reduce((best, el) => {
+        const pos = view.posAtDOM(el)
+        return Math.abs(pos - at) < Math.abs(view.posAtDOM(best) - at) ? el : best
+      })
+    },
+    write: (found) => flashTarget(found)
+  })
+}
+
+/**
+ * Rewrite the embed standing under `host` with a new width. The document
+ * position is asked for at commit time, not captured at build time — edits
+ * above the picture move it, and a stale offset would rewrite someone else's
+ * text.
+ */
+function commitEmbedWidth (view, host, width) {
+  const range = embedRangeAtDOM(view, host)
+  if (!range) return
+  view.dispatch({
+    changes: {
+      from: range.from,
+      to: range.to,
+      insert: withEmbedSize(range.embed, width)
+    },
+    userEvent: 'input'
+  })
+}
+
+/* The kind-mark standing where `[!warning]` was written. It carries the icon
+   the reading view draws and nothing else — the title after it is the author's
+   own text and stays exactly as typed. */
+class CalloutIconWidget extends WidgetType {
+  constructor (kind) { super(); this.kind = kind }
+  eq (other) { return other.kind.id === this.kind.id }
+  toDOM () {
+    const host = document.createElement('span')
+    host.className = `tk-callout-mark is-${this.kind.tone}`
+    host.title = this.kind.label
+    host.append(calloutIcon(this.kind))
+    return host
+  }
+  ignoreEvent () { return true }
+}
+
+/** The disclosure beside a heading. CodeMirror owns the folded range; this
+ *  widget only presents the direct control for it. */
+class HeadingFoldWidget extends WidgetType {
+  constructor (range, folded) {
+    super()
+    this.range = range
+    this.folded = folded
+  }
+  eq (other) {
+    return other.folded === this.folded &&
+      other.range.from === this.range.from &&
+      other.range.to === this.range.to
+  }
+  toDOM (view) {
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = 'tk-heading-fold'
+    button.innerHTML =
+      '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="m3.5 4.5 2.5 3 2.5-3" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+    button.classList.toggle('is-folded', this.folded)
+    button.setAttribute('aria-expanded', String(!this.folded))
+    button.setAttribute('aria-label', this.folded ? 'Expand section' : 'Fold section')
+    button.title = this.folded ? 'Expand section' : 'Fold section'
+    button.addEventListener('mousedown', (event) => event.preventDefault())
+    button.addEventListener('click', (event) => {
+      event.preventDefault()
+      event.stopPropagation()
+      view.dispatch({
+        effects: (this.folded ? unfoldEffect : foldEffect).of(this.range)
+      })
+    })
+    return button
+  }
   ignoreEvent () { return false }
 }
 
@@ -180,6 +661,27 @@ class BulletWidget extends WidgetType {
     dot.textContent = '•'
     return dot
   }
+}
+
+class EquationRefWidget extends WidgetType {
+  constructor (label, shown) {
+    super()
+    this.label = label
+    this.shown = shown
+  }
+
+  eq (other) { return other.label === this.label && other.shown === this.shown }
+
+  toDOM () {
+    const link = document.createElement('a')
+    link.className = 'tk-eq-ref'
+    link.dataset.equationRef = this.label
+    link.textContent = this.shown
+    link.href = `#eq-${encodeURIComponent(this.label).replaceAll('%', '_')}`
+    return link
+  }
+
+  ignoreEvent () { return false }
 }
 
 class TaskWidget extends WidgetType {
@@ -203,34 +705,129 @@ class TaskWidget extends WidgetType {
   ignoreEvent () { return false }
 }
 
+/* Every line a selection touches shows its raw markup, not just the line the
+   head landed on: selecting two list items and getting source for one of them
+   and prose for the other reads as a bug, because nothing about the selection
+   marks the two lines as different.
+
+   This span used to be narrowed to the head alone, because expanding it made a
+   drag through a long note progressively replace the selected region with
+   source: link targets wrapped, line heights changed under the pointer, and the
+   next mouse event was hit-tested against a document that had moved. That is
+   fixed at its cause instead — see the plugin's pointer guard below, which
+   holds the rebuild until the button comes up, so no drag ever runs against
+   geometry that is shifting underneath it.
+
+   Spans rather than a set of line numbers, because ⌘A is a selection too: a set
+   would hold an entry per line of the note and be re-joined into a signature on
+   every selection change. */
+function selectionLines (state) {
+  const spans = []
+  for (const r of state.selection.ranges) {
+    spans.push([state.doc.lineAt(r.from).number, state.doc.lineAt(r.to).number])
+  }
+  return {
+    has: (n) => spans.some(([a, b]) => n >= a && n <= b),
+    signature: spans.map(([a, b]) => `${a}-${b}`).join(',')
+  }
+}
+
+/* Is everything between two positions concealed — not merely overlapped by a
+   hidden range, but covered end to end, with no visible character left in the
+   gap? `between` walks the set in order and hands back every range that touches
+   the span, including one that began before it, so the test is whether the
+   covered edge ever falls short of where the next range starts. */
+function fullyHidden (hidden, from, to) {
+  if (to <= from) return false
+  let edge = from
+  hidden.between(from, to, (a, b) => {
+    if (a > edge) return false
+    if (b > edge) edge = b
+  })
+  return edge >= to
+}
+
+/**
+ * A selection drawn over a rendered line meant "everything I could see". The
+ * moment the line opens up, the characters that were concealed appear inside
+ * the span it was drawn across — so dragging to the end of `- [6.5 Struct]`
+ * left `(#6.5%20Struct)` unselected, on a line the user had selected to the end
+ * of, and the highlight stopped in the middle of what was now one link.
+ *
+ * So each end is carried out over the run it was resting against, but only when
+ * that run is concealed the whole way to the line's edge: a selection that
+ * stops among visible words stops exactly where it was put.
+ *
+ * Returns null when nothing moved, which is the ordinary case — the dispatch
+ * then carries the reveal alone rather than a selection change that reads as
+ * one in the history.
+ */
+function widenOverHidden (state, hidden) {
+  let moved = false
+  const ranges = state.selection.ranges.map((r) => {
+    if (r.empty) return r
+    const first = state.doc.lineAt(r.from)
+    const last = state.doc.lineAt(r.to)
+    const from = fullyHidden(hidden, first.from, r.from) ? first.from : r.from
+    const to = fullyHidden(hidden, r.to, last.to) ? last.to : r.to
+    if (from === r.from && to === r.to) return r
+    moved = true
+    // The direction is the user's, and reversing it would send the next
+    // shift-arrow back over the text they just selected.
+    return r.anchor <= r.head
+      ? EditorSelection.range(from, to)
+      : EditorSelection.range(to, from)
+  })
+  return moved ? EditorSelection.create(ranges, state.selection.mainIndex) : null
+}
+
+/** The source range beneath one heading, stopping before its next peer. */
+function headingFoldRange (state, heading, list) {
+  let last = state.doc.lines
+  for (const next of list) {
+    if (next.line > heading.line && next.level <= heading.level) {
+      last = next.line - 1
+      break
+    }
+  }
+  if (last <= heading.line) return null
+  const from = state.doc.line(heading.line).to
+  const to = state.doc.line(last).to
+  return to > from ? { from, to } : null
+}
+
+const foldedExactly = (state, range) => {
+  let found = false
+  foldedRanges(state).between(range.from, range.from, (from, to) => {
+    if (from === range.from && to === range.to) found = true
+  })
+  return found
+}
+
+/** Let CodeMirror's fold commands and state use Markdown heading sections. */
+const headingFoldService = foldService.of((state, lineStart) => {
+  const line = state.doc.lineAt(lineStart)
+  const list = headings(state.doc.toString())
+  const heading = list.find((entry) => entry.line === line.number)
+  return heading ? headingFoldRange(state, heading, list) : null
+})
+
 /**
  * Decorations are rebuilt from the visible ranges on every relevant update.
  * Markup is hidden unless the cursor sits on that line — the line you are
  * editing always shows its true source, everything else reads as prose.
  */
-function buildDecorations (view) {
+function buildDecorations (view, imageSource = null) {
   const { state } = view
   const ranges = []
   const hidden = []
 
-  const activeLines = new Set()
-  for (const r of state.selection.ranges) {
-    const first = state.doc.lineAt(r.from).number
-    const last = state.doc.lineAt(r.to).number
-    for (let n = first; n <= last; n++) activeLines.add(n)
-  }
+  const activeLines = selectionLines(state)
+  const documentText = state.doc.toString()
+  const documentHeadings = headings(documentText)
+  const equations = equationIndex(documentText)
 
   const isActive = (pos) => activeLines.has(state.doc.lineAt(pos).number)
-
-  /* Frontmatter is resolved first: its closing fence would otherwise be parsed
-     as a thematic break and styled as a rule. */
-  let frontmatterEnd = 0
-  if (state.doc.lines > 1 && state.doc.line(1).text.trim() === '---') {
-    for (let n = 2; n <= Math.min(state.doc.lines, 300); n++) {
-      if (state.doc.line(n).text.trim() === '---') { frontmatterEnd = n; break }
-    }
-  }
-  const inFrontmatter = (pos) => frontmatterEnd && state.doc.lineAt(pos).number <= frontmatterEnd
 
   const hide = (from, to) => {
     if (to <= from) return
@@ -253,11 +850,42 @@ function buildDecorations (view) {
       enter: (node) => {
         if (node.name === 'InlineCode' || node.name === 'FencedCode' || node.name === 'CodeBlock') {
           codeRanges.push([node.from, node.to])
+          /* Code is not prose, so the platform's spelling checker is turned off
+             over it — otherwise every identifier in a `ripgrep` or a `useState`
+             is underlined as a mistake. Fenced blocks are also covered by a
+             line decoration further down, which catches the blank lines inside
+             them; this covers inline spans, indented blocks, and the fences'
+             own text. */
+          ranges.push(
+            Decoration.mark({ attributes: { spellcheck: 'false' } })
+              .range(node.from, node.to)
+          )
+          // The whole span is claimed, so its interior — the block's own
+          // language tokens, the densest part of the tree — need not be walked.
+          return false
         }
       }
     })
   }
-  const inCode = (from, to) => codeRanges.some(([a, b]) => from < b && to > a)
+  /* `codeRanges` is finished before the first question is asked of it, and the
+     tree is walked in document order over ascending viewport ranges — so it is
+     sorted, and the spans do not overlap, because a fence's interior is never
+     descended into. That is enough to answer by bisection instead of scanning:
+     the last span starting before `to` is the only one that can reach `from`.
+
+     The two lists below stay linear on purpose. They are appended to *between*
+     queries, so keeping them sorted would cost an insertion for every claim and
+     give the scan back what the search saved. */
+  const inCode = (from, to) => {
+    let lo = 0
+    let hi = codeRanges.length
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1
+      if (codeRanges[mid][0] < to) lo = mid + 1
+      else hi = mid
+    }
+    return lo > 0 && codeRanges[lo - 1][1] > from
+  }
 
   /* Wikilinks run next. lezer parses [[Note]] as a regular link, so if the main
      tree pass went first it would hide the brackets as LinkMarks and this pass
@@ -269,7 +897,8 @@ function buildDecorations (view) {
      good wikilink and the pass below would otherwise render the `[[…]]` half of
      it as a link, leaving a stray `!` in front. Claiming the whole match here
      settles which of the two it is. */
-  const resolve = state.facet(embedResolver)
+  const resolve = state.facet(tableAssetResolver)
+  const resolveNote = state.facet(embedNoteResolver)
 
   for (const { from, to } of view.visibleRanges) {
     const startLine = state.doc.lineAt(from).number
@@ -288,11 +917,92 @@ function buildDecorations (view) {
         if (inCode(start, end) || isClaimed(start, end)) continue
 
         claimed.push([start, end])
-        if (active) continue   // the line being edited keeps its source
 
-        const spec = embedSpec(embed.src, { alt: embed.alt, size: embed.size, resolve })
-        ranges.push(Decoration.replace({ widget: new EmbedWidget(spec) }).range(start, end))
+        const spec = specForEmbed(embed, { resolve, resolveNote })
+        if (spec.kind === 'image' &&
+            imageSource?.from === start && imageSource?.to === end) continue
+        /* A picture keeps its geometry while the caret passes its line. Turning
+           a full-width image into one short source line and back made the whole
+           document collapse and expand under the pointer. Raw view remains the
+           place to edit an image's Markdown target; live Editing view keeps the
+           picture stable. A transclusion is taller still, so it holds its
+           ground on the same reasoning. Other embed kinds keep the existing
+           active-line source behaviour. */
+        if (active && spec.kind !== 'image' && spec.kind !== 'note') continue
+
+        /* A YouTube embed starts as a poster card and only becomes a guest
+           after its own Play click, so it is no more of a wall to edit around
+           than a local video. General web pages and PDFs are live guests from
+           the outset and still stay as source in Editing view. */
+        if (spec.kind === 'web' || spec.kind === 'pdf') continue
+
+        /* Whether the picture is the whole line — a figure, standing on a line
+           of its own — or one of several, which is how a row of badges is
+           written. What may remain beside it is furniture: indentation, a
+           bullet, a quote mark, or the brackets of the link a badge sits in.
+           The reading view asks the same of a paragraph; see `standsAlone` in
+           src/renderer.js. */
+        const figure = LINE_FURNITURE.test(
+          line.text.slice(0, embed.from) + line.text.slice(embed.to))
+
+        ranges.push(Decoration.replace({ widget: new EmbedWidget(spec, figure) }).range(start, end))
         hidden.push([start, end])
+      }
+
+      /* Footnotes are claimed here, before the tree pass, for the same reason
+         wikilinks are: a note that defines `[^1]:` at the foot makes `[^1]`
+         above it a valid shortcut reference link, so lezer parses it as a Link
+         and the pass below would hide its brackets as LinkMarks. Claiming the
+         span settles that it is a footnote, and marks it as one. */
+      for (const m of line.text.matchAll(/\[\^[^\]\s]+\]/g)) {
+        const start = line.from + m.index
+        const end = start + m[0].length
+        if (inCode(start, end) || isClaimed(start, end)) continue
+        claimed.push([start, end])
+        // `[^1]:` at the head of a line is the definition, which is a label
+        // rather than a reference and should not be lifted into superscript.
+        const definition = m.index === 0 && line.text[m.index + m[0].length] === ':'
+        const id = m[0].slice(2, -1)
+        ranges.push(
+          Decoration.mark({
+            class: definition ? 'tk-footnote-def' : 'tk-footnote',
+            /* The id rides on the mark so a click can find the other end of the
+               pair without re-reading the document under the mouse. */
+            attributes: definition ? { 'data-footnote-def': id } : { 'data-footnote-ref': id }
+          }).range(start, end)
+        )
+      }
+
+      for (const cite of findCitations(line.text)) {
+        const start = line.from + cite.from
+        const end = line.from + cite.to
+        if (inCode(start, end) || isClaimed(start, end)) continue
+        claimed.push([start, end])
+        ranges.push(Decoration.mark({ class: 'tk-citation' }).range(start, end))
+      }
+
+      for (const m of line.text.matchAll(/\\(eqref|ref)\{([^{}\n]+)\}/g)) {
+        const start = line.from + m.index
+        const end = start + m[0].length
+        if (inCode(start, end) || isClaimed(start, end)) continue
+        claimed.push([start, end])
+        const label = m[2].trim()
+        if (active) {
+          ranges.push(
+            Decoration.mark({
+              class: 'tk-eq-ref-source',
+              attributes: { 'data-equation-ref': label }
+            }).range(start, end)
+          )
+        } else {
+          const tag = equations.get(label)?.tag || label
+          ranges.push(
+            Decoration.replace({
+              widget: new EquationRefWidget(label, m[1] === 'eqref' ? `(${tag})` : tag)
+            }).range(start, end)
+          )
+          hidden.push([start, end])
+        }
       }
 
       // Brackets are excluded from the target so a stray "[[" (in code, say)
@@ -333,19 +1043,76 @@ function buildDecorations (view) {
         const heading = HEADING.exec(name)
         if (heading) {
           const line = state.doc.lineAt(node.from)
+          const entry = documentHeadings.find((item) => item.line === line.number)
+          const fold = entry && headingFoldRange(state, entry, documentHeadings)
+          const folded = fold ? foldedExactly(state, fold) : false
           ranges.push(
-            Decoration.line({ class: `tk-h${heading[1]}` }).range(line.from)
+            Decoration.line({
+              class: `tk-h${heading[1]}${folded ? ' is-heading-collapsed' : ''}`
+            }).range(line.from)
           )
+          if (fold) {
+            ranges.push(
+              Decoration.widget({
+                widget: new HeadingFoldWidget(fold, folded),
+                side: -1
+              }).range(line.from)
+            )
+          }
           return
         }
 
         if (name === 'Blockquote') {
-          let pos = node.from
-          while (pos <= node.to) {
-            const line = state.doc.lineAt(pos)
-            ranges.push(Decoration.line({ class: 'tk-quote' }).range(line.from))
-            if (line.to >= node.to) break
-            pos = line.to + 1
+          /* A blockquote whose first line names a kind is a callout, not a
+             quotation — see src/callouts.js, which the reading view reads the
+             same table from. The marker is hidden the way every other piece of
+             markup here is: everywhere except the line you are editing. */
+          const opening = state.doc.lineAt(node.from)
+          const prefix = /^[ \t]*(?:>[ \t]?)+/.exec(opening.text)?.[0] || ''
+          const body = opening.text.slice(prefix.length)
+          const head = calloutHead(body)
+
+          const first = opening.number
+          const last = state.doc.lineAt(node.to).number
+
+          for (let n = first; n <= last; n++) {
+            const line = state.doc.line(n)
+            if (!head) {
+              ranges.push(Decoration.line({ class: 'tk-quote' }).range(line.from))
+              continue
+            }
+            const edge = (n === first ? ' tk-callout-top' : '') +
+                         (n === last ? ' tk-callout-bottom' : '')
+            ranges.push(
+              Decoration.line({ class: `tk-callout is-${head.kind.tone}${edge}` }).range(line.from)
+            )
+          }
+
+          if (head && !activeLines.has(first)) {
+            // The offsets are measured off the raw line rather than the trimmed
+            // copy the matcher was handed, or a callout written with a space
+            // after its `>` would hide one character too few.
+            const lead = body.length - body.trimStart().length
+            const markFrom = opening.from + prefix.length + lead
+            ranges.push(
+              Decoration.widget({ widget: new CalloutIconWidget(head.kind), side: -1 })
+                .range(markFrom)
+            )
+            hide(markFrom, markFrom + head.markLength)
+
+            /* The title, set as the label the reading view sets it as — the
+               kind's colour, the app's sans, a size down. It is still the
+               author's own characters, marked rather than replaced, so it
+               reverts to plain text the moment the caret arrives on the line.
+               Without this the head read at exactly the weight of the body
+               under it, and the two views disagreed about what a callout is. */
+            const titleFrom = markFrom + head.markLength
+            if (titleFrom < opening.to) {
+              ranges.push(
+                Decoration.mark({ class: `tk-callout-label is-${head.kind.tone}` })
+                  .range(titleFrom, opening.to)
+              )
+            }
           }
           return
         }
@@ -368,13 +1135,18 @@ function buildDecorations (view) {
               (closed && n === last ? ' tk-code-fence' : '') +
               (closed && n === last - 1 && n > first ? ' tk-code-last' : '')
             ranges.push(
-              Decoration.line({ class: `tk-code-block${edge}` }).range(state.doc.line(n).from)
+              // Nothing in a fence is prose, so nothing in one is misspelled:
+              // the checker underlines every identifier in the block otherwise.
+              Decoration.line({
+                class: `tk-code-block${edge}`,
+                attributes: { spellcheck: 'false' }
+              }).range(state.doc.line(n).from)
             )
           }
           return
         }
 
-        if (name === 'HorizontalRule' && !inFrontmatter(node.from) && !isActive(node.from)) {
+        if (name === 'HorizontalRule' && !isActive(node.from)) {
           const line = state.doc.lineAt(node.from)
           ranges.push(Decoration.line({ class: 'tk-hr' }).range(line.from))
           return
@@ -450,13 +1222,48 @@ function buildDecorations (view) {
     })
   }
 
-  /* Tags run last, so they can defer to anything the tree or wikilinks claimed. */
+  /* Inline highlights and block IDs are plain text to Lezer, so the shared
+     scanners claim their delimiters after the syntax-tree pass. */
   for (const { from, to } of view.visibleRanges) {
     const startLine = state.doc.lineAt(from).number
     const endLine = state.doc.lineAt(to).number
 
     for (let n = startLine; n <= endLine; n++) {
       const line = state.doc.line(n)
+      const active = activeLines.has(n)
+
+      for (const mark of findInlineHighlights(line.text)) {
+        const start = line.from + mark.from
+        const contentFrom = line.from + mark.contentFrom
+        const contentTo = line.from + mark.contentTo
+        const end = line.from + mark.to
+        if (inCode(start, end) ||
+            isClaimed(start, contentFrom) ||
+            isClaimed(contentTo, end)) continue
+
+        ranges.push(Decoration.mark({ class: 'tk-highlight' }).range(contentFrom, contentTo))
+        if (active) {
+          ranges.push(Decoration.mark({ class: 'tk-mark' }).range(start, contentFrom))
+          ranges.push(Decoration.mark({ class: 'tk-mark' }).range(contentTo, end))
+        } else {
+          hide(start, contentFrom)
+          hide(contentTo, end)
+        }
+      }
+
+      const block = blockReferenceOnLine(line.text)
+      if (block) {
+        const start = line.from + block.from
+        const marker = line.from + block.markerFrom
+        const end = line.from + block.to
+        if (!inCode(start, end) && !isClaimed(start, end)) {
+          if (active) {
+            ranges.push(Decoration.mark({ class: 'tk-block-id' }).range(marker, end))
+          } else {
+            hide(start, end)
+          }
+        }
+      }
 
       for (const m of line.text.matchAll(/(^|\s)(#[\p{L}\p{N}][\p{L}\p{N}/_-]*)/gu)) {
         const start = line.from + m.index + m[1].length
@@ -465,40 +1272,144 @@ function buildDecorations (view) {
         // A heading's '#' is followed by a space, so it never matches here.
         ranges.push(Decoration.mark({ class: 'tk-tag' }).range(start, end))
       }
+
     }
   }
 
-  /* Frontmatter reads as a different register from the prose below it: a
-     monospace block with a rule down its left edge. */
-  for (let n = 1; n <= frontmatterEnd; n++) {
-    const line = state.doc.line(n)
-    const edge = n === 1 ? ' tk-fm-top' : n === frontmatterEnd ? ' tk-fm-bottom' : ''
-    ranges.push(Decoration.line({ class: `tk-frontmatter${edge}` }).range(line.from))
+  return {
+    decorations: Decoration.set(ranges, true),
+    /* Only what conceals text is atomic. A mark leaves its characters visible
+       and editable, so the caret has to be able to walk through them — with
+       the whole set atomic, one Backspace after a tag ate the tag. `hidden`
+       already lists exactly the concealed spans. */
+    atomic: Decoration.set(hidden.map(([a, b]) => Decoration.replace({}).range(a, b)), true),
+    active: activeLines.signature
   }
-
-  return Decoration.set(ranges, true)
 }
 
 const livePreview = ViewPlugin.fromClass(
   class {
-    constructor (view) { this.decorations = buildDecorations(view) }
+    constructor (view) {
+      this.timer = null
+      this.imageSource = null
+      /* A selection being dragged out is the one case where re-rendering the
+         selected lines is actively harmful: swapping them to source changes
+         their height and wrapping, and the drag's next mouse event is then
+         hit-tested against a document that moved under the pointer. So the
+         rebuild waits for the button, and `held` remembers that one is owed.
+
+         pointerdown on the editor, pointerup on the window: a drag that ends
+         past the pane's edge still ends. */
+      this.dragging = false
+      this.held = false
+      this.onDown = () => { this.dragging = true }
+      this.onUp = () => {
+        if (!this.dragging) return
+        this.dragging = false
+        if (!this.held) return
+        this.held = false
+        this.settle(view)
+      }
+      view.dom.addEventListener('pointerdown', this.onDown)
+      window.addEventListener('pointerup', this.onUp)
+      this.detach = () => {
+        view.dom.removeEventListener('pointerdown', this.onDown)
+        window.removeEventListener('pointerup', this.onUp)
+      }
+      Object.assign(this, buildDecorations(view, this.imageSource))
+    }
+
+    cancel () {
+      if (this.timer !== null) clearTimeout(this.timer)
+      this.timer = null
+    }
+
+    settle (view) {
+      this.cancel()
+      if (this.dragging) { this.held = true; return }
+      this.timer = setTimeout(() => {
+        this.timer = null
+        /* Measured against the decorations still on screen — `this.atomic` is
+           the set that concealed the text, and the rebuild this dispatch
+           triggers is what takes it away. */
+        const selection = widenOverHidden(view.state, this.atomic)
+        view.dispatch({
+          ...(selection ? { selection } : {}),
+          effects: selectionRevealEffect.of(null)
+        })
+      }, 50)
+    }
+
     update (update) {
+      /* Keep an opened image range attached to its text while that source is
+         edited. A note switch moves the selection elsewhere and clears it
+         below, so the range can never leak into the next document. */
+      if (this.imageSource && update.docChanged) {
+        for (const tr of update.transactions) {
+          this.imageSource = {
+            from: tr.changes.mapPos(this.imageSource.from, -1),
+            to: tr.changes.mapPos(this.imageSource.to, 1)
+          }
+        }
+      }
+
       // A refresh means something the decorations read from *outside* the
       // document moved — the note's name, or the list of attachments an embed
       // resolves against. Nothing in the update itself would show that.
       const refreshed = update.transactions.some((tr) =>
         tr.effects.some((e) => e.is(refreshEffect)))
+      const settled = update.transactions.some((tr) =>
+        tr.effects.some((e) => e.is(selectionRevealEffect)))
+      const sourceEffect = update.transactions
+        .flatMap((tr) => tr.effects)
+        .find((effect) => effect.is(embedSourceEffect))
+      const foldChanged = update.transactions.some((tr) =>
+        tr.effects.some((e) => e.is(foldEffect) || e.is(unfoldEffect)))
 
-      if (refreshed || update.docChanged || update.selectionSet || update.viewportChanged ||
-          syntaxTree(update.startState) !== syntaxTree(update.state)) {
-        this.decorations = buildDecorations(update.view)
+      if (sourceEffect) {
+        this.cancel()
+        this.imageSource = sourceEffect.value
+        Object.assign(this, buildDecorations(update.view, this.imageSource))
+        return
       }
+
+      if (this.imageSource && update.selectionSet) {
+        const selected = update.state.selection.ranges.some(
+          (range) => range.to >= this.imageSource.from && range.from <= this.imageSource.to
+        )
+        if (!selected) this.imageSource = null
+      }
+
+      if (refreshed || foldChanged || update.docChanged || update.viewportChanged ||
+          syntaxTree(update.startState) !== syntaxTree(update.state)) {
+        this.cancel()
+        Object.assign(this, buildDecorations(update.view, this.imageSource))
+      } else if (settled) {
+        Object.assign(this, buildDecorations(update.view, this.imageSource))
+      } else if (update.selectionSet) {
+        const next = selectionLines(update.state).signature
+        if (this.active === next) {
+          this.cancel()
+          this.held = false
+          return
+        }
+        /* Do not swap a rendered line to source for every intermediate point
+           in a drag or key-repeat run. A real edit takes the immediate branch
+           above, so clicking and typing before this short settle still reveals
+           the correct line before the document changes. */
+        this.settle(update.view)
+      }
+    }
+
+    destroy () {
+      this.cancel()
+      this.detach()
     }
   },
   {
     decorations: (v) => v.decorations,
     provide: () =>
-      EditorView.atomicRanges.of((view) => view.plugin(livePreview)?.decorations ?? Decoration.none)
+      EditorView.atomicRanges.of((view) => view.plugin(livePreview)?.atomic ?? Decoration.none)
   }
 )
 
@@ -507,6 +1418,10 @@ const livePreview = ViewPlugin.fromClass(
 /* The title lives outside the document, so nothing in an ordinary update tells
    the plugin it changed. A rename dispatches this instead. */
 const refreshEffect = StateEffect.define()
+/* Selection-only motion is allowed to settle before live markup follows it.
+   Kept separate from refreshEffect: an attachment/title refresh is never safe
+   to delay, while a cursor passing through intermediate lines is. */
+const selectionRevealEffect = StateEffect.define()
 
 /**
  * Kept apart from the live preview: the name of the note belongs at the top of
@@ -516,12 +1431,22 @@ const refreshEffect = StateEffect.define()
  * decorations from plugins, because a plugin cannot be consulted before the
  * viewport it would change has been measured.
  */
-function titleFor (noteTitle) {
+function titleFor (noteTitle, onRename, noteFlag, titleEditable) {
   const build = () => {
     const text = noteTitle?.()
     if (!text) return Decoration.none
     return Decoration.set([
-      Decoration.widget({ widget: new TitleWidget(text), block: true, side: -1 }).range(0)
+      Decoration.widget({
+        widget: new TitleWidget(
+          text,
+          onRename,
+          noteFlag?.() || '',
+          titleEditable?.() !== false
+        ),
+        block: true,
+        side: -1
+      })
+        .range(0)
     ])
   }
 
@@ -535,9 +1460,9 @@ function titleFor (noteTitle) {
   })
 }
 
-/* -------------------------------------------------- the assistant's edits */
+/* -------------------------------------------------- the copilot's edits */
 
-/* Marks the span the assistant just rewrote, so a change arriving from outside
+/* Marks the span the copilot just rewrote, so a change arriving from outside
    the keyboard is seen happening rather than discovered afterwards. */
 const flashEffect = StateEffect.define()   // { from, to } | null
 
@@ -561,6 +1486,193 @@ const agentFlash = StateField.define({
   provide: (field) => EditorView.decorations.from(field)
 })
 
+/* The inline review is presentation only and never enters the document or
+   undo history. It remains until the Copilot review is explicitly accepted,
+   so leaving the note or continuing to type cannot silently dismiss it. */
+const agentDiffEffect = StateEffect.define() // { before, after } | null
+
+class AgentDeletedWidget extends WidgetType {
+  constructor (rows) { super(); this.rows = rows }
+  eq (other) {
+    return other.rows.length === this.rows.length &&
+      other.rows.every((row, i) => row.before === this.rows[i].before && row.text === this.rows[i].text)
+  }
+  toDOM () {
+    const block = document.createElement('div')
+    block.className = 'cm-agent-deleted'
+    block.contentEditable = 'false'
+    block.setAttribute('aria-label', 'Text removed by Copilot')
+    for (const row of this.rows) {
+      const line = document.createElement('div')
+      line.className = 'cm-agent-deleted-line'
+      const mark = document.createElement('span')
+      mark.className = 'cm-agent-diff-mark'
+      mark.textContent = '−'
+      const text = document.createElement('span')
+      text.textContent = row.text || ' '
+      line.append(mark, text)
+      block.append(line)
+    }
+    return block
+  }
+  ignoreEvent () { return true }
+}
+
+function buildAgentDiff (state, change) {
+  if (!change || change.before === change.after) return Decoration.none
+  const { rows } = fileDiff(change.before, change.after)
+  const decorations = []
+
+  // Added lines are already in the new document, so colour those real lines.
+  const added = new Set(rows
+    .filter((row) => row.kind === 'add' && row.after != null)
+    .map((row) => row.after))
+  for (const number of added) {
+    if (number >= 1 && number <= state.doc.lines) {
+      decorations.push(Decoration.line({ class: 'cm-agent-added-line' }).range(state.doc.line(number).from))
+    }
+  }
+
+  /* A run of deleted lines sits immediately before the next surviving/added
+     line, or at the end of the document. This is the old half of the diff,
+     drawn as a widget so copying or saving still sees only the new Markdown. */
+  for (let i = 0; i < rows.length;) {
+    if (rows[i].kind !== 'del') { i++; continue }
+    const removed = []
+    while (i < rows.length && rows[i].kind === 'del') removed.push(rows[i++])
+    const next = rows.slice(i).find((row) => row.after != null)
+    const at = next && next.after <= state.doc.lines
+      ? state.doc.line(next.after).from
+      : state.doc.length
+    decorations.push(Decoration.widget({
+      widget: new AgentDeletedWidget(removed),
+      block: true,
+      side: -1
+    }).range(at))
+  }
+
+  return Decoration.set(decorations, true)
+}
+
+const agentDiff = StateField.define({
+  create: () => Decoration.none,
+  update (deco, tr) {
+    for (const effect of tr.effects) {
+      if (effect.is(agentDiffEffect)) return buildAgentDiff(tr.state, effect.value)
+    }
+    return deco.map(tr.changes)
+  },
+  provide: (field) => EditorView.decorations.from(field)
+})
+
+/* Shown from the moment an Edit tool announces its target until its write
+   lands. It points at the work without moving the user's caret or focus. */
+const agentWorkingEffect = StateEffect.define() // document position | null
+const agentWorking = StateField.define({
+  create: () => Decoration.none,
+  update (deco, tr) {
+    for (const effect of tr.effects) {
+      if (!effect.is(agentWorkingEffect)) continue
+      if (effect.value == null) return Decoration.none
+      const at = Math.max(0, Math.min(effect.value, tr.state.doc.length))
+      return Decoration.set([
+        Decoration.line({ class: 'cm-agent-working-line' }).range(tr.state.doc.lineAt(at).from)
+      ])
+    }
+    if (tr.docChanged) return Decoration.none
+    return deco.map(tr.changes)
+  },
+  provide: (field) => EditorView.decorations.from(field)
+})
+
+/* The file is patched once, then its newly inserted span is uncovered a few
+   characters at a time. Keeping this as presentation rather than a stream of
+   document transactions is what makes the whole Copilot write one Undo step
+   and prevents autosave from ever seeing a half-written replacement. */
+const agentTypingEffect = StateEffect.define() // { from, to } | null
+
+class AgentTypingCursor extends WidgetType {
+  eq () { return true }
+  toDOM () {
+    const cursor = document.createElement('span')
+    cursor.className = 'cm-agent-typing-cursor'
+    cursor.setAttribute('aria-hidden', 'true')
+    return cursor
+  }
+  ignoreEvent () { return true }
+}
+
+const agentTyping = StateField.define({
+  create: () => Decoration.none,
+  update (deco, tr) {
+    for (const effect of tr.effects) {
+      if (!effect.is(agentTypingEffect)) continue
+      if (!effect.value) return Decoration.none
+      const from = Math.max(0, Math.min(effect.value.from, tr.state.doc.length))
+      const to = Math.max(from, Math.min(effect.value.to, tr.state.doc.length))
+      if (to <= from) return Decoration.none
+      return Decoration.set([
+        Decoration.replace({ widget: new AgentTypingCursor() }).range(from, to)
+      ])
+    }
+    // A real keystroke reveals the complete result. The animation timer sees
+    // the same document change and stops before painting another frame.
+    if (tr.docChanged) return Decoration.none
+    return deco
+  },
+  provide: (field) => EditorView.decorations.from(field)
+})
+
+/* The text of a write the copilot is still composing, shown where it will land.
+   It is a decoration and not a document change on purpose: nothing here has
+   been written to disk yet, so putting it in the document would hand autosave a
+   half-finished sentence and fill undo with a hundred one-token steps. The
+   document catches up in one transaction when the tool actually runs. */
+const agentDraftEffect = StateEffect.define() // { from, to, text } | null
+
+class AgentDraft extends WidgetType {
+  constructor (text) { super(); this.text = text }
+  eq (other) { return other.text === this.text }
+  toDOM () {
+    const draft = document.createElement('span')
+    draft.className = 'cm-agent-draft'
+    // Read by nobody: a screen reader announcing a partial sentence on every
+    // token would be unusable, and the settled text is announced when it lands.
+    draft.setAttribute('aria-hidden', 'true')
+    draft.append(document.createTextNode(this.text))
+    const caret = document.createElement('span')
+    caret.className = 'cm-agent-typing-cursor'
+    draft.append(caret)
+    return draft
+  }
+
+  ignoreEvent () { return true }
+}
+
+const agentDraft = StateField.define({
+  create: () => Decoration.none,
+  update (deco, tr) {
+    for (const effect of tr.effects) {
+      if (!effect.is(agentDraftEffect)) continue
+      if (!effect.value) return Decoration.none
+      const end = tr.state.doc.length
+      const from = Math.max(0, Math.min(effect.value.from, end))
+      const to = Math.max(from, Math.min(effect.value.to, end))
+      const widget = new AgentDraft(effect.value.text)
+      /* The span being replaced is the Edit's `old_string`: it is about to stop
+         existing, so it is covered rather than left beside its replacement. A
+         Write, and an Edit that only inserts, have nothing to cover. */
+      return Decoration.set([to > from
+        ? Decoration.replace({ widget }).range(from, to)
+        : Decoration.widget({ widget, side: 1 }).range(from)])
+    }
+    // The real write landing is what ends the preview.
+    if (tr.docChanged) return Decoration.none
+    return deco
+  },
+  provide: (field) => EditorView.decorations.from(field)
+})
+
 /**
  * The smallest single change that turns `a` into `b` — everything between the
  * first and last character they disagree on.
@@ -572,7 +1684,7 @@ const agentFlash = StateField.define({
  * wide span; the document still ends up right, and the flash is merely broader
  * than it strictly needs to be.
  */
-export function diffRange (a, b) {
+function diffRange (a, b) {
   if (a === b) return null
   const limit = Math.min(a.length, b.length)
   let start = 0
@@ -587,8 +1699,23 @@ export function diffRange (a, b) {
 /* Everything that renders rather than annotates. Named once because raw view
    swaps the whole set out and back — restoring a subset here is how tables and
    equations quietly stopped coming back after a trip through ⌘3. A rendered
-   table in the "raw" view would make the view a lie, so they travel together. */
-const RENDERED = [livePreview, mathPreview, tablePreview, moneyPreview, runBlocks]
+   table in the "raw" view would make the view a lie, so they travel together —
+   and so do a code block's line numbers, which without the frame around them
+   are numbers hanging in the margin of what is meant to be plain text. */
+/* The colouring travels with them. Raw view is the file as a text editor with
+   no idea what markdown is would show it — leaving bold orange and inline code
+   in a box is still an opinion about the markup, and the view's whole claim is
+   that it has none. */
+const RENDERED = [livePreview, mathPreview, tablePreview, tableCursorGuard, moneyPreview, runBlocks,
+                  mermaidBlocks, tikzBlocks, svgBlocks, codeBlockView,
+                  headingFoldService, codeFolding({ placeholderText: ' … ' }),
+                  keymap.of(foldKeymap),
+                  syntaxHighlighting(highlight)]
+
+/* Passing the language list straight to `markdown()` leaves any word it does
+   not recognise unparsed, and therefore uncoloured — `manim` among them. The
+   reading view resolves the same aliases through the same function. */
+const fenceLanguage = (info) => languageFor(info)
 
 /* ------------------------------------------------------------ shortcuts */
 
@@ -613,7 +1740,8 @@ function wrapSelection (view, before, after = before) {
 }
 
 const markdownKeymap = [
-  { key: 'Mod-b', run: (v) => wrapSelection(v, '**') },
+  // ⌘B belongs to the sidebar, so bold moves one key over.
+  { key: 'Mod-Shift-b', run: (v) => wrapSelection(v, '**') },
   { key: 'Mod-i', run: (v) => wrapSelection(v, '*') },
   { key: 'Mod-Shift-x', run: (v) => wrapSelection(v, '~~') },
   { key: 'Mod-e', run: () => true },   // owned by the menu; swallow the default
@@ -623,46 +1751,122 @@ const markdownKeymap = [
 /* ----------------------------------------------------------- the editor */
 
 export function createEditor ({
-  parent, onChange, onOpenLink, noteNames, noteTitle, resolveEmbed
+  parent, onChange, onOpenLink, noteNames, noteTitle, onRename, resolveEmbed,
+  resolveNoteEmbed, languageTable, noteFlag, titleEditable
 }) {
   const preview = new Compartment()
   let raw = false
+  let agentTypingRun = 0
+  let agentTypingTimer = 0
+  /* Whoever is waiting on the reveal currently running. Cancelling one means
+     settling it, not dropping it: the caller has the rest of the edit to finish
+     — the review diff to file, the tab to repaint, the tally to report — and a
+     promise that never resolves silently abandons all of it. That is how an
+     `Edited` row ends up with no diff beside it. */
+  let agentTypingDone = null
+
+  const stopAgentTyping = () => {
+    agentTypingRun++
+    clearTimeout(agentTypingTimer)
+    const waiting = agentTypingDone
+    agentTypingDone = null
+    waiting?.()
+  }
 
   const wikiCompletion = (context) => {
     const before = context.matchBefore(/\[\[[^\]]*/)
     if (!before) return null
+
+    /* `[[#` names a heading in this note rather than another note — the one
+       target the editor can answer for on its own, since the vault's other
+       notes live on the far side of the bridge. */
+    if (before.text.startsWith('[[#')) {
+      if (before.text.startsWith('[[#^')) {
+        const wanted = before.text.slice(4).toLowerCase()
+        const options = blockReferences(context.state.doc.toString())
+          .filter((block) => block.id.toLowerCase().includes(wanted))
+          .slice(0, 40)
+          .map((block) => ({
+            label: `#^${block.id}`,
+            detail: `line ${block.line}`,
+            type: 'text'
+          }))
+        if (!options.length) return null
+        return { from: before.from + 2, options, validFor: /^#\^[^\]]*$/ }
+      }
+
+      const wanted = before.text.slice(3).toLowerCase()
+      const options = headings(context.state.doc.toString())
+        .filter((h) => h.text.toLowerCase().includes(wanted))
+        .slice(0, 40)
+        .map((h) => ({ label: `#${h.text}`, detail: `H${h.level}`, type: 'text' }))
+      if (!options.length) return null
+      return { from: before.from + 2, options, validFor: /^#[^\]]*$/ }
+    }
+
     const query = before.text.slice(2).toLowerCase()
     const options = noteNames()
       .filter((n) => n.name.toLowerCase().includes(query))
       .slice(0, 40)
-      .map((n) => ({ label: n.name, detail: n.dir || undefined, type: 'text' }))
+      .map((n) => ({ label: n.name, detail: n.detail || n.dir || undefined, type: 'text' }))
     if (!options.length) return null
     return { from: before.from + 2, options, validFor: /^[^\]]*$/ }
   }
 
   const extensions = [
         history(),
-        drawSelection(),
+        /* A solid caret: the default 1.2 s blink reads as a flicker. */
+        drawSelection({ cursorBlinkRate: 0 }),
         highlightActiveLine(),
         dropCursor(),
         rectangularSelection(),
         indentOnInput(),
+        /* One indent level is four spaces — what Tab inserts, what Enter
+           inside a fence deepens by, and what Backspace at the head of a code
+           line removes (src/codeblock.js reads the same facet). Spaces rather
+           than a tab character, so the file reads the same everywhere. */
+        indentUnit.of('    '),
         bracketMatching(),
         closeBrackets(),
         highlightSelectionMatches(),
+        /* Configured up front rather than left for `openSearchPanel` to add on
+           first use: until the extension is in the state there is no query to
+           seed, so the first ⌘F of a session ignored the selection and every
+           one after it honoured it. */
+        search(findConfig),
         EditorView.lineWrapping,
-        markdown({ base: markdownLanguage, codeLanguages: languages, addKeymap: false }),
-        syntaxHighlighting(highlight),
-        titleFor(noteTitle),
+        markdown({ base: markdownLanguage, codeLanguages: fenceLanguage, addKeymap: false }),
+        titleFor(noteTitle, onRename, noteFlag, titleEditable),
+        languageTableMode.of(languageTable || (() => false)),
+        /* Language documents are table editors, not free-form buffers. Cell
+           writes and row controls identify themselves as input.table. */
+        EditorState.transactionFilter.of((tr) => {
+          if (!languageTable?.() || !tr.docChanged) return tr
+          if (tr.isUserEvent('input.table') ||
+              tr.isUserEvent('input.agent') ||
+              tr.isUserEvent('undo') ||
+              tr.isUserEvent('redo')) return tr
+          return []
+        }),
+        // A drawing is filed under the note it belongs to, so the widgets are
+        // told which note that is — the same function the title reads.
+        tikzNote.of(noteTitle || (() => 'Untitled')),
         agentFlash,
-        embedResolver.of(resolveEmbed || (() => null)),
+        agentDiff,
+        agentWorking,
+        agentTyping,
+        agentDraft,
+        tableAssetResolver.of(resolveEmbed || (() => null)),
+        embedNoteResolver.of(resolveNoteEmbed || (() => null)),
         // Raw view empties this compartment: same document, same history, no
         // decorations standing between you and the markup.
         preview.of(RENDERED),
         codeBlockKeymap,
-        codeLineNumbers,
         proseBrackets,
-        autocompletion({ override: [wikiCompletion], icons: false }),
+        autocompletion({
+          override: [wikiCompletion, slashCommands, fenceLanguages, calloutKinds],
+          icons: false
+        }),
         tulipTheme,
         Prec.high(keymap.of(markdownKeymap)),
         keymap.of([
@@ -674,13 +1878,82 @@ export function createEditor ({
           indentWithTab
         ]),
         EditorView.domEventHandlers({
-          click (event) {
+          click (event, view) {
             const el = event.target
             if (!(el instanceof HTMLElement)) return
+            const equation = el.dataset.equationRef ||
+              el.closest('[data-equation-ref]')?.dataset.equationRef
+            if (equation) {
+              event.preventDefault()
+              /* A transcluded note carries its own copy of the equation, and a
+                 reference inside it means that copy — not the one the note
+                 doing the transcluding may also have. */
+              const inFragment = el.closest('.transclude')
+                ?.querySelector(`[data-equation="${CSS.escape(equation)}"]`)
+              if (inFragment) {
+                inFragment.scrollIntoView({ block: 'center', behavior: 'smooth' })
+                flashTarget(inFragment)
+                return true
+              }
+              revealEquation(view, equation)
+              return true
+            }
+            /* A footnote marker is a reference like `\eqref` is, and behaves
+               like one: the click says where its note is and leaves the caret
+               alone. Inside a transclusion it means that copy's footnote — the
+               anchor branch further down handles those. */
+            if (!el.closest('.transclude')) {
+              const ref = el.dataset.footnoteRef ||
+                el.closest('[data-footnote-ref]')?.dataset.footnoteRef
+              const def = el.dataset.footnoteDef ||
+                el.closest('[data-footnote-def]')?.dataset.footnoteDef
+              if (ref || def) {
+                event.preventDefault()
+                revealFootnote(view, ref || def, { toDefinition: Boolean(ref) })
+                return true
+              }
+            }
             const asset = el.dataset.asset || el.closest('[data-asset]')?.dataset.asset
             if (asset) { onOpenLink({ type: 'asset', target: asset }); return true }
+            /* An embed that turned out to be a URL rather than a file. It is a
+               real anchor, but nothing in the editor follows anchors, so the
+               click is handed over the same way every other link here is.
+
+               A YouTube card is the exception: a plain click on one starts the
+               player in place, which the card handles itself, so only the
+               modified click — the one that means "not here" — is taken. */
+            const card = el.closest('a.embed-yt')
+            if (card) {
+              if (!(event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)) return
+              onOpenLink({ type: 'url', target: card.href })
+              return true
+            }
+            const remote = el.closest('a.embed-link')
+            if (remote) { onOpenLink({ type: 'url', target: remote.href }); return true }
+            /* A transcluded note carries the reading view's markup — real
+               anchors included — into an editor that never had any. Left
+               alone, clicking one would navigate the whole window. A web
+               address goes to the browser; anything else (a footnote's own
+               `#fn1`) is swallowed rather than followed. */
+            const anchor = el.closest('a[href]')
+            if (anchor && el.closest('.transclude')) {
+              event.preventDefault()
+              const href = anchor.getAttribute('href') || ''
+              if (EXTERNAL_SCHEME.test(href)) onOpenLink({ type: 'url', target: anchor.href })
+              return true
+            }
             const wiki = el.dataset.wikilink || el.closest('[data-wikilink]')?.dataset.wikilink
-            if (wiki) { onOpenLink({ type: 'wikilink', target: wiki }); return true }
+            if (wiki) {
+              // ⌘-click opens it in a new tab; ⌥-click in the side pane —
+              // beside what you are writing rather than over it.
+              onOpenLink({
+                type: 'wikilink',
+                target: wiki,
+                newTab: event.metaKey || event.ctrlKey,
+                side: event.altKey
+              })
+              return true
+            }
             if (el.classList.contains('tk-link') && (event.metaKey || event.ctrlKey)) {
               const text = el.textContent || ''
               if (/^https?:/.test(text)) { onOpenLink({ type: 'url', target: text }); return true }
@@ -688,7 +1961,14 @@ export function createEditor ({
           }
         }),
         EditorView.updateListener.of((update) => {
-          if (update.docChanged) onChange(update.state.doc.toString())
+          /* Nothing is handed over: the document is the editor's, and copying
+             it out as a string on every keystroke cost a note-sized allocation
+             per character for the sake of one status-bar readout. Whoever
+             needs the text reads it from the state when they need it. */
+          if (update.docChanged) {
+            agentTypingRun++
+            onChange()
+          }
         })
   ]
 
@@ -702,10 +1982,15 @@ export function createEditor ({
    * undo can never walk backwards out of this note and into the last one.
    */
   view.setDoc = (text) => {
+    stopAgentTyping()
     view.setState(EditorState.create({ doc: text, extensions }))
     // A fresh state resets every compartment to its default, so raw view has to
     // be re-applied or opening a note would quietly drop you back into preview.
     if (raw) view.dispatch({ effects: preview.reconfigure([]) })
+    // CodeMirror rebuilds its root classes with the state. This one is ours,
+    // and the Raw-only Copilot review marks depend on it surviving the note.
+    view.dom.classList.toggle('is-raw', raw)
+    view.contentDOM.spellcheck = spellcheck
   }
 
   /** Raw view: the file as it is on disk, monospaced, nothing hidden. */
@@ -719,25 +2004,175 @@ export function createEditor ({
   /** Redraw the parts that read from outside the document — the inline title. */
   view.refresh = () => { view.dispatch({ effects: refreshEffect.of(null) }) }
 
+  /* Spelling is checked by the platform, not by us, so this is a property of
+     the editable element rather than an extension. Re-applied after setDoc,
+     which builds a fresh state — and therefore a fresh contentDOM. */
+  let spellcheck = true
+  view.setSpellcheck = (on) => {
+    spellcheck = on !== false
+    view.contentDOM.spellcheck = spellcheck
+  }
+
   /**
    * Bring the buffer to `text` as an edit rather than a replacement, and mark
-   * what moved. Used when the assistant writes to the note that is open: the
+   * what moved. Used when the copilot writes to the note that is open: the
    * caret stays where it was, ⌘Z still walks back through it, and the changed
-   * lines light up for a moment.
+   * lines remain lit until the Copilot review is accepted.
    */
   let fade = null
-  view.patch = (text) => {
-    const change = diffRange(view.state.doc.toString(), text)
-    if (!change) return false
+
+  const scrollToAgentEdit = (at) => {
+    const pos = Math.max(0, Math.min(at, view.state.doc.length))
+    view.dispatch({
+      effects: EditorView.scrollIntoView(pos, { y: 'center', yMargin: 80 })
+    })
+  }
+
+  view.revealAgentEdit = (at) => {
+    const pos = Math.max(0, Math.min(at, view.state.doc.length))
+    view.dispatch({ effects: [
+      agentWorkingEffect.of(pos),
+      EditorView.scrollIntoView(pos, { y: 'center', yMargin: 80 })
+    ] })
+  }
+
+  /**
+   * The text of a write as it is being composed, shown in the place it will
+   * land — nothing is in the document yet.
+   *
+   * @param {{from: number, to: number, text: string, reveal?: boolean}} draft
+   */
+  view.showAgentDraft = ({ from, to, text, reveal = false }) => {
+    const end = view.state.doc.length
+    const at = Math.max(0, Math.min(from, end))
+    const effects = [agentDraftEffect.of({ from: at, to, text })]
+    // Only when the draft first appears. Scrolling on every token would drag
+    // the page under a reader who has looked somewhere else in the note.
+    if (reveal) effects.push(EditorView.scrollIntoView(at, { y: 'center', yMargin: 80 }))
+    view.dispatch({ effects })
+  }
+
+  view.clearAgentDraft = () => {
+    if (!view.state.field(agentDraft, false)?.size) return
+    view.dispatch({ effects: agentDraftEffect.of(null) })
+  }
+
+  const showAgentDiff = (before, after) => {
+    if (before === after) return false
+    const change = diffRange(before, after)
+    view.dispatch({ effects: [
+      agentDiffEffect.of({ before, after }),
+      agentWorkingEffect.of(null)
+    ] })
+    scrollToAgentEdit(change?.from || 0)
+    return true
+  }
+
+  view.showAgentDiff = showAgentDiff
+  view.clearAgentDiff = () => {
+    view.dispatch({ effects: [
+      agentDiffEffect.of(null),
+      agentWorkingEffect.of(null)
+    ] })
+  }
+
+  view.patch = (text, { agent = false, before = null } = {}) => {
+    const current = view.state.doc.toString()
+    const change = diffRange(current, text)
+    const baseline = before ?? current
+    if (!change) return agent && showAgentDiff(baseline, text)
     view.dispatch({
       changes: change,
-      effects: flashEffect.of({ from: change.from, to: change.from + change.insert.length }),
-      // The assistant's writing should not steal the page from someone reading
+      userEvent: agent ? 'input.agent' : undefined,
+      effects: agent
+        ? [
+            agentDiffEffect.of({ before: baseline, after: text }),
+            agentWorkingEffect.of(null)
+          ]
+        : flashEffect.of({ from: change.from, to: change.from + change.insert.length }),
+      // The copilot's writing should not steal the page from someone reading
       // elsewhere in it; only a change at the caret follows the caret.
       scrollIntoView: false
     })
-    clearTimeout(fade)
-    fade = setTimeout(() => view.dispatch({ effects: flashEffect.of(null) }), 1400)
+    if (agent) {
+      scrollToAgentEdit(diffRange(baseline, text)?.from || change.from)
+    } else {
+      clearTimeout(fade)
+      fade = setTimeout(() => view.dispatch({ effects: flashEffect.of(null) }), 1400)
+    }
+    return true
+  }
+
+  /**
+   * Patch the real Markdown once, but uncover the inserted text like a cursor
+   * moving through it. The returned promise is only the presentation settling;
+   * the document transaction has already happened before this function yields.
+   */
+  view.patchAnimated = async (text, { before = null } = {}) => {
+    const current = view.state.doc.toString()
+    const change = diffRange(current, text)
+    const baseline = before ?? current
+    if (!change) return showAgentDiff(baseline, text)
+
+    stopAgentTyping()
+    const insertedTo = change.from + change.insert.length
+    const glyphEnds = []
+    let offset = 0
+    for (const glyph of change.insert) {
+      offset += glyph.length
+      glyphEnds.push(offset)
+    }
+
+    view.dispatch({
+      changes: change,
+      userEvent: 'input.agent',
+      effects: glyphEnds.length > 1
+        ? agentTypingEffect.of({ from: change.from, to: insertedTo })
+        : agentWorkingEffect.of(null),
+      scrollIntoView: false
+    })
+    scrollToAgentEdit(change.from)
+
+    const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+    if (glyphEnds.length <= 1 || reduced) {
+      showAgentDiff(baseline, text)
+      return true
+    }
+
+    const run = ++agentTypingRun
+    const duration = Math.min(4500, Math.max(260, glyphEnds.length * 16))
+    const started = performance.now()
+
+    await new Promise((resolve) => {
+      agentTypingDone = resolve
+      const settle = () => {
+        if (agentTypingDone === resolve) agentTypingDone = null
+        resolve()
+      }
+      /* Electron pauses animation frames for an occluded window. A short timer
+         keeps a backgrounded edit from remaining concealed until the reader
+         returns, while the elapsed-time calculation still skips straight to
+         the right point rather than replaying every missed frame. */
+      const frame = () => {
+        if (run !== agentTypingRun) { settle(); return }
+        const now = performance.now()
+        const progress = Math.min(1, (now - started) / duration)
+        const count = Math.min(glyphEnds.length, Math.floor(progress * glyphEnds.length))
+        if (count >= glyphEnds.length) {
+          view.dispatch({ effects: agentTypingEffect.of(null) })
+          settle()
+          return
+        }
+        const revealed = count ? glyphEnds[count - 1] : 0
+        view.dispatch({
+          effects: agentTypingEffect.of({ from: change.from + revealed, to: insertedTo })
+        })
+        agentTypingTimer = setTimeout(frame, 20)
+      }
+      agentTypingTimer = setTimeout(frame, 20)
+    })
+
+    if (run === agentTypingRun) showAgentDiff(baseline, text)
     return true
   }
 
@@ -753,6 +2188,45 @@ export function createEditor ({
     const pos = view.posAtCoords({ x: box.left + 8, y: box.top + 2 }, false)
     if (pos == null) return 1
     return view.state.doc.lineAt(Math.max(0, Math.min(pos, view.state.doc.length))).number
+  }
+
+  /**
+   * The note's own undo, reachable from outside the editor.
+   *
+   * ⌘Z is on the Edit menu, and a menu key equivalent is taken by the menu
+   * before the page ever sees it — so the keymap installed above only answers
+   * when something else is holding the keyboard. These are what the menu calls,
+   * and they are the same commands, on the same history.
+   */
+  view.undo = () => undo(view)
+  view.redo = () => redo(view)
+
+  /** Fold every Markdown heading that owns a section, including nested ones. */
+  view.foldAllHeadings = () => {
+    const { state } = view
+    const list = headings(state.doc.toString())
+    const effects = list
+      .map((heading) => headingFoldRange(state, heading, list))
+      .filter((range) => range && !foldedExactly(state, range))
+      .map((range) => foldEffect.of(range))
+    if (effects.length) view.dispatch({ effects })
+    return effects.length > 0
+  }
+
+  /** Unfold heading sections without disturbing a folded code block. */
+  view.unfoldAllHeadings = () => {
+    const { state } = view
+    const list = headings(state.doc.toString())
+    const headingRanges = new Set(list
+      .map((heading) => headingFoldRange(state, heading, list))
+      .filter(Boolean)
+      .map(({ from, to }) => `${from}:${to}`))
+    const effects = []
+    foldedRanges(state).between(0, state.doc.length, (from, to) => {
+      if (headingRanges.has(`${from}:${to}`)) effects.push(unfoldEffect.of({ from, to }))
+    })
+    if (effects.length) view.dispatch({ effects })
+    return effects.length > 0
   }
 
   /** Put that line back at the top. */

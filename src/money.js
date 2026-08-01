@@ -10,7 +10,8 @@
 
 import { Decoration, ViewPlugin } from '@codemirror/view'
 import { syntaxTree } from '@codemirror/language'
-import { findMath } from './math.js'
+import { findMath, mathSpans, docText } from './math.js'
+import { inCode } from './blocks.js'
 
 /**
  * A price is a `$` bound tightly to digits: `$5`, `$1,234.56`, `US$20`.
@@ -22,11 +23,34 @@ import { findMath } from './math.js'
 const MONEY = /\$(\d[\d,]*(?:\.\d{1,2})?)(?![\d$])/g
 const MONEY_AT = new RegExp(MONEY.source, 'y')
 
+/* Lent out so the other places that set a price — a table cell in the editing
+   view, which draws its own contents — ask the same question this module asks,
+   rather than carrying a second, slightly different idea of what a price is. */
+export const MONEY_SOURCE = MONEY.source
+
+/**
+ * A price as the reading view sets it, built as DOM.
+ *
+ * Anything drawing a price outside markdown-it comes here for it, so a price
+ * looks like a price wherever it is read.
+ */
+export function moneyNode (amount) {
+  const span = document.createElement('span')
+  span.className = 'money'
+  const mark = document.createElement('span')
+  mark.className = 'money-mark'
+  mark.textContent = '$'
+  const figures = document.createElement('span')
+  figures.className = 'money-amount'
+  figures.textContent = amount
+  span.append(mark, figures)
+  return span
+}
+
 const escaped = (text, i) => text[i - 1] === '\\' || text[i - 1] === '$'
 
 /** Every price in `text`, skipping any that falls inside a maths span. */
-function findMoney (text) {
-  const maths = findMath(text)
+function findMoney (text, maths = findMath(text)) {
   const inMath = (from, to) => maths.some((m) => from < m.to && to > m.from)
 
   const out = []
@@ -40,7 +64,32 @@ function findMoney (text) {
   return out
 }
 
+/**
+ * The same answer for a whole document, computed once per version.
+ *
+ * Both halves of the work are shared with the maths layer: the document's
+ * string and its maths spans come from that module's cache rather than being
+ * recomputed here, which is what stops one keystroke from scanning the note
+ * three times over.
+ */
+let cache = { doc: null, spans: null }
+
+function moneySpans (doc) {
+  if (cache.doc !== doc) {
+    cache = { doc, spans: findMoney(docText(doc), mathSpans(doc)) }
+  }
+  return cache.spans
+}
+
 /* --------------------------------------------------------- markdown-it */
+
+/* The inline run, scanned once per run rather than once per `$`: the rule is
+   called at every dollar sign in a paragraph, and they all share `src`. */
+let inlineMaths = { src: null, spans: null }
+function mathsIn (src) {
+  if (inlineMaths.src !== src) inlineMaths = { src, spans: findMath(src) }
+  return inlineMaths.spans
+}
 
 export function moneyPlugin (md) {
   // Before the maths rule, so a price is claimed before `$` can open a span.
@@ -52,6 +101,12 @@ export function moneyPlugin (md) {
     MONEY_AT.lastIndex = pos
     const m = MONEY_AT.exec(src)
     if (!m) return false
+
+    /* The editor's pass skips prices inside maths (`findMoney` above); the
+       same test has to be made here, or `$1\sigma$` is a price in one view
+       and an expression in the other — the very thing running before the
+       maths rule makes possible. */
+    if (mathsIn(src).some((s) => pos >= s.from && pos < s.to)) return false
 
     if (!silent) {
       const token = state.push('money', '', 0)
@@ -73,7 +128,13 @@ export function moneyPlugin (md) {
 /**
  * The editor keeps the literal `$`: replacing it with a badge would put a
  * widget where a character has to be, and typing into it would fight the
- * caret. Tinting says the same thing and stays editable.
+ * caret.
+ *
+ * So the character itself is set as the badge instead — the sign and the
+ * figures each get their own mark, and the stylesheet cuts the `$` in the sans
+ * face the reading view uses. Nothing is added, removed or moved: what you see
+ * is the same run of characters you can still type over, which is why this can
+ * look rendered without any of a widget's trouble.
  */
 export const moneyPreview = ViewPlugin.fromClass(
   class {
@@ -87,19 +148,19 @@ export const moneyPreview = ViewPlugin.fromClass(
 
     build (view) {
       const { state } = view
-      const text = state.doc.toString()
       const tree = syntaxTree(state)
       const ranges = []
 
-      for (const span of findMoney(text)) {
+      for (const span of moneySpans(state.doc)) {
         if (span.to < view.viewport.from || span.from > view.viewport.to) continue
         // A price in a code block is a string literal, and belongs to the
-        // language's own highlighting rather than to this.
-        const node = tree.resolveInner(span.from, 1)
-        if (node.name === 'InlineCode' || node.name === 'FencedCode' ||
-            node.node.parent?.name === 'FencedCode') continue
+        // language's own highlighting rather than to this. The same test the
+        // maths scanner runs, so the two cannot disagree about a `$`.
+        if (inCode(tree, span.from)) continue
 
-        ranges.push(Decoration.mark({ class: 'tk-money' }).range(span.from, span.to))
+        // The `$` is one character wide, always: the pattern starts on it.
+        ranges.push(Decoration.mark({ class: 'tk-money-mark' }).range(span.from, span.from + 1))
+        ranges.push(Decoration.mark({ class: 'tk-money-amount' }).range(span.from + 1, span.to))
       }
       return Decoration.set(ranges, true)
     }

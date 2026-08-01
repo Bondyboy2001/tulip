@@ -9,7 +9,9 @@ import { logoSvg } from './logos.js'
 
 const DARK_INK = '#1A1815'
 
-const ENTRIES = [
+/* Exported for the editor's fence-language autocomplete, which offers these
+   ids as you type after ``` . */
+export const LANGUAGES = [
   { id: 'javascript', label: 'JavaScript', short: 'JS', color: '#F7DF1E', ink: DARK_INK,
     alias: ['js', 'mjs', 'cjs', 'node'] },
   { id: 'jsx', label: 'JSX', short: 'JSX', color: '#F7DF1E', ink: DARK_INK },
@@ -20,6 +22,18 @@ const ENTRIES = [
      out is a film, not a program's output — so they get their own tile. */
   { id: 'manim', label: 'Manim', short: 'MAN', color: '#63C9B0', ink: DARK_INK },
   { id: 'lean', label: 'Lean', short: 'L∀N', color: '#0000FF', alias: ['lean4'] },
+  /* Mermaid blocks are drawn rather than run, the same as manim — the tile is
+     what tells you which of the two a block is before you read a line of it. */
+  { id: 'mermaid', label: 'Mermaid', short: 'MMD', color: '#FF3670', alias: ['mmd'] },
+  /* TikZ is LaTeX, and drawn rather than run — same family as manim and
+     mermaid. The colour is TeX's own. */
+  { id: 'tikz', label: 'TikZ', short: 'TkZ', color: '#008080' },
+  /* An svg block is drawn too — the only one of the family whose source needs
+     nothing done to it but reading. It is XML underneath, which is why the
+     tile is the one thing that says which of the two a block is. */
+  { id: 'svg', label: 'SVG', short: 'SVG', color: '#FFB13B', ink: DARK_INK },
+  /* One entry only — a twin further down once shadowed this one in INDEX. */
+  { id: 'latex', label: 'LaTeX', short: 'TeX', color: '#008080', alias: ['tex'] },
   { id: 'ruby', label: 'Ruby', short: 'RB', color: '#CC342D', alias: ['rb'] },
   { id: 'rust', label: 'Rust', short: 'RS', color: '#CE422B', alias: ['rs'] },
   { id: 'go', label: 'Go', short: 'GO', color: '#00ADD8', alias: ['golang'] },
@@ -37,7 +51,7 @@ const ENTRIES = [
   { id: 'json', label: 'JSON', short: '{}', color: '#6E6259', alias: ['json5', 'jsonc'] },
   { id: 'yaml', label: 'YAML', short: 'YML', color: '#CB171E', alias: ['yml'] },
   { id: 'toml', label: 'TOML', short: 'TML', color: '#9C4221' },
-  { id: 'xml', label: 'XML', short: 'XML', color: '#F1662A', alias: ['svg', 'plist'] },
+  { id: 'xml', label: 'XML', short: 'XML', color: '#F1662A', alias: ['plist'] },
   { id: 'markdown', label: 'Markdown', short: 'MD', color: '#5E5B57', alias: ['md', 'mdown'] },
   { id: 'shell', label: 'Shell', short: '$_', color: '#4EAA25',
     alias: ['sh', 'bash', 'zsh', 'fish', 'console', 'shell-session', 'terminal'] },
@@ -65,7 +79,6 @@ const ENTRIES = [
   { id: 'nix', label: 'Nix', short: 'NIX', color: '#7EBAE4', ink: DARK_INK },
   { id: 'solidity', label: 'Solidity', short: 'SOL', color: '#4C4C4C', alias: ['sol'] },
   { id: 'makefile', label: 'Makefile', short: 'MK', color: '#427819', alias: ['make', 'cmake'] },
-  { id: 'latex', label: 'LaTeX', short: 'TEX', color: '#008080', alias: ['tex'] },
   { id: 'vim', label: 'Vim', short: 'VIM', color: '#019733', alias: ['viml', 'vimscript'] },
   { id: 'diff', label: 'Diff', short: '±', color: '#5E7A5A', alias: ['patch'] },
   { id: 'ini', label: 'Config', short: 'CFG', color: '#85807A', alias: ['conf', 'config', 'properties', 'env'] },
@@ -73,20 +86,32 @@ const ENTRIES = [
 ]
 
 const INDEX = new Map()
-for (const entry of ENTRIES) {
+for (const entry of LANGUAGES) {
   INDEX.set(entry.id, entry)
   for (const alias of entry.alias || []) INDEX.set(alias, entry)
 }
 
 /** Never null for a non-empty token — an unknown language still gets a tile,
  *  drawn in the neutral grey so it reads as "unrecognised", not "broken". */
-export function languageMark (token) {
+function languageMark (token) {
   const key = String(token || '').trim().toLowerCase()
   if (!key) return null
   const hit = INDEX.get(key)
   if (hit) return hit
   return { id: key, label: key, short: key.slice(0, 3).toUpperCase(), color: null }
 }
+
+/**
+ * The canonical id behind whatever spelling a fence used — `htm` and `xhtml`
+ * both answer `html`.
+ *
+ * For the features that treat one language specially and would otherwise each
+ * keep their own copy of its aliases: a spelling listed here but missing from
+ * that copy is a block that draws the right chip and then gets none of the
+ * treatment the chip implies. An unrecognised token is its own id, so a
+ * comparison against a known one is still false rather than throwing.
+ */
+export const languageId = (token) => languageMark(token)?.id || ''
 
 /**
  * @param {string} token   the word after the opening fence

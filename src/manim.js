@@ -17,7 +17,8 @@
    ================================================================== */
 
 import { embedSpec, renderEmbed } from './assets.js'
-import { runState, adopt } from './runcode.js'
+import { renderedBlock } from './blocks.js'
+import { artefactRun } from './runcode.js'
 
 const api = window.tulip
 
@@ -25,12 +26,14 @@ export function isManim (lang) {
   return String(lang || '').trim().toLowerCase() === 'manim'
 }
 
-function el (tag, className, text) {
-  const node = document.createElement(tag)
-  if (className) node.className = className
-  if (text != null) node.textContent = text
-  return node
-}
+/* Renders in flight, keyed by note and code — the same bargain runcode's
+   `results` map strikes. A per-attach state stranded the render whenever the
+   reading view was rebuilt under it — a note switch and back, mid-render —
+   because the fresh attach's lookup ran before the file existed: the block
+   said "Render" while Manim worked on unseen, and the finished film never
+   appeared. A rebuilt block adopts the run instead. Entries are retired once
+   the run has settled and been shown. */
+const runs = new Map()
 
 /* The video for a path we have just been handed. Going through embedSpec keeps
    one decision about what an .mp4 in this vault becomes, shared with every
@@ -55,16 +58,6 @@ function videoFor (path) {
   return video
 }
 
-/** A line of manim's own output worth showing while it works. */
-function lastLine (text) {
-  const lines = text.trimEnd().split('\n')
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i].trim()
-    if (line) return line.slice(0, 90)
-  }
-  return ''
-}
-
 /**
  * Fits one `manim` block with its render control, and swaps in the video
  * whenever there is one to show.
@@ -75,165 +68,58 @@ function lastLine (text) {
  * @param {{noteName: string, scene: string}} ctx
  */
 export function attachManim (wrap, head, code, { noteName, scene }) {
-  const state = runState()
+  /* The shared rendered-block shell puts the video where the source was and
+     yields the whole space to the transcript while Manim works. */
+  const view = renderedBlock(wrap, 'manim')
 
-  const button = el('button', 'run-btn')
-  button.type = 'button'
-
-  /* The figure stands where the block does and holds the video; the block is
-     kept alongside it, hidden, because "show me the code" has to be one click
-     and not a re-render. */
-  const figure = el('figure', 'manim')
-  figure.hidden = true
-  const stage = el('div', 'manim-stage')
-  const foot = el('figcaption', 'manim-foot')
-  figure.append(stage, foot)
-  wrap.after(figure)
-
-  const status = el('div', 'run-out manim-status')
-  status.setAttribute('aria-live', 'polite')
-  status.hidden = true
-  figure.after(status)
-
-  const sceneName = el('span', 'manim-scene')
-  const showCode = el('button', 'run-btn')
-  showCode.type = 'button'
-  showCode.textContent = 'Code'
-  showCode.title = 'Show the scene’s source'
-  const again = el('button', 'run-btn')
-  again.type = 'button'
-  again.textContent = 'Re-render'
-  again.title = 'Render this scene again'
-  foot.append(sceneName, el('span', 'manim-spacer'), showCode, again)
-
-  let videoPath = null
-  let codeVisible = true
-
-  /** Which of the two — the film or the source — is on screen. */
-  function show (what) {
-    codeVisible = what === 'code' || !videoPath
-    wrap.hidden = !codeVisible
-    figure.hidden = codeVisible
-    // The button says where it goes, not where you are.
-    showCode.textContent = codeVisible ? 'Video' : 'Code'
-    showCode.title = codeVisible ? 'Back to the video' : 'Show the scene’s source'
-    showCode.hidden = !videoPath
-    // With the film on screen the header is gone and the figure's own footer
-    // carries the controls — two Re-render buttons on one block is one too many.
-    button.hidden = !codeVisible
-  }
-
-  function setVideo (path) {
-    videoPath = path
-    stage.replaceChildren(videoFor(path))
-    sceneName.textContent = scene || ''
-    show('video')
-    paint()
-  }
-
-  const paint = () => {
-    const running = state.status === 'running'
-    button.classList.toggle('is-running', running)
-    button.textContent = running ? 'Stop' : (videoPath ? 'Re-render' : 'Render')
-    button.title = running ? 'Stop rendering' : 'Render this scene with Manim'
-    button.setAttribute('aria-label', button.title)
-    again.disabled = running
-    drawStatus()
-  }
-  state.painters.add(paint)
-
-  function drawStatus () {
-    status.replaceChildren()
-    if (state.status === 'idle') { status.hidden = true; return }
-
-    const bar = el('div', 'run-out-head')
-
-    if (state.status === 'running') {
-      bar.append(el('span', 'run-out-verdict is-running', 'Rendering…'))
-      status.append(bar)
-      const note = lastLine(state.stdout) || lastLine(state.stderr)
-      if (note) status.append(el('pre', 'run-out-stream', note))
-      status.hidden = false
-      return
-    }
-
-    /* No file to show means it did not work, whatever it said on the way — a
-       scene that raises exits non-zero with nothing in `error`, and reporting
-       only the cases that set one would leave the commonest failure silent. */
-    if (!state.path) {
-      bar.append(el('span', 'run-out-verdict is-bad',
-        state.timedOut ? 'Timed out' : state.signal ? 'Stopped' : 'Failed'))
-      status.append(bar)
-
-      const said = state.error || ''
-      if (said) status.append(el('pre', 'run-out-stream is-stderr', said))
+  /* The same control a runnable block and a tikz picture get: starting a render
+     and stopping one is the run gesture, and the machinery behind it — adopting
+     a render already in flight, retiring it once shown, finding one already on
+     disk — is runcode's, not this file's. Only the words and the two api calls
+     are Manim's. */
+  const run = artefactRun(runs, `${noteName}\n${code}`, {
+    statusClass: 'manim-status',
+    words: {
+      busy: 'Rendering…',
+      keep: 1500,
+      // A first render replaces the source with Manim's complete live output;
+      // unlike a quick drawing, the minutes of work are useful to watch.
+      transcript: true,
       // Manim says why on stderr, and that is usually the actual answer.
-      const trace = state.stderr.trim()
-      if (trace) status.append(el('pre', 'run-out-stream is-stderr', trace.slice(-1500)))
-      if (!said && !trace) {
-        status.append(el('pre', 'run-out-stream is-stderr', `Manim exited ${state.code}.`))
-      }
-      status.hidden = false
-      return
-    }
-
-    // A finished render speaks for itself: the video is the result, and a
-    // green "Exit 0" under it would be noise.
-    status.hidden = true
-  }
-
-  async function render () {
-    Object.assign(state, {
-      status: 'running',
-      stdout: '',
-      stderr: '',
-      code: null,
-      signal: null,
-      error: null,
-      timedOut: false,
-      path: null
-    })
-    show('code')
-    state.render()
-
-    try {
-      const { id, scene: chosen } = await api.manim.render(noteName, code, scene)
-      if (chosen) scene = chosen
-      state.id = id
-      adopt(id, state)
-    } catch (err) {
-      const text = String(err?.message || err)
-      const at = text.lastIndexOf('Error: ')
-      Object.assign(state, { status: 'done', error: at === -1 ? text : text.slice(at + 7) })
-      state.render()
-    }
-  }
-
-  button.addEventListener('click', () => {
-    if (state.status === 'running') { api.run.kill(state.id).catch(() => {}); return }
-    render()
+      silent: (s) => `Manim exited ${s.code}.`
+    },
+    titles: {
+      stop: 'Stop rendering',
+      again: 'Render this scene again',
+      first: 'Render this scene with Manim'
+    },
+    start: () => api.manim.render(noteName, code, scene),
+    lookup: () => api.manim.lookup(noteName, code, scene),
+    /* A render that ends hands back the path it wrote, and the video takes the
+       transcript's place. With no path, onPath deliberately does nothing so
+       the full failure remains visible. */
+    onPath: (path) => {
+      if (!path) return
+      view.stage.replaceChildren(videoFor(path))
+      view.settle(true)
+    },
+    // The reading view can be rebuilt under a render — a note switch and back —
+    // and a lookup landing afterwards must not write into the detached copy.
+    alive: () => wrap.isConnected,
+    // A fresh attachment can adopt a render started by the previous reading
+    // view, so the transcript mode is also asserted by every live paint.
+    onPaint: (state) => { if (state.status === 'running') view.hide() },
+    // The transcript takes the block's place while Manim works. If no video is
+    // produced it remains there with the full failure instead of snapping back
+    // to source and hiding the useful part.
+    willStart: view.hide,
+    /* Manim picks the scene out of the block when the block did not name one,
+       and says which it picked. Carried back so the next lookup and the next
+       render ask about the same scene rather than guessing again. */
+    didStart: (started) => { if (started?.scene) scene = started.scene },
+    onHit: (hit) => { scene = hit.scene || scene }
   })
-  again.addEventListener('click', () => { if (state.status !== 'running') render() })
-  showCode.addEventListener('click', () => show(codeVisible ? 'video' : 'code'))
 
-  head.append(button)
-  paint()
-
-  /* Already rendered? Then the video is what this block is, and the code goes
-     behind it — without anything being run. */
-  api.manim.lookup(noteName, code, scene)
-    .then((hit) => {
-      if (!hit || !wrap.isConnected) return
-      scene = hit.scene || scene
-      setVideo(hit.path)
-    })
-    .catch(() => {})
-
-  /* When a render finishes it hands back the path it wrote. */
-  const finished = () => {
-    if (state.status !== 'done') return
-    if (state.path) setVideo(state.path)
-    else show('code')
-  }
-  state.painters.add(finished)
+  view.figure.after(run.status)
+  head.append(run.button)
 }

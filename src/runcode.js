@@ -10,29 +10,28 @@
    printed the last time you ran it.
    ================================================================== */
 
+import { el, svgIcon } from './blocks.js'
+import { runners as RUNNERS } from '../electron/runnable-languages.json'
+
 const api = window.tulip
 
-/* The languages the main process will accept, repeated here so the reading
-   view can decide whether to draw the control at all without a round trip.
-   Kept in step with RUNNERS in electron/main.js. */
-const RUNNABLE = new Set([
-  'js', 'javascript', 'node', 'mjs', 'cjs',
-  'py', 'python', 'python3',
-  'sh', 'shell', 'bash', 'zsh',
-  'jl', 'julia',
-  'go', 'golang',
-  'rs', 'rust',
-  'lean', 'lean4'
-])
+/* The languages the main process will accept, read from the one list both
+   sides read — see electron/runnable-languages.json. The reading view decides
+   whether to draw the control at all without a round trip, and cannot decide
+   it differently from the process that would run the block. */
+const RUNNABLE = new Set(Object.values(RUNNERS).flat())
 
 export function isRunnable (lang) {
   return RUNNABLE.has(String(lang || '').trim().toLowerCase())
 }
 
-/* Every result this session, keyed by the code itself. Two blocks with the
-   same body are the same run, and editing a block abandons its old output
-   rather than showing yesterday's answer under today's code. Bounded, because
-   a long session of edits would otherwise keep every draft's output alive. */
+/* Every result this session, keyed by the language and the code together. Two
+   blocks with the same body are the same run — but only in the same language;
+   the same three lines under ```py and ```jl are two different programs, and
+   one key for both had Run on one flipping the other's button. Editing a block
+   abandons its old output rather than showing yesterday's answer under today's
+   code. Bounded, because a long session of edits would otherwise keep every
+   draft's output alive. */
 const results = new Map()
 const MAX_RESULTS = 200
 
@@ -75,19 +74,37 @@ function held (id) {
  * A blank run state. Manim keeps its own view but streams through the same
  * machinery, so the two cannot drift over what "running" looks like.
  */
-export function runState () {
+function runState () {
   return {
     status: 'idle',
     stdout: '',
     stderr: '',
     code: null,
+    id: null,
+    stopRequested: false,
     painters: new Set(),
     render () { for (const paint of this.painters) paint() }
   }
 }
 
+/**
+ * The run state for one block, shared through `map` under `key` — so a rebuilt
+ * widget adopts the run its predecessor started instead of stranding it. The
+ * key is remembered on the state so whoever finishes with it can retire the
+ * entry.
+ */
+function adoptRun (map, key) {
+  let state = map.get(key)
+  if (!state) {
+    state = runState()
+    state.key = key
+    map.set(key, state)
+  }
+  return state
+}
+
 /** Hand a started run its view, replaying anything that arrived first. */
-export function adopt (id, state) {
+function adopt (id, state) {
   const box = inbox.get(id)
   if (box) {
     inbox.delete(id)
@@ -103,25 +120,17 @@ export function adopt (id, state) {
   state.render()
 }
 
-function stateFor (code) {
-  let state = results.get(code)
+function stateFor (lang, code) {
+  const key = `${String(lang || '').trim().toLowerCase()}\n${code}`
+  let state = results.get(key)
   if (state) return state
 
   /* One state can be on screen more than once — the same snippet twice in a
      note — so every panel showing it registers its own painter. */
   state = runState()
   if (results.size >= MAX_RESULTS) results.delete(results.keys().next().value)
-  results.set(code, state)
+  results.set(key, state)
   return state
-}
-
-/* -------------------------------------------------------------- the box */
-
-function el (tag, className, text) {
-  const node = document.createElement(tag)
-  if (className) node.className = className
-  if (text != null) node.textContent = text
-  return node
 }
 
 /* An invoke that throws arrives wrapped in Electron's own framing —
@@ -134,11 +143,258 @@ function reason (err) {
 }
 
 /**
+ * Starts a piece of work and hands its state the run it produced.
+ *
+ * Every runner goes through here — a snippet, a scene, a picture — so none of
+ * them can have its own idea of what "starting" clears or of how a refused
+ * start is reported. `start` returns whatever the main process said; the `id`
+ * in it is the run, and the rest is the caller's.
+ *
+ * @param {object} state          from runState()
+ * @param {() => Promise<{id: number}>} start
+ * @returns {Promise<object|null>}  what start() said, or null if it threw
+ */
+async function launch (state, start) {
+  Object.assign(state, {
+    status: 'running',
+    stdout: '',
+    stderr: '',
+    code: null,
+    id: null,
+    stopRequested: false,
+    signal: null,
+    error: null,
+    timedOut: false,
+    truncated: false,
+    path: null
+  })
+  state.render()
+
+  try {
+    const result = await start()
+    state.id = result.id
+    adopt(result.id, state)
+    /* Stop was clicked while start() was still in flight — there was no id to
+       kill then, so the wish was parked on the state. Honour it now. */
+    if (state.stopRequested) {
+      state.stopRequested = false
+      api.run.kill(result.id).catch(() => {})
+    }
+    return result
+  } catch (err) {
+    Object.assign(state, { status: 'done', error: reason(err), ms: 0, stopRequested: false })
+    state.render()
+    return null
+  }
+}
+
+/**
+ * Stop a run, including one still starting. Between the click on Run and
+ * `start()` resolving there is no id yet, and killing `undefined` is a no-op
+ * that leaves the run going while the button says it stopped — so in that
+ * window the request is flagged on the state and launch() carries it out the
+ * moment the id arrives.
+ */
+function requestStop (state) {
+  if (state.id != null) {
+    api.run.kill(state.id).catch(() => {})
+    return
+  }
+  state.stopRequested = true
+}
+
+/** The line of a runner's chatter worth showing while a compact render works. */
+function lastLine (text) {
+  const lines = String(text || '').trimEnd().split('\n')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim()
+    if (line) return line.slice(0, 90)
+  }
+  return ''
+}
+
+/**
+ * The status line under a block that renders to a file — a scene, a picture.
+ *
+ * These do not report their output the way a snippet does: the artefact is the
+ * result, so a finished render says nothing at all, and a failed one has to say
+ * everything, because "no file" is the only reliable signal there is. TeX will
+ * report an error and still exit 0 in some configurations, and a manim scene
+ * that raises exits non-zero with nothing in `error`.
+ *
+ * @param {HTMLElement} status  the panel to fill
+ * @param {object} state        from runState()
+ * @param {{busy: string, keep: number, silent: string, transcript?: boolean}} words
+ * @param {HTMLElement|null} stop  a Stop control for a transcript that replaces its source
+ */
+function drawArtefactStatus (status, state, { busy, keep, silent, transcript }, stop) {
+  status.replaceChildren()
+  status.classList.remove('is-bad')
+  if (state.status === 'idle') { status.hidden = true; return }
+
+  const bar = el('div', 'run-out-head')
+
+  if (state.status === 'running') {
+    bar.append(el('span', 'run-out-verdict is-running', busy))
+    if (transcript && stop) bar.append(stop)
+    status.append(bar)
+    if (transcript) {
+      if (state.stdout) status.append(el('pre', 'run-out-stream', state.stdout))
+      if (state.stderr) status.append(el('pre', 'run-out-stream is-stderr', state.stderr))
+      if (state.truncated) {
+        status.append(el('div', 'run-out-note',
+          'Output truncated — the render printed more than Tulip will hold.'))
+      }
+    } else {
+      const note = lastLine(state.stdout) || lastLine(state.stderr)
+      if (note) status.append(el('pre', 'run-out-stream', note))
+    }
+    status.hidden = false
+    if (transcript) status.scrollTop = status.scrollHeight
+    return
+  }
+
+  // A finished render speaks for itself: the picture is the result, and a
+  // green "Exit 0" under it would be noise.
+  if (state.path) { status.hidden = true; return }
+
+  bar.append(el('span', 'run-out-verdict is-bad',
+    state.timedOut ? 'Timed out' : state.signal ? 'Stopped' : 'Failed'))
+  status.append(bar)
+  /* Reached only when there is no artefact to show, which for a render is the
+     definition of a failure — including the stopped case, where the words
+     above already say `is-bad` for the same reason. */
+  status.classList.add('is-bad')
+
+  const said = state.error || ''
+  if (said) status.append(el('pre', 'run-out-stream is-stderr', said))
+  if (transcript && state.stdout) status.append(el('pre', 'run-out-stream', state.stdout))
+  const trace = state.stderr
+  if (trace) {
+    status.append(el('pre', 'run-out-stream is-stderr',
+      transcript ? trace : trace.trim().slice(-keep)))
+  }
+  if (!said && !state.stdout && !trace) {
+    status.append(el('pre', 'run-out-stream is-stderr', silent(state)))
+  }
+  if (transcript && state.truncated) {
+    status.append(el('div', 'run-out-note',
+      'Output truncated — the render printed more than Tulip will hold.'))
+  }
+  status.hidden = false
+}
+
+/** The panel those statuses are drawn into. */
+function artefactStatus (className) {
+  const status = el('div', `run-out ${className}`)
+  status.setAttribute('aria-live', 'polite')
+  status.hidden = true
+  return status
+}
+
+/**
+ * The whole control behind a block that renders to a file — a scene, a picture.
+ *
+ * Manim and TikZ struck the same bargain in the same order, and each wrote it
+ * out: adopt the run under a key so a rebuilt widget does not strand it, a
+ * Run/Stop button, a status panel, a painter that retires the entry once the
+ * result has been shown, and a lookup on mount so an artefact already on disk
+ * appears without anything being started. Only the words and the two `api`
+ * calls ever differed, and having it twice meant the fixes landed once — the
+ * "adopt rather than strand" rule was learned separately in both files, which
+ * is exactly the shape of thing that gets learned a third time.
+ *
+ * What is shown is tracked here as `shown`, so the caller is told about a path
+ * only when it changes, and the button can say "again" once there is one.
+ *
+ * @param {Map} runs           the module's own in-flight table
+ * @param {string} key         note and code together — see adoptRun
+ * @param {object} spec
+ * @param {string} spec.statusClass          the status panel's own class
+ * @param {{busy: string, keep: number, silent: (s) => string, transcript?: boolean}} spec.words
+ * @param {{stop: string, again: string, first: string}} spec.titles
+ * @param {() => Promise<object>} spec.start   what running it is
+ * @param {() => Promise<object>} spec.lookup  what is already on disk
+ * @param {(path: string|null) => void} spec.onPath  an artefact arrived, or went
+ * @param {() => boolean} [spec.alive]     is the caller's DOM still on the page
+ * @param {() => void} [spec.willStart]    about to run
+ * @param {(started: object|null) => void} [spec.didStart]  it started
+ * @param {(hit: object) => void} [spec.onHit]  the lookup found one
+ * @param {(state: object) => void} [spec.onPaint]  the status changed shape; re-measure
+ * @returns {{button: HTMLElement, status: HTMLElement}}
+ */
+export function artefactRun (runs, key, {
+  statusClass, words, titles, start, lookup, onPath,
+  alive, willStart, didStart, onHit, onPaint
+}) {
+  const state = adoptRun(runs, key)
+  const status = artefactStatus(statusClass)
+  const button = runButton()
+  const stop = words.transcript ? runButton() : null
+  if (stop) {
+    drawRunFace(stop, true, titles.stop)
+    stop.addEventListener('click', () => requestStop(state))
+  }
+
+  /* What is on screen, as against what the run last produced — the two differ
+     exactly when there is something new to show. */
+  let shown = null
+  const settle = (path) => { shown = path; onPath(path) }
+
+  /* One painter per attach, retiring with its element — a shared state
+     accumulates a painter for every rebuild, and the dead ones must not keep
+     drawing into detached DOM. */
+  const paint = painter(state, button, () => {
+    /* A run that ends hands back the path it wrote, or nothing at all — and
+       once that has been shown, the shared entry has done its job. */
+    if (state.status === 'done') {
+      const path = state.path || null
+      if (path !== shown) settle(path)
+      runs.delete(state.key)
+    }
+
+    /* The words that would have been on the button are on it as the tooltip:
+       whether this has already been rendered is worth saying, and it is the one
+       thing the mark itself cannot. */
+    const running = state.status === 'running'
+    drawRunFace(button, running, running ? titles.stop : (shown ? titles.again : titles.first))
+    drawArtefactStatus(status, state, words, stop)
+    onPaint?.(state)
+  })
+
+  button.addEventListener('click', async () => {
+    if (state.status === 'running') { requestStop(state); return }
+    willStart?.()
+    /* Awaited into a name of its own, rather than straight into the argument of
+       `didStart?.()`: an optional call whose callee is nullish never evaluates
+       its arguments, so a caller that wants no notification — a tikz picture —
+       started no run either, and its button did nothing at all. */
+    const started = await launch(state, start)
+    didStart?.(started)
+  })
+
+  paint()
+
+  /* Already rendered? Then the artefact is what this block is, without anything
+     being run at all. */
+  lookup()
+    .then((hit) => {
+      if (!hit?.path || alive?.() === false) return
+      onHit?.(hit)
+      settle(hit.path)
+      paint()
+    })
+    .catch(() => {})
+
+  return { button, status }
+}
+
+/**
  * How a finished run is summarised in a line: what happened, and how long.
  *
- * The exit code is always stated — it is the one fact a run has to report — but
- * a successful one is said quietly. Only a failure earns the colour, so a page
- * of blocks that all worked has nothing shouting on it.
+ * The exit code is always stated — it is the one fact a run has to report — and
+ * it is coloured by what it says: green for a clean exit, red for a failure or
+ * a timeout. A run you stopped yourself is neither, and stays grey.
  */
 function verdict (state) {
   const time = (n) => (n < 1000 ? `${n} ms` : `${(n / 1000).toFixed(1)} s`)
@@ -152,149 +408,275 @@ function verdict (state) {
   const built = state.buildMs ? `${ms} · ${time(state.buildMs)} building` : ms
   return {
     text: `exit ${state.code} · ${built}`,
-    tone: state.code === 0 ? 'plain' : 'bad'
+    tone: state.code === 0 ? 'good' : 'bad'
   }
 }
 
 /**
- * Draws the output panel for one block. The panel is rebuilt in place on every
- * update rather than appended to, so a re-render after a note switch produces
- * exactly the same DOM as the run that filled it.
+ * Where a failed run goes when the reader asks for help with it.
+ *
+ * Set by the renderer, which owns the copilot panel. Nothing here knows what a
+ * copilot is — it hands over a finished question and lets the panel decide what
+ * to do with it — and until something registers, the button is not drawn at all.
  */
-function drawOutput (panel, state) {
+let askToFix = null
+
+export function onAskToFix (handler) {
+  askToFix = handler
+}
+
+/* How much of what a failed block printed goes into that question: enough for
+   a traceback and the lines around it, not the whole of a run that failed
+   after printing a megabyte. */
+const FIX_OUTPUT_MAX = 6000
+
+/**
+ * Is this a failure worth offering help with?
+ *
+ * A run stopped by hand is not one — you already know why it ended — and a
+ * block that has not finished has nothing to explain yet.
+ */
+function worthFixing (state) {
+  if (state.status !== 'done' || state.signal) return false
+  return !!state.error || !!state.timedOut || state.code !== 0
+}
+
+/**
+ * The question the copilot is asked, written the way the reader would write it:
+ * the block, what became of it, and what it printed. The *end* of the output is
+ * what is kept — a traceback finishes with the line that raised.
+ */
+function fixPrompt (lang, code, state) {
+  const printed = [state.error, state.stdout, state.stderr]
+    .filter(Boolean).join('\n').trimEnd()
+  const shown = printed.length > FIX_OUTPUT_MAX
+    ? `…\n${printed.slice(-FIX_OUTPUT_MAX)}`
+    : printed
+  const what = state.timedOut
+    ? 'it timed out'
+    : state.error
+      ? `it would not start: ${state.error}`
+      : `it exited ${state.code}`
+
+  return [
+    `I ran this ${lang} block from the note I have open, and ${what}:`,
+    '',
+    '```' + lang,
+    code.trimEnd(),
+    '```',
+    '',
+    shown ? 'It printed:\n\n```\n' + shown + '\n```' : 'It printed nothing.',
+    '',
+    'Work out what is wrong and edit that block in the note to fix it. ' +
+      'Change nothing else, and keep the explanation short.'
+  ].join('\n')
+}
+
+/** The offer itself, standing in the output panel's header beside the verdict. */
+function fixButton (lang, code, state) {
+  const button = el('button', 'run-fix')
+  button.type = 'button'
+  button.title = 'Ask Copilot to fix this block'
+  button.append(
+    svgIcon(
+      '<path d="M8 1.6 9.3 5.4 13 6.7 9.3 8 8 11.8 6.7 8 3 6.7 6.7 5.4Z"/>' +
+      '<path d="M12.4 10.2l.5 1.5 1.5.5-1.5.5-.5 1.5-.5-1.5-1.5-.5 1.5-.5Z"/>',
+      { className: 'run-fix-icon', fill: 'currentColor' }
+    ),
+    el('span', '', 'Fix with Copilot')
+  )
+  button.addEventListener('click', () => askToFix(fixPrompt(lang, code, state)))
+  return button
+}
+
+/**
+ * What one block's output panel holds, for whatever state its run is in.
+ *
+ * A block that printed nothing says so: an empty panel and a panel that never
+ * opened look alike, and telling them apart is the whole of what the reader
+ * came to the panel for.
+ */
+function drawOutput (panel, state, lang, code) {
   panel.replaceChildren()
   if (state.status === 'idle') { panel.hidden = true; return }
   panel.hidden = false
 
-  /* No "OUTPUT" caption — the compartment under the code, in the code's own
-     face, already says what it is. The header row carries only the verdict. */
-  const head = el('div', 'run-out-head')
-
+  const bar = el('div', 'run-out-head')
   if (state.status === 'running') {
-    head.append(el('span', 'run-out-verdict is-running', 'Running…'))
+    bar.append(el('span', 'run-out-verdict is-running', 'Running…'))
+    panel.classList.remove('is-bad')
   } else {
-    const v = verdict(state)
-    head.append(el('span', `run-out-verdict is-${v.tone}`, v.text))
+    const said = verdict(state)
+    // Before the verdict, not after it: the line is what the reader has just
+    // read, and the offer is what they want next.
+    if (askToFix && lang && worthFixing(state)) bar.append(fixButton(lang, code, state))
+    bar.append(el('span', `run-out-verdict is-${said.tone}`, said.text))
+    panel.classList.toggle('is-bad', said.tone === 'bad')
   }
-  panel.append(head)
+  panel.append(bar)
 
   if (state.stdout) panel.append(el('pre', 'run-out-stream', state.stdout))
-  // stderr is kept as its own stream rather than interleaved: which of the two
-  // a line came from is information, and merging them throws it away.
   if (state.stderr) panel.append(el('pre', 'run-out-stream is-stderr', state.stderr))
   if (!state.stdout && !state.stderr && state.status === 'done') {
     panel.append(el('pre', 'run-out-stream is-empty', 'No output.'))
   }
   if (state.truncated) {
-    panel.append(el('div', 'run-out-note', 'Output truncated — the block printed more than Tulip will hold.'))
+    panel.append(el('div', 'run-out-note',
+      'Output truncated — the block printed more than Tulip will hold.'))
   }
 }
 
-/**
- * Fits a code block with its run control and an output panel beneath it.
- *
- * @param {HTMLElement} wrap  the .code-wrap drawing the frame
- * @param {HTMLElement} head  the .code-head the control belongs in
- * @param {string} lang       the word after the fence
- * @param {string} code       the block's source
- */
-/**
- * The wiring both views share: a Run/Stop button, an output panel, and the
- * painter that keeps them true to the block's state. The state itself is keyed
- * by the code, so the same block running in the editing view and the reading
- * view is one run seen from two places.
- */
-function wireRun (button, panel, lang, code) {
-  const state = stateFor(code)
+/** The one button's two meanings: whichever of them the block is asking for. */
+async function startOrStop (state, lang, code) {
+  if (state.status === 'running') { requestStop(state); return }
+  await launch(state, () => api.run.start(lang, code))
+}
 
+/**
+ * Registers `draw` against a run and hands it back, so a view paints itself
+ * once and is repainted by every chunk of output that arrives afterwards.
+ *
+ * A painter drops itself the first time it is asked to draw into an element
+ * that has left the page — the only tear-down a running block ever needs.
+ */
+export function painter (state, node, draw) {
   const paint = () => {
-    // Both views rebuild their DOM wholesale, so a panel from a previous
-    // render is detached and has nothing left to say. It drops itself the
-    // first time it is asked to draw.
-    if (!panel.isConnected && panel.dataset.drawn) {
+    if (!node.isConnected && node.dataset.drawn) {
       state.painters.delete(paint)
       return
     }
-    panel.dataset.drawn = '1'
-
-    const running = state.status === 'running'
-    button.classList.toggle('is-running', running)
-    button.textContent = running ? 'Stop' : 'Run'
-    button.title = running ? 'Stop this block' : `Run this block with ${lang}`
-    button.setAttribute('aria-label', button.title)
-    drawOutput(panel, state)
+    node.dataset.drawn = '1'
+    draw()
   }
   state.painters.add(paint)
-
-  button.addEventListener('click', async () => {
-    if (state.status === 'running') {
-      api.run.kill(state.id).catch(() => {})
-      return
-    }
-
-    Object.assign(state, {
-      status: 'running',
-      stdout: '',
-      stderr: '',
-      code: null,
-      signal: null,
-      error: null,
-      timedOut: false,
-      truncated: false
-    })
-    state.render()
-
-    try {
-      const { id } = await api.run.start(lang, code)
-      state.id = id
-      adopt(id, state)
-    } catch (err) {
-      Object.assign(state, { status: 'done', error: reason(err), ms: 0 })
-      state.render()
-    }
-  })
-
-  paint()
+  /* Dropping itself on the next draw only reaches a block that is running —
+     nothing asks an idle block's painters to draw. So the retire handle is left
+     on the element for whoever tears it down; see retirePainters. */
+  node.tkRetire = () => state.painters.delete(paint)
+  node.dataset.painter = '1'
+  return paint
 }
 
-function makeButton () {
-  const button = el('button', 'run-btn')
+/**
+ * Retires every painter under `root`, for a caller that is about to throw the
+ * subtree away.
+ *
+ * Without it a widget scrolled out of the viewport and back — or a note closed
+ * and reopened — left its old painter behind, holding a detached element (and,
+ * for an output panel, everything that block ever printed) for as long as the
+ * session lasted.
+ */
+export function retirePainters (root) {
+  if (!(root instanceof Element)) return
+  root.tkRetire?.()
+  for (const node of root.querySelectorAll('[data-painter]')) node.tkRetire?.()
+}
+
+/**
+ * A Run/Stop button for one block. The state behind it is keyed by the language
+ * and the code, so the same block's button in the editing view and in the
+ * reading view drive one run between them.
+ */
+export function runButtonUI (lang, code) {
+  const state = stateFor(lang, code)
+  const button = runButton()
+
+  const paint = painter(state, button, () => {
+    const running = state.status === 'running'
+    drawRunFace(button, running, running ? 'Stop this block' : `Run this block with ${lang}`)
+  })
+
+  button.addEventListener('click', () => startOrStop(state, lang, code))
+  paint()
+  return button
+}
+
+/**
+ * The button itself, for anything that starts a process against a block.
+ *
+ * Manim's render is the same gesture as a run — set something going, stop it
+ * while it goes — so it is the same control, and only the tooltip differs. It
+ * used to be a word ("Render", "Re-render", "Stop") beside blocks whose own
+ * runs were a triangle, which read as two different kinds of thing. The html
+ * preview (htmlrun.js) struck the same bargain, which is why this and
+ * drawRunFace are exported.
+ */
+export function runButton () {
+  const button = el('button', 'run-btn is-icon')
   button.type = 'button'
   return button
 }
 
-function makePanel () {
-  const panel = el('div', 'run-out')
+/**
+ * Puts one of the button's two faces on it.
+ *
+ * Every painter runs on every chunk of output a run streams back, so the mark
+ * is rebuilt when it changes face rather than thousands of times while one
+ * face is on screen. The tooltip is set each time regardless: it is one string
+ * assignment, and a caller may want to change the words without the face
+ * changing — which is exactly what "Render" becoming "Render again" is.
+ */
+export function drawRunFace (button, running, title) {
+  const face = running ? 'stop' : 'run'
+  if (button.dataset.face !== face) {
+    button.dataset.face = face
+    button.classList.toggle('is-running', running)
+    button.replaceChildren(runIcon(running))
+  }
+  button.title = title
+  button.setAttribute('aria-label', title)
+}
+
+/**
+ * The output panel for one block, drawing itself whenever the run moves.
+ *
+ * `onDraw` is how the editing view hears that the panel just changed height —
+ * output arriving is a height the editor never measured, and one it has to be
+ * told about or every line below the block sits a line from where it is drawn.
+ */
+export function runPanelUI (lang, code, className, onDraw) {
+  const state = stateFor(lang, code)
+  const panel = makePanel(className)
+  painter(state, panel, () => {
+    drawOutput(panel, state, lang, code)
+    onDraw?.()
+  })()
+  return panel
+}
+
+/**
+ * The mark on the button: a filled triangle to start, a filled square to stop —
+ * the same pair, on the same 16-unit grid, as every other icon in the app.
+ */
+function runIcon (running) {
+  return svgIcon(
+    running
+      ? '<rect x="4.5" y="4.5" width="7" height="7" rx="1.4"/>'
+      : '<path d="M5.4 4.3 12.4 8l-7 3.7Z" stroke="currentColor" stroke-width="1.2" ' +
+        'stroke-linejoin="round"/>',
+    { className: 'run-icon', fill: 'currentColor' }
+  )
+}
+
+/* The box the output goes in: a named group, so a screen reader meets it as
+   this block's output rather than as loose text after the code. */
+function makePanel (className) {
+  const panel = el('div', className ? `run-out ${className}` : 'run-out')
   panel.setAttribute('role', 'group')
   panel.setAttribute('aria-label', 'Output')
   panel.setAttribute('aria-live', 'polite')
   return panel
 }
 
-/** The reading view's form: button into the block's header, panel after it. */
+/**
+ * The reading view's Run control: the button in the block's header, the output
+ * under the frame. A block in a language Tulip cannot run gets neither.
+ */
 export function attachRunControl (wrap, head, lang, code) {
   if (!isRunnable(lang)) return
 
-  const button = makeButton()
-  const panel = makePanel()
   // A sibling of the frame rather than a child, so a long output line scrolls
   // in its own box instead of widening the code above it.
-  wrap.after(panel)
-  head.append(button)
-  wireRun(button, panel, lang, code)
-}
-
-/**
- * The editing view's form: one element carrying both, for the block widget
- * that stands under a fence (see runblocks.js).
- */
-export function runBlockUI (lang, code) {
-  const root = el('div', 'tk-run')
-  const bar = el('div', 'tk-run-bar')
-  const button = makeButton()
-  const panel = makePanel()
-  bar.append(button)
-  root.append(bar, panel)
-  wireRun(button, panel, lang, code)
-  return root
+  wrap.after(runPanelUI(lang, code))
+  head.append(runButtonUI(lang, code))
 }

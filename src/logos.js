@@ -17,6 +17,7 @@ import {
   siZig, siNim, siPerl, siJulia, siOcaml, siGraphql, siDocker, siNixos,
   siSolidity, siPostgresql, siXml
 } from 'simple-icons'
+import { svgIcon } from './blocks.js'
 
 /** Tulip's language id → the brand mark that belongs to it. */
 const MARKS = {
@@ -72,19 +73,18 @@ const MARKS = {
  */
 /* Manim is not in Simple Icons, so its mark ships as the project's own file —
    the sidebar logo from docs.manim.community, bundled at build time because
-   the page's CSP forbids fetching anything. The upstream light and dark
-   variants differ only in the colour of the M (#343434 vs #ece6e2), so one
-   file serves both themes: the M is repainted with the theme's own ink, and
-   the square, circle and triangle keep the brand's colours. */
+   the page's CSP forbids fetching anything. */
 import manimLogoSource from './manim-logo.svg'
 
 function manimSvg () {
-  const svg = brandSvg(manimLogoSource, 'is-manim', /fill:\s*#343434/)
-  // The file is a sidebar banner, and half of it is margin — the ink sits in
-  // the middle of the canvas (measured with getBBox). At tile height those
-  // margins would shrink the mark to two-thirds of nothing, so the viewBox is
-  // cropped to the drawing.
-  svg?.setAttribute('viewBox', '38.3 14.2 78.6 52.3')
+  const svg = brandSvg(manimLogoSource, 'is-manim')
+  /* The file is a sidebar banner: a wide M beside the square, circle and
+     triangle, on a canvas that is mostly margin. The whole lockup at tile
+     height leaves the M as an unreadable letter with three specks next to it,
+     so the viewBox is cropped to the shapes alone — the part of the mark that
+     still says Manim at 15px. Bounds are the union of the three shapes'
+     boxes, measured with getBBox and squared off around their centre. */
+  svg?.setAttribute('viewBox', '62 18 56 56')
   return svg
 }
 
@@ -96,7 +96,7 @@ function manimSvg () {
    stroke repainted in the theme's ink. */
 import leanLogoSource from './lean-logo.svg'
 
-function brandSvg (source, extraClass, repaint) {
+function brandSvg (source, extraClass, repaint = null) {
   const doc = new DOMParser().parseFromString(source, 'image/svg+xml')
   const svg = doc.documentElement
   if (svg.nodeName !== 'svg') return null
@@ -108,8 +108,9 @@ function brandSvg (source, extraClass, repaint) {
   svg.classList.add('lang-logo', extraClass)
 
   // `repaint` names the colour that should follow the theme; on elements that
-  // carry it, whichever of fill/stroke is a real colour becomes the ink.
-  for (const el of svg.querySelectorAll('[style]')) {
+  // carry it, whichever of fill/stroke is a real colour becomes the ink. A
+  // mark drawn entirely in its own brand colours passes nothing and keeps them.
+  for (const el of repaint ? svg.querySelectorAll('[style]') : []) {
     const style = el.getAttribute('style')
     if (!repaint.test(style)) continue
     if (/fill:\s*#/.test(style)) el.style.fill = 'var(--ink)'
@@ -129,16 +130,9 @@ export function logoSvg (id) {
   const icon = MARKS[id]
   if (!icon?.path) return null
 
-  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
-  svg.setAttribute('viewBox', '0 0 24 24')
-  svg.setAttribute('aria-hidden', 'true')
-  svg.setAttribute('focusable', 'false')
-  svg.classList.add('lang-logo')
-
-  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path')
-  path.setAttribute('d', icon.path)
-  path.setAttribute('fill', 'currentColor')
-  svg.append(path)
-
-  return svg
+  return svgIcon(`<path d="${icon.path}"/>`, {
+    viewBox: '0 0 24 24',
+    className: 'lang-logo',
+    fill: 'currentColor'
+  })
 }

@@ -1,8 +1,9 @@
 /* ========================================================== run widgets
-   The editing view's Run control: a bar under every closed, runnable fence,
-   holding the same button and output panel the reading view draws. The state
-   behind it is keyed by the block's code (see runcode.js), so a run started
-   in one view is the same run in the other.
+   The editing view's Run control, in the two places the reading view puts it:
+   the button on the fence's header line, out at the right beside the language
+   chip, and the output panel under the block. The state behind them is keyed
+   by the block's code (see runcode.js), so a run started in one view is the
+   same run in the other.
 
    A StateField, not a ViewPlugin — block widgets change line geometry, and a
    plugin cannot be consulted before the viewport it would change has been
@@ -10,71 +11,80 @@
    widget follows.
    ================================================================== */
 
-import { EditorView, Decoration, WidgetType } from '@codemirror/view'
-import { StateField } from '@codemirror/state'
-import { syntaxTree } from '@codemirror/language'
-import { isRunnable, runBlockUI } from './runcode.js'
+import { Decoration, WidgetType } from '@codemirror/view'
+import { eachFence, fenceField } from './blocks.js'
+import { isRunnable, retirePainters, runButtonUI, runPanelUI } from './runcode.js'
+import { htmlButtonUI, htmlPanelUI, isHtmlRun } from './htmlrun.js'
 
-class RunBlockWidget extends WidgetType {
+/* An html block runs too — into a page rather than a process — and its
+   controls stand in the same two places, so the widgets below serve both and
+   only the UI a widget appends differs. */
+const buttonUI = (lang) => (isHtmlRun(lang) ? htmlButtonUI : runButtonUI)
+const panelUI = (lang) => (isHtmlRun(lang) ? htmlPanelUI : runPanelUI)
+
+/* Both widgets are equal while the block's text is unchanged, so typing
+   elsewhere in the note maps them rather than rebuilding them — and a running
+   block's panel is not torn down mid-stream by an edit three paragraphs away.
+   The widget owns its clicks, so the editor does not move the caret for them. */
+
+/** The button, standing at the right of the fence's header line. */
+class RunButtonWidget extends WidgetType {
   constructor (lang, code) { super(); this.lang = lang; this.code = code }
-
-  // Equal while the block's text is unchanged, so typing elsewhere in the note
-  // maps the widget rather than rebuilding it — and a running block's panel is
-  // not torn down mid-stream by an edit three paragraphs away.
   eq (other) { return other.lang === this.lang && other.code === this.code }
+  toDOM () {
+    const slot = document.createElement('span')
+    slot.className = 'tk-run-top'
+    slot.append(buttonUI(this.lang)(this.lang, this.code))
+    return slot
+  }
+  // Scrolling a block out of the viewport tears its widget down. The painter
+  // registered above outlives the element unless it is told not to.
+  destroy (dom) { retirePainters(dom) }
+  ignoreEvent () { return true }
+}
 
-  toDOM () { return runBlockUI(this.lang, this.code) }
-
-  // The widget owns its clicks; the editor should not move the caret for them.
+/** The output, under the closing fence. Hidden until the block has run. */
+class RunPanelWidget extends WidgetType {
+  constructor (lang, code) { super(); this.lang = lang; this.code = code }
+  // The language is part of the key: the same body under ```py and ```jl is
+  // two different runs, and a panel that compared only code would show one
+  // block's output under the other.
+  eq (other) { return other.lang === this.lang && other.code === this.code }
+  toDOM (view) { return panelUI(this.lang)(this.lang, this.code, 'tk-run', () => view.requestMeasure()) }
+  // A panel holds everything the block has printed; left registered, so does
+  // the painter that was drawing into it.
+  destroy (dom) { retirePainters(dom) }
   ignoreEvent () { return true }
 }
 
 function buildRunWidgets (state) {
   const widgets = []
-  const { doc } = state
 
-  syntaxTree(state).iterate({
-    enter: (node) => {
-      if (node.name !== 'FencedCode') return
+  eachFence(state, ({ node, first, lang, code }) => {
+    if (!isRunnable(lang) && !isHtmlRun(lang)) return
 
-      const first = doc.lineAt(node.from)
-      const last = doc.lineAt(node.to)
-      // Only a finished block gets a control: while the closing fence is still
-      // unwritten, the "block" is whatever happens to sit under the caret.
-      if (last.number <= first.number || !/^\s*(```|~~~)\s*$/.test(last.text)) return
+    /* The button goes at the end of the opening fence line, where the chip
+       already is; the CSS lifts it out of the text flow and over to the right,
+       so it costs the line no width and no height. */
+    widgets.push(
+      Decoration.widget({
+        widget: new RunButtonWidget(lang.toLowerCase(), code),
+        side: 1
+      }).range(first.to)
+    )
 
-      const lang = /^\s*(?:```|~~~)\s*([\w+-]+)/.exec(first.text)?.[1]
-      if (!isRunnable(lang)) return
-
-      const code = last.number - first.number < 2
-        ? ''
-        : doc.sliceString(doc.line(first.number + 1).from, doc.line(last.number - 1).to)
-
-      widgets.push(
-        Decoration.widget({
-          widget: new RunBlockWidget(lang.toLowerCase(), code),
-          block: true,
-          side: 1
-        }).range(node.to)
-      )
-    }
+    widgets.push(
+      Decoration.widget({
+        widget: new RunPanelWidget(lang.toLowerCase(), code),
+        block: true,
+        side: 1
+      }).range(node.to)
+    )
   })
 
-  return Decoration.set(widgets)
+  // Sorted: the two widgets per block are pushed in document order, but nested
+  // blocks are not, and an unsorted set throws.
+  return Decoration.set(widgets, true)
 }
 
-export const runBlocks = StateField.define({
-  create: buildRunWidgets,
-  update (deco, tr) {
-    // Rebuilt when the document moves — and when the parse does. A fresh note
-    // has no syntax tree yet at create(), and the parser delivers its progress
-    // through transactions of its own, so the tree changing hands is the one
-    // other signal there may be fences we have not seen. Widget eq() keeps the
-    // untouched ones alive across every rebuild.
-    if (tr.docChanged || syntaxTree(tr.state) !== syntaxTree(tr.startState)) {
-      return buildRunWidgets(tr.state)
-    }
-    return deco
-  },
-  provide: (field) => EditorView.decorations.from(field)
-})
+export const runBlocks = fenceField(buildRunWidgets)

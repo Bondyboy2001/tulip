@@ -14,11 +14,89 @@
  * still renders stretchy delimiters and spacing worse than KaTeX's own boxes.
  */
 
-import katex from 'katex'
-import 'katex/dist/katex.min.css'
-import { EditorView, Decoration, ViewPlugin, WidgetType } from '@codemirror/view'
+import { EditorView, Decoration, WidgetType } from '@codemirror/view'
+import { StateField } from '@codemirror/state'
+import { syntaxTree } from '@codemirror/language'
+import { inCode } from './blocks.js'
 
 /* ---------------------------------------------------------------- render */
+
+let katex = null
+let loadingKatex = null
+let loadingStyles = null
+
+function loadStyles () {
+  if (loadingStyles) return loadingStyles
+
+  const link = document.createElement('link')
+  link.rel = 'stylesheet'
+  link.href = new URL('katex.css', import.meta.url).href
+  link.dataset.tulipKatex = ''
+
+  loadingStyles = new Promise((resolve, reject) => {
+    link.addEventListener('load', resolve, { once: true })
+    link.addEventListener('error', () => {
+      loadingStyles = null
+      reject(new Error('KaTeX styles could not be loaded.'))
+    }, { once: true })
+  })
+  document.head.append(link)
+  return loadingStyles
+}
+
+function loadKatex () {
+  if (katex) return Promise.resolve(katex)
+  if (!loadingKatex) {
+    loadingKatex = Promise.all([import('katex'), loadStyles()]).then(([module]) => {
+      katex = module.default || module
+      return katex
+    }).catch((err) => {
+      loadingKatex = null
+      throw err
+    })
+  }
+  return loadingKatex
+}
+
+export async function prepareMath (text) {
+  if (!findMath(String(text || '')).length) return false
+  await loadKatex()
+  return true
+}
+
+const escapeMath = (text) => String(text)
+  .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+
+const LABEL = /\\label\s*\{([^{}]+)\}/
+const TAG = /\\tag\*?\s*\{([^{}]+)\}/
+const equationId = (label) => `eq-${encodeURIComponent(label).replaceAll('%', '_')}`
+
+/** Labels and the numbers/tags they display, in document order. */
+export function equationIndex (text) {
+  const labels = new Map()
+  let number = 0
+  for (const span of findMath(String(text || ''))) {
+    if (!span.display) continue
+    const found = LABEL.exec(span.tex)
+    if (!found) continue
+    number++
+    labels.set(found[1].trim(), {
+      label: found[1].trim(),
+      tag: TAG.exec(span.tex)?.[1]?.trim() || String(number)
+    })
+  }
+  return labels
+}
+
+function equationSource (tex, equations = null) {
+  const found = LABEL.exec(tex)
+  const label = found?.[1]?.trim() || ''
+  let source = String(tex || '').replace(/\\label\s*\{[^{}]+\}/g, '').trim()
+  const tag = label ? equations?.get(label)?.tag || TAG.exec(source)?.[1]?.trim() || '' : ''
+  if (label && tag && !TAG.test(source)) source += ` \\tag{${tag}}`
+  TAG.lastIndex = 0
+  return { source, label, tag }
+}
 
 /**
  * Never throws: a half-typed expression is the normal state of an editor, so a
@@ -26,6 +104,10 @@ import { EditorView, Decoration, ViewPlugin, WidgetType } from '@codemirror/view
  * than taking the surrounding render down with it.
  */
 function renderMath (tex, displayMode = false) {
+  if (!katex) {
+    loadKatex().catch(() => {})
+    return `<span class="math-pending">${escapeMath(tex)}</span>`
+  }
   return katex.renderToString(tex, {
     displayMode,
     throwOnError: false,
@@ -37,7 +119,14 @@ function renderMath (tex, displayMode = false) {
   })
 }
 
-function renderMathInto (el, tex, displayMode = false) {
+export function renderMathInto (el, tex, displayMode = false) {
+  if (!katex) {
+    el.textContent = tex
+    loadKatex().then(() => {
+      if (el.isConnected) renderMathInto(el, tex, displayMode)
+    }).catch(() => { el.classList.add('math-error') })
+    return el
+  }
   try {
     katex.render(tex, el, {
       displayMode,
@@ -62,6 +151,17 @@ function renderMathInto (el, tex, displayMode = false) {
  * from being read as maths.
  */
 export function mathPlugin (md) {
+  md.inline.ruler.before('escape', 'equation_ref', (state, silent) => {
+    const found = /^\\(eqref|ref)\{([^{}\n]+)\}/.exec(state.src.slice(state.pos))
+    if (!found) return false
+    if (!silent) {
+      const token = state.push('equation_ref', '', 0)
+      token.meta = { label: found[2].trim(), parens: found[1] === 'eqref' }
+    }
+    state.pos += found[0].length
+    return true
+  })
+
   md.inline.ruler.before('escape', 'math_inline', (state, silent) => {
     const { src, pos } = state
     if (src.charCodeAt(pos) !== 0x24) return false            // '$'
@@ -127,20 +227,43 @@ export function mathPlugin (md) {
     return true
   }, { alt: ['paragraph', 'blockquote', 'list'] })
 
-  md.renderer.rules.math_inline = (tokens, i) => renderMath(tokens[i].content, false)
-  md.renderer.rules.math_block = (tokens, i) =>
-    `<div class="math-block">${renderMath(tokens[i].content, true)}</div>`
+  md.renderer.rules.equation_ref = (tokens, i, _opts, env) => {
+    const { label, parens } = tokens[i].meta
+    const tag = env?.equations?.get(label)?.tag || label
+    const shown = parens ? `(${tag})` : tag
+    const id = equationId(label)
+    return `<a class="tk-eq-ref" href="#${id}" data-equation-ref="${md.utils.escapeHtml(label)}">` +
+      `${md.utils.escapeHtml(shown)}</a>`
+  }
+  md.renderer.rules.math_inline = (tokens, i) =>
+    renderMath(equationSource(tokens[i].content).source, false)
+  md.renderer.rules.math_block = (tokens, i, _opts, env) => {
+    const equation = equationSource(tokens[i].content, env?.equations)
+    const identity = equation.label
+      ? ` id="${equationId(equation.label)}" data-equation="${md.utils.escapeHtml(equation.label)}"`
+      : ''
+    return `<div class="math-block"${identity}>${renderMath(equation.source, true)}</div>`
+  }
 }
 
 /* -------------------------------------------------- live preview widget */
 
 class MathWidget extends WidgetType {
-  constructor (tex, display) { super(); this.tex = tex; this.display = display }
-  eq (other) { return other.tex === this.tex && other.display === this.display }
+  constructor (tex, display, label = '') {
+    super()
+    this.tex = tex
+    this.display = display
+    this.label = label
+  }
+
+  eq (other) {
+    return other.tex === this.tex && other.display === this.display && other.label === this.label
+  }
 
   toDOM () {
     const host = document.createElement('span')
     host.className = this.display ? 'tk-math tk-math-display' : 'tk-math'
+    if (this.label) host.dataset.equation = this.label
     renderMathInto(host, this.tex, this.display)
     return host
   }
@@ -152,19 +275,39 @@ class MathWidget extends WidgetType {
 /** Every $…$ and $$…$$ span in the document, in order. */
 export function findMath (text) {
   const spans = []
+
+  /* Display maths is a block, and the reading view's block rule treats it as
+     one: `$$` only opens when it begins its line (three spaces of indent at
+     most — a fourth makes indented code) and only closes when it ends one.
+     The same two tests here, or `a $$x$$ b` would centre itself in the editor
+     while staying literal text in the reading view. */
+  const opensLine = (i) => {
+    const from = text.lastIndexOf('\n', i - 1) + 1
+    return /^ {0,3}$/.test(text.slice(from, i))
+  }
+  const closesLine = (i) => {
+    const to = text.indexOf('\n', i)
+    return /^[ \t]*$/.test(text.slice(i, to === -1 ? text.length : to))
+  }
+
   let i = 0
   while (i < text.length) {
     const ch = text[i]
     if (ch !== '$' || (i > 0 && text[i - 1] === '\\')) { i++; continue }
 
     const display = text[i + 1] === '$'
+    /* A `$$` that does not begin its line is no opener at all: the reading
+       view leaves the first `$` as text and lets the second try its luck as
+       an inline delimiter, so the same step is taken here. */
+    if (display && !opensLine(i)) { i++; continue }
     const open = display ? i + 2 : i + 1
     if (!display && /\s/.test(text[open] || ' ')) { i++; continue }
     const close = display ? '$$' : '$'
     let end = open
 
     while (end < text.length) {
-      if (text.startsWith(close, end) && text[end - 1] !== '\\') break
+      if (text.startsWith(close, end) && text[end - 1] !== '\\' &&
+          (!display || closesLine(end + 2))) break
       if (!display && text[end] === '\n') break
       end++
     }
@@ -184,46 +327,97 @@ export function findMath (text) {
   return spans
 }
 
+/* ------------------------------------------------------------- the cache */
+
+/**
+ * `findMath` is a whole-document scan, and three callers want the same answer
+ * about the same document: this layer, on every keystroke *and every cursor
+ * move*; and the money layer, which scans for prices and then needs to know
+ * which of them fall inside maths. Uncached that was three passes over the
+ * entire note per keystroke — and a full pass merely to move the caret.
+ *
+ * Keyed on the `Text` object rather than on a string. CodeMirror shares it
+ * between states whenever the document itself did not change, so identity is
+ * exactly the question being asked: a selection-only update reuses the scan,
+ * and only a real edit pays for another.
+ *
+ * One entry is enough — the interesting case is many updates against one
+ * document, not alternation between two.
+ */
+let cache = { doc: null, text: '', spans: null }
+
+function fill (doc) {
+  if (cache.doc !== doc) {
+    const text = doc.toString()
+    cache = { doc, text, spans: findMath(text) }
+  }
+  return cache
+}
+
+/** The document as a string, computed once per version. */
+export const docText = (doc) => fill(doc).text
+
+/** Every maths span in the document, computed once per version. */
+export const mathSpans = (doc) => fill(doc).spans
+
 /**
  * Renders maths in the editing view, and steps out of the way — showing the
  * raw TeX — whenever the cursor is inside the expression, which is the same
  * rule the rest of the live preview follows.
+ *
+ * A StateField rather than a ViewPlugin: a `$$…$$` block spans line breaks,
+ * and CodeMirror refuses replace decorations across a line break when they
+ * come from a plugin — opening a note with display maths threw and left the
+ * whole view broken. Same rule the diagrams and the tables follow.
  */
-export const mathPreview = ViewPlugin.fromClass(
-  class {
-    constructor (view) { this.decorations = this.build(view) }
+function buildMathDeco (state) {
+  const tree = syntaxTree(state)
+  const ranges = []
+  const equations = equationIndex(docText(state.doc))
 
-    update (update) {
-      if (update.docChanged || update.selectionSet || update.viewportChanged) {
-        this.decorations = this.build(update.view)
-      }
+  /* In code, `$` is a shell variable or a string literal, and the reading
+     view never typesets there. The test is asked of the tree rather than of
+     the span cache, which is keyed on the document alone — money.js makes
+     the same call, of the same helper. */
+  for (const span of mathSpans(state.doc)) {
+    if (inCode(tree, span.from)) continue
+
+    const touched = state.selection.ranges.some(
+      (r) => r.to >= span.from && r.from <= span.to
+    )
+    if (touched) {
+      /* The caret is in it, so the source is showing rather than the
+         typeset result — and TeX is not prose. Without this the checker
+         underlines every `\alpha` and `\frac` the moment you edit one. */
+      ranges.push(
+        Decoration.mark({ attributes: { spellcheck: 'false' } })
+          .range(span.from, span.to)
+      )
+      continue
     }
 
-    build (view) {
-      const { state } = view
-      const ranges = []
-      const text = state.doc.toString()
-
-      for (const span of findMath(text)) {
-        if (span.to < view.viewport.from || span.from > view.viewport.to) continue
-
-        const touched = state.selection.ranges.some(
-          (r) => r.to >= span.from && r.from <= span.to
-        )
-        if (touched) continue
-
-        ranges.push(
-          Decoration.replace({ widget: new MathWidget(span.tex, span.display) })
-            .range(span.from, span.to)
-        )
-      }
-      return Decoration.set(ranges, true)
-    }
-  },
-  {
-    decorations: (v) => v.decorations,
-    provide: () => EditorView.atomicRanges.of(
-      (view) => view.plugin(mathPreview)?.decorations ?? Decoration.none
+    const equation = equationSource(span.tex, equations)
+    ranges.push(
+      Decoration.replace({ widget: new MathWidget(equation.source, span.display, equation.label) })
+        .range(span.from, span.to)
     )
   }
-)
+  return Decoration.set(ranges, true)
+}
+
+export const mathPreview = StateField.define({
+  create: buildMathDeco,
+  update (deco, tr) {
+    if (tr.docChanged || tr.selection) return buildMathDeco(tr.state)
+    /* The parse advancing can move a span into or out of code — and a freshly
+       opened note has no tree at create() at all. The parser reports its
+       progress through transactions of its own; this catches them. Widget
+       eq() keeps the untouched renders alive across every rebuild. */
+    if (syntaxTree(tr.state) !== syntaxTree(tr.startState)) return buildMathDeco(tr.state)
+    return deco
+  },
+  provide: (field) => [
+    EditorView.decorations.from(field),
+    EditorView.atomicRanges.of((view) => view.state.field(field))
+  ]
+})
