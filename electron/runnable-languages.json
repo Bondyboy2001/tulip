@@ -1,0 +1,14 @@
+{
+  "_comment": "Which fence languages run, and which runner each one names. The main process builds its RUNNERS table from these aliases and the renderer decides whether to draw a Run button from the same list, so a language can never run from one side and be invisible on the other. Only the aliases live here — what a runner actually spawns is code, and stays in electron/main.js.",
+  "runners": {
+    "node": ["js", "javascript", "node", "mjs", "cjs"],
+    "python": ["py", "python", "python3"],
+    "sh": ["sh", "shell"],
+    "bash": ["bash"],
+    "zsh": ["zsh"],
+    "julia": ["jl", "julia"],
+    "go": ["go", "golang"],
+    "lean": ["lean", "lean4"],
+    "rust": ["rs", "rust"]
+  }
+}

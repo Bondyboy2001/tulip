@@ -1,0 +1,31 @@
+{
+  "_comment": [
+    "What a vault is made of, in the one place both processes read it from.",
+    "electron/main.js requires this; src/vault-paths.js imports it and hands",
+    "the renderer the matchers built from it. A fact stated here once cannot",
+    "have the two sides disagreeing about it — which is what a note the tree",
+    "shows and the editor will not open comes down to.",
+    "",
+    "languageFlagPattern is a source string rather than a literal because a",
+    "regular expression is not a JSON type; both readers build it with the `u`",
+    "flag, which is what makes the \\u{...} escapes mean codepoints."
+  ],
+  "noteExtensions": [".md", ".markdown", ".mdown"],
+  "pdfExtension": ".pdf",
+  "siteExtension": ".website",
+  "languageTableSuffix": ".language.md",
+  "languageFlagPattern": "^([\\u{1F1E6}-\\u{1F1FF}]{2})\\s*",
+  "legacyLanguageTableNames": [
+    "Vocabulary.md",
+    "Sounds.md",
+    "Grammar.md"
+  ],
+  "languageTableTemplates": {
+    "vocabulary": "| Word | English | Example | Notes |\n| --- | --- | --- | --- |\n|  |  |  |  |\n",
+    "sounds": "| Letter / combination | Sound | Example | Notes |\n| --- | --- | --- | --- |\n|  |  |  |  |\n",
+    "grammar": "| Pattern / rule | Meaning / use | Example | Notes |\n| --- | --- | --- | --- |\n|  |  |  |  |\n"
+  },
+  "attachmentDirectory": ".attachments",
+  "annotationDirectory": ".annotations",
+  "pdfTextSuffix": ".txt"
+}

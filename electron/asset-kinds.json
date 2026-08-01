@@ -1,7 +1,36 @@
 {
-  "_comment": "The one list of what a note can embed, and how each kind is shown. Read by electron/main.js (require) and by src/assets.js (bundled in at build time), so adding a format is one edit. Lives in electron/ because packaging ships only electron/ and dist/.",
+  "_comment": "The one list of what a note can embed, and how each kind is shown. Read by electron/main.js (require) and by src/assets.js (bundled in at build time), so adding a format is one edit. Lives in electron/ because packaging ships only electron/ and dist/. Both readers skip the underscored keys.",
   "image": ["png", "jpg", "jpeg", "gif", "webp", "avif", "svg", "bmp", "ico", "heic"],
   "video": ["mp4", "webm", "mov", "m4v", "ogv"],
   "audio": ["mp3", "wav", "m4a", "aac", "flac", "ogg", "opus"],
-  "file": ["pdf"]
+  "pdf": ["pdf"],
+  "file": ["bib"],
+
+  "_mime_comment": "What tulip-file:// serves each of the above as. A range request cannot be answered by net.fetch, which is what guesses the type from the extension everywhere else, so that guess is written down here — and because the replies also carry nosniff, an extension missing from this table is a <video> or <img> the browser refuses rather than one it recovers. Kept beside the extension lists so adding a format shows both edits at once.",
+  "_mime": {
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "gif": "image/gif",
+    "webp": "image/webp",
+    "avif": "image/avif",
+    "svg": "image/svg+xml",
+    "bmp": "image/bmp",
+    "ico": "image/x-icon",
+    "heic": "image/heic",
+    "mp4": "video/mp4",
+    "webm": "video/webm",
+    "mov": "video/quicktime",
+    "m4v": "video/x-m4v",
+    "ogv": "video/ogg",
+    "mp3": "audio/mpeg",
+    "wav": "audio/wav",
+    "m4a": "audio/mp4",
+    "aac": "audio/aac",
+    "flac": "audio/flac",
+    "ogg": "audio/ogg",
+    "opus": "audio/ogg",
+    "pdf": "application/pdf",
+    "bib": "text/plain"
+  }
 }

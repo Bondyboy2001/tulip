@@ -1,0 +1,156 @@
+{
+  "comment": "The three CLIs the copilot can be, and what they offer before they are asked. Shared because both processes need it: electron/ai.js decides what it will spawn, src/models.js decides what the dropdown shows, and two copies of that is how the two disagree. `offerByDefault` is false for opencode alone — its catalogue is an account property running to several hundred entries, which is what the Models-offered setting exists to keep out of the list. The Claude versions in the labels are the one thing here that goes stale on its own: the id is an alias that follows the newest model of that name, so when Anthropic ships the next Opus this label has to be moved by hand. `context` is the model's context window, used to draw how much of it a conversation has spent; Codex and opencode publish their own, so only Claude's is stated here.",
+  "providers": [
+    {
+      "id": "claude",
+      "label": "Claude",
+      "command": "claude",
+      "offerByDefault": true,
+      "default": "opus"
+    },
+    {
+      "id": "codex",
+      "label": "Codex",
+      "command": "codex",
+      "offerByDefault": true,
+      "default": "gpt-5.6-sol"
+    },
+    {
+      "id": "opencode",
+      "label": "opencode",
+      "command": "opencode",
+      "offerByDefault": false,
+      "default": ""
+    }
+  ],
+  "fallbacks": {
+    "claude": [
+      {
+        "id": "opus",
+        "label": "Opus 5",
+        "effort": "high",
+        "efforts": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "context": 1000000
+      },
+      {
+        "id": "sonnet",
+        "label": "Sonnet 5",
+        "effort": "high",
+        "efforts": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "context": 1000000
+      },
+      {
+        "id": "haiku",
+        "label": "Haiku 4.5",
+        "effort": "high",
+        "efforts": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "context": 200000
+      },
+      {
+        "id": "fable",
+        "label": "Fable 5",
+        "effort": "high",
+        "efforts": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "context": 1000000
+      }
+    ],
+    "codex": [
+      {
+        "id": "gpt-5.6-sol",
+        "label": "GPT-5.6-Sol",
+        "effort": "low",
+        "efforts": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "context": 272000
+      },
+      {
+        "id": "gpt-5.6-terra",
+        "label": "GPT-5.6-Terra",
+        "effort": "low",
+        "efforts": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "context": 272000
+      },
+      {
+        "id": "gpt-5.6-luna",
+        "label": "GPT-5.6-Luna",
+        "effort": "low",
+        "efforts": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "context": 272000
+      }
+    ],
+    "opencode": []
+  },
+  "efforts": [
+    {
+      "id": "none",
+      "label": "Off"
+    },
+    {
+      "id": "minimal",
+      "label": "Minimal"
+    },
+    {
+      "id": "low",
+      "label": "Low"
+    },
+    {
+      "id": "medium",
+      "label": "Medium"
+    },
+    {
+      "id": "thinking",
+      "label": "Thinking"
+    },
+    {
+      "id": "high",
+      "label": "High"
+    },
+    {
+      "id": "xhigh",
+      "label": "Higher"
+    },
+    {
+      "id": "max",
+      "label": "Max"
+    },
+    {
+      "id": "ultra",
+      "label": "Ultra"
+    }
+  ]
+}

@@ -9,14 +9,15 @@
     "build": "node build.mjs",
     "dev": "node build.mjs --watch",
     "start": "npm run build && electron .",
-    "app": "electron ."
+    "app": "electron .",
+    "tidy": "node scripts/tidy-vault.mjs"
   },
   "allowScripts": {
     "esbuild": true,
     "electron": true
   },
   "devDependencies": {
-    "electron": "^43.2.0",
+    "electron": "43.2.0",
     "esbuild": "^0.28.1"
   },
   "dependencies": {
@@ -31,6 +32,9 @@
     "@lezer/highlight": "^1.2.3",
     "katex": "^0.18.1",
     "markdown-it": "^14.3.0",
+    "markdown-it-footnote": "^4.0.0",
+    "mermaid": "^11.16.0",
+    "pdfjs-dist": "^6.1.200",
     "simple-icons": "^16.27.1"
   }
 }
