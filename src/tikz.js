@@ -20,8 +20,8 @@
 import { WidgetType } from '@codemirror/view'
 import { Facet } from '@codemirror/state'
 import { embedSpec, renderEmbed } from './assets.js'
-import { el, pictureBlocks, renderedBlock } from './blocks.js'
-import { artefactRun } from './runcode.js'
+import { el, pictureBlocks } from './blocks.js'
+import { artefactRun, attachArtefactBlock } from './runcode.js'
 
 const api = window.tulip
 
@@ -48,25 +48,24 @@ function pictureFor (path, onLoad) {
 }
 
 /**
- * One block's rendering: the state behind it, a Draw/Stop button, the picture,
- * and what went wrong when it did. Both views build their own frame around
- * this, because a code block in the reading view and a widget under a fence in
- * the editing view are different shapes — but neither should have its own idea
- * of what "drawn" means.
+ * What drawing this block *is* — the run behind it, and the words the control
+ * wears while it goes. Everything else about a picture belongs to the view it
+ * stands in, and the two views are different shapes: a code block in the
+ * reading view, a widget under a fence in the editing view. This is the part
+ * that must not differ between them.
  *
- * @param {string} code       the picture's source
- * @param {string} noteName   which note's attachments it belongs to
- * @param {(path: string|null) => void} onPicture  a drawing arrived, or went
- * @param {() => void} [onPaint]  the status changed shape; re-measure
+ * The words are here rather than on the button because starting a draw and
+ * stopping one is the run gesture, and spelling it out beside blocks whose own
+ * runs are a triangle made two different-looking things out of one. What the
+ * words said is in the tooltip.
+ *
+ * @param {string} code      the picture's source
+ * @param {string} noteName  which note's attachments it belongs to
  */
-function tikzRun (code, noteName, onPicture, onPaint) {
-  /* The same control a runnable block and a manim scene get — the artefact run
-     in runcode.js is all three of them. Starting a draw and stopping one is the
-     run gesture, and spelling it out in words beside blocks whose own runs are
-     a triangle made two different-looking things out of one. What the words
-     said is in the tooltip. */
-  return artefactRun(runs, `${noteName}\n${code}`, {
-    statusClass: 'tikz-status',
+function tikzSpec (code, noteName) {
+  return {
+    runs,
+    key: `${noteName}\n${code}`,
     words: {
       busy: 'Drawing…',
       keep: 1200,
@@ -78,31 +77,49 @@ function tikzRun (code, noteName, onPicture, onPaint) {
       first: 'Draw this picture with TeX'
     },
     start: () => api.tikz.render(noteName, code),
-    lookup: () => api.tikz.lookup(noteName, code),
+    lookup: () => api.tikz.lookup(noteName, code)
+  }
+}
+
+/**
+ * The same run, for a view that builds its own frame — the editing view's
+ * widget, which is a picture under the fence rather than a block that becomes
+ * one.
+ *
+ * @param {(path: string|null) => void} onPicture  a drawing arrived, or went
+ * @param {() => void} [onPaint]  the status changed shape; re-measure
+ */
+function tikzRun (code, noteName, onPicture, onPaint) {
+  const { runs: table, key, ...spec } = tikzSpec(code, noteName)
+  return artefactRun(table, key, {
+    ...spec,
+    statusClass: 'tikz-status',
     onPath: onPicture,
     onPaint
   })
 }
 
 /**
- * The reading view's form: the drawing stands where the block does, with Draw
- * beside the source when switched back.
+ * The reading view's form: the drawing stands where the block does, and draws
+ * itself the first time the note is read.
+ *
+ * A picture is what the block *is* — the reading view is where you go to read
+ * the note rather than its source, and a page of TeX with a button on it is
+ * neither. Nothing is repeated for it: the drawing is a file in the vault named
+ * after a hash of the code, so this costs a TeX run once per block ever written
+ * and nothing at all on every reading after that. The button stays for the
+ * second go, and for the block that failed.
  *
  * @param {HTMLElement} wrap  the .code-wrap holding the source
  * @param {HTMLElement} head  the .code-head the Draw button belongs in
  */
 export function attachTikz (wrap, head, code, { noteName }) {
-  const view = renderedBlock(wrap, 'tikz')
-
-  /* Until there is a drawing the block is the block, Draw button and all; once
-     there is, the picture takes its place entirely. */
-  const run = tikzRun(code, noteName, (path) => {
-    if (path) view.stage.replaceChildren(pictureFor(path))
-    view.settle(!!path)
+  attachArtefactBlock(wrap, head, {
+    ...tikzSpec(code, noteName),
+    kind: 'tikz',
+    make: (path) => pictureFor(path),
+    auto: true
   })
-
-  view.figure.after(run.status)
-  head.append(run.button)
 }
 
 /* ------------------------------------------------- the editing view */

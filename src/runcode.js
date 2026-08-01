@@ -10,7 +10,7 @@
    printed the last time you ran it.
    ================================================================== */
 
-import { el, svgIcon } from './blocks.js'
+import { el, renderedBlock, svgIcon } from './blocks.js'
 import { runners as RUNNERS } from '../electron/runnable-languages.json'
 
 const api = window.tulip
@@ -320,12 +320,13 @@ function artefactStatus (className) {
  * @param {() => void} [spec.willStart]    about to run
  * @param {(started: object|null) => void} [spec.didStart]  it started
  * @param {(hit: object) => void} [spec.onHit]  the lookup found one
+ * @param {() => void} [spec.onMiss]  the lookup found nothing on disk
  * @param {(state: object) => void} [spec.onPaint]  the status changed shape; re-measure
- * @returns {{button: HTMLElement, status: HTMLElement}}
+ * @returns {{button: HTMLElement, status: HTMLElement, begin: () => Promise<void>}}
  */
 export function artefactRun (runs, key, {
   statusClass, words, titles, start, lookup, onPath,
-  alive, willStart, didStart, onHit, onPaint
+  alive, willStart, didStart, onHit, onMiss, onPaint
 }) {
   const state = adoptRun(runs, key)
   const status = artefactStatus(statusClass)
@@ -362,8 +363,11 @@ export function artefactRun (runs, key, {
     onPaint?.(state)
   })
 
-  button.addEventListener('click', async () => {
-    if (state.status === 'running') { requestStop(state); return }
+  /* Starting it, as against asking for it to be started. A caller that renders
+     the block without being clicked — see attachArtefactBlock's `auto` — goes
+     through the same door the button does, so there is one path into a run. */
+  const begin = async () => {
+    if (state.status === 'running') return
     willStart?.()
     /* Awaited into a name of its own, rather than straight into the argument of
        `didStart?.()`: an optional call whose callee is nullish never evaluates
@@ -371,22 +375,112 @@ export function artefactRun (runs, key, {
        started no run either, and its button did nothing at all. */
     const started = await launch(state, start)
     didStart?.(started)
+  }
+
+  button.addEventListener('click', () => {
+    if (state.status === 'running') { requestStop(state); return }
+    begin()
   })
 
   paint()
 
   /* Already rendered? Then the artefact is what this block is, without anything
-     being run at all. */
+     being run at all — and if it is not, whoever wanted it rendered on sight is
+     told so here, once the disk has answered. */
   lookup()
     .then((hit) => {
-      if (!hit?.path || alive?.() === false) return
+      if (alive?.() === false) return
+      if (!hit?.path) { onMiss?.(); return }
       onHit?.(hit)
       settle(hit.path)
       paint()
     })
     .catch(() => {})
 
-  return { button, status }
+  return { button, status, begin }
+}
+
+/* Blocks whose render has been asked for on sight this session, so a note read
+   twice does not run TeX twice — and, more to the point, so a block that cannot
+   render at all is attempted once rather than on every repaint of the note.
+   The button is still there for a second go. */
+const askedFor = new Set()
+
+/**
+ * The reading view's shape for a block that renders to a file — a scene, a
+ * picture. The shell, the control, the status, and what becomes of the artefact
+ * when there is one.
+ *
+ * Manim and TikZ had written this out twice: the shell from blocks.js, the run
+ * from artefactRun above, the status after the figure and the button in the
+ * head — in that order, because any other order puts the status inside the
+ * frame it is meant to stand under. Only three things ever differed, and they
+ * are the three arguments below: what the artefact becomes on the page, the
+ * words on the control, and whether the block renders itself when it is read.
+ *
+ * `auto` is for a render measured in seconds. A picture is what the block *is*,
+ * so a reader should not have to ask for one — but a scene costs minutes of a
+ * machine's attention, and starting that unbidden because someone opened a note
+ * is not a thing to do to anybody. That block keeps its button.
+ *
+ * @param {HTMLElement} wrap  the .code-wrap holding the source
+ * @param {HTMLElement} head  the .code-head the control belongs in
+ * @param {object} spec
+ * @param {Map} spec.runs      the caller's own in-flight table
+ * @param {string} spec.key    note and code together — see adoptRun
+ * @param {string} spec.kind   the figure's class; its stage and status follow it
+ * @param {(path: string) => Element} spec.make  the artefact, as something to show
+ * @param {boolean} [spec.auto]  render it when the note is read, not when asked
+ * @param {(started: object|null) => void} [spec.onStarted]
+ * @param {(hit: object) => void} [spec.onFound]
+ * @returns {{view: object, run: object}}
+ */
+export function attachArtefactBlock (wrap, head, {
+  runs, key, kind, words, titles, start, lookup, make,
+  auto = false, onStarted, onFound
+}) {
+  const view = renderedBlock(wrap, kind)
+  const transcript = Boolean(words.transcript)
+
+  const run = artefactRun(runs, key, {
+    statusClass: `${kind}-status`,
+    words,
+    titles,
+    start,
+    lookup,
+    onPath: (path) => {
+      if (path) {
+        view.stage.replaceChildren(make(path))
+        view.settle(true)
+        return
+      }
+      /* A transcript is the whole of what a failed render has to say, and it is
+         standing where the block was; showing the source again would take it
+         away at the moment it is worth reading. A block without one has nothing
+         to show but its source, so it goes back to that. */
+      if (!transcript) view.settle(false)
+    },
+    // The reading view can be rebuilt under a render — a note switch and back —
+    // and a lookup landing afterwards must not write into the detached copy.
+    alive: () => wrap.isConnected,
+    // The transcript takes the block's place while the render works, whether
+    // this attachment started it or adopted it from the one before.
+    willStart: transcript ? view.hide : undefined,
+    onPaint: transcript
+      ? (state) => { if (state.status === 'running') view.hide() }
+      : undefined,
+    onMiss: () => {
+      if (!auto || askedFor.has(key) || !wrap.isConnected) return
+      askedFor.add(key)
+      run.begin()
+    },
+    didStart: onStarted,
+    onHit: onFound
+  })
+
+  view.figure.after(run.status)
+  head.append(run.button)
+  return { view, run }
 }
 
 /**

@@ -116,8 +116,10 @@ brings the equation on screen and washes it in the accent colour, leaving the
 caret where it was.
 
 **Pictures that are drawn, not embedded.** A ```` ```tikz ```` block is a
-picture: press Draw and TeX renders it into the vault as an `.svg`, and from
-then on both views show the drawing where the code was. A ```` ```manim ````
+picture: Reading view draws it the first time it reads one, TeX renders it into
+the vault as an `.svg`, and from then on both views show the drawing where the
+code was — a block already drawn costs nothing to read again. Editing view keeps
+its Draw button, and so does a block whose TeX failed. A ```` ```manim ````
 block is the same bargain for a scene, rendering to an `.mp4`. Both are named
 after a hash of the block, so a note that has been drawn opens with its
 pictures already in place and an edit is what asks for a new one. TikZ needs a

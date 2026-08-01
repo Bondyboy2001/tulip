@@ -17,8 +17,7 @@
    ================================================================== */
 
 import { embedSpec, renderEmbed } from './assets.js'
-import { renderedBlock } from './blocks.js'
-import { artefactRun } from './runcode.js'
+import { attachArtefactBlock } from './runcode.js'
 
 const api = window.tulip
 
@@ -68,17 +67,18 @@ function videoFor (path) {
  * @param {{noteName: string, scene: string}} ctx
  */
 export function attachManim (wrap, head, code, { noteName, scene }) {
-  /* The shared rendered-block shell puts the video where the source was and
-     yields the whole space to the transcript while Manim works. */
-  const view = renderedBlock(wrap, 'manim')
+  /* The shell, the control, the status and the video's place in them are the
+     same arrangement a tikz picture stands in, and are runcode's — adopting a
+     render already in flight, retiring it once shown, finding one already on
+     disk. Only what is below is Manim's.
 
-  /* The same control a runnable block and a tikz picture get: starting a render
-     and stopping one is the run gesture, and the machinery behind it — adopting
-     a render already in flight, retiring it once shown, finding one already on
-     disk — is runcode's, not this file's. Only the words and the two api calls
-     are Manim's. */
-  const run = artefactRun(runs, `${noteName}\n${code}`, {
-    statusClass: 'manim-status',
+     No `auto`: a scene is minutes of a machine's attention, and starting that
+     because somebody opened a note is not a thing to do to anybody. A picture
+     is seconds, and draws itself. */
+  attachArtefactBlock(wrap, head, {
+    runs,
+    key: `${noteName}\n${code}`,
+    kind: 'manim',
     words: {
       busy: 'Rendering…',
       keep: 1500,
@@ -95,31 +95,11 @@ export function attachManim (wrap, head, code, { noteName, scene }) {
     },
     start: () => api.manim.render(noteName, code, scene),
     lookup: () => api.manim.lookup(noteName, code, scene),
-    /* A render that ends hands back the path it wrote, and the video takes the
-       transcript's place. With no path, onPath deliberately does nothing so
-       the full failure remains visible. */
-    onPath: (path) => {
-      if (!path) return
-      view.stage.replaceChildren(videoFor(path))
-      view.settle(true)
-    },
-    // The reading view can be rebuilt under a render — a note switch and back —
-    // and a lookup landing afterwards must not write into the detached copy.
-    alive: () => wrap.isConnected,
-    // A fresh attachment can adopt a render started by the previous reading
-    // view, so the transcript mode is also asserted by every live paint.
-    onPaint: (state) => { if (state.status === 'running') view.hide() },
-    // The transcript takes the block's place while Manim works. If no video is
-    // produced it remains there with the full failure instead of snapping back
-    // to source and hiding the useful part.
-    willStart: view.hide,
+    make: videoFor,
     /* Manim picks the scene out of the block when the block did not name one,
        and says which it picked. Carried back so the next lookup and the next
        render ask about the same scene rather than guessing again. */
-    didStart: (started) => { if (started?.scene) scene = started.scene },
-    onHit: (hit) => { scene = hit.scene || scene }
+    onStarted: (started) => { if (started?.scene) scene = started.scene },
+    onFound: (hit) => { scene = hit.scene || scene }
   })
-
-  view.figure.after(run.status)
-  head.append(run.button)
 }
