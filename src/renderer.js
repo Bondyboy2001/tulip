@@ -2756,9 +2756,19 @@ const languageStudy = mountLanguageStudy({
     reveal: $('study-reveal'),
     answerActions: $('study-answer-actions'),
     again: $('study-again'),
-    got: $('study-got')
+    hard: $('study-hard'),
+    got: $('study-got'),
+    easy: $('study-easy'),
+    againWhen: $('study-again-when'),
+    hardWhen: $('study-hard-when'),
+    goodWhen: $('study-good-when'),
+    easyWhen: $('study-easy-when')
   },
   source: () => editor.state.doc.toString(),
+  /* Which note the cards belong to: a card's identity begins with it, so this
+     is what keeps one language's schedule apart from another's. */
+  notePath: () => state.current?.path || '',
+  api,
   onEmpty: toast
 })
 
@@ -4064,6 +4074,7 @@ const COMMANDS = [
   { id: 'themes', title: 'Change theme…' },
   { id: 'font-body', title: 'Change markdown font…' },
   { id: 'font-ui', title: 'Change interface font…' },
+  { id: 'study', title: 'Review due cards…', key: '⌃⌘S' },
   { id: 'lint-file', title: 'Lint current file' },
   { id: 'settings', title: 'Settings…', key: '⌘,' },
   { id: 'copilot', title: 'Toggle copilot', key: '⌘⇧A' }
@@ -5111,6 +5122,13 @@ function runCommand (id) {
     case 'outline': toggleOutline(); break
     case 'links': togglePane('links'); break
     case 'search': openOverlay('search'); break
+    case 'study':
+      /* From anywhere: if a language table is open it is that table's deck,
+         and otherwise the reader is told where a deck comes from rather than
+         being shown an overlay with nothing in it. */
+      if (state.current && isLanguageTablePath(state.current.path)) languageStudy.open()
+      else toast('Open a language table to review its cards.')
+      break
     case 'lint-file': lintFile(); break
     case 'orphaned-images': showOrphanedImages(); break
     case 'note-history':

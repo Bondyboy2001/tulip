@@ -425,10 +425,31 @@
       </button>
 
       <footer class="study-actions">
-        <button class="study-reveal" id="study-reveal" type="button">Show English</button>
+        <button class="study-reveal" id="study-reveal" type="button">Show answer</button>
+        <!-- Four answers, not two. "Got it" cannot tell a word you dredged up
+             from one you knew instantly, and those two deserve very different
+             next dates. Each button carries the interval it will schedule. -->
         <div class="study-answer-actions" id="study-answer-actions" hidden>
-          <button class="study-again" id="study-again" type="button">Again <kbd>←</kbd></button>
-          <button class="study-got" id="study-got" type="button">Got it <kbd>→</kbd></button>
+          <button class="study-again" id="study-again" type="button">
+            <span class="study-grade">Again</span>
+            <span class="study-when" id="study-again-when"></span>
+            <kbd>1</kbd>
+          </button>
+          <button class="study-hard" id="study-hard" type="button">
+            <span class="study-grade">Hard</span>
+            <span class="study-when" id="study-hard-when"></span>
+            <kbd>2</kbd>
+          </button>
+          <button class="study-got" id="study-got" type="button">
+            <span class="study-grade">Good</span>
+            <span class="study-when" id="study-good-when"></span>
+            <kbd>3</kbd>
+          </button>
+          <button class="study-easy" id="study-easy" type="button">
+            <span class="study-grade">Easy</span>
+            <span class="study-when" id="study-easy-when"></span>
+            <kbd>4</kbd>
+          </button>
         </div>
       </footer>
       <p class="study-hint">Space reveals the answer</p>

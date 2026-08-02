@@ -102,6 +102,16 @@ contextBridge.exposeInMainWorld('tulip', {
     }
   },
 
+  /* When each card comes back. The schedule is worked out in the renderer
+     (src/srs.js); this is only where the answers are kept — in the vault, so
+     they are backed up and synced with the notes they are about. */
+  review: {
+    all: () => ipcRenderer.invoke('review:all'),
+    record: (entries) => ipcRenderer.invoke('review:record', entries),
+    prune: (knownIds) => ipcRenderer.invoke('review:prune', knownIds),
+    history: () => ipcRenderer.invoke('review:history')
+  },
+
   /* What was typed but not yet saved, kept outside the vault so a crash cannot
      take it with the window. `list` answers with only the drafts that differ
      from the note on disk — see the handler in main. */

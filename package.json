@@ -10,7 +10,8 @@
     "dev": "node build.mjs --watch",
     "start": "npm run build && electron .",
     "app": "electron .",
-    "tidy": "node scripts/tidy-vault.mjs"
+    "tidy": "node scripts/tidy-vault.mjs",
+    "test:srs": "esbuild scripts/test-srs.mjs --bundle --format=esm --platform=node --outfile=node_modules/.cache/test-srs.mjs --log-level=error && node node_modules/.cache/test-srs.mjs"
   },
   "allowScripts": {
     "esbuild": true,

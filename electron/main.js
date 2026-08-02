@@ -13,6 +13,7 @@ const { spawn } = require('node:child_process')
 const { pathToFileURL } = require('node:url')
 const ai = require('./ai')
 const { TrustStore } = require('./trust-store')
+const { makeStore: makeReviewStore } = require('./review-store')
 const VAULT_CONTRACT = require('./vault-contract.json')
 const WEB_PARTITIONS = require('./web-partitions.json')
 
@@ -153,6 +154,11 @@ let mainWindow = null
 let vaultPath = null
 let watcher = null
 let trust = null
+
+/* The scheduler's memory. Reads `vaultPath` through a function rather than
+   being rebuilt on every vault switch: the store keys everything on the vault
+   it was asked about, and re-reads when that changes. */
+const review = makeReviewStore({ vault: () => vaultPath || '' })
 
 /* ---------------------------------------------------------------- config */
 
@@ -787,6 +793,11 @@ async function relocate (srcAbs, targetAbs) {
   noteSelfWrite(targetAbs)
   await fs.rename(srcAbs, targetAbs)
   await carryAnnotations(rel(srcAbs), rel(targetAbs))
+  /* A card's identity begins with the path of the note it came from, so a
+     rename that did not carry the review state would silently reset every word
+     in the table to never-seen — the same loss as throwing the history away,
+     and harder to notice, because all the words are still there. */
+  await review.relocate(rel(srcAbs), rel(targetAbs)).catch(() => {})
   const rewritten = await followMoves(moves)
   return { path: rel(targetAbs), links: rewritten.length, rewritten }
 }
@@ -1367,6 +1378,10 @@ function buildMenu () {
         { label: 'Jump to Heading', click: () => send('menu', 'headings') },
         { label: 'Command Palette', accelerator: 'Cmd+P', click: () => send('menu', 'commands') },
         { type: 'separator' },
+        // Study had no key, no menu item and no palette entry — the one way in
+        // was a button that only appears while a language table is open.
+        { label: 'Review Due Cards', accelerator: 'Ctrl+Cmd+S', click: () => send('menu', 'study') },
+        { type: 'separator' },
         { label: 'Toggle Sidebar', accelerator: 'Cmd+B', click: () => send('menu', 'sidebar') },
         // The old key still works. A menu item carries one accelerator, so the
         // second one needs a twin of its own, kept out of the menu.
@@ -1666,6 +1681,11 @@ ipcMain.handle('file:delete', async (_e, p) => {
       await shell.trashItem(sidecar)
     } catch { /* not worth a dialog */ }
   }
+
+  /* And the review history of anything that was a language table. Deliberate
+     and unguarded, unlike `prune`: this is somebody saying the note is gone,
+     not a scan concluding it. */
+  await review.remove(p).catch(() => {})
   return true
 })
 
@@ -3515,6 +3535,34 @@ ipcMain.handle('ai:history:save', async (_e, history) => {
        the only trace was this console line. */
     throw new Error(err.message || 'the history could not be written')
   }
+})
+
+/* -------------------------------------------------------- review state
+
+   The scheduler's side of the study surface. Everything about *when* a card
+   comes back is decided in src/srs.js, in the renderer; this only keeps the
+   answers. See electron/review-store.js for why it lives in the vault and for
+   the wipe that `prune`'s guard exists to prevent.
+   ================================================================== */
+
+ipcMain.handle('review:all', async () => {
+  if (!vaultPath) return {}
+  return review.all()
+})
+
+ipcMain.handle('review:record', async (_e, entries) => {
+  if (!vaultPath) return { ok: false }
+  return review.record(entries)
+})
+
+ipcMain.handle('review:prune', async (_e, knownIds) => {
+  if (!vaultPath) return { pruned: 0, refused: false }
+  return review.prune(knownIds)
+})
+
+ipcMain.handle('review:history', async () => {
+  if (!vaultPath) return []
+  return review.history()
 })
 
 /* ------------------------------------------------------------- drafts
