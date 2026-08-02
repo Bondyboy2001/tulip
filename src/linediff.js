@@ -76,6 +76,8 @@ function lineDiff (a, b, origin = 1) {
  * edits collapse to a marker, so a note with two small changes at either end
  * is two small changes and not nine thousand lines of agreement.
  */
+export { lineDiff }
+
 export function fileDiff (before, after, { budget = 4000 } = {}) {
   const a = String(before ?? '').split('\n')
   const b = String(after ?? '').split('\n')

@@ -95,9 +95,31 @@ function findTables (state) {
   const tables = []
   const total = state.doc.lines
 
+  /* Which fence the scan is inside, if any. Without this a table written
+     *inside* a code block became a live editable grid in the editing view
+     while the reading view — where markdown-it's fence rule has already
+     swallowed the interior — correctly showed it as code. Typing in one of
+     those cells wrote table edits into the body of the fence. Tracked the same
+     way `headings` tracks it, and by the same rule: a fence closes only on its
+     own character, so ``` does not end a ~~~ block. */
+  let fence = null
+
   for (let n = 1; n < total; n++) {
     const head = state.doc.line(n)
+
+    const marker = /^\s{0,3}(`{3,}|~{3,})/.exec(head.text)
+    if (marker) {
+      if (!fence) fence = marker[1][0]
+      else if (marker[1][0] === fence) fence = null
+      continue
+    }
+    if (fence) continue
+
     if (!head.text.includes('|')) continue
+    /* Four spaces in is an indented code block, which markdown-it's table rule
+       refuses for the same reason — the delimiter pattern below allows leading
+       whitespace and would otherwise take one. */
+    if (/^ {4,}|^\t/.test(head.text)) continue
 
     const delimiter = state.doc.line(n + 1)
     if (!DELIMITER.test(delimiter.text) || !delimiter.text.includes('-')) continue
@@ -112,6 +134,9 @@ function findTables (state) {
     for (let m = n + 2; m <= total; m++) {
       const row = state.doc.line(m)
       if (!row.text.includes('|') || !row.text.trim()) break
+      // A fence opening ends the table, whatever else is on the line: the rest
+      // of it is code, and the reading view stops the table here too.
+      if (/^\s{0,3}(`{3,}|~{3,})/.test(row.text)) break
       rows.push({ line: m, cells: splitRow(row.text, row.from) })
       last = m
     }

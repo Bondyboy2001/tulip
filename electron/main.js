@@ -946,6 +946,8 @@ async function writeAtomic (abs, content, { durable = true } = {}) {
 }
 
 function watchVault () {
+  clearTimeout(watchRetryTimer)
+  watchRetryTimer = null
   if (watcher) { watcher.close(); watcher = null }
   if (!vaultPath) return
 
@@ -972,24 +974,66 @@ function watchVault () {
       timer = setTimeout(() => {
         const paths = [...changed]
         changed = new Set()
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('vault:changed', { paths })
-        }
+        notifyVaultChanged(paths)
         /* A PDF dropped into the vault from Finder arrives this way and no
            other. Cheap to run on every quiet moment — a stat per document, and
            the app's own writes never reach here to start with. */
         sweepPdfText().catch(() => {})
       }, 180)
     })
+    // Watching again from scratch: a later blip should be retried promptly
+    // rather than inheriting the backoff the last one had climbed to.
+    watchRetryDelay = 0
     // A watcher that fails at runtime — the vault unmounted, or the system out
     // of watch descriptors — must not take the process with it.
     watcher.on('error', (err) => {
       console.error('vault watch failed', err)
       try { watcher?.close() } catch { /* already gone */ }
       watcher = null
+      /* And must not leave the vault unwatched for the rest of the session.
+         Losing the watcher silently disables the only way the app hears about
+         an outside edit: the merge panel never opens, and the next autosave
+         writes over a note a sync client changed hours earlier. A network
+         volume that blips takes a moment to come back, so this backs off
+         rather than spinning on a mount that is still gone. */
+      scheduleWatchRetry()
     })
   } catch (err) {
     console.error('watch failed', err)
+    scheduleWatchRetry()
+  }
+}
+
+/* How long to wait before trying the watch again, doubling to a ceiling so a
+   vault that never comes back costs nothing to keep hoping for. Reset whenever
+   a watch succeeds, so a second blip is retried promptly. */
+let watchRetryTimer = null
+let watchRetryDelay = 0
+const WATCH_RETRY_MIN = 2000
+const WATCH_RETRY_MAX = 60000
+
+function scheduleWatchRetry () {
+  if (watchRetryTimer) return
+  watchRetryDelay = watchRetryDelay ? Math.min(watchRetryDelay * 2, WATCH_RETRY_MAX) : WATCH_RETRY_MIN
+  const root = vaultPath
+  watchRetryTimer = setTimeout(() => {
+    watchRetryTimer = null
+    // The vault may have been switched or closed while we were waiting; that
+    // switch armed its own watch, and this one is for a folder nobody is in.
+    if (!vaultPath || vaultPath !== root || watcher) return
+    watchVault()
+    /* Whatever changed while nothing was watching is unknown, so the renderer
+       is told the vault moved without naming files. It reloads the tree and
+       re-reads the open note, and a buffer with edits in it goes through the
+       merge rather than being overwritten. */
+    notifyVaultChanged()
+  }, watchRetryDelay)
+}
+
+/** Tell the renderer the vault may have moved under it. */
+function notifyVaultChanged (paths = []) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('vault:changed', { paths })
   }
 }
 
@@ -1137,8 +1181,22 @@ function createWindow () {
      all of it costs nothing. In-page #anchors don't raise this event. */
   mainWindow.webContents.on('will-navigate', (event) => event.preventDefault())
 
-  // Nothing a note started outlives the window that started it.
-  mainWindow.on('closed', () => { mainWindow = null; stopAllRuns() })
+  /* The fence a note's embeds attach behind. Registered here, per window, so
+     that a window built by the Dock's `activate` gets one too — see the
+     account above `fenceWebviewAttach`. */
+  fenceWebviewAttach(mainWindow)
+
+  /* Nothing a note started outlives the window that started it. The copilot's
+     process is included: it is one CLI per conversation, running with the vault
+     as its working directory and holding tools that write notes. Left alive by
+     ⌘W it kept editing the vault with no window to show for it, and every
+     event it sent was dropped on the floor — including the one that records
+     what it changed, so the edits landed with no way to review or undo them. */
+  mainWindow.on('closed', () => {
+    mainWindow = null
+    stopAllRuns()
+    try { ai.stop('SIGKILL') } catch { /* nothing running */ }
+  })
 
   // Held open until unsaved edits reach the disk — see askRendererToFlush.
   let flushed = false
@@ -1359,6 +1417,14 @@ async function pickVault () {
     buttonLabel: 'Open Vault'
   })
   if (res.canceled || !res.filePaths[0]) return null
+  /* The buffer goes to disk while `vaultPath` still points at the folder it
+     came from. A note's path is relative to its vault, so an autosave that
+     fires after the switch resolves the old note's path against the new root
+     — and `file:write` makes the directories it needs — quietly depositing a
+     copy of a note from the old vault into the new one. The same handshake the
+     window close uses; the renderer closes its tabs when `vault:opened`
+     arrives, which is after this. */
+  await askRendererToFlush(mainWindow)
   await openVault(res.filePaths[0])
   return res.filePaths[0]
 }
@@ -1427,9 +1493,23 @@ ipcMain.handle('file:write', async (_e, p, content) => {
      autosave path — the one write that happens constantly and unattended — so
      it is the last one that should be able to leave a half-written note behind
      if the power goes. */
+  const isNote = MD_EXT.has(path.extname(abs).toLowerCase())
+  /* The note as it stood before this write, read first: the snapshot has to be
+     the same text the write is about to replace, and reading after would hand
+     the history store the text being written. Read even when the file is new,
+     so the note's first save is recorded as the thing it replaced — nothing. */
+  const before = isNote
+    ? await fs.readFile(abs, 'utf8').catch(() => null)
+    : null
   const stamp = await writeAtomic(abs, content, {
     durable: readConfig().durability === 'full'
   })
+  /* A copy of what the save replaced, so any version of the note can be put
+     back from History. Only notes: the store is for writing, and a website
+     file holds an address rather than prose. */
+  if (isNote && String(before ?? '') !== String(content)) {
+    trust?.record({ source: 'save', changes: [{ path: rel(abs), before, after: String(content) }] })
+  }
   /* The text is already here, so the next sync can skip re-reading it. Without
      this, every autosave would cost the index a read of the note being typed.
 
@@ -1437,7 +1517,7 @@ ipcMain.handle('file:write', async (_e, p, content) => {
      from, and a website file put into it would answer a search for the site's
      own name with a row that is not a note — until the next walk of the vault
      quietly dropped it again, which is the worse half of the bug. */
-  if (MD_EXT.has(path.extname(abs).toLowerCase())) touchIndex(abs, content, stamp)
+  if (isNote) touchIndex(abs, content, stamp)
   return true
 })
 
@@ -1577,6 +1657,11 @@ ipcMain.handle('file:delete', async (_e, p) => {
   for (const sidecar of [annotationFile(p), stem + PDF_TEXT_SUFFIX, stem]) {
     if (!fsSync.existsSync(sidecar)) continue
     try {
+      /* Where the path really leads, before anything is thrown away. Both the
+         test above and `shell.trashItem` follow symlinks, so a linked
+         `.annotations` folder in a synced vault turned "delete this PDF" into
+         "move that file, wherever it is, to the Trash". */
+      await assertReal(sidecar)
       noteSelfWrite(sidecar)
       await shell.trashItem(sidecar)
     } catch { /* not worth a dialog */ }
@@ -2239,7 +2324,14 @@ ipcMain.handle('asset:write', async (_e, noteName, ext, bytes) => {
   await fs.mkdir(folder, { recursive: true })
 
   const target = freeAttachmentName(folder, base, suffix)
+  /* Claimed as the app's own before the bytes land, the way `writeAtomic` does
+     it. Without this a paste read as an outside change: the watcher woke, and
+     the renderer answered with a full recursive walk of the vault, a re-read of
+     the open note and a full-text backlink scan over every note in it — all to
+     learn about a file it had just asked for and is about to embed itself. */
+  noteSelfWrite(target)
   await fs.writeFile(target, Buffer.from(bytes))
+  noteSelfWrite(target)
   // The renderer re-reads the list straight away, before the watcher's debounce.
   invalidateVaultSnapshot()
   return { path: rel(target), name: path.basename(target) }
@@ -2257,7 +2349,14 @@ const annotationFile = (relPath) => safePath(path.join(ANNOTATION_DIR, `${relPat
 ipcMain.handle('pdf:marks:load', async (_e, p) => {
   if (!isPdf(String(p || ''))) return []
   try {
-    const text = await fs.readFile(annotationFile(p), 'utf8')
+    const abs = annotationFile(p)
+    /* `safePath` is lexical: it settles that the path spells somewhere inside
+       the vault, not that following it stays there. A vault synced from
+       elsewhere can carry `.annotations/Papers` as a symlink to any folder on
+       the machine, and this reads and parses whatever is at the other end.
+       Saving already checks; reading did not. */
+    await assertReal(abs)
+    const text = await fs.readFile(abs, 'utf8')
     const parsed = JSON.parse(text)
     return Array.isArray(parsed?.highlights) ? parsed.highlights : []
   } catch {
@@ -2429,6 +2528,11 @@ async function carryAnnotations (fromRel, toRel) {
   ]) {
     if (!fsSync.existsSync(src)) continue
     try {
+      /* Both ends, before either is touched: `safePath` only settles the
+         spelling, and a symlinked `.annotations` subtree would otherwise let a
+         rename inside the vault move a file that lives outside it. */
+      await assertReal(src)
+      await assertReal(dest)
       await fs.mkdir(path.dirname(dest), { recursive: true })
       await fs.rename(src, dest)
     } catch { /* highlights are not worth failing the move over */ }
@@ -2680,10 +2784,10 @@ function runnerFor (lang) {
  *
  * @returns {Promise<{code:number|null, signal:string|null, timedOut:boolean, error?:string}>}
  */
-function startRun (id, cmd, args, { cwd, timeoutMs }) {
+function startRun (id, cmd, args, { cwd, timeoutMs, env: extraEnv }) {
   const child = spawn(cmd, args, {
     cwd,
-    env: { ...process.env, PATH: runnerPath(), TULIP_VAULT: vaultPath || '' },
+    env: { ...process.env, PATH: runnerPath(), TULIP_VAULT: vaultPath || '', ...extraEnv },
     // Its own process group, so killing a shell takes the pipeline it started
     // with it rather than leaving orphans behind.
     detached: true,
@@ -2812,6 +2916,21 @@ ipcMain.handle('run:start', async (_e, lang, code) => {
   // they mean in the note. Without one, the scratch directory stands in.
   runSequence(id, steps, { cwd: vaultPath || dir, timeoutMs, cleanup: dir })
     .then((result) => send('run:done', { id, ...result }))
+    /* A failure before `run:done` is sent leaves the block on screen saying
+       "Running…" for the rest of the session — and unrunnable, since the
+       renderer keeps the state keyed by its code and Stop cannot find an id
+       that was never registered. An invalid working directory (the vault
+       unmounted, or renamed while the app was open) is enough to reach here.
+       The failure is reported as the run's own, which is what it is. */
+    .catch((err) => {
+      console.error('run failed', err)
+      send('run:done', {
+        id,
+        code: null,
+        error: err?.message || 'This block could not be run.'
+      })
+      discard(dir)
+    })
 
   return { id, cmd: steps[0][0], timeoutMs }
 })
@@ -2901,7 +3020,13 @@ const discard = (dir) => fs.rm(dir, { recursive: true, force: true }).catch(() =
  *  temp dir is often on a different volume, where rename fails outright. */
 async function keepArtefact (produced, target) {
   await fs.mkdir(path.dirname(target), { recursive: true })
+  /* The app's own write, so the watcher does not report it back as an outside
+     change and set off a full vault walk plus a backlink scan for a picture
+     Tulip drew itself. Stamped on both sides of the copy: the window has to be
+     open when the event is actually generated. */
+  noteSelfWrite(target)
   await fs.copyFile(produced, target)
+  noteSelfWrite(target)
   // A new file in the vault; the note embeds it as soon as this returns.
   invalidateVaultSnapshot()
 }
@@ -3110,6 +3235,36 @@ function tikzCommands () {
   return { latex, dvisvgm: ['dvisvgm'] }
 }
 
+/**
+ * TeX with the doors that can be shut, shut.
+ *
+ * A picture draws itself when the note is read, which means TeX runs on
+ * whatever a note contains before anyone has looked at it — and a note is not
+ * always something the reader wrote. Vaults are synced, shared, cloned from a
+ * repository, handed over as a folder of somebody's lecture notes. TeX is a
+ * full macro language with file and process access, so opening a note was
+ * enough to run a command outright on the many installations where
+ * `shell_escape` is enabled in `texmf.cnf`.
+ *
+ * `shell_escape=f`, with `-no-shell-escape` on the command line beside it,
+ * closes that: `\write18` is refused, and the flag also overrides a
+ * `-shell-escape` that a configured `tikzCommand` carries. Both were tested
+ * against a block that tries it; neither lets it through.
+ *
+ * `openin_any`/`openout_any` are set for the installations that honour them,
+ * but they are **not** load-bearing and must not be relied on: measured
+ * against MacTeX's `latex`, `openin_any=p` did not prevent `\openin` from
+ * reading an absolute path, or a path inside a dot-directory — all three of
+ * `a`, `r` and `p` behaved identically. kpathsea reports the value correctly
+ * (`kpsewhich --var-value=openin_any` answers `p`), so the setting arrives and
+ * the engine simply does not enforce it for reads.
+ *
+ * What guards reading is therefore in the renderer, not here: a block that
+ * asks to open files is not drawn on sight — see `READS_FILES` in src/tikz.js.
+ * Pressing Draw still runs it, because at that point a person has asked.
+ */
+const TEX_SANDBOX_ENV = { openin_any: 'p', openout_any: 'p', shell_escape: 'f' }
+
 /* LaTeX says what went wrong in the middle of a great deal of noise. The lines
    worth showing are the error itself and the line of the document it stopped
    on, which is what a reader needs to find it in the block. */
@@ -3148,8 +3303,8 @@ ipcMain.handle('tikz:render', async (_e, noteName, code) => {
        is going, and so the page sees one piece of work rather than two. */
     const typeset = await startRun(
       id, latex[0],
-      [...latex.slice(1), '-interaction=nonstopmode', '-halt-on-error', 'figure.tex'],
-      { cwd: dir, timeoutMs }
+      [...latex.slice(1), '-no-shell-escape', '-interaction=nonstopmode', '-halt-on-error', 'figure.tex'],
+      { cwd: dir, timeoutMs, env: TEX_SANDBOX_ENV }
     )
     if (typeset.error || typeset.code !== 0) {
       const log = await fs.readFile(path.join(dir, 'figure.log'), 'utf8').catch(() => '')
@@ -3314,9 +3469,27 @@ const chatFile = () => path.join(CHAT_DIR(), `${sha1(vaultPath || '')}.json`)
 
 ipcMain.handle('ai:history:load', () => {
   if (!vaultPath) return {}
+  const file = chatFile()
+  let raw
   try {
-    return JSON.parse(fsSync.readFileSync(chatFile(), 'utf8'))
+    raw = fsSync.readFileSync(file, 'utf8')
   } catch {
+    // No history for this vault yet, which is the ordinary first-run case.
+    return {}
+  }
+  try {
+    return JSON.parse(raw)
+  } catch (err) {
+    /* The file exists and will not parse — truncated by a power cut, or half
+       written by a kill. Returning `{}` here used to be the whole story, and
+       the next flush then wrote an empty history straight over it: one bad
+       byte cost the vault every conversation it had, unrecoverably. The
+       damaged file is moved aside instead, so the transcripts are still on
+       disk for anyone who wants to pick them out by hand. */
+    console.error('chat history unreadable', err)
+    try {
+      fsSync.renameSync(file, `${file}.corrupt`)
+    } catch { /* if it cannot be moved, it will simply be overwritten */ }
     return {}
   }
 })
@@ -3335,8 +3508,91 @@ ipcMain.handle('ai:history:save', async (_e, history) => {
     return { ok: true }
   } catch (err) {
     console.error('chat history write failed', err)
-    return { ok: false, error: err.message }
+    /* Thrown rather than reported in the return value. The renderer's recovery
+       — put the unsaved flag back up so the next flush tries again, and tell
+       the reader — hangs off a rejected promise, and a resolved `{ok: false}`
+       never reached it: a full disk silently dropped the session's history and
+       the only trace was this console line. */
+    throw new Error(err.message || 'the history could not be written')
   }
+})
+
+/* ------------------------------------------------------------- drafts
+
+   What was typed but not yet saved, kept somewhere a crash cannot take with it.
+
+   The autosave is quick — 600 ms by default — but "quick" is not "always", and
+   the gap is real: a renderer crash, a GPU process kill, a force quit, a power
+   cut all land on a note whose last few seconds exist only in the editor's
+   memory. Nothing on disk records them, so nothing can offer them back.
+
+   A draft is that record. It is written on its own timer, beside the app's
+   state rather than in the vault — an unfinished paragraph is not something to
+   sync to other machines, and a stray file next to the note would be picked up
+   by the tree, the index and the backlink scan as though it were one. It is
+   removed the moment the real save succeeds, so the ordinary state of this
+   folder is empty and anything in it at launch is by definition a note whose
+   edits never reached disk.
+   ================================================================== */
+
+const DRAFT_DIR = () => path.join(app.getPath('userData'), 'drafts', sha1(vaultPath || ''))
+const draftFile = (rel) => path.join(DRAFT_DIR(), `${sha1(rel)}.json`)
+
+ipcMain.handle('draft:save', async (_e, rel, text) => {
+  if (!vaultPath || typeof rel !== 'string' || typeof text !== 'string') return { ok: false }
+  try {
+    await fs.mkdir(DRAFT_DIR(), { recursive: true })
+    /* Not durable, and deliberately so: this races the very crash it exists
+       for, and an fsync per keystroke-pause would cost more than it buys. The
+       rename still makes each draft whole-or-absent, which is the guarantee
+       that matters — a half-written draft offered back as recovery would be
+       worse than none. */
+    await writeAtomic(draftFile(rel), JSON.stringify({ path: rel, text, at: Date.now() }), { durable: false })
+    return { ok: true }
+  } catch (err) {
+    console.error('draft write failed', err)
+    return { ok: false }
+  }
+})
+
+ipcMain.handle('draft:clear', async (_e, rel) => {
+  if (!vaultPath || typeof rel !== 'string') return { ok: false }
+  await fs.unlink(draftFile(rel)).catch(() => {})
+  return { ok: true }
+})
+
+/**
+ * Every draft this vault has, with the file's current text beside it.
+ *
+ * The comparison is made here rather than in the renderer because it is the
+ * whole question: a draft that matches the note on disk is one whose save did
+ * land, and offering it back would be asking about nothing. Those are dropped
+ * — and deleted — so the renderer only ever hears about real losses.
+ */
+ipcMain.handle('draft:list', async () => {
+  if (!vaultPath) return []
+  let names
+  try { names = await fs.readdir(DRAFT_DIR()) } catch { return [] }
+
+  const out = []
+  for (const name of names) {
+    if (!name.endsWith('.json')) continue
+    const file = path.join(DRAFT_DIR(), name)
+    let draft
+    try { draft = JSON.parse(await fs.readFile(file, 'utf8')) } catch { draft = null }
+    if (!draft || typeof draft.path !== 'string' || typeof draft.text !== 'string') {
+      await fs.unlink(file).catch(() => {})
+      continue
+    }
+    /* The note may have been renamed, deleted or moved out of the vault since.
+       `safePath` throws on anything that is not inside it, which is also the
+       check that keeps a hand-edited draft from naming a file elsewhere. */
+    let disk = null
+    try { disk = await fs.readFile(safePath(draft.path), 'utf8') } catch { disk = null }
+    if (disk === draft.text) { await fs.unlink(file).catch(() => {}); continue }
+    out.push({ path: draft.path, text: draft.text, at: draft.at || 0, disk })
+  }
+  return out
 })
 
 /**
@@ -3459,6 +3715,31 @@ function allowedGuestUrl (url, partition) {
   }
 }
 
+/**
+ * The fence around a guest at the moment it is attached, which is the only
+ * moment its first URL and its preferences can still be refused.
+ *
+ * Per window, not per app: this listener lives on a window's webContents, and
+ * on macOS closing the window does not end the process — clicking the Dock
+ * icon builds a new one. Registered once at startup, the fence therefore
+ * belonged to a window that no longer existed, and every guest attached after
+ * a Dock re-open got its preferences unexamined and its initial `src` unchecked
+ * (`will-navigate` only ever sees the *second* page a guest visits). The
+ * embedded PDF viewer quietly stopped working at the same time, for the same
+ * reason — `plugins` is set here.
+ */
+function fenceWebviewAttach (win) {
+  win.webContents.on('will-attach-webview', (event, prefs, params) => {
+    // Nothing of Tulip's reaches into the guest.
+    delete prefs.preload
+    prefs.nodeIntegration = false
+    prefs.contextIsolation = true
+    // The guest's own PDF viewer, for web embeds pointing straight at one.
+    if (params.partition === WEB_PARTITION) prefs.plugins = true
+    if (!allowedGuestUrl(params.src, params.partition)) event.preventDefault()
+  })
+}
+
 function guardGuests () {
   /* Guests carry the User-Agent of the Chrome they in fact are. Sites vary
      what they serve on the Electron token — YouTube's player among them — and
@@ -3468,15 +3749,20 @@ function guardGuests () {
     session.fromPartition(partition).setUserAgent(ua)
   }
 
-  mainWindow?.webContents.on('will-attach-webview', (event, prefs, params) => {
-    // Nothing of Tulip's reaches into the guest.
-    delete prefs.preload
-    prefs.nodeIntegration = false
-    prefs.contextIsolation = true
-    // The guest's own PDF viewer, for web embeds pointing straight at one.
-    if (params.partition === WEB_PARTITION) prefs.plugins = true
-    if (!allowedGuestUrl(params.src, params.partition)) event.preventDefault()
-  })
+  /* An ```html block runs when the note is read, like a picture draws itself —
+     and like a picture, the note it runs for is not always one the reader
+     wrote. `allowedGuestUrl` already holds the guest to the one `data:` URL
+     the renderer built, but that only governs *navigation*: a script inside
+     that document was still free to `fetch` anywhere, which is enough to
+     announce that a given note was opened, carry off anything readable in the
+     page, and pull down a second stage to run. Nothing legitimate in a preview
+     needs the network — the block is its own document, whole in the note — so
+     the partition is simply not given one. Requests that never leave the page
+     (`data:`, `blob:`, `about:`) are what remains, which is everything a
+     self-contained preview is made of. */
+  session.fromPartition(HTML_RUN_PARTITION).webRequest.onBeforeRequest(
+    (details, callback) => callback({ cancel: !/^(data|blob|about):/i.test(details.url) })
+  )
 
   app.on('web-contents-created', (_e, contents) => {
     if (contents.getType() !== 'webview') return

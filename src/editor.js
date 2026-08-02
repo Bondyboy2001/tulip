@@ -17,7 +17,7 @@ import { autocompletion, closeBrackets, closeBracketsKeymap,
          completionKeymap } from '@codemirror/autocomplete'
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
 import { tags as t } from '@lezer/highlight'
-import { mathPreview, equationIndex } from './math.js'
+import { mathPreview, equationsFor } from './math.js'
 import { moneyPreview } from './money.js'
 import { codeBlockKeymap, proseBrackets, codeBlockView } from './codeblock.js'
 import { runBlocks } from './runblocks.js'
@@ -31,7 +31,7 @@ import { slashCommands, fenceLanguages, calloutKinds } from './slash.js'
 import { mermaidBlocks } from './mermaid.js'
 import { tikzBlocks, tikzNote } from './tikz.js'
 import { svgBlocks } from './svg.js'
-import { headings, blockReferences, blockReferenceOnLine } from './headings.js'
+import { headingsFor, blockReferences, blockReferenceOnLine } from './headings.js'
 import { findInlineHighlights } from './marks.js'
 import { findCitations } from './citations.js'
 import { fileDiff } from './linediff.js'
@@ -807,7 +807,7 @@ const foldedExactly = (state, range) => {
 /** Let CodeMirror's fold commands and state use Markdown heading sections. */
 const headingFoldService = foldService.of((state, lineStart) => {
   const line = state.doc.lineAt(lineStart)
-  const list = headings(state.doc.toString())
+  const list = headingsFor(state.doc)
   const heading = list.find((entry) => entry.line === line.number)
   return heading ? headingFoldRange(state, heading, list) : null
 })
@@ -823,9 +823,20 @@ function buildDecorations (view, imageSource = null) {
   const hidden = []
 
   const activeLines = selectionLines(state)
-  const documentText = state.doc.toString()
-  const documentHeadings = headings(documentText)
-  const equations = equationIndex(documentText)
+  /* All three of these used to be computed here, from a fresh
+     `state.doc.toString()`, on every rebuild — and a rebuild happens on every
+     keystroke *and* every scroll. That is a copy of the whole note, a
+     line-by-line heading scan, and a character-by-character maths scan, before
+     any of the visible-range work below begins. They are facts about the
+     document rather than about the viewport, so each is now asked of a cache
+     keyed on the document itself and computed at most once per version.
+
+     The equations are lazier still. They are wanted only by the `\eqref`
+     branch far below, which most notes never reach, so the index is not built
+     unless something asks for it. */
+  const documentHeadings = headingsFor(state.doc)
+  let equationCache = null
+  const equations = () => (equationCache ||= equationsFor(state.doc))
 
   const isActive = (pos) => activeLines.has(state.doc.lineAt(pos).number)
 
@@ -995,7 +1006,7 @@ function buildDecorations (view, imageSource = null) {
             }).range(start, end)
           )
         } else {
-          const tag = equations.get(label)?.tag || label
+          const tag = equations().get(label)?.tag || label
           ranges.push(
             Decoration.replace({
               widget: new EquationRefWidget(label, m[1] === 'eqref' ? `(${tag})` : tag)
@@ -1796,7 +1807,7 @@ export function createEditor ({
       }
 
       const wanted = before.text.slice(3).toLowerCase()
-      const options = headings(context.state.doc.toString())
+      const options = headingsFor(context.state.doc)
         .filter((h) => h.text.toLowerCase().includes(wanted))
         .slice(0, 40)
         .map((h) => ({ label: `#${h.text}`, detail: `H${h.level}`, type: 'text' }))
@@ -2204,7 +2215,7 @@ export function createEditor ({
   /** Fold every Markdown heading that owns a section, including nested ones. */
   view.foldAllHeadings = () => {
     const { state } = view
-    const list = headings(state.doc.toString())
+    const list = headingsFor(state.doc)
     const effects = list
       .map((heading) => headingFoldRange(state, heading, list))
       .filter((range) => range && !foldedExactly(state, range))
@@ -2216,7 +2227,7 @@ export function createEditor ({
   /** Unfold heading sections without disturbing a folded code block. */
   view.unfoldAllHeadings = () => {
     const { state } = view
-    const list = headings(state.doc.toString())
+    const list = headingsFor(state.doc)
     const headingRanges = new Set(list
       .map((heading) => headingFoldRange(state, heading, list))
       .filter(Boolean)

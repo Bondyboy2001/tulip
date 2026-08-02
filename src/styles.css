@@ -1359,13 +1359,6 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.panel-list .group {
-  padding: 9px 11px 4px;
-  font-size: 10.5px;
-  letter-spacing: .07em;
-  text-transform: uppercase;
-  color: var(--faint);
-}
 .panel-list .empty-hint { padding: 14px 11px; color: var(--muted); font-size: 13px; }
 
 .panel-foot {
@@ -3982,6 +3975,23 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
     box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 0%, transparent);
   }
 }
+/* A tiny target — a footnote's superscript mark, a dozen pixels wide — washed
+   at the equation's strength is invisible: there is not enough of it to carry
+   the colour. So `flashTarget` measures, and anything smaller than a word gets
+   the wash turned up and spread further into the space around it. */
+.is-flash-target.is-flash-small {
+  animation-name: tk-flash-target-small;
+}
+@keyframes tk-flash-target-small {
+  0%, 55% {
+    background: color-mix(in srgb, var(--accent) 38%, transparent);
+    box-shadow: 0 0 0 9px color-mix(in srgb, var(--accent) 38%, transparent);
+  }
+  100% {
+    background: color-mix(in srgb, var(--accent) 0%, transparent);
+    box-shadow: 0 0 0 9px color-mix(in srgb, var(--accent) 0%, transparent);
+  }
+}
 /* The point is to be found, not to move — so with motion turned down the wash
    simply stands there until the timer takes it away. */
 @media (prefers-reduced-motion: reduce) {
@@ -3989,6 +3999,10 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
     animation: none;
     background: color-mix(in srgb, var(--accent) 16%, transparent);
     box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 16%, transparent);
+  }
+  .is-flash-target.is-flash-small {
+    background: color-mix(in srgb, var(--accent) 38%, transparent);
+    box-shadow: 0 0 0 9px color-mix(in srgb, var(--accent) 38%, transparent);
   }
 }
 .tk-bibliography {
@@ -6772,6 +6786,106 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   font: 9.5px/1.6 var(--font-ui);
 }
 .history-diff-empty { margin: 0; padding: 10px; color: var(--faint); font-size: 11px; }
+
+
+/* ------------------------------------------------------------ merging
+
+   What a note looks like when two hands have written to it since they last
+   agreed: one card per place they both rewrote, each holding the two
+   candidates and the choice between them. The panel shares the history
+   panel's head, so the note's own name is the title there too. */
+
+.merge-panel {
+  position: fixed;
+  z-index: var(--z-panel);
+  right: 14px;
+  bottom: 34px;
+  display: flex;
+  flex-direction: column;
+  width: min(480px, calc(100vw - 28px));
+  max-height: min(660px, calc(100vh - 70px));
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 16px 48px color-mix(in srgb, #000 20%, transparent);
+}
+.merge-body { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; overflow: auto; }
+.merge-intro {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+.merge-list { display: flex; flex-direction: column; gap: 10px; }
+
+/* One contested place. */
+.merge-conflict {
+  overflow: hidden;
+  background: var(--sunk);
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+}
+.merge-conflict-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px 6px 10px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.merge-where { color: var(--faint); font: 600 9.5px/1 var(--font-ui); letter-spacing: .1em; text-transform: uppercase; }
+.merge-choice { display: flex; gap: 2px; padding: 2px; background: color-mix(in srgb, var(--line) 26%, transparent); border-radius: 6px; }
+.merge-choice button {
+  padding: 2px 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font: 550 10.5px/1.5 var(--font-ui);
+  cursor: default;
+}
+.merge-choice button.is-active {
+  background: var(--paper);
+  color: var(--ink);
+  box-shadow: 0 0 0 1px var(--line-soft);
+}
+
+/* The two candidates, side by side; the chosen one takes the accent's family
+   colour and the other dims. */
+.merge-blocks { display: grid; grid-template-columns: 1fr 1fr; }
+.merge-block { min-width: 0; }
+.merge-block + .merge-block { border-left: 1px solid var(--line-soft); }
+.merge-block-label {
+  padding: 4px 10px;
+  color: var(--faint);
+  font: 600 9px/1.6 var(--font-ui);
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.merge-block.is-mine .merge-block-label { color: var(--code-added); }
+.merge-block.is-theirs .merge-block-label { color: var(--code-removed); }
+.merge-code {
+  margin: 0;
+  padding: 0 10px 8px;
+  color: var(--ink-soft);
+  font: 10.5px/1.55 var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 180px;
+  overflow: auto;
+}
+.merge-block.is-mine.is-picked .merge-code { color: var(--code-added); }
+.merge-block.is-theirs.is-picked .merge-code { color: var(--code-removed); }
+
+.merge-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--line-soft);
+}
 
 
 .msg-review {

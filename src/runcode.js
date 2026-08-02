@@ -406,6 +406,41 @@ export function artefactRun (runs, key, {
    The button is still there for a second go. */
 const askedFor = new Set()
 
+/* How many blocks may draw themselves at once.
+
+   A run started on sight is started by the note, not by the reader, and a page
+   of lecture notes with thirty figures on it used to start thirty of them in
+   the same instant — thirty TeX processes, each with the full drawing budget,
+   competing for the machine the reader is trying to read on. A click is
+   self-limiting because a person does the clicking; this is not, so it is
+   limited here.
+
+   Small on purpose. The first picture in the note is the one being waited for,
+   and finishing it sooner matters more than starting the twelfth. */
+const AUTO_AT_ONCE = 2
+const autoWaiting = []
+let autoRunning = 0
+
+function pumpAuto () {
+  while (autoRunning < AUTO_AT_ONCE && autoWaiting.length) {
+    const next = autoWaiting.shift()
+    autoRunning++
+    /* `begin` resolves when the run is over either way — a failure is still a
+       slot freed, and letting one stop the queue would leave the rest of the
+       note's pictures undrawn. */
+    Promise.resolve(next()).catch(() => {}).finally(() => {
+      autoRunning--
+      pumpAuto()
+    })
+  }
+}
+
+/** Put a draw-on-sight in the queue rather than starting it now. */
+function queueAuto (begin) {
+  autoWaiting.push(begin)
+  pumpAuto()
+}
+
 /**
  * The reading view's shape for a block that renders to a file — a scene, a
  * picture. The shell, the control, the status, and what becomes of the artefact
@@ -472,7 +507,10 @@ export function attachArtefactBlock (wrap, head, {
     onMiss: () => {
       if (!auto || askedFor.has(key) || !wrap.isConnected) return
       askedFor.add(key)
-      run.begin()
+      /* Queued rather than begun: see `queueAuto`. The block may also have left
+         the page while it waited its turn — a note switch is enough — and
+         starting a render for a detached block is work nobody will ever see. */
+      queueAuto(() => (wrap.isConnected ? run.begin() : undefined))
     },
     didStart: onStarted,
     onHit: onFound

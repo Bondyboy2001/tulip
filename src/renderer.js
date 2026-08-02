@@ -39,6 +39,8 @@ import { lintEdits } from './lint.js'
 import { mountSettings } from './settings.js'
 import { mountCopilot } from './copilot.js'
 import { mountHistory } from './history.js'
+import { mountMergePanel } from './mergepanel.js'
+import { merge3 } from './merge.js'
 import { fileDiff } from './linediff.js'
 import { mountPdf, MARK_COLORS } from './pdf.js'
 import { mountSite } from './site.js'
@@ -262,6 +264,7 @@ const editor = createEditor({
       state.dirty = true
       if (wasClean) renderTabs()
       queueSave()
+      queueDraft()
     }
     queueStatus()
     queueOutline()
@@ -537,7 +540,55 @@ el.siteAddress.addEventListener('blur', () => paintSiteBar(site.state()))
 
 function queueSave () {
   clearTimeout(state.saveTimer)
+  /* A keystroke while a merge is being settled does not arm an autosave that
+     would then dismiss the panel underneath the reader — the merge owns the
+     save until it is resolved. */
+  if (mergeOpen) return
   state.saveTimer = setTimeout(saveNow, Number(state.cfg.autosave) || 600)
+}
+
+/* ---------------------------------------------------------------- drafts
+
+   A copy of the unsaved buffer, kept outside the vault so that a crash, a kill
+   or a power cut cannot take the last few seconds of typing with it. The store
+   itself is main's (see the drafts section there); this is only about when to
+   write one and when to throw it away.
+
+   On a timer of its own rather than on the autosave's: the two exist for
+   opposite reasons. The autosave waits, because writing the note on every
+   keystroke would make the vault's history and every watcher downstream
+   unusable. A draft has no such cost — nothing watches it and nothing syncs it
+   — so it runs short and steadily, and the ordinary case is that the real save
+   lands first and deletes it before it is ever needed. */
+const DRAFT_MS = 1200
+let draftTimer = null
+let draftPath = null
+
+function queueDraft () {
+  clearTimeout(draftTimer)
+  draftTimer = setTimeout(writeDraft, DRAFT_MS)
+}
+
+async function writeDraft () {
+  clearTimeout(draftTimer)
+  const path = state.current?.path
+  if (!path || !state.dirty || viewingPdf() || viewingSite() || !NOTE_EXT.test(path)) return
+  draftPath = path
+  await api.draft.save(path, editor.state.doc.toString()).catch(() => {})
+}
+
+/**
+ * Forget the draft for a note whose text is now safely on disk.
+ *
+ * Takes the path explicitly because the note on screen may already have moved
+ * on by the time a save resolves — the draft to drop is the one belonging to
+ * the file that was written, not to whatever is being looked at now.
+ */
+function clearDraft (path) {
+  clearTimeout(draftTimer)
+  if (!path) return
+  if (draftPath === path) draftPath = null
+  api.draft.clear(path).catch(() => {})
 }
 
 /* Rebuilding the outline means re-scanning the note, which is not something to
@@ -579,6 +630,15 @@ function lintBuffer () {
 async function saveNow () {
   clearTimeout(state.saveTimer)
   if (!state.current || !state.dirty) return
+  /* An explicit save while a merge is on screen settles it as "keep mine" and
+     then writes the buffer — the autosave is what the panel owns, and the
+     autosave is already refused in queueSave. A tab switch, a note switch or
+     the window closing has to get the buffer to disk, whatever is open. The
+     panel's own buttons take their own path; this one just stands it down. */
+  if (mergeOpen) {
+    mergePanel.close()
+    mergeOpen = false
+  }
   const wrote = state.current.path
   /* Before the document is read, not after: what goes to disk and what is in the
      buffer have to be the same text, or the identity test below never holds and
@@ -595,8 +655,15 @@ async function saveNow () {
        CodeMirror's documents are immutable, so identity is the whole test. */
     if (editor.state.doc === doc && state.current?.path === wrote) {
       state.dirty = false
+      const tab = activeTab()
+      if (tab && tab.path === wrote) tab.base = doc.toString()
       renderTabs()
       setStatusRight('Saved')
+      /* The note is on disk, so the copy kept against a crash has nothing left
+         to protect. Only on this branch: if a keystroke landed mid-write the
+         buffer has run ahead of the file again, and the draft is once more the
+         only record of the difference. */
+      clearDraft(wrote)
     }
     /* The pane beside the editor may be showing the very note that was
        written — the watcher never hears about the app's own saves, so it is
@@ -1382,6 +1449,10 @@ async function openText (path, { focus = true, history = true, place = null, new
 
   enterDoc(path, { history, newTab })
   editor.setDoc(text)
+  // The buffer and the disk agree from here: this is the version the edits to
+  // come are measured against, if a sync client rewrites the note meanwhile.
+  const opened = activeTab()
+  if (opened) opened.base = text
   // Boot establishes the saved view before the note is opened, so the fresh
   // editor state starts in that view instead of always building preview first.
   editor.setRaw(state.view === 'raw')
@@ -1606,7 +1677,14 @@ const activeTab = () => state.tabs[state.tabIndex] || null
 
 /** A tab holding nothing — what ⌘T opens, and what is left standing when the
  *  last note is closed, so the strip is never empty. */
-const blankTab = () => ({ path: null, history: [], historyAt: -1 })
+const blankTab = () => ({ path: null, history: [], historyAt: -1, base: null })
+
+/* The version a tab's buffer diverged from — set whenever the buffer and the
+   disk are known to agree: on opening a note, on saving one, and when the
+   watcher pulls a changed file back in. The three-way merge of a note someone
+   else rewrote while it was being edited reads from it, so "ours" means the
+   edits since the last agreement and "theirs" means the disk's. */
+const tabBase = (tab) => tab?.base ?? null
 
 function renderTabs () {
   const frag = document.createDocumentFragment()
@@ -1815,16 +1893,16 @@ async function selectTab (i) {
   markPlace()
   state.tabIndex = i
 
-  if (!tab.path) { showBlank(); return }
+  if (!tab.path) { await showBlank(); return }
   await openNote(tab.path, { history: false, place: tabPlace(tab) })
   revealInTree(tab.path)
 }
 
-function newTab () {
+async function newTab () {
   markPlace()
   state.tabs.splice(state.tabIndex + 1, 0, blankTab())
   state.tabIndex++
-  showBlank()
+  await showBlank()
 }
 
 /* The tabs closed this session, newest last, so ⌘⇧T can walk back through
@@ -1850,7 +1928,7 @@ async function closeTab (i, { record = true } = {}) {
   if (!state.tabs.length) {
     state.tabs.push(blankTab())
     state.tabIndex = 0
-    showBlank()
+    await showBlank()
     return
   }
 
@@ -1860,7 +1938,7 @@ async function closeTab (i, { record = true } = {}) {
   // The one that was showing has gone; its neighbour takes the screen.
   state.tabIndex = Math.min(i, state.tabs.length - 1)
   const next = state.tabs[state.tabIndex]
-  if (!next.path) { showBlank(); return }
+  if (!next.path) { await showBlank(); return }
   await openNote(next.path, { history: false, place: tabPlace(next) })
   revealInTree(next.path)
 }
@@ -1893,22 +1971,52 @@ async function reopenTab () {
 }
 
 /** Put the pane back to its empty state, with the current tab holding nothing. */
-function showBlank () {
+async function showBlank () {
   const tab = activeTab()
+  /* Edits are saved, not dropped, before the note is abandoned — the same
+     promise selectTab and closeTab make. Without it a ⌘T fired while the
+     merge panel was up (which has refused the autosave) would lose the buffer
+     that autosave was supposed to protect. */
+  if (state.dirty) await saveNow()
   if (tab) tab.path = null
   closeCurrentNote()
   copilot.setNote('')
   rememberTabs()
 }
 
+/** Whether `path` is one of `gone`, or lives inside one of them. */
+function isUnder (path, gone) {
+  return Boolean(path) && (gone.has(path) || [...gone].some((g) => path.startsWith(g + '/')))
+}
+
+/**
+ * Give up on writing notes that are about to be deleted.
+ *
+ * Called *before* the delete, not after it. The confirmation dialog does not
+ * take the keyboard away from the editor, so typing during it leaves an
+ * autosave armed; if that timer fires while `api.file.remove` is still in
+ * flight, the write lands after the trash and `file:write` recreates the
+ * directory and the note. The file comes back from the dead, the tab that
+ * would have shown it is gone, and the ghost only appears at the next tree
+ * load. An unsaved buffer for a file being deleted has nowhere to go, so the
+ * flag and the timer are dropped while there is still time for it to matter.
+ */
+function disarmSaves (paths) {
+  if (!isUnder(state.current?.path, new Set(paths))) return
+  clearTimeout(state.saveTimer)
+  state.dirty = false
+  // And the crash copy: a draft outliving the file it belongs to would offer,
+  // at the next launch, to restore a note the reader deliberately threw away.
+  clearDraft(state.current?.path)
+}
+
 /** Close every tab pointing at a note that has gone away. */
 async function dropTabsFor (paths) {
   const gone = new Set(paths)
-  const doomed = (p) => p && (gone.has(p) || [...gone].some((g) => p.startsWith(g + '/')))
-  /* The files are already in the Trash by the time this runs, and closeTab
-     saves a dirty active tab on its way out — which would write the note
-     straight back onto disk. An unsaved buffer for a deleted file has nowhere
-     to go, so the flag and the pending autosave are dropped first. */
+  const doomed = (p) => isUnder(p, gone)
+  /* Ordinarily already done by `disarmSaves` before the delete; repeated here
+     because `closeTab` saves a dirty active tab on its way out, and this is the
+     last point before that happens. */
   if (doomed(state.current?.path)) {
     clearTimeout(state.saveTimer)
     state.dirty = false
@@ -2080,6 +2188,10 @@ async function reloadCurrent () {
     state.patching = false
   }
   state.dirty = false
+  /* The buffer and the disk now agree again: the text that was pulled in is
+     what the next edits measure against. */
+  const tab = activeTab()
+  if (tab) tab.base = text
   updateStatus()
 }
 
@@ -2205,6 +2317,9 @@ function rememberAgentBefore (relPath, needle = '', tool = 'Edit') {
  * The conversation stays where it is. Following the edit changes the document
  * on screen, not the note the reply is being written into.
  */
+/* The tail of the chain of edits being absorbed — see `onEdited` below. */
+let absorbQueue = Promise.resolve()
+
 async function absorbAgentEdit (relPath) {
   const beforePromise = agentBefore.get(relPath)
   agentBefore.delete(relPath)
@@ -2240,13 +2355,48 @@ async function absorbAgentEdit (relPath) {
   }
 
   let text
-  try { text = await api.file.read(state.current.path) } catch { return }
+  try { text = await api.file.read(relPath) } catch { return }
+  // The pane can move while the read is in flight — the reader clicking another
+  // note is enough. Whatever is on screen now is not what this edit is about.
+  if (state.current?.path !== relPath) return
 
   // The file on screen is a website, and its text is an address rather than
   // anything the editor holds. Following it means moving the page.
   if (viewingSite()) { site.rehome(text); return }
 
-  const baseline = before ?? editor.state.doc.toString()
+  /* Both sides wrote. The copilot's write is on disk and the reader has been
+     typing into the same note while it worked — patching the file's text in
+     would drop what they wrote with nothing said, leaving it only in the undo
+     stack. It is the same situation as a sync client changing a note under an
+     unsaved buffer, so it is settled the same way: fold the two together from
+     the version the copilot started at, and ask where they both rewrote the
+     same lines. */
+  const buffer = editor.state.doc.toString()
+  if (state.dirty && before != null && buffer !== before && buffer !== text) {
+    showAgentDraft(null)
+    const result = merge3(before, buffer, text)
+    if (result.conflicts.length) {
+      // The panel owns the note until it is settled, autosave included.
+      mergeOpen = true
+      clearTimeout(state.saveTimer)
+      mergePanel.show(relPath, result)
+      return agentEditSummary(before, text)
+    }
+    state.patching = true
+    try {
+      if (editor.patch(result.text) && reading()) rerenderReading()
+    } finally {
+      state.patching = false
+    }
+    /* Still dirty: the merged text is a version neither the buffer nor the file
+       held, so it has yet to be written anywhere. */
+    queueSave()
+    setStatusRight('Merged the copilot’s changes')
+    updateStatus()
+    return agentEditSummary(before, text)
+  }
+
+  const baseline = before ?? buffer
   const reviewBefore = pendingAgentDiffs.get(relPath)?.before ?? baseline
   state.patching = true
   let animation
@@ -2310,6 +2460,111 @@ const noteHistory = mountHistory({
   beforeRestore: saveNow
 })
 
+/* --------------------------------------------------------------- merging
+
+   A note changed on disk while it was being edited. `mergeOpen` keeps the
+   autosave from overwriting the disk's version while the merge is on screen:
+   `queueSave` refuses to arm a timer and `saveNow` resolves the panel as
+   "keep mine" before any explicit save trigger. The panel itself is a set of
+   cards, one per contested place, built by mergepanel.js; the merge of the
+   two texts is merge.js's. */
+let mergeOpen = false
+
+const mergePanel = mountMergePanel({
+  el: {
+    panel: $('merge-panel'),
+    title: $('merge-title'),
+    intro: $('merge-intro'),
+    list: $('merge-list'),
+    close: $('merge-close'),
+    keep: $('merge-keep'),
+    save: $('merge-save')
+  },
+  apply: (text) => {
+    /* The one save the merge owns: the buffer becomes the settled text and is
+       written, so the note on disk is the note both sides chose. */
+    mergeOpen = false
+    if (editor.patch(text) && reading()) rerenderReading()
+    setStatusRight('Merged')
+    saveNow()
+  },
+  keep: () => {
+    /* "Keep mine" closes the merge and settles the note the way the toast
+       always said it had: the buffer is saved, the disk's version dropped. */
+    mergeOpen = false
+    toast('This note changed on disk while you had unsaved edits. Your version was kept.')
+    saveNow()
+  }
+})
+
+/**
+ * The open note was rewritten by something other than Tulip while it was being
+ * edited. Merge the buffer against the disk, from the version both sides last
+ * agreed on; where they both rewrote the same lines, the merge panel asks.
+ * Returns whether the note was handled, so the caller can skip the plain
+ * reload that would otherwise follow.
+ */
+async function handleDiskConflict (path) {
+  const base = tabBase(activeTab())
+  if (base == null) return false
+  /* A merge is already being settled, or a save asked for in the meantime
+     settled it as "keep mine" — either way there is nothing to redo. */
+  if (mergeOpen) return true
+  /* Stop the autosave before any await, or it could fire mid-merge and write
+     the buffer over the disk's version. */
+  mergeOpen = true
+  clearTimeout(state.saveTimer)
+
+  let disk
+  try { disk = await api.file.read(path) } catch {
+    mergeOpen = false
+    return false
+  }
+  const buffer = editor.state.doc.toString()
+  if (disk === buffer) { mergeOpen = false; return true }
+
+  const result = merge3(base, buffer, disk)
+  if (result.conflicts.length === 0) {
+    /* Nothing the disk did touched anything the buffer did — the two fold
+       together. Apply and save, and the note is whole again. */
+    const merged = result.text !== buffer
+    if (merged && editor.patch(result.text) && reading()) rerenderReading()
+    mergeOpen = false
+    await saveNow()
+    if (merged && !state.dirty) setStatusRight('Merged changes from disk')
+    return true
+  }
+
+  mergePanel.show(path, result)
+  return true
+}
+
+/**
+ * Ask the disk whether the open note is still what we think it is.
+ *
+ * The merge above only ever runs because the watcher said something moved, and
+ * a watcher is not a guarantee: it dies with an unmounted volume, it is capped
+ * by the system's watch descriptors, and the app deliberately ignores anything
+ * it believes to be its own write. Coming back to the window is the moment a
+ * missed change matters — you were somewhere else, which is exactly when a sync
+ * client had the file to itself — so the one note on screen is re-read and put
+ * through the same two paths a watcher event would have taken. One file read
+ * per focus, and nothing at all when there is no note or the buffer is clean
+ * and unchanged.
+ */
+async function recheckOpenNote () {
+  const path = state.current?.path
+  if (!path || viewingPdf() || !NOTE_EXT.test(path)) return
+  let disk
+  try { disk = await api.file.read(path) } catch { return }
+  // The note may have been closed or switched while the read was in flight.
+  if (state.current?.path !== path) return
+  if (disk === editor.state.doc.toString()) return
+  if (state.dirty) { await handleDiskConflict(path) } else { await reloadCurrent() }
+}
+
+window.addEventListener('focus', () => { recheckOpenNote() })
+
 const copilot = mountCopilot({
   el: {
     app: el.app,
@@ -2360,7 +2615,19 @@ const copilot = mountCopilot({
   // A failure here means the note on screen has quietly fallen behind the file
   // on disk, which is the one state this feature must never reach silently.
   onEdited: (relPath) => {
-    return absorbAgentEdit(relPath).catch((err) => {
+    /* One at a time, in the order the writes happened. Absorbing an edit opens
+       notes, reads files and plays an animation — a dozen awaits — while
+       reading and writing the one `state.current` the whole app shares. Two
+       edits a few hundred milliseconds apart used to interleave: the second
+       would decide whether its note was the one on screen, then act on that
+       answer after the first had switched the pane, and patch one note's text
+       into the other note's buffer. Serialising is enough to fix it, because
+       every branch inside is correct as long as nothing moves underneath it. */
+    const run = absorbQueue.then(() => absorbAgentEdit(relPath))
+    // The queue must survive a failure, or one bad edit stops the app from
+    // following any that come after it.
+    absorbQueue = run.catch(() => {})
+    return run.catch((err) => {
       console.error('absorbing a copilot edit failed', err)
       toast('The copilot changed this note but the editor could not follow. Reopen it.')
       return null
@@ -3607,7 +3874,7 @@ function viewportLine () {
   if (!reading()) return editor.topLine()
 
   const top = el.reading.getBoundingClientRect().top
-  const nodes = el.reading.querySelectorAll('[data-line]')
+  const nodes = placedLines()
   /* The blocks come back in document order, which on a page laid out in normal
      flow is top-to-bottom — so the first one below the fold is found by
      bisection rather than by measuring every block above it. This runs once
@@ -3624,12 +3891,33 @@ function viewportLine () {
   return lo ? Number(nodes[lo - 1].dataset.line) + 1 : 1   // markdown-it counts from zero
 }
 
+/**
+ * The reading view's addressable blocks, minus the ones that are not on the
+ * page.
+ *
+ * A folded heading section and a collapsed callout are `display: none`, and a
+ * hidden element's rectangle is all zeros. The bisection above assumes the tops
+ * it compares increase down the list; a run of zeros in the middle breaks that
+ * assumption outright, so switching to the editing view with anything folded
+ * landed at a line from the wrong side of the fold — and `scrollToLine`, which
+ * walks the same list, would take a hidden node as its target and scroll to a
+ * nonsense offset. Filtering by `offsetParent` is the cheap test for "laid
+ * out": it is null for an element whose subtree is display:none, and it costs
+ * no more than the rectangle read that follows.
+ */
+function placedLines () {
+  return [...el.reading.querySelectorAll('[data-line]')]
+    .filter((node) => node.offsetParent !== null)
+}
+
 function scrollToLine (line) {
   if (!state.current || viewingPdf()) return
   if (!reading()) { editor.scrollToLine(line); return }
 
   let target = null
-  for (const node of el.reading.querySelectorAll('[data-line]')) {
+  // Only blocks that are actually on the page: a folded one has no position to
+  // scroll to, and taking it as the target sends the pane to the top instead.
+  for (const node of placedLines()) {
     if (Number(node.dataset.line) + 1 > line) break
     target = node
   }
@@ -3804,14 +4092,17 @@ function openOverlay (mode, meta = {}) {
     themes: 'Change the theme…',
     'font-body': 'Choose the font notes are written in…',
     'font-ui': 'Choose the font the app is drawn in…',
-    countries: 'Choose a country flag…'
+    countries: 'Choose a country flag…',
+    'pdf-find': 'Find in this document…'
   }[mode]
   el.panelFoot.innerHTML = mode === 'themes' || FONT_MODES[mode]
     ? '<span><kbd>↑↓</kbd> preview</span><span><kbd>↵</kbd> keep</span><span><kbd>esc</kbd> cancel</span>'
     : mode === 'search'
         ? '<span><kbd>↑↓</kbd> move</span><span><kbd>↵</kbd> open</span>' +
           '<span class="panel-syntax"><kbd>tag:</kbd> <kbd>path:</kbd> <kbd>file:</kbd> <kbd>"phrase"</kbd></span>'
-        : '<span><kbd>↑↓</kbd> move</span><span><kbd>↵</kbd> open</span><span><kbd>esc</kbd> close</span>'
+        : mode === 'pdf-find'
+          ? '<span><kbd>↑↓</kbd> move</span><span><kbd>↵</kbd> go to page</span><span><kbd>esc</kbd> close</span>'
+          : '<span><kbd>↑↓</kbd> move</span><span><kbd>↵</kbd> open</span><span><kbd>esc</kbd> close</span>'
 
   // Only the vault search has switches to qualify, and only it can rewrite.
   const searching = mode === 'search'
@@ -4054,6 +4345,38 @@ async function runOverlayQuery (query) {
     return
   }
 
+  /* Finding inside the open PDF. Its own mode rather than a branch of `search`:
+     that one asks the main process about every note in the vault, and this one
+     asks the viewer about the one document on screen — different source,
+     different row, and nothing shared but the box they are typed into. */
+  if (mode === 'pdf-find') {
+    const token = ++searchToken
+    setSearchCaveats()
+    if (!query.trim()) {
+      state.overlay.items = []
+      state.overlay.index = 0
+      renderOverlayList('Type to search this document.')
+      return
+    }
+
+    const hits = await pdf.find(query)
+    // The reader may have typed on, or closed the document, while the pages
+    // were being read.
+    if (token !== searchToken || state.overlay?.mode !== 'pdf-find') return
+
+    state.overlay.items = hits.map((hit) => ({
+      item: { ...hit, label: `Page ${hit.page}`, pdfHit: true },
+      hits: []
+    }))
+    state.overlay.index = 0
+    renderOverlayList(`Nothing matches “${query.trim()}”.`)
+    if (hits.length) {
+      const pages = new Set(hits.map((h) => h.page)).size
+      setSearchCaveats(`${hits.length} on ${pages} ${pages === 1 ? 'page' : 'pages'}`)
+    }
+    return
+  }
+
   if (mode === 'search') {
     const token = ++searchToken
     setSearchCaveats()
@@ -4134,6 +4457,15 @@ async function replaceEverywhere () {
   })
   if (!go) { el.panelInput.focus(); return }
 
+  /* The buffer goes to disk first. Main rewrites notes from its own index —
+     the last text it was told about — so an unsaved edit in the open note is
+     invisible to the replace, and the autosave that lands afterwards would put
+     the pre-replace buffer back over the rewritten file. The replace would be
+     undone in the one note the reader was looking at, silently, under a toast
+     saying it had worked. Every other flow that rewrites notes underneath the
+     buffer — rename, move — flushes for the same reason. */
+  if (state.dirty) await saveNow()
+
   const result = await api.replaceAll(query, into, searchOpts)
   if (result.error) { toast(result.error); return }
 
@@ -4183,6 +4515,15 @@ function renderOverlayList (emptyMessage = 'Nothing matches.') {
       title.append(snippet)
     }
 
+    // The same shape for a hit inside the open PDF: the line it stands in is
+    // what tells one "Page 12" from the next.
+    if (item.pdfHit) {
+      const snippet = document.createElement('span')
+      snippet.className = 'snippet'
+      snippet.textContent = item.excerpt
+      title.append(snippet)
+    }
+
     /* A typeface names itself in its own letters. It is the only honest way to
        show one — "Baskerville" set in the interface sans tells you nothing you
        could not have guessed — and it means the list is a specimen sheet you
@@ -4204,6 +4545,9 @@ function renderOverlayList (emptyMessage = 'Nothing matches.') {
       // A heading, from the switcher's `#` mode: its depth is what tells one
       // "Notes" from another.
       right.textContent = `H${item.level}`
+    } else if (item.pdfHit) {
+      // The page is already the row's title, so the right column says nothing.
+      right.textContent = ''
     } else {
       right.textContent = mode === 'commands'
         ? (item.key || '')
@@ -4246,6 +4590,9 @@ async function chooseOverlayItem (i) {
   if (mode === 'themes') { commitTheme(item.id); return }
   if (FONT_MODES[mode]) { commitFont(FONT_MODES[mode], item.id); return }
   if (mode === 'commands') { runCommand(item.id); return }
+  // A hit in the open PDF is a place in the document already on screen, so
+  // nothing is opened — the viewer just goes there.
+  if (item.pdfHit) { pdf.goToPage(item.page, item.y); return }
   if (mode === 'countries') {
     await createLanguageFor(dir, item)
     return
@@ -4270,7 +4617,12 @@ let queryTimer = null
 
 function queueOverlayQuery (value) {
   clearTimeout(queryTimer)
-  if (state.overlay?.mode !== 'search') { runOverlayQuery(value); return }
+  /* Finding in a PDF is debounced for the same reason vault search is: the
+     first pass over a long document asks the worker for every page's text, and
+     doing that per keystroke while a phrase is typed is the one way to make a
+     four-hundred-page paper feel slow. */
+  const slow = state.overlay?.mode === 'search' || state.overlay?.mode === 'pdf-find'
+  if (!slow) { runOverlayQuery(value); return }
   queryTimer = setTimeout(() => runOverlayQuery(value), 90)
 }
 
@@ -4482,6 +4834,7 @@ async function removeMany (paths) {
   })
   if (!yes) return
 
+  disarmSaves(paths)
   const failed = []
   for (const path of paths) {
     try {
@@ -4702,6 +5055,7 @@ async function removeNode (node) {
   })
   if (!yes) return
 
+  disarmSaves([node.path])
   try {
     await api.file.remove(node.path)
   } catch (err) {
@@ -4779,9 +5133,10 @@ function runCommand (id) {
     case 'theme': cycleTheme(); break
     case 'save': saveNow(); break
     case 'find':
-      // Searching inside a PDF is not built; saying so beats a find panel that
-      // silently searches an empty buffer.
-      if (viewingPdf()) { setStatusRight('Find does not reach inside a PDF yet'); break }
+      /* A PDF has its own find: the editor's panel searches a buffer, and the
+         document on screen is not in one. The words come from the viewer, which
+         has already read them to lay the selectable text over each page. */
+      if (viewingPdf()) { openOverlay('pdf-find'); break }
       // Nor inside a page, which is a guest and keeps its own text out of reach.
       if (viewingSite()) { setStatusRight('Find does not reach inside a web page'); break }
       // The find panel lives in the editor, so reading view steps across to the
@@ -5556,37 +5911,58 @@ api.on('menu', runCommand)
 api.on('zoom', showZoom)
 el.zoom?.addEventListener('click', () => api.resetZoom())
 api.on('vault:changed', async ({ paths = [] } = {}) => {
-  /* Said once, where it can be seen: *this* file moved under a buffer that has
-     edits of its own, and the buffer is what was kept. The message names the
+  const open = state.current?.path
+  /* *This* file moved under a buffer that has edits of its own. What was kept
+     used to be decided here, in a toast; now the two are merged — a sync
+     client's change and the edits in the buffer fold together where they do
+     not touch, and where they do, the merge panel asks. The message names the
      files that moved because "something in the vault changed" is not enough to
      say that — a sync client touching another folder, a PDF dropped into
      Finder, the copilot writing to a different note all arrive here too, and
      each of them used to accuse the note being typed into. */
-  const open = state.current?.path
-  if (state.dirty && open && paths.includes(open)) {
+  const conflict = state.dirty && open && paths.includes(open) && NOTE_EXT.test(open)
+  const handled = conflict ? await handleDiskConflict(open) : false
+  /* A conflict with no common version to merge from falls back to the old
+     bargain: the buffer is what was kept. */
+  if (conflict && !handled) {
     toast('This note changed on disk while you had unsaved edits. Your version was kept.')
   }
   await loadTree()
-  // Something moved on disk. If it was the open note — a link rewrite, an edit
-  // in another app, a sync client — the buffer is now stale, and at the next
-  // autosave the stale buffer would win.
-  await reloadCurrent()
+  /* Something moved on disk. If it was the open note — a link rewrite, an edit
+     in another app, a sync client — the buffer is now stale, and at the next
+     autosave the stale buffer would win. A note the merge just settled is
+     already the file's own text, so it is left alone here. */
+  if (!handled) await reloadCurrent()
   // What links here is a fact about the other notes, so it moved when they did.
   queueLinks()
   // And so is what stands transcluded here: the note on show in a frame may be
-  // the very one that changed.
-  refreshTransclusions()
+  // the very one that changed — and only those need redrawing.
+  refreshTransclusions(paths)
 })
 api.on('vault:opened', async (vault) => {
   state.vault = vault
   state.cfg.vaultPath = vault.path
   state.cfg.defaultVaultPath = vault.path
   el.vaultLabel.textContent = vault.name
-  /* Both hold documents of the folder being left: a pane still showing the old
-     vault's note, and a stack of its closed tabs waiting to be reopened into a
-     vault they are not in. */
+
+  /* Everything on screen belongs to the folder being left. A note's path is
+     relative to its vault, so a tab left open here is a path that now means a
+     different file — or, since `file:write` makes the directories it needs, a
+     file that does not exist yet and is about to. The buffer has already gone
+     to disk (main flushes before it repoints; see `pickVault` there), so there
+     is nothing left to save and every reason not to try: the autosave is
+     disarmed before the tabs go, in case a keystroke landed during the switch.
+     What is dropped, and why each: a pane still showing the old vault's note,
+     a stack of its closed tabs waiting to be reopened into a vault they are
+     not in, and the strip itself. */
+  clearTimeout(state.saveTimer)
+  state.dirty = false
   closeSidePane()
   closedTabs.length = 0
+  state.tabs = [blankTab()]
+  state.tabIndex = 0
+  await showBlank()
+  renderTabs()
   paintEmpty()
   await loadTree()
 })
@@ -5711,7 +6087,13 @@ function pdfKeys (e) {
    an async IPC write, so main asks first and closes after. The unload handler
    below stays as a second chance for reloads. */
 api.on('app:flush', async () => {
-  try { if (state.dirty) await saveNow() } finally { api.flushed() }
+  try {
+    if (state.dirty) await saveNow()
+    /* The transcripts too. A reply that landed in the last moment before ⌘Q is
+       still sitting behind a debounce, and the copilot's own `beforeunload`
+       write happens after main has already let the process go. */
+    await copilot.flush()
+  } finally { api.flushed() }
 })
 
 window.addEventListener('beforeunload', () => { if (state.dirty) saveNow() })
@@ -5801,4 +6183,53 @@ window.__tulip = {
   if (cfg.sideDoc && known.has(cfg.sideDoc)) {
     openToSide(cfg.sideDoc, { persist: false })
   }
+
+  // Last, and only if the previous session ended badly: see below.
+  await offerDraftRecovery()
 })()
+
+/**
+ * Edits from a session that ended before they could be saved.
+ *
+ * Every draft still on disk at launch is one whose note was never written —
+ * the ordinary path deletes each as soon as its save lands, so an empty folder
+ * is what a clean shutdown leaves behind. Main has already dropped the ones
+ * that match their file, so anything reaching here is a real difference
+ * between what was typed and what survived.
+ *
+ * Asked rather than applied. The text is by definition unreviewed — it is
+ * whatever the editor happened to be holding — and the note on disk may have
+ * moved on since through a sync or the copilot. Declining keeps the file as it
+ * is and drops the draft, so the question is asked once and not at every
+ * launch thereafter.
+ */
+async function offerDraftRecovery () {
+  const drafts = await api.draft.list().catch(() => [])
+  if (!drafts.length) return
+
+  for (const draft of drafts) {
+    const name = draft.path.split('/').pop().replace(NOTE_EXT, '')
+    const restore = await ask({
+      title: `Restore unsaved edits to “${name}”?`,
+      detail: draft.disk === null
+        ? 'Tulip closed before these edits were saved, and the note is no longer in the vault. Restoring writes it back.'
+        : 'Tulip closed before these edits were saved. The copy on disk is older than what was on screen.',
+      go: 'Restore'
+    })
+    if (restore) {
+      try {
+        await api.file.write(draft.path, draft.text)
+        toast(`Restored unsaved edits to “${name}”`)
+      } catch (err) {
+        toast(err.message || `“${name}” could not be restored.`)
+        // Kept, so the next launch can try again rather than losing the text
+        // to a failure that may be temporary.
+        continue
+      }
+    }
+    await api.draft.clear(draft.path).catch(() => {})
+  }
+
+  await loadTree()
+  await reloadCurrent()
+}

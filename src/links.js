@@ -40,17 +40,24 @@ const flashing = new WeakMap()
  */
 export function flashTarget (target) {
   if (!(target instanceof HTMLElement)) return
+  /* A footnote's mark is a dozen pixels of superscript; the wash that reads
+     clearly over an equation reads as nothing over it. Anything smaller than
+     about a word gets the emphatic version — measured, not enumerated, so a
+     future tiny target is covered without being named here. */
+  const { width, height } = target.getBoundingClientRect()
+  const small = width < 48 && height < 32
   /* Taken off and put back rather than simply added: an animation already
      running ignores a class the element already has, so clicking the same
      reference twice would flash once. Reading a layout property in between is
      what makes the browser treat it as a new animation. */
-  target.classList.remove('is-flash-target')
+  target.classList.remove('is-flash-target', 'is-flash-small')
   void target.offsetWidth
   target.classList.add('is-flash-target')
+  if (small) target.classList.add('is-flash-small')
 
   clearTimeout(flashing.get(target))
   flashing.set(target, setTimeout(() => {
-    target.classList.remove('is-flash-target')
+    target.classList.remove('is-flash-target', 'is-flash-small')
     flashing.delete(target)
   }, FLASH_MS))
 }

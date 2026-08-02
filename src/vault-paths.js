@@ -33,7 +33,6 @@ export const SITE_EXT = new RegExp(`${escapeRe(VAULT_CONTRACT.siteExtension)}$`,
    \u{...} escapes mean codepoints rather than literal text. */
 export const LANGUAGE_FLAG = new RegExp(VAULT_CONTRACT.languageFlagPattern, 'u')
 
-export const isNotePath = (path) => NOTE_EXT.test(path || '')
 export const isPdfPath = (path) => PDF_EXT.test(path || '')
 export const isSitePath = (path) => SITE_EXT.test(path || '')
 

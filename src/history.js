@@ -1,13 +1,13 @@
 /**
  * Note history.
  *
- * One job: the copilot is about to rewrite a note, so the note as it stands is
- * kept first. This panel lists those snapshots for the note on screen and puts
- * the file back the way it was.
+ * Every way a note's text is replaced, kept where it can be put back: the copy
+ * an autosave leaves of what it overwrote, the copilot's rewrite of a note,
+ * and the snapshot a restore leaves so it can be undone. This panel lists
+ * them for the note on screen and puts the file back the way it was.
  *
- * Only the copilot's turns are listed. Your own typing is not snapshotted here
- * — undo covers that, and a list padded with every autosave buries the entries
- * that exist because something else did the writing.
+ * Saves are coalesced into one entry per typing burst by the store, so the
+ * list reads as the note's chapters rather than its every pause.
  */
 
 import { el as element } from './blocks.js'
@@ -131,6 +131,8 @@ export function mountHistory ({ el, api, confirm, beforeRestore }) {
       ))
     }
     if (operation.source === 'restore') head.append(element('span', 'history-tag', 'restore point'))
+    else if (operation.source === 'save') head.append(element('span', 'history-tag', 'saved'))
+    else head.append(element('span', 'history-tag', 'copilot'))
 
     const actions = element('div', 'history-actions')
     const view = element('button', 'ghost is-compact', 'Changes')
@@ -182,7 +184,7 @@ export function mountHistory ({ el, api, confirm, beforeRestore }) {
       glyph,
       element('p', 'history-none-title', 'No versions kept yet'),
       element('p', 'history-none-sub',
-        'Before the copilot edits this note, Tulip keeps a copy here — so anything it changes can be put back.')
+        'Each save keeps the note as it stood a moment before — so an edit, or a copilot rewrite, can be put back from here.')
     )
     return node
   }

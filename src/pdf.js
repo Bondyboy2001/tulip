@@ -1352,6 +1352,8 @@ export function mountPdf ({
     hidePop()
     sheet.replaceChildren()
     host.classList.remove('on-mark')
+    // The words belonged to that document; the next one has its own.
+    pageText.clear()
     try { await doc.destroy() } catch { /* going away regardless */ }
   }
 
@@ -1423,6 +1425,96 @@ export function mountPdf ({
     }
   }
 
+  /* ------------------------------------------------------------- finding
+
+     ⌘F inside a document. The words are already there — every page's text is
+     asked for to build the selectable layer over it — so the search is a walk
+     of that same content rather than anything new, and the answer is a page
+     number and a place down it, which is exactly what `goToPage` takes.
+
+     The text of each page is kept once it has been read: a search is a pass
+     over the whole document, and typing in the box is a search per keystroke.
+     Cleared with the document, like everything else keyed to it. */
+  const pageText = new Map()
+
+  async function textOf (n) {
+    if (pageText.has(n)) return pageText.get(n)
+    const epoch = state.epoch
+    let out = { text: '', items: [] }
+    try {
+      const proxy = state.pages[n - 1]?.proxy || await state.doc.getPage(n)
+      const content = await proxy.getTextContent()
+      // The document may have been closed or swapped while the worker answered.
+      if (epoch !== state.epoch) return out
+      /* Where each item begins in the joined string, so a hit found in the
+         string can be traced back to the item — and therefore to the height on
+         the page — that carries it. */
+      const items = []
+      let text = ''
+      for (const item of content.items) {
+        if (typeof item.str !== 'string') continue
+        items.push({ at: text.length, y: item.transform?.[5] })
+        text += item.str
+        if (item.hasEOL) text += '\n'
+      }
+      out = { text, items }
+    } catch { /* an unreadable page finds nothing */ }
+    if (epoch === state.epoch) pageText.set(n, out)
+    return out
+  }
+
+  /**
+   * Every place a query appears, in reading order.
+   *
+   * Case-insensitive and whitespace-flattened, because a phrase that runs
+   * across a line break in a two-column paper is still the phrase the reader
+   * typed. Capped: a one-letter query in a four-hundred-page book has tens of
+   * thousands of hits and nobody is walking them.
+   */
+  async function find (query, { limit = 500 } = {}) {
+    const needle = String(query || '').replace(/\s+/g, ' ').trim().toLowerCase()
+    if (!state.doc || !needle) return []
+
+    const epoch = state.epoch
+    const hits = []
+    for (let n = 1; n <= state.pages.length && hits.length < limit; n++) {
+      const { text, items } = await textOf(n)
+      if (epoch !== state.epoch) return []
+      const hay = text.replace(/\s+/g, ' ').toLowerCase()
+
+      let at = hay.indexOf(needle)
+      while (at !== -1 && hits.length < limit) {
+        hits.push({
+          page: n,
+          at,
+          // A line of context either side, tidied, for the results list.
+          excerpt: text.replace(/\s+/g, ' ').slice(Math.max(0, at - 40), at + needle.length + 40).trim(),
+          y: offsetOf(items, at, n)
+        })
+        at = hay.indexOf(needle, at + needle.length)
+      }
+    }
+    return hits
+  }
+
+  /* How far down its page a hit sits, 0–1, from the text item it falls in.
+     PDF text coordinates run up from the bottom of the page, so the fraction is
+     turned over to match the way the viewer scrolls. */
+  function offsetOf (items, at, n) {
+    let found = null
+    for (const item of items) {
+      if (item.at > at) break
+      found = item
+    }
+    if (typeof found?.y !== 'number') return 0
+    // `unit` is the page's size at scale 1, filled in when the page is first
+    // measured; a page nobody has scrolled to yet has none, and 0 puts the jump
+    // at its top, which is the right answer in the absence of a better one.
+    const height = state.pages[n - 1]?.unit?.height
+    if (!height) return 0
+    return clamp01(1 - found.y / height)
+  }
+
   /** The flash itself, on every rectangle the mark has on screen. Says whether
    *  there were any — a mark on an undrawn page has none yet. */
   function flash (id) {
@@ -1489,6 +1581,13 @@ export function mountPdf ({
     goToPage,
     goToOutline,
     goToMark,
+
+    /**
+     * Every place a phrase appears in the open document, as
+     * `{ page, y, excerpt }` in reading order — `y` being how far down its page
+     * a hit sits, which is what `goToPage` takes as its second argument.
+     */
+    find,
     setZoom,
     setTool,
     setPen,

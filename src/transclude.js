@@ -189,11 +189,27 @@ async function fillFragment (body, { path, anchor, chain, onReady }) {
    without a word, so the set is tidied here rather than notified there. */
 const live = new Set()
 
-/** Redraw every mounted transclusion — called when the vault changes. */
-export function refreshTransclusions () {
+/**
+ * Redraw mounted transclusions — called when the vault changes.
+ *
+ * `paths` is what actually moved, and a frame showing a note that is not among
+ * them has nothing to redraw. Refilling is not cheap: each one re-reads its
+ * note over IPC, renders it through markdown-it, and rebuilds the whole
+ * fragment's DOM, images included. Without the filter every autosave of the
+ * note being *typed into* rebuilt every frame on the page — the watcher fires
+ * for the app's own writes too — several times a minute, throwing away and
+ * re-decoding pictures nobody had touched.
+ *
+ * No list means "something changed but not which" — the fallback the watcher
+ * uses after it has been re-armed and cannot say what it missed. Everything is
+ * redrawn then, because anything might have.
+ */
+export function refreshTransclusions (paths = null) {
+  const moved = paths?.length ? new Set(paths) : null
   for (const frame of [...live]) {
     if (!frame.el.isConnected) { live.delete(frame); continue }
     if (frame.el.classList.contains('is-editing')) continue
+    if (moved && !moved.has(frame.path)) continue
     frame.fill()
   }
 }
@@ -358,7 +374,9 @@ export function renderTransclusion (spec, onReady = () => {}, ancestors = null) 
   })
   head.append(edit)
 
-  live.add({ el: box, fill })
+  // The path travels with the frame so a vault change can tell whether this is
+  // one of the notes that moved — see `refreshTransclusions`.
+  live.add({ el: box, fill, path: spec.path })
   fill()
 
   return box

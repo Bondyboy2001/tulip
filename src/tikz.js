@@ -100,6 +100,26 @@ function tikzRun (code, noteName, onPicture, onPaint) {
 }
 
 /**
+ * TeX primitives that read or write files, or hand work to the shell.
+ *
+ * A block using any of these is not drawn on sight. Reading a note is a
+ * passive act and must stay one, but a note is not always something the reader
+ * wrote — vaults are synced, shared, and cloned — and TeX is a full programming
+ * language, so a picture that draws itself is a program that runs itself. The
+ * command-execution half is refused by the engine (see `TEX_SANDBOX_ENV` in
+ * electron/main.js); the file half is not, because `openin_any` turns out not
+ * to be enforced for reads, so it is refused here instead.
+ *
+ * A denylist is a weak instrument and this one does not pretend otherwise —
+ * `\csname openin\endcsname` spells its way around it. It is not the only
+ * defence, it is the one that costs nothing: what it reliably stops is the
+ * plain form of the attack, and what it costs is that a handful of unusual
+ * blocks wait for a click. Nothing is refused outright — the Draw button runs
+ * whatever the block says, because by then a person has asked for it.
+ */
+const READS_FILES = /\\(?:openin|openout|read|write|input|include|InputIfFileExists|immediate|special)\b/
+
+/**
  * The reading view's form: the drawing stands where the block does, and draws
  * itself the first time the note is read.
  *
@@ -114,11 +134,19 @@ function tikzRun (code, noteName, onPicture, onPaint) {
  * @param {HTMLElement} head  the .code-head the Draw button belongs in
  */
 export function attachTikz (wrap, head, code, { noteName }) {
+  const asks = READS_FILES.test(code)
   attachArtefactBlock(wrap, head, {
     ...tikzSpec(code, noteName),
     kind: 'tikz',
     make: (path) => pictureFor(path),
-    auto: true
+    // Drawn on sight unless the block asks for the filesystem — see above.
+    auto: !asks,
+    titles: {
+      ...tikzSpec(code, noteName).titles,
+      first: asks
+        ? 'This picture reads files, so it is not drawn until you ask'
+        : 'Draw this picture with TeX'
+    }
   })
 }
 

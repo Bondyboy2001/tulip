@@ -59,6 +59,23 @@ export function headings (text) {
   return out
 }
 
+/* One document's headings, held so that repeated asking is free.
+
+   Keyed on CodeMirror's `Text` rather than on a string, for the reason the
+   maths cache gives at length: the object is shared between states whenever
+   the document did not change, so identity is exactly the question. The editor
+   asks on every decoration rebuild — every keystroke, and every scroll — and
+   the scan is a split and two regular expressions per line of the note. One
+   entry is enough; the case that matters is many asks about one document. */
+let headingCache = { doc: null, found: null }
+
+export function headingsFor (doc) {
+  if (headingCache.doc !== doc) {
+    headingCache = { doc, found: headings(doc.toString()) }
+  }
+  return headingCache.found
+}
+
 /**
  * Splits `Note#Heading` into the note and the place in it. A leading `#` means
  * this note — `[[#Heading]]` is how a link inside a note names its own section.

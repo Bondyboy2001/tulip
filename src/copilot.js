@@ -804,7 +804,9 @@ export function mountCopilot ({
        saw nothing to do and returned, so a transient error (a full disk, a
        vault on a volume that had gone away) dropped the history for the rest
        of the session rather than for one attempt. */
-    api.ai.history.save(out).catch((err) => {
+    /* Returned so a caller that can wait — the quit handshake — knows when the
+       transcripts are actually on disk rather than merely asked for. */
+    return api.ai.history.save(out).catch((err) => {
       unsaved = true
       console.error('saving the copilot history failed', err)
       // During unload there is no window left to show it in, and the console
@@ -1166,10 +1168,22 @@ export function mountCopilot ({
     setBusy(true)
 
     if (!await ensureSession()) { setBusy(false); return }
+    /* Stop may have been pressed while the session was starting — `halt` has
+       nothing to signal yet at that point, so it settles the panel and returns,
+       and without this the turn it thought it had cancelled would carry on
+       from here: a reply and a run of file edits with no working strip, no way
+       to stop them, and `state.turn` already let go of, so every event would
+       be filed against whichever note happened to be on screen when it landed.
+       The test is the turn's identity, not a flag: a *new* turn started in the
+       meantime owns the session now, and this one is equally stale. */
+    if (state.turn !== to) return
 
     // Awaited: the renderer flushes the open buffer here, so the agent reads
     // the note as it is on screen rather than as it was at the last autosave.
-    const result = await api.ai.send(text, await context())
+    const context_ = await context()
+    if (state.turn !== to) return
+
+    const result = await api.ai.send(text, context_)
     if (!result?.ok) {
       // Whatever went wrong, the session is no longer one we can trust; the
       // next message starts over rather than failing the same way again.
@@ -1222,6 +1236,11 @@ export function mountCopilot ({
 
   async function halt () {
     const to = state.turn
+    /* Let go of the turn before the await, not after. `submit` checks its own
+       turn against this one at every point it resumes, so clearing it here is
+       what makes a Stop pressed during startup actually stop: the send that
+       was about to happen sees the turn has moved on and never goes out. */
+    state.turn = null
     await api.ai.stop()
     state.started = false
     setBusy(false)   // settles the stream and lets go of the turn
@@ -1605,6 +1624,18 @@ export function mountCopilot ({
     },
 
     applyConfig,
+
+    /**
+     * Get the transcripts to disk, now, and say when they are there.
+     *
+     * `beforeunload` also calls `flush`, but by then main has already resolved
+     * the close and called `app.quit()` — the write is an async IPC round trip
+     * racing process exit, and a reply that arrived in the last few hundred
+     * milliseconds (the settling save is debounced) loses that race. Main holds
+     * the window open for `app:flush`, so this is the one place a transcript
+     * can be written with something waiting for it.
+     */
+    flush: () => flush(),
 
     /**
      * Settings and stored conversations are applied before the panel is ever

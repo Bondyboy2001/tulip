@@ -73,9 +73,16 @@ const equationId = (label) => `eq-${encodeURIComponent(label).replaceAll('%', '_
 
 /** Labels and the numbers/tags they display, in document order. */
 export function equationIndex (text) {
+  return indexEquations(findMath(String(text || '')))
+}
+
+/* The indexing itself, over spans that have already been found. Split out so
+   the editor can index the spans it has cached rather than scanning again —
+   see `equationsFor`. */
+function indexEquations (spans) {
   const labels = new Map()
   let number = 0
-  for (const span of findMath(String(text || ''))) {
+  for (const span of spans) {
     if (!span.display) continue
     const found = LABEL.exec(span.tex)
     if (!found) continue
@@ -281,10 +288,18 @@ export function findMath (text) {
      most — a fourth makes indented code) and only closes when it ends one.
      The same two tests here, or `a $$x$$ b` would centre itself in the editor
      while staying literal text in the reading view. */
-  const opensLine = (i) => {
-    const from = text.lastIndexOf('\n', i - 1) + 1
-    return /^ {0,3}$/.test(text.slice(from, i))
-  }
+  /* What may stand between the start of a line and a `$$` that opens a block.
+     Spaces, up to the three that still count as unindented — and the markers of
+     the containers markdown-it runs this rule inside. Its block rule is
+     registered for paragraphs, blockquotes *and* lists, and reads each line
+     from `bMarks + tShift`, which is the position after the container's own
+     prefix; so `> $$…$$` inside a callout is display maths in the reading view.
+     Refusing it here made the editing view show a stray `$` on each side and
+     typeset the middle inline, which is the exact disagreement between the two
+     scanners this module exists to prevent. */
+  const CONTAINER = /^ {0,3}(?:> ?)*(?:(?:[-*+]|\d{1,9}[.)]) +)? {0,3}$/
+  const lineStart = (i) => text.lastIndexOf('\n', i - 1) + 1
+  const opensLine = (i) => CONTAINER.test(text.slice(lineStart(i), i))
   const closesLine = (i) => {
     const to = text.indexOf('\n', i)
     return /^[ \t]*$/.test(text.slice(i, to === -1 ? text.length : to))
@@ -320,7 +335,15 @@ export function findMath (text) {
     if (!display && /\s/.test(text[end - 1])) { i++; continue }
     if (!display && /\d/.test(text[end + close.length] || '')) { i++; continue }
 
-    const tex = text.slice(open, end)
+    let tex = text.slice(open, end)
+    /* A block opened inside a blockquote or callout carries that container's
+       marker down its left edge, and the marker is not part of the expression —
+       markdown-it never sees it, because the block parser strips each line's
+       prefix before this rule reads it. Stripped here too, so both views
+       typeset the same TeX. */
+    if (display && tex.includes('\n') && /^ {0,3}(?:> ?)+/.test(text.slice(lineStart(i), i))) {
+      tex = tex.replace(/\n[ \t]*>[ \t]?/g, '\n')
+    }
     if (tex.trim()) spans.push({ from: i, to: end + close.length, tex, display })
     i = end + close.length
   }
@@ -344,12 +367,12 @@ export function findMath (text) {
  * One entry is enough — the interesting case is many updates against one
  * document, not alternation between two.
  */
-let cache = { doc: null, text: '', spans: null }
+let cache = { doc: null, text: '', spans: null, equations: null }
 
 function fill (doc) {
   if (cache.doc !== doc) {
     const text = doc.toString()
-    cache = { doc, text, spans: findMath(text) }
+    cache = { doc, text, spans: findMath(text), equations: null }
   }
   return cache
 }
@@ -361,6 +384,23 @@ export const docText = (doc) => fill(doc).text
 export const mathSpans = (doc) => fill(doc).spans
 
 /**
+ * The numbered equations of a document, computed once per version.
+ *
+ * `equationIndex` takes a string, which meant every caller in the editor was
+ * paying for a fresh `findMath` over the whole note — the exact scan this cache
+ * exists to prevent, reintroduced by going in through the door that does not
+ * take a `Text`. Two callers made that mistake on every keystroke, and one of
+ * them on every cursor movement as well. Built from the spans above rather than
+ * scanning again, and held beside them because it is a fact about the same
+ * document and goes stale at the same moment.
+ */
+export function equationsFor (doc) {
+  const entry = fill(doc)
+  if (!entry.equations) entry.equations = indexEquations(entry.spans)
+  return entry.equations
+}
+
+/**
  * Renders maths in the editing view, and steps out of the way — showing the
  * raw TeX — whenever the cursor is inside the expression, which is the same
  * rule the rest of the live preview follows.
@@ -370,10 +410,32 @@ export const mathSpans = (doc) => fill(doc).spans
  * come from a plugin — opening a note with display maths threw and left the
  * whole view broken. Same rule the diagrams and the tables follow.
  */
+/**
+ * Which spans the selection is sitting in, as a string that changes only when
+ * that set does.
+ *
+ * Moving the caret changes what this field draws only when it crosses into or
+ * out of an expression — every other movement, which is nearly all of them,
+ * produces exactly the decorations already on screen. Comparing the answer is
+ * far cheaper than rebuilding: no widgets are constructed and no decoration set
+ * is sorted, and the spans themselves are already cached.
+ */
+function touchedSpans (state) {
+  const spans = mathSpans(state.doc)
+  let signature = ''
+  for (let i = 0; i < spans.length; i++) {
+    const span = spans[i]
+    if (state.selection.ranges.some((r) => r.to >= span.from && r.from <= span.to)) {
+      signature += `${i},`
+    }
+  }
+  return signature
+}
+
 function buildMathDeco (state) {
   const tree = syntaxTree(state)
   const ranges = []
-  const equations = equationIndex(docText(state.doc))
+  const equations = equationsFor(state.doc)
 
   /* In code, `$` is a shell variable or a string literal, and the reading
      view never typesets there. The test is asked of the tree rather than of
@@ -405,19 +467,28 @@ function buildMathDeco (state) {
   return Decoration.set(ranges, true)
 }
 
+const mathState = (state) => ({ deco: buildMathDeco(state), touched: touchedSpans(state) })
+
 export const mathPreview = StateField.define({
-  create: buildMathDeco,
-  update (deco, tr) {
-    if (tr.docChanged || tr.selection) return buildMathDeco(tr.state)
+  create: mathState,
+  update (value, tr) {
+    if (tr.docChanged) return mathState(tr.state)
     /* The parse advancing can move a span into or out of code — and a freshly
        opened note has no tree at create() at all. The parser reports its
        progress through transactions of its own; this catches them. Widget
        eq() keeps the untouched renders alive across every rebuild. */
-    if (syntaxTree(tr.state) !== syntaxTree(tr.startState)) return buildMathDeco(tr.state)
-    return deco
+    if (syntaxTree(tr.state) !== syntaxTree(tr.startState)) return mathState(tr.state)
+    if (tr.selection) {
+      /* Only when the caret has crossed an expression's edge. Holding an arrow
+         key down through a note full of maths used to rebuild every widget in
+         it on every intermediate position. */
+      const touched = touchedSpans(tr.state)
+      return touched === value.touched ? value : { deco: buildMathDeco(tr.state), touched }
+    }
+    return value
   },
   provide: (field) => [
-    EditorView.decorations.from(field),
-    EditorView.atomicRanges.of((view) => view.state.field(field))
+    EditorView.decorations.from(field, (value) => value.deco),
+    EditorView.atomicRanges.of((view) => view.state.field(field).deco)
   ]
 })

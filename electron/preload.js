@@ -102,6 +102,15 @@ contextBridge.exposeInMainWorld('tulip', {
     }
   },
 
+  /* What was typed but not yet saved, kept outside the vault so a crash cannot
+     take it with the window. `list` answers with only the drafts that differ
+     from the note on disk — see the handler in main. */
+  draft: {
+    save: (path, text) => ipcRenderer.invoke('draft:save', path, text),
+    clear: (path) => ipcRenderer.invoke('draft:clear', path),
+    list: () => ipcRenderer.invoke('draft:list')
+  },
+
   trust: {
     list: () => ipcRenderer.invoke('trust:list'),
     operation: (id) => ipcRenderer.invoke('trust:operation', id),
