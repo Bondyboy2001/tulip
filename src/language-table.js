@@ -6,7 +6,10 @@
 
 import VAULT_CONTRACT from '../electron/vault-contract.json'
 import { LANGUAGE_FLAG } from './vault-paths.js'
-import { AGAIN, HARD, GOOD, EASY, grade as gradeCard, preview, humanDays, isLeech } from './srs.js'
+import {
+  AGAIN, HARD, GOOD, EASY,
+  grade as gradeCard, preview, humanDays, isLeech, isNew, isDue
+} from './srs.js'
 
 const LANGUAGE_TABLE_SUFFIX = VAULT_CONTRACT.languageTableSuffix
 const LEGACY_LANGUAGE_TABLES = new Set(
@@ -104,7 +107,7 @@ function columnsFor (header, options = {}) {
 }
 
 /** The `key: value` lines above the first `---`, if the note opens with one. */
-export function frontmatterOf (markdown) {
+function frontmatterOf (markdown) {
   const text = String(markdown || '')
   if (!/^---\r?\n/.test(text)) return {}
   const end = text.indexOf('\n---', 3)
@@ -127,7 +130,7 @@ export function frontmatterOf (markdown) {
  * to speak it. They schedule independently — which is why `direction` is part
  * of a card's identity in the store.
  */
-export function languageCards (markdown, notePath = '') {
+function languageCards (markdown, notePath = '') {
   const lines = String(markdown || '').split(/\r?\n/)
   const options = frontmatterOf(markdown)
   const reverse = !/^(no|false|off)$/i.test(options['study-reverse'] || '')
@@ -196,7 +199,7 @@ function endOfToday (now) {
  * rather than the front: meeting twenty new words before reviewing is how a
  * session becomes too long to finish.
  */
-export function buildQueue (cards, states, now, { newPerDay = NEW_PER_DAY } = {}) {
+function buildQueue (cards, states, now, { newPerDay = NEW_PER_DAY } = {}) {
   const cutoff = endOfToday(now)
   const due = []
   const fresh = []
@@ -204,8 +207,11 @@ export function buildQueue (cards, states, now, { newPerDay = NEW_PER_DAY } = {}
   for (const card of cards) {
     const state = states[card.id]
     if (isLeech(state)) continue          // set aside, not drilled — see srs.js
-    if (!state || !state.reps) fresh.push(card)
-    else if ((state.due || 0) <= cutoff) due.push({ card, due: state.due || 0 })
+    /* Asked of the scheduler rather than worked out here. Both questions were
+       spelled out again in this loop, which is two more places for "what counts
+       as due" to drift away from what the scheduler thinks it means. */
+    if (isNew(state)) fresh.push(card)
+    else if (isDue(state, cutoff)) due.push({ card, due: state.due || 0 })
   }
 
   due.sort((a, b) => a.due - b.due)

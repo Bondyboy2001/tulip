@@ -7,12 +7,5 @@ dist/
 # Electron, rebuildable from source in one command.
 build/
 
-# SwiftPM's cache, left over from the pre-Electron Tulip.
-.build/
-
-# Rendered Manim videos in the sample vault — a content-hash cache the
-# runner regenerates on demand.
-sample-vault/.images/
-
 # Scratch written by agent tooling run inside the repo.
 .pi-subagents/

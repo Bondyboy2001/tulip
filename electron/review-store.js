@@ -288,4 +288,4 @@ function makeStore ({ vault }) {
   }
 }
 
-module.exports = { makeStore, cardId, splitId, STATE_DIR }
+module.exports = { makeStore }

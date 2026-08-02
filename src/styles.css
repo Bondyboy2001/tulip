@@ -1493,10 +1493,13 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   opacity: .75;
   line-height: 1.2;
 }
-/* Coloured by what they mean, not by which is "correct": Again is the one that
-   costs you the interval, Easy the one that spends it. Good keeps the accent
-   because it is the answer most sessions are made of. */
-.study-again { color: var(--paper); background: var(--danger, #c0574f); }
+/* Good is filled, because it is the answer most sessions are made of and the
+   one the hand should find without looking. The other three share the quiet
+   treatment and are told apart by their ink — Again in the colour this app
+   already uses for something that did not work (see `.run-out-verdict.is-bad`).
+   Not a filled red: forgetting a card is the ordinary business of reviewing,
+   not an error, and a page of red buttons would say otherwise. */
+.study-again { color: var(--code-removed); background: var(--hover); }
 .study-hard { color: var(--ink-soft); background: var(--hover); }
 .study-got { color: var(--paper); background: var(--accent); }
 .study-easy { color: var(--ink-soft); background: var(--hover); }

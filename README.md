@@ -126,6 +126,12 @@ pictures already in place and an edit is what asks for a new one. TikZ needs a
 LaTeX installation (`latex` and `dvisvgm`, both in MacTeX or TeX Live); the
 command and the timeout are in Settings.
 
+Drawing on sight means TeX runs on whatever a note contains before anyone has
+read it, and a note is not always one you wrote — vaults are synced, shared and
+cloned. So TeX is run with command execution refused outright, and a block that
+asks to open files is not drawn until you press Draw; two at a time, so a page
+of thirty figures does not start thirty of them at once.
+
 **Timed recordings.** A media embed can start at seconds, `MM:SS`, `HH:MM:SS`,
 or `1h2m3s`: `![[lecture.mp3#t=12:35]]`. The same address without the bang,
 `[[lecture.mp3#t=12:35]]`, opens one transient player at that moment rather
@@ -177,7 +183,13 @@ the place in each note you were reading rather than to its top. The side buttons
 on a mouse do the same.
 
 **Saving.** Edits autosave 600 ms after you stop typing, and on note switch,
-window hide, and quit. The dot beside the note name means unsaved.
+window hide, and quit. The dot beside the note name means unsaved. A copy of
+anything typed but not yet saved is kept outside the vault as well, so a crash
+or a power cut has something to offer back; it is deleted the moment the real
+save lands, and what is left at the next launch is by definition a loss. If a
+note changes on disk under an unsaved buffer — a sync client, another editor,
+the copilot — the two are folded together, and where they both rewrote the same
+lines you are asked which to keep.
 
 **Linting.** Every save brings the note to the house style: a run of blank lines
 becomes one, the top and bottom of the file lose theirs, the file ends in a
@@ -203,7 +215,8 @@ terminal — see `--check` above.
 | `⌘,` | Settings |
 | `⌘P` | Command palette |
 | `⌘⇧F` | Search the vault |
-| `⌘F` | Find in note |
+| `⌘F` | Find in note, or in the open PDF |
+| `⌃⌘S` | Review the cards that are due |
 | `⌘N` / `⌘⇧N` | New note / folder |
 | `⌘E` | Reading view |
 | `⌘B` / `⌘\` | Toggle sidebar |
@@ -233,6 +246,11 @@ src/transclude.js    a note rendered inside another — embeds and hover preview
 src/sidepane.js      the second document, standing beside the one being written
 src/settings.js      the settings panel — keys and controls, nothing else
 src/lint.js          the markdown rules a note is held to, as edits
+src/srs.js           when a card comes back — FSRS, and nothing else
+src/language-table.js  a language table read as a deck, and the review overlay
+src/merge.js         folding two versions of a note together
+src/mergepanel.js    what it asks when both sides rewrote the same lines
+electron/review-store.js  the schedule, kept in the vault and guarded
 src/styles.css       design tokens and all chrome styling
 build.mjs            esbuild bundle into dist/
 scripts/drive.mjs    evaluates expressions in a running renderer, for testing
@@ -275,7 +293,28 @@ CDP_PORT=9333 node scripts/drive.mjs --file probe.js
 ## Language learning
 
 Creating a language makes one folder with three portable Markdown files:
-`Vocabulary.language.md` for the fixed vocabulary table and flashcards,
-`Sounds.md` for letters or combinations and their sounds, and `Grammar.md` for
+`Vocabulary.language.md` for words and their meanings, `Sounds.language.md` for
+letters or combinations and the sounds they make, and `Grammar.language.md` for
 patterns, examples, and exceptions. The same scaffold is used for every
 language; the selected country flag and name live on the folder.
+
+**Review.** Any of the three can be studied — `⌃⌘S`, **View ▸ Review Due
+Cards**, or the button on a language table. Each row makes two cards, asked in
+both directions and scheduled apart, because reading a language and speaking it
+are different things to know. A note can say otherwise in its frontmatter:
+`study-front:` and `study-back:` name the columns, and `study-reverse: no` asks
+one way only.
+
+Scheduling is FSRS (`src/srs.js`). Two numbers describe a card — how long until
+you would forget it, and how stubborn it is — and each answer updates both from
+how it went *and* from how likely you were to have remembered it just then, so a
+card recalled after a long gap gains far more than the same card recalled
+tomorrow. Each button says what it will schedule. A session shows what is
+overdue first, then up to twenty cards you have never seen; a card forgotten
+eight times is set aside rather than drilled, because it needs rewriting.
+
+What the scheduler remembers lives in the vault — `.tulip/review.json`, with an
+append-only log beside it — so it is backed up and synced with the notes it is
+about, and it follows a note that is renamed. Nothing prunes it without saying
+so: a scan that reports no cards at all, or one that would forget more than a
+fifth of the deck, is refused rather than believed.
