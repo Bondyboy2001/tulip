@@ -7,6 +7,7 @@
 
 import { tags as t, tagHighlighter, highlightCode } from '@lezer/highlight'
 import { LanguageDescription } from '@codemirror/language'
+import { languageId } from './languages.js'
 
 export const codeTokens = [
   { tag: [t.keyword, t.controlKeyword, t.operatorKeyword, t.definitionKeyword,
@@ -64,8 +65,13 @@ const MAX_HIGHLIGHT = 120_000
    language it is written in. A Manim scene is Python and a TikZ picture is
    LaTeX — they are called what they are because of what Tulip renders them
    into — so they are parsed as the languages they are written in. An SVG
-   drawing is XML for the same reason. */
-const FENCE_ALIAS = { manim: 'python', tikz: 'latex', svg: 'xml' }
+   drawing is XML for the same reason, and a three.js scene is JavaScript.
+
+   Keyed on the canonical id as well as the raw word, so a kind with spellings
+   of its own — `three`, `threejs`, `3js` — is one entry here rather than one
+   per alias. languages.js already holds that list, and the second copy this
+   avoids is the kind that silently stops colouring when the first one grows. */
+const FENCE_ALIAS = { manim: 'python', tikz: 'latex', svg: 'xml', three: 'javascript' }
 const descriptions = new Map()
 
 /**
@@ -75,14 +81,28 @@ const descriptions = new Map()
 export function languageFor (token) {
   const word = String(token || '').trim().split(/\s+/)[0].toLowerCase()
   if (!word) return null
-  const name = FENCE_ALIAS[word] || word
+  /* The chip table's aliases are the vault's dialect — `py`, `jl`, `rs` — and
+     language-data's matcher knows none of them: it never consults extensions,
+     only names and its own aliases. Asking with the raw word alone left half
+     the spellings languages.js blesses (and three that run) without colours
+     in either view, so the chip table's canonical id stands behind the word.
+     The word as written is still tried first: `cmake`, `postgresql`, `less`
+     name dialect parsers of their own that the canonical id folds away. */
+  const name = FENCE_ALIAS[word] || FENCE_ALIAS[languageId(word)] || word
+  const canon = name === word ? languageId(word) : name
+  /* Plain text is the one id that must not reach the fuzzy matcher: "text"
+     contains "tex", which language-data reads as LaTeX, and a block that says
+     it is plain came out coloured as maths. */
+  if (canon === 'text') return null
   if (!descriptions.has(name)) {
     descriptions.set(name, LanguageDescription.of({
       name,
       alias: [name],
       async load () {
         const { languages } = await import('@codemirror/language-data')
-        const real = LanguageDescription.matchLanguageName(languages, name, true)
+        const real = LanguageDescription.matchLanguageName(languages, name, true) ||
+          (canon && canon !== name &&
+            LanguageDescription.matchLanguageName(languages, canon, true)) || null
         if (!real) throw new Error(`Unknown code language: ${name}`)
         return support(real)
       }

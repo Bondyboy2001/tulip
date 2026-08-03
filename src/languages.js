@@ -6,6 +6,7 @@
    ================================================================== */
 
 import { logoSvg } from './logos.js'
+import RUNNABLE from '../electron/runnable-languages.json'
 
 const DARK_INK = '#1A1815'
 
@@ -28,6 +29,12 @@ export const LANGUAGES = [
   /* TikZ is LaTeX, and drawn rather than run — same family as manim and
      mermaid. The colour is TeX's own. */
   { id: 'tikz', label: 'TikZ', short: 'TkZ', color: '#008080' },
+  /* A three block is JavaScript, and drawn rather than run — the same family
+     again: the tile is what says a block builds a scene rather than printing
+     something. three.js has no brand colour of its own beyond black, which at
+     tile size is a hole in the page, so the mark is drawn on the near-black
+     the logo itself uses. */
+  { id: 'three', label: 'three.js', short: '3JS', color: '#2B2A28', alias: ['threejs', '3js'] },
   /* An svg block is drawn too — the only one of the family whose source needs
      nothing done to it but reading. It is XML underneath, which is why the
      tile is the one thing that says which of the two a block is. */
@@ -72,7 +79,7 @@ export const LANGUAGES = [
   { id: 'nim', label: 'Nim', short: 'NIM', color: '#FFE953', ink: DARK_INK },
   { id: 'perl', label: 'Perl', short: 'PL', color: '#39457E', alias: ['pl'] },
   { id: 'julia', label: 'Julia', short: 'JL', color: '#9558B2', alias: ['jl'] },
-  { id: 'ocaml', label: 'OCaml', short: 'ML', color: '#EC6813' },
+  { id: 'ocaml', label: 'OCaml', short: 'ML', color: '#EC6813', alias: ['ml'] },
   { id: 'fsharp', label: 'F#', short: 'F#', color: '#378BBA', alias: ['fs', 'f#'] },
   { id: 'graphql', label: 'GraphQL', short: 'GQL', color: '#E10098', alias: ['gql'] },
   { id: 'dockerfile', label: 'Dockerfile', short: 'DKR', color: '#2496ED', alias: ['docker'] },
@@ -112,6 +119,13 @@ function languageMark (token) {
  * comparison against a known one is still false rather than throwing.
  */
 export const languageId = (token) => languageMark(token)?.id || ''
+
+/* The fences this app draws rather than runs, by the name each drawing module
+   answers to. Re-exported from the shared contract rather than restated,
+   because the main process reads the same file to tell the copilot which
+   fences Tulip understands — see electron/runnable-languages.json — and a
+   second list here is how the two come to disagree about what `three` is. */
+export const DRAWN = RUNNABLE.drawn
 
 /**
  * @param {string} token   the word after the opening fence

@@ -11,7 +11,8 @@
     "start": "npm run build && electron .",
     "app": "electron .",
     "tidy": "node scripts/tidy-vault.mjs",
-    "test:srs": "esbuild scripts/test-srs.mjs --bundle --format=esm --platform=node --outfile=node_modules/.cache/test-srs.mjs --log-level=error && node node_modules/.cache/test-srs.mjs"
+    "test:srs": "esbuild scripts/test-srs.mjs --bundle --format=esm --platform=node --outfile=node_modules/.cache/test-srs.mjs --log-level=error && node node_modules/.cache/test-srs.mjs",
+    "test:ai": "esbuild scripts/test-ai.mjs --bundle --format=cjs --platform=node --outfile=node_modules/.cache/test-ai.cjs --log-level=error && node node_modules/.cache/test-ai.cjs"
   },
   "allowScripts": {
     "esbuild": true,
@@ -36,6 +37,7 @@
     "markdown-it-footnote": "^4.0.0",
     "mermaid": "^11.16.0",
     "pdfjs-dist": "^6.1.200",
-    "simple-icons": "^16.27.1"
+    "simple-icons": "^16.27.1",
+    "three": "^0.185.1"
   }
 }

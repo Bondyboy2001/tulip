@@ -388,8 +388,10 @@ html, body {
 }
 
 /**
- * The app chrome is a control surface, so its pointer is an arrow — stated,
- * rather than left to `cursor: auto`.
+ * Two cursors, and which one you get says what a click would do: an arrow
+ * everywhere, a hand over anything a click acts on.
+ *
+ * The arrow is the ground state, stated rather than left to `cursor: auto`.
  *
  * `auto` is not "the arrow": it means the browser decides per position, and
  * over selectable text it decides on an I-beam. Left at the initial value, the
@@ -401,54 +403,96 @@ html, body {
  * rules patching this widget by widget; this is the rule they were each a
  * local instance of.
  *
- * A document is the exception and opts back in below: the reading view, the
- * editor, the PDF's text layer and the transcript are all things you select
- * from, and an I-beam over them is information rather than noise. Inheritance
- * makes that exception the only kind that has to be written down, since a
- * caret's own surfaces would otherwise be handed the arrow set here.
+ * The hand is not one of the things this rule is protecting against. A tab, a
+ * row of the tree, a chip, a card, a swatch: every one of them does something
+ * when clicked, and each still names `cursor: pointer` for itself — `button`
+ * says it once below for the great majority that are buttons. Chrome that a
+ * click does nothing to keeps the arrow, and so does a disabled control, which
+ * is the whole of what "disabled" has to say for itself.
  *
- * The editor's opt-in is `.cm-scroller`, not `.cm-content`: the content is a
- * centered column, and the pane's margins beside and below it belong to the
- * scroller — scoped to the content, the pointer flips at the column edge on
- * every sideways movement of the mouse.
+ * A note is not an exception to it. The reading view and the editor once took
+ * the I-beam, on the reasoning that they are things you select from — but a
+ * note is not a plain block of text, it is text with tables, embeds, widgets
+ * and markup threaded through it, and each of those is a boundary the shape
+ * changed at. Over a table that meant a beam flickering several times per sweep
+ * of the mouse. The caret already says where typing would land, and it says so
+ * without moving with the mouse; the cursor saying it a second time bought
+ * nothing and cost a steady pointer. So a note keeps the arrow, and the only
+ * thing that changes it is the hand.
+ *
+ * Real text fields — the search box, a title field, the source textarea — keep
+ * the beam. They are single-purpose boxes with nothing threaded through them,
+ * so nothing flickers, and the beam is how a field says it is one.
  */
 body { cursor: default; }
 
-.reading,
-.cm-scroller,
-.msg-you, .msg-bot, .think-body,
-input, textarea, [contenteditable="true"] { cursor: text; }
+/* Typed into, not clicked: a checkbox or a button is an `<input>` too, and the
+   beam over one is a lie about what pressing it does. */
+input:not([type="checkbox"], [type="radio"], [type="button"], [type="range"],
+          [type="color"], [type="file"], [type="submit"]),
+textarea { cursor: text; }
+input:is([type="checkbox"], [type="radio"], [type="button"], [type="range"],
+         [type="color"], [type="file"], [type="submit"]) { cursor: pointer; }
 
-/* And inside a document the beam is the only cursor there is.
+/* Inside a note the arrow is the default rather than the only cursor.
  *
- * A note is prose with links, wikilinks, tags and task boxes threaded through
- * it, and each of those used to name a cursor of its own — the hand over a
- * link, the arrow over a callout's head or a locked column. On ordinary prose
- * that is an occasional blip, but a contents note is a page of links, and
- * sweeping the mouse along one line of it flipped the pointer between the beam
- * and the hand several times a second with nothing opening, moving or
- * highlighting to account for it.
+ * Everything a note holds inherits it — inline buttons, rendered widgets, table
+ * cells, the lot — so the shape holds steady across a sweep of the mouse
+ * whatever the text is made of. `!important` is deliberate: many controls
+ * declare a cursor later, and CodeMirror's base theme is injected after this
+ * stylesheet.
  *
- * The affordance was not worth that. A link in a note is read far more often
- * than it is followed, it is already drawn in the accent colour and underlined,
- * and in the editing view a plain click does not follow it at all — which is
- * the reasoning `.tk-link` was already written down with, generalised here to
- * everything that sits inside a line of text.
+ * The editor's scope is `.cm-scroller`, not `.cm-content`, so that the pane's
+ * margins beside and below the centered column are covered by the same rule as
+ * the column itself.
  *
- * The whole Markdown surface is one cursor, including inline buttons and
- * rendered widgets. Letting each descendant opt back into pointer/default was
- * still enough to flash a different icon throughout real notes. `!important`
- * is deliberate here: many controls declare their cursor later, and
- * CodeMirror's base theme is injected after this stylesheet. Only genuine
- * resize handles opt out below. */
-:where(.reading, .reading *, .cm-scroller, .cm-scroller *) {
-  cursor: text !important;
+ * What opts back out is what a click acts on, listed below. */
+:where(
+  .reading, .reading *,
+  .cm-scroller, .cm-scroller *,
+  .msg-you, .msg-you *, .msg-bot, .msg-bot *, .think-body, .think-body *
+) {
+  cursor: default !important;
 }
-/* The grip keeps its own cursor inside surfaces that set `cursor: text` on
-   everything they hold. One selector, because there is one grip. */
-:where(.reading, .cm-scroller) .tk-embed-grip {
-  cursor: nwse-resize !important;
+
+/* The hand, for the things inside a document a click does something to.
+ *
+ * Named one by one rather than swept up by `a, button`, because the two views
+ * do not agree on what a click means and the cursor should not claim they do.
+ * In the reading view a link is an anchor and a plain click follows it. In the
+ * editor it is text you are in the middle of writing: only a wikilink opens on
+ * a plain click, and a bare URL wants ⌘ — so the arrow stays over it, which is
+ * the truth about what clicking there would do.
+ *
+ * Every list here is written twice, once bare and once with a descendant `*`,
+ * and that second half is not decoration. The rule above matches each element
+ * on its own rather than being inherited, so it lands on the icon inside a
+ * button as surely as on the button — and an icon claiming the arrow inside a
+ * control claiming the hand is a cursor that changes shape twice on the way
+ * across one toggle. Naming the descendants makes a control one object.
+ *
+ * `!important` for the same reason the rule above carries one; and a class
+ * outranks the zero-specificity `:where()` it is overriding, so between two
+ * important declarations this is the one that lands. */
+:where(.reading) :is(
+  a, .tk-link, .tk-footnote, .tk-footnote-def, .tk-eq-ref,
+  a *, .tk-link *, .tk-footnote *, .tk-footnote-def *, .tk-eq-ref *
+),
+:where(.reading, .cm-scroller, .msg-you, .msg-bot, .think-body) :is(
+  button, [role="button"], [role="switch"], summary, [data-wikilink],
+  /* The task checkbox, under the name each view gives it. */
+  .tk-task, .task, .callout.is-foldable > .callout-head,
+  button *, [role="button"] *, [role="switch"] *, summary *, [data-wikilink] *,
+  .callout.is-foldable > .callout-head *
+) {
+  cursor: pointer !important;
 }
+
+/* Resize handles, which are neither the arrow nor the hand. They come after
+   both, and carry `!important` for the same reason those do: a note sets a
+   cursor on everything it holds, this one included. */
+:where(.reading, .cm-scroller) .tk-embed-grip { cursor: nwse-resize !important; }
+:where(.cm-scroller) .tk-col-grip { cursor: col-resize !important; }
 
 button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
 
@@ -620,7 +664,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   font-size: 11px;
   font-weight: 600;
   letter-spacing: .04em;
-  cursor: default;
+  cursor: pointer;
   transition: color .12s;
 }
 .pane-tab:hover { color: var(--ink-soft); }
@@ -657,7 +701,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   font-size: 13px;
   line-height: 1;
   color: var(--ink-soft);
-  cursor: default;
+  cursor: pointer;
   user-select: none;
   white-space: nowrap;
 }
@@ -781,7 +825,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   font-family: var(--font-ui);
   font-size: 12.5px;
   white-space: nowrap;
-  cursor: default;
+  cursor: pointer;
   flex: 0 1 auto;
 }
 .tab:hover { background: var(--hover); color: var(--ink-soft); }
@@ -893,6 +937,12 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .reading h1 strong, .reading h2 strong, .reading h3 strong,
 .reading h4 strong, .reading h5 strong, .reading h6 strong { color: inherit; }
 
+/* `**bold**` and `*italic*` in the editor. The same colours as the reading
+   view above, said in classes so the active-line rule further down has
+   something to name. */
+.tk-strong { color: var(--strong); font-weight: 650; }
+.tk-em { color: var(--emph); font-style: italic; }
+
 /* `==highlight==`: ink under a translucent marker stroke, shared by both
    rendered views. The colour is the PDF highlighter's yellow, so marking text
    means the same thing throughout the app. */
@@ -950,11 +1000,57 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   font-size: 12.5px;
   line-height: 1.62;
 }
+/* A quotation, drawn as the thing it is: somebody else speaking inside your
+   note.
+
+   The bar down the left said "set apart" and nothing more, which is the same
+   thing a callout's edge says — so the two constructs read as the same gesture
+   at different weights. A bubble says who is talking instead, and it is the one
+   shape a callout can never take: callouts are tinted by kind, titled, and
+   carry an icon; a quote is untinted, untitled, and has a tail. Neither can be
+   mistaken for the other at a glance.
+
+   Untinted deliberately. The accent belongs to links, the cursor and emphasis,
+   and a rose-washed bubble would simply be the rose callout. The recessed
+   paper tone is enough to lift it off the page, and leaves the accent free to
+   do its own work inside the quote.
+
+   The tail hangs from the bottom-left, which is where an attribution goes —
+   pointing back at the source rather than off into the margin. That is also
+   why the bottom-left corner is the one square corner: the left edge runs
+   straight down and becomes the tail, the way a drawn balloon works, instead
+   of the tail being stuck onto a finished box. */
 .reading blockquote {
-  border-left: 2px solid var(--accent);
-  padding-left: 1em;
+  position: relative;
+  margin: 0 0 1.7em;
+  padding: .8em 1.15em .85em;
+  background: var(--sunk);
+  border-radius: 14px 14px 14px 0;
   color: var(--ink-soft);
   font-style: italic;
+}
+/* The last paragraph's own bottom margin would pad the bubble unevenly. */
+.reading blockquote > :last-child { margin-bottom: 0; }
+/* A quotation is set in italic; the code inside one is not. The slant is
+   inherited by everything in the bubble, and mono takes it badly — the gutter's
+   numbers and the language mark come out looking like a rendering fault rather
+   than an emphasis. The italic is there to say "these are someone else's
+   words", which a fence is not: it is a listing, quoted or otherwise. */
+.reading blockquote .code-wrap,
+.reading blockquote pre,
+.reading blockquote code { font-style: normal; }
+.reading blockquote::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  bottom: -13px;
+  width: 20px;
+  height: 13px;
+  background: var(--sunk);
+  /* Right angle at the top-left, so the bubble's left edge carries on down and
+     the slope runs back in under it. Big enough to read as a tail: at the size
+     this started, it looked like the corner had been chipped off. */
+  clip-path: polygon(0 0, 100% 0, 0 100%);
 }
 /* A section break, set as one rather than drawn as a border.
    A flat hairline the width of the column read as an accident of layout — a
@@ -1002,10 +1098,22 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
    work. A full grid draws 30 lines to separate 12 numbers — the header rule and
    the hairlines between rows carry the structure on their own, and dropping the
    verticals lets the columns breathe. */
+/* A tint of --faint rather than --line-soft, for the same reason the horizontal
+   rule mixes its own colour: --line-soft is cut to sit *under* something — a
+   panel edge, a list divider — and on the dark themes it lands within a few
+   points of --paper (cobalt2: #1C3E58 on #193549). Drawn as the only thing
+   separating two rows it disappeared, and the table read as floating text.
+   Mixed from --faint the rule is held to the same visible fraction of the
+   text colour in every theme. Declared here rather than beside the palettes
+   because it is derived: --faint is themed, this follows it. */
+:root {
+  --table-rule:        color-mix(in srgb, var(--faint) 26%, transparent);
+  --table-rule-strong: color-mix(in srgb, var(--faint) 45%, transparent);
+}
 .reading .table-wrap {
   overflow-x: auto;
   margin: 0 0 1.4em;
-  border: 1px solid var(--line-soft);
+  border: 1px solid var(--table-rule-strong);
   border-radius: 7px;
 }
 .reading table {
@@ -1014,12 +1122,14 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   width: max-content;
   min-width: 100%;
 }
+/* Columns the reader dragged are set for both views at once, further down the
+   file — see `:is(.reading table, .tk-table).has-column-widths`. */
 .reading th, .reading td {
   padding: 8px 14px;
   text-align: left;
   vertical-align: top;
-  border-right: 1px solid var(--line-soft);
-  border-bottom: 1px solid var(--line-soft);
+  border-right: 1px solid var(--table-rule);
+  border-bottom: 1px solid var(--table-rule);
 }
 .reading th:last-child, .reading td:last-child { border-right: 0; }
 .reading tbody tr:last-child td { border-bottom: 0; }
@@ -1028,12 +1138,15 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .reading thead th {
   font-family: var(--font-ui);
   font-size: .82em;
-  font-weight: 600;
+  /* Bold whatever the header cell's own markup says. A heading row is a label
+     for the column, so it carries the weight of one without anybody having to
+     write `**…**` into every cell — and the editing view sets the same. */
+  font-weight: 700;
   letter-spacing: .05em;
   text-transform: uppercase;
   color: var(--muted);
   background: color-mix(in srgb, var(--ink) 3.5%, transparent);
-  border-bottom: 1px solid var(--line);
+  border-bottom: 1px solid var(--table-rule-strong);
   white-space: nowrap;
 }
 .reading td .embed-img {
@@ -1043,10 +1156,15 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   max-width: min(640px, 70vw);
 }
 /* A cell that is nothing but a picture hands the whole cell to it: no padding
-   to sit inside, and a column exactly as wide as the image (the 1% is the
-   table-layout hint for "minimum content"). The editing view says the same
-   thing with the same class — `.tk-table td.has-image-only` above — and
-   `markImageCells` in src/renderer.js is what puts the class here. */
+   to sit inside, and the picture fills what is left (the fill itself is set for
+   both views at once, further down — see `.has-image-only … .embed-img`). The
+   editing view says the same thing with the same class — `.tk-table
+   td.has-image-only` above — and `markImageCells` in src/renderer.js is what
+   puts the class here, along with the cell's width hint.
+
+   The 1% is the table-layout hint for "minimum content", and what a picture
+   still being loaded falls back to: once its width is known the hint is an
+   inline one, which outranks this. */
 /* Named through `table` to outweigh the first/last-child padding further down
    the file, which is otherwise exactly as specific and would win by order. */
 .reading table :is(th, td).has-image-only {
@@ -1071,11 +1189,11 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .reading li.task-item.is-done { color: var(--faint); text-decoration: line-through; }
 .reading input.task {
   appearance: none;
-  width: .82em; height: .82em;
-  margin: 0 .42em 0 0;
-  vertical-align: -.04em;
-  border: 1.4px solid var(--faint);
-  border-radius: 3px;
+  width: 1.2em; height: 1.2em;
+  margin: 0 .48em 0 0;
+  vertical-align: -.2em;
+  border: 1.6px solid var(--faint);
+  border-radius: 4px;
   position: relative;
   transition: background .12s, border-color .12s;
 }
@@ -1129,7 +1247,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   color: var(--accent);
   font-family: var(--font-ui);
   font-size: 14px;
-  cursor: default;
+  cursor: pointer;
   transition: background .12s;
 }
 .empty-action:hover { background: var(--hover); }
@@ -1301,7 +1419,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   font-size: 12.5px;
   font-weight: 550;
   white-space: nowrap;
-  cursor: default;
+  cursor: pointer;
   transition: background .12s;
 }
 .panel-replace-go:hover { background: color-mix(in srgb, var(--accent) 18%, transparent); }
@@ -1325,7 +1443,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   padding: 7px 11px;
   border-radius: 6px;
   font-size: 13.5px;
-  cursor: default;
+  cursor: pointer;
 }
 .panel-list li[aria-selected="true"] { background: var(--accent-dim); }
 .panel-list li .title { color: var(--ink); }
@@ -1360,6 +1478,60 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   white-space: nowrap;
 }
 .panel-list .empty-hint { padding: 14px 11px; color: var(--muted); font-size: 13px; }
+
+/* ------------------------------------------------- font specimen card
+
+   Sits to the right of the panel rather than inside it: the list is already
+   as tall as it wants to be, and a specimen that pushed it around would move
+   the row you are arrowing through. Absolute, off the panel's own centre
+   line, so nothing about the panel changes when the card is not there — every
+   other picker is laid out exactly as it was.
+
+   The text is set in the role's own custom property, which is the same
+   property the preview is already pointing at a new stack. So the card needs
+   no repainting of its own: it is simply the first thing on screen written in
+   the face being tried on. */
+
+.font-sample {
+  position: absolute;
+  top: 13vh;
+  left: calc(50% + min(560px, 100vw - 64px) / 2 + 14px);
+  width: min(290px, calc(50vw - min(560px, 100vw - 64px) / 2 - 28px));
+  max-height: 62vh;
+  overflow: hidden;
+  padding: 18px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 1px 2px #0000000d, 0 12px 40px -8px #00000026;
+  font-family: var(--font-body);
+  animation: rise .16s var(--ease);
+}
+.font-sample.is-ui { font-family: var(--font-ui); }
+
+.font-sample-page { color: var(--ink); }
+.font-sample-page h3 {
+  margin: 0 0 6px;
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+.font-sample-page p {
+  margin: 0 0 8px;
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+.font-sample-glyphs {
+  color: var(--faint) !important;
+  font-variant-numeric: normal;
+}
+
+/* Under a certain width there is no right-hand side to put it on, and a card
+   overlapping the list it belongs to is worse than no card. */
+@media (max-width: 1040px) {
+  .font-sample { display: none; }
+}
 
 .panel-foot {
   padding: 8px 14px;
@@ -1663,7 +1835,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   font-family: var(--font-ui);
   font-size: 12.5px;
   font-weight: 550;
-  cursor: default;
+  cursor: pointer;
   transition: background .12s, border-color .12s, color .12s;
 }
 .ask-btn:hover { border-color: var(--faint); color: var(--ink); }
@@ -1787,7 +1959,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   color: var(--ink-soft);
   font-family: var(--font-ui);
   font-size: 11.5px;
-  cursor: default;
+  cursor: pointer;
   transition: border-color .12s, color .12s, background .12s;
 }
 .orphan-act:hover { border-color: var(--faint); color: var(--ink); }
@@ -1926,7 +2098,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   font-size: 12.5px;
   font-weight: 550;
   white-space: nowrap;
-  cursor: default;
+  cursor: pointer;
   transition: background .12s, border-color .12s, color .12s;
 }
 .find-btn:hover { border-color: var(--faint); color: var(--ink); }
@@ -1949,7 +2121,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   color: var(--muted);
   font-family: var(--font-mono);
   font-size: 11.5px;
-  cursor: default;
+  cursor: pointer;
   transition: background .12s, border-color .12s, color .12s;
 }
 .find-chip:hover, .panel-chip:hover { background: var(--hover); color: var(--ink-soft); }
@@ -1971,7 +2143,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   color: var(--muted);
   font-size: 13px;
   line-height: 1;
-  cursor: default;
+  cursor: pointer;
   transition: background .12s, color .12s;
 }
 .find-step:hover, .find-twist:hover { background: var(--hover); color: var(--ink); }
@@ -2042,9 +2214,9 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   background: none;
   color: var(--faint);
   vertical-align: .08em;
-  /* It sits inside selectable heading text. An arrow over this otherwise
-     invisible 18px patch makes the pointer flip on every heading sweep. */
-  cursor: text;
+  /* A button that folds a section: the hand, like every other control. Its
+     twist inherits it too, so crossing the patch does not change shape twice.*/
+  cursor: pointer;
   opacity: .45;
   transition: color .12s, background .12s, opacity .12s;
 }
@@ -2078,12 +2250,40 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   font-size: .72em;
 }
 
-.tk-quote {
+/* The same bubble in the editing view — see `.reading blockquote`, which this
+   exists to match. A quote here is one line decoration per line, so the shape
+   is assembled from its ends: the first line rounds the top, the last rounds
+   the bottom and grows the tail, and a one-line quote does both. The negative
+   margins take back the padding so the quoted text sits on the same left edge
+   as the prose above it, exactly as a callout does. */
+.cm-line.tk-quote {
+  position: relative;
+  background: var(--sunk);
   color: var(--ink-soft);
   font-style: italic;
-  border-left: 2px solid var(--accent);
   padding-left: 14px;
-  margin-left: -16px;
+  padding-right: 10px;
+  margin-left: -14px;
+  margin-right: -10px;
+}
+.cm-line.tk-quote.tk-quote-top {
+  padding-top: 6px;
+  border-radius: 14px 14px 0 0;
+}
+.cm-line.tk-quote.tk-quote-bottom {
+  padding-bottom: 7px;
+  border-radius: 0 0 14px 0;
+}
+.cm-line.tk-quote.tk-quote-top.tk-quote-bottom { border-radius: 14px 14px 14px 0; }
+.cm-line.tk-quote.tk-quote-bottom::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  bottom: -13px;
+  width: 20px;
+  height: 13px;
+  background: var(--sunk);
+  clip-path: polygon(0 0, 100% 0, 0 100%);
 }
 /* The rule's own dashes must vanish, including the span the highlighter wraps
    them in, so the colour is forced rather than inherited. */
@@ -2158,7 +2358,9 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   border-radius: 0 0 8px 8px;
 }
 /* Both views draw the same chip; only the header's own metrics differ. */
-.tk-lang-chip { margin-right: .35em; }
+.tk-lang-chip { margin-right: .35em; cursor: pointer; }
+/* The chip answers a click (see LangChipWidget), and the hover says so. */
+.tk-lang-chip:hover .lang-name { color: var(--accent); }
 .tk-done { color: var(--faint); text-decoration: line-through; }
 
 .tk-mark { color: var(--faint); }
@@ -2171,16 +2373,35 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   border-bottom: 1px solid var(--accent-dim);
 }
 .tk-wikilink:hover { border-bottom-color: var(--accent); }
-/* ~~struck~~ text. On the line being edited the decoration comes off — the
-   marks are already showing, and striking through the words you are trying to
-   read is the one place the preview should get out of the way. */
+/* ~~struck~~ text. */
 .tk-strike {
   text-decoration: line-through;
   color: var(--faint);
 }
-.cm-activeLine .tk-strike {
-  text-decoration: none;
+
+/* The line you are editing shows its source, and that goes for the rendering
+   as well as the markup.
+ *
+ * Once the `**` are on screen the span is being written rather than read, and
+ * a line half in source and half in preview is the awkward state: the words
+ * shift weight, colour and width the moment the caret lands on them, and
+ * again when it leaves. Clicking into a span now changes nothing about the
+ * text — the delimiters simply appear around it — and clicking off is what
+ * formats it. Strikethrough already worked this way, for the narrower reason
+ * that a line through the words you are trying to read is unhelpful; this is
+ * that rule, generalised to the rest of the inline marks.
+ *
+ * Inline code and links keep their look: a `code` chip is already set as
+ * source, and a link's colour is how you tell what the brackets are for. */
+.cm-activeLine :is(.tk-strong, .tk-em, .tk-strike) {
   color: inherit;
+  font-weight: inherit;
+  font-style: normal;
+  text-decoration: none;
+}
+.cm-activeLine .tk-highlight {
+  background: none;
+  padding: 0;
 }
 
 .tk-tag {
@@ -2205,13 +2426,28 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   -webkit-box-decoration-break: clone;
 }
 
+/* Clicked into, so shown as source. Bold under the caret keeps its weight and
+   grows a pair of asterisks; a code span keeps its face and colour and loses
+   the pill, which is the part that read as rendered rather than typed. The
+   selector is written both ways round because the mark decoration and the
+   highlighter's own span nest in whichever order CodeMirror settles on, and
+   sometimes land on the same element. */
+.tk-code-raw,
+.tk-code-raw .tk-inline-code,
+.tk-inline-code .tk-code-raw {
+  background: none;
+  border-color: transparent;
+  padding: 0;
+  border-radius: 0;
+}
+
 .tk-task {
   appearance: none;
-  width: .82em; height: .82em;
-  margin: 0 .42em 0 0;
-  vertical-align: -.04em;
-  border: 1.4px solid var(--faint);
-  border-radius: 3px;
+  width: 1.2em; height: 1.2em;
+  margin: 0 .48em 0 0;
+  vertical-align: -.2em;
+  border: 1.6px solid var(--faint);
+  border-radius: 4px;
   position: relative;
   transition: background .12s, border-color .12s;
 }
@@ -2300,18 +2536,64 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   border: 1px solid var(--line-soft);
   border-radius: 8px;
   overflow: hidden;
+  /* The corner the floating copy control hangs from, on a block with no
+     header to hold it. */
+  position: relative;
 }
 /* The header sits outside the scroll box, so a long line slides under the
-   language mark instead of dragging it out of view. The run control, when
-   there is one, takes the other end of it. */
+   language mark instead of dragging it out of view. The controls, when there
+   are any, take the other end of it. */
 .reading .code-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 10px;
   padding: 11px 14px 8px;
 }
 /* No language, no header — an empty bar is just a bar. */
 .reading .code-head:empty { display: none; }
+
+/* The header's right-hand end: Run or Draw when the block has one, Copy
+   always — one group, so the modules that add each control land side by side
+   without knowing about each other. */
+.code-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+.reading .code-head .code-tools { margin-left: auto; }
+
+/* What the fence said after its language — a scene's name, a file's — shown
+   where it was written instead of parsed out and dropped. It yields to the
+   controls: a long title truncates before it pushes them off the header. */
+.code-info {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--faint);
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A block without a language has no header, so Copy floats over the code's
+   corner and shows itself on hover — set on the frame's own paper so the code
+   underneath does not show through the mark. */
+.reading .code-tools.is-floating {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  background: var(--sunk);
+  border-radius: 4px;
+  opacity: 0;
+  transition: opacity .12s var(--ease);
+}
+.reading .code-wrap:hover .code-tools.is-floating,
+.reading .code-tools.is-floating:focus-within { opacity: 1; }
+
+/* The tick's moment of confirmation, in the accent the click already lit. */
+.run-btn.tk-copy.is-copied { color: var(--accent); background: none; }
 
 .reading .code-body {
   display: flex;
@@ -2528,6 +2810,10 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   top: 10px;
   right: 8px;
   z-index: var(--z-raised);
+  /* Run and Copy side by side, the same pair the reading view's header holds. */
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
 }
 
 /* The closed fence line above hands its bottom edge to the panel — but only
@@ -2572,11 +2858,11 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
    sizes a canvas at load. A browser-window shape: the column's width, height
    in proportion to it, within bounds; a longer page scrolls inside the guest.
    White in either theme, because an unstyled page assumes a white viewport. */
-.run-out.html-run { padding: 0; overflow: hidden; }
+.run-out:is(.html-run, .three-run) { padding: 0; overflow: hidden; }
 
 /* Every rendered fence occupies the code block's old frame. Their contents
    differ, but their place in the note does not. */
-.reading :is(.html-page, .manim, .tikz, .drawing) {
+.reading :is(.html-page, .three-page, .manim, .tikz, .drawing) {
   position: relative;
   margin: 0 0 1.05em;
   border: 1px solid var(--line-soft);
@@ -2587,7 +2873,10 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   background: #fff;
 }
 .reading :is(.manim, .tikz, .drawing) { background: var(--sunk); }
-.html-run-view {
+/* A scene is drawn on the note's own paper — the guest paints the same colour
+   inside itself, so nothing flashes white while the runtime loads. */
+.reading .three-page { background: var(--surface); }
+:is(.html-run-view, .three-run-view) {
   /* Electron's webview hosts an internal flexing iframe. The host must also
      be flex or that iframe keeps Chromium's 150px default and the page is
      visibly cut off inside an otherwise full-height frame. */
@@ -2597,8 +2886,11 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   min-height: 260px;
   max-height: 560px;
   border: 0;
-  background: #fff;
 }
+/* An unstyled page assumes a white viewport, in either theme. A scene assumes
+   nothing, and is given the paper the note is written on. */
+.html-run-view { background: #fff; }
+.three-run-view { background: var(--surface); }
 
 /* stderr is marked, not alarmed. The palette's red is tuned to carry a deleted
    line in a diff, which at full strength turns every warning into a failure —
@@ -2883,9 +3175,9 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   outline: none;
 }
 .tk-title-field:is(:hover, :focus) { background: var(--hover); }
-/* Locked, but still a line of the document's own text — so it keeps the beam
-   the rest of the note has rather than handing back the chrome's arrow. */
-.tk-title-field.is-locked { cursor: text; }
+/* Locked, and so not a field any more — it takes the note's arrow rather than
+   the beam an editable box wears. */
+.tk-title-field.is-locked { cursor: default; }
 .tk-title-field.is-locked:is(:hover, :focus) { background: none; }
 .tk-title-flag,
 
@@ -2901,52 +3193,87 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 
 /* -------------------------------------------------------- view switch */
 
-/* Three direct choices in one compact segmented control. The selected view is
-   filled; the other two remain visible targets rather than being hidden behind
-   a cycle. */
+/* One quiet piece of chrome for the three document views and Copilot. The
+   panel toggle shares the surface but not the semantic group: the divider is
+   the small visual pause that keeps "open Copilot" distinct from "render this
+   document another way". */
+.doc-control-cluster {
+  display: flex;
+  align-items: center;
+  height: 34px;
+  padding: 3px;
+  gap: 3px;
+  border: 1px solid color-mix(in srgb, var(--line) 82%, transparent);
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--surface) 72%, var(--paper));
+  box-shadow: 0 1px 3px color-mix(in srgb, #000 10%, transparent),
+              inset 0 1px color-mix(in srgb, #fff 5%, transparent);
+}
 .view-switch {
   display: flex;
   align-items: center;
-  height: 24px;
-  padding: 2px;
-  gap: 1px;
-  border: 1px solid var(--line-soft);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--ink) 3%, transparent);
+  gap: 3px;
 }
-.view-option {
+.view-option,
+.doc-tool {
   display: grid;
   place-items: center;
-  width: 25px;
-  height: 20px;
-  border-radius: 6px;
+  width: 29px;
+  height: 28px;
+  padding: 0;
+  border-radius: 8px;
   color: var(--muted);
-  transition: background .12s var(--ease), color .12s var(--ease);
+  transition: background .14s var(--ease), color .14s var(--ease),
+              box-shadow .14s var(--ease), transform .1s var(--ease);
 }
-.view-option:hover:not(:disabled) {
+.view-option:hover:not(:disabled),
+.doc-tool:hover {
+  color: var(--ink);
+  background: color-mix(in srgb, var(--ink) 7%, transparent);
+}
+.view-option[aria-pressed="true"],
+.doc-tool[aria-pressed="true"] {
   color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  background: color-mix(in srgb, var(--accent) 18%, var(--surface));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent),
+              0 1px 2px color-mix(in srgb, #000 12%, transparent);
 }
-.view-option[aria-pressed="true"] {
-  color: var(--accent);
-  background: var(--accent-dim);
+.view-option:focus-visible,
+.doc-tool:focus-visible {
+  outline-offset: 1px;
+  border-radius: 8px;
 }
-.view-option:active:not(:disabled) { transform: translateY(.5px); }
+.view-option:active:not(:disabled),
+.doc-tool:active { transform: scale(.94); }
 .view-option:disabled { opacity: .32; cursor: default; }
+
+.doc-control-divider {
+  width: 1px;
+  height: 16px;
+  margin-inline: 1px;
+  border-radius: 1px;
+  background: var(--line);
+}
 
 .study-start {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   height: 24px;
-  padding: 0 9px;
-  border-radius: 7px;
+  padding: 0 10px;
+  border-radius: 8px;
   color: var(--accent);
   background: var(--accent-dim);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent);
   font-size: 11.5px;
   font-weight: 600;
+  transition: background .14s var(--ease), box-shadow .14s var(--ease);
 }
-.study-start:hover { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+.study-start:hover {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.study-start:active { transform: translateY(.5px); }
 
 /* ---------------------------------------------------------- raw view */
 /* No decorations, no proportional type — the file as it sits on disk. */
@@ -2983,7 +3310,6 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .math-block { overflow-x: auto; margin: 1.1em 0; }
 .math-block .katex-display { margin: 0; }
 
-.tk-math { cursor: text; }
 .tk-math:hover { background: color-mix(in srgb, var(--math) 9%, transparent); border-radius: 3px; }
 .tk-math-display {
   display: block;
@@ -3079,7 +3405,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .tk-table-wrap {
   overflow-x: auto;
   margin: .6em 0 1em;
-  border: 1px solid var(--line-soft);
+  border: 1px solid var(--table-rule-strong);
   border-radius: 7px;
 }
 /* In the editing view the frame is a block widget, and the editor measures a
@@ -3087,9 +3413,11 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
    a box outside the frame, where it counts towards the height the editor sees.
    Anything else puts every line below the table a line away from where it is
    drawn (see TableWidget.toDOM). */
+/* The room below was where the add-row control sat. With the control gone the
+   table wants the same air above and below as any other block. */
 .tk-table-box {
   position: relative;
-  padding: .6em 0 1.8em;
+  padding: .6em 0;
 }
 .tk-table-box > .tk-table-wrap { margin: 0; }
 .tk-table {
@@ -3103,31 +3431,118 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   font-family: var(--font-body);
   font-size: .92em;
 }
+/* ----------------------------------------------- dragged column widths
+
+   A table whose columns have been dragged sizes from its colgroup and nothing
+   else. `table-layout: auto` treats a column width as a suggestion the content
+   may overrule, so a column could not be made narrower than its longest word —
+   which is half of what a spreadsheet drag is for. Fixed layout also stops the
+   grid re-flowing every column while one of them is being dragged.
+
+   One block for both surfaces, because it is one table: the widths come from
+   the same marker line in the note (src/table.js), and a rule that held in the
+   editing view and not in the reading one would make the same note two
+   different shapes. */
+:is(.reading table, .tk-table).has-column-widths {
+  table-layout: fixed;
+  min-width: 0;
+}
+:is(.reading table, .tk-table).has-column-widths :is(th, td) {
+  /* Both floors are the column's to overrule now: the editing view's caret
+     minimum, and the header's refusal to wrap. */
+  min-width: 0;
+  overflow-wrap: break-word;
+  white-space: normal;
+}
+/* Once a column has a width, the pictures in it fill it — drag the column and
+   the picture follows, edge to edge, the way a spreadsheet's does.
+
+   `!important` because the width being overruled is an inline one: a picture
+   carries its own `|400` from the note (src/assets.js writes it, and the cell
+   renderer puts it on the element), and no selector outranks that. In a column
+   the reader has set by hand, the column is the authority and the picture's
+   own number is the thing that has to give. */
+:is(.reading table, .tk-table).has-column-widths
+  :is(.embed-img, .tk-table-image-shell) {
+  width: 100% !important;
+  max-width: 100%;
+  height: auto !important;
+}
+/* A picture-only cell asks for "as narrow as the picture" (`width: 1%`), which
+   is the opposite of a column that has been given a width. */
+:is(.reading table, .tk-table).has-column-widths :is(th, td).has-image-only {
+  width: auto;
+}
+/* And the same thing without a drag: a cell that is nothing but a picture is
+   filled by it, edge to edge, whatever the column turns out to be. A column is
+   as wide as its widest row — a long heading, a sentence three rows down, a
+   table stretched to the width of the note — and the picture is rarely the one
+   that decides, so a picture left at its own `|140` sat in a wider column with
+   blank canvas beside it.
+
+   What the column then wants to be wide *as* is the width hint `fitImageCell`
+   puts on the cell (src/assets.js): a picture told to fill has no width of its
+   own left to size the column from, and left to itself it would offer the
+   file's full pixel width and push the rest of the table off the side.
+
+   No `!important` here, unlike the dragged-column rule above, and the two JS
+   sides are what make that true: neither view puts an inline width on a picture
+   that fills — so the one inline width that does appear, the one a drag paints
+   frame by frame, is free to overrule this for as long as the drag lasts. */
+:is(.reading table, .tk-table) :is(th, td).has-image-only
+  :is(.embed-img, .tk-table-image-shell) {
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+}
+/* For as long as a grip is being dragged, though, the picture is the thing
+   being sized and the cell is what follows it: the shell goes back to
+   shrink-to-fit so the column grows under the hand, the way it did before the
+   picture was told to fill. At the end of the drag the number moves onto the
+   cell (see `commit` in src/table.js) and the picture fills again. */
+.tk-table :is(th, td).has-image-only .tk-table-image-shell.is-resizing,
+.tk-table :is(th, td).has-image-only .tk-table-image-shell.is-resizing > .embed-img {
+  width: auto;
+  max-width: none;
+}
+/* One handle per thing, and only the editing view has handles: a picture that
+   fills its cell has no width of its own left to drag, so its corner grip
+   stands down and the column's is the one that sizes it. */
+.tk-table.has-column-widths .tk-embed-grip { display: none; }
+
 .tk-table th,
 .tk-table td {
   padding: 8px 14px;
   text-align: left;
   vertical-align: top;
-  border-right: 1px solid var(--line-soft);
-  border-bottom: 1px solid var(--line-soft);
+  border-right: 1px solid var(--table-rule);
+  border-bottom: 1px solid var(--table-rule);
   /* Cells are contenteditable, and a caret needs somewhere to sit in an empty
      one; without a floor the row collapses to nothing. */
   min-width: 3em;
-  cursor: text;
+  /* The grid is typed into, but it is also the surface the mouse crosses most
+     boundaries on — a beam per cell, per border, per padding gap. It keeps the
+     note's arrow; the caret says where the typing goes. */
+  cursor: default;
 }
 .tk-table th:last-child, .tk-table td:last-child { border-right: 0; }
 .tk-table tbody tr:last-child td { border-bottom: 0; }
 .tk-table th:first-child, .tk-table td:first-child { padding-left: 16px; }
 .tk-table th:last-child, .tk-table td:last-child { padding-right: 16px; }
 .tk-table thead th {
+  /* The containing block for the column grip, which lives in the header row
+     and nowhere else — a table of a few hundred rows has no reason to promote
+     every body cell to a positioned box for it. */
+  position: relative;
   font-family: var(--font-ui);
   font-size: .82em;
-  font-weight: 600;
+  /* The reading view's header weight, kept in step — see `.reading thead th`. */
+  font-weight: 700;
   letter-spacing: .05em;
   text-transform: uppercase;
   color: var(--muted);
   background: color-mix(in srgb, var(--ink) 3.5%, transparent);
-  border-bottom: 1px solid var(--line);
+  border-bottom: 1px solid var(--table-rule-strong);
 }
 .tk-table td { font-variant-numeric: tabular-nums; }
 /* The focused cell is showing its own markdown rather than the formatted text,
@@ -3138,6 +3553,48 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   box-shadow: inset 0 0 0 1.5px var(--accent-dim);
   font-family: var(--font-mono);
   font-size: .84em;
+}
+/* The column grip: a spreadsheet's, on the seam between two columns. It sits
+   in the header cell rather than in an overlay because the cells are the only
+   thing that knows where a column's edge actually is, and an overlay would
+   have to be re-measured after every edit, scroll and redraw. */
+.tk-col-grip {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: -4px;
+  width: 9px;
+  z-index: 3;
+  cursor: col-resize;
+  /* The drag is driven by pointer events; without this it is a scroll on a
+     touch screen. */
+  touch-action: none;
+  user-select: none;
+}
+/* The seam itself, drawn on hover so the header is otherwise unchanged. */
+.tk-col-grip::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--accent);
+  opacity: 0;
+  transition: opacity .12s var(--ease);
+}
+.tk-col-grip:hover::after,
+.tk-table-wrap.is-resizing-column .tk-col-grip:active::after { opacity: .9; }
+/* The last column's grip has no cell to hang over: kept inside the frame, or
+   the wrap's own overflow would hide it. */
+.tk-table th:last-child > .tk-col-grip { right: 0; width: 7px; }
+/* Mid-drag the pointer is nowhere near the text, and a text caret over the
+   whole grid while dragging a column reads as a selection about to happen. */
+.tk-table-wrap.is-resizing-column,
+.tk-table-wrap.is-resizing-column :is(th, td) {
+  cursor: col-resize;
+  user-select: none;
 }
 .tk-table-wrap.is-selecting-cells .tk-table { user-select: none; }
 .tk-table th.tk-table-cell-selected,
@@ -3319,87 +3776,6 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   max-width: none;
 }
 
-/* Edge controls stay almost invisible until the table is approached. Each
-   begins as a small plus and unfolds its label on hover, making growth easy to
-   discover without leaving permanent spreadsheet chrome around every table. */
-.tk-table-add {
-  position: absolute;
-  z-index: var(--z-sticky);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0;
-  height: 22px;
-  width: 22px;
-  padding: 0;
-  overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: 11px;
-  background: var(--surface);
-  color: var(--faint);
-  box-shadow: 0 2px 7px rgb(0 0 0 / 8%);
-  font: 600 10.5px/1 var(--font-ui);
-  white-space: nowrap;
-  cursor: default;
-  opacity: 0;
-  transform: scale(.82);
-  transition:
-    width .18s var(--ease),
-    opacity .14s var(--ease),
-    transform .18s var(--ease),
-    color .14s var(--ease),
-    background .14s var(--ease),
-    border-color .14s var(--ease);
-}
-.tk-table-box:hover .tk-table-add,
-.tk-table-box:focus-within .tk-table-add {
-  opacity: 1;
-  transform: scale(1);
-}
-.tk-table-add:hover {
-  width: 70px;
-  color: var(--ink);
-  background: var(--hover);
-  border-color: color-mix(in srgb, var(--accent) 42%, var(--line));
-}
-.tk-table-add:active { transform: scale(.96); }
-.tk-table-add.is-row {
-  left: 50%;
-  bottom: 3px;
-  translate: -50% 0;
-}
-.tk-table-add.is-column {
-  right: 4px;
-  top: 50%;
-  translate: 0 -50%;
-}
-.tk-table-add-plus {
-  flex: none;
-  width: 20px;
-  font-size: 15px;
-  font-weight: 400;
-}
-.tk-table-add-label {
-  max-width: 0;
-  opacity: 0;
-  transform: translateX(-4px);
-  transition:
-    max-width .18s var(--ease),
-    opacity .12s var(--ease),
-    transform .18s var(--ease);
-}
-.tk-table-add:hover .tk-table-add-label {
-  max-width: 46px;
-  margin-right: 8px;
-  opacity: 1;
-  transform: translateX(0);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .tk-table-add,
-  .tk-table-add-label { transition: none; }
-}
-
 /* Multi-selected rows in the file tree. Distinct from .is-active, which marks
    the one note actually open in the editor. */
 .row.is-picked { background: var(--selected, color-mix(in srgb, var(--accent) 17%, transparent)); }
@@ -3498,6 +3874,78 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   background-size: 100% calc(100% - 10px);
 }
 
+/* ------------------------------------------- a fence inside a quote or callout
+
+   Two line decorations land on the same line here, and each of them wants to
+   draw a whole card: the quote's or the callout's — its surface, its side
+   borders, its tone bar, and negative margins carrying it out to the column
+   edge — and the code block's, which is a sunk surface with borders of its own
+   and margins that pull it back in. The code block's selectors are the more
+   specific, so it took every one of them: the callout's frame stopped dead for
+   the length of the fence, its bar jogged inward to sit on the card instead,
+   and the card's right side ran out past the callout it is meant to be inside.
+
+   A line can only paint one box, so the block it is inside keeps the box and
+   the code surface becomes a layer within it — the same arrangement the active
+   line inside a block uses above. The band is square where a block standing on
+   its own is rounded: what says "code" in here is the surface and the mono
+   type, and a background layer is not a thing a single element can round. */
+.cm-content .cm-line.tk-quote.tk-code-block,
+.cm-content .cm-line.tk-callout.tk-code-block {
+  /* How far the code sits inside the enclosing block's own text column. */
+  --code-inset: 9px;
+  /* The enclosing block's geometry, taken back from the code block's rule. */
+  margin-left: -14px;
+  margin-right: -10px;
+  padding-left: calc(var(--pad-left) + var(--code-inset));
+  padding-right: calc(var(--pad-right) + var(--code-inset));
+  /* The band, from one edge of that text column to the other. */
+  background-repeat: no-repeat;
+  background-position: var(--pad-left) 0;
+  background-size: calc(100% - var(--pad-left) - var(--pad-right)) 100%;
+}
+.cm-content .cm-line.tk-callout.tk-code-block {
+  --pad-left: 13px;
+  --pad-right: 9px;
+  border-inline: 1px solid var(--edge);
+  background-color: var(--wash);
+  background-image: linear-gradient(var(--sunk), var(--sunk));
+}
+.cm-content .cm-line.tk-quote.tk-code-block {
+  --pad-left: 14px;
+  --pad-right: 10px;
+  border-inline: 0;
+  background-color: var(--sunk);
+  /* A quotation is already drawn on the code surface's own colour, so the band
+     goes a shade deeper instead of the same again — laid on in the same tone a
+     fence would be invisible inside a quote. */
+  background-image: linear-gradient(
+    color-mix(in srgb, var(--ink) 7%, var(--sunk)),
+    color-mix(in srgb, var(--ink) 7%, var(--sunk)));
+}
+
+/* The card's own ends belong to the block outside it now. */
+.cm-content .cm-line.tk-quote.tk-code-top,
+.cm-content .cm-line.tk-quote.tk-code-bottom,
+.cm-content .cm-line.tk-callout.tk-code-top,
+.cm-content .cm-line.tk-callout.tk-code-bottom {
+  border-top: 0;
+  border-bottom: 0;
+  border-radius: 0;
+}
+/* Unless the fence really is the first or last line of what encloses it, in
+   which case that end is the enclosing block's and has to be given back. */
+.cm-content .cm-line.tk-callout.tk-code-block.tk-callout-top {
+  border-top: 1px solid var(--edge);
+  border-radius: 8px 8px 0 0;
+}
+.cm-content .cm-line.tk-callout.tk-code-block.tk-callout-bottom {
+  border-bottom: 1px solid var(--edge);
+  border-radius: 0 0 8px 8px;
+}
+.cm-content .cm-line.tk-quote.tk-code-block.tk-quote-top { border-radius: 14px 14px 0 0; }
+.cm-content .cm-line.tk-quote.tk-code-block.tk-quote-bottom { border-radius: 0 0 14px 0; }
+
 .cm-content .cm-line.tk-code-fence {
   font-size: 0;
   line-height: 8px;
@@ -3545,8 +3993,11 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   background: var(--sunk);
   /* The number sticks at the frame's padding edge, which leaves a strip of
      frame to its left for the code to slide through. The shadow extends the
-     same colour over that strip without moving anything. */
-  box-shadow: -14px 0 0 var(--sunk);
+     same colour over that strip without moving anything — and is exactly as
+     wide as the strip is (the line's 12px padding-inline). A pixel more and
+     the shadow paints past the frame's left edge, where it reads as a tab
+     sticking out of the block. */
+  box-shadow: -12px 0 0 var(--sunk);
   text-align: right;
   /* Mixed toward the block's own colour rather than dimmed with opacity: a
      see-through number is also a see-through background, and the code it is
@@ -3869,38 +4320,112 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 .transclude {
   display: block;
   border: 1px solid var(--line-soft);
-  border-left: 2px solid var(--line);
-  border-radius: 8px;
+  border-radius: 10px;
   margin: .35em 0 1.1em;
+  background: var(--surface);
   overflow: hidden;
+  transition: border-color .12s;
 }
+.transclude:hover { border-color: var(--line); }
+
+/* A titlebar, not a line of text floating above the note: its own tint and a
+   hairline underneath say where the frame's chrome ends and the borrowed note
+   begins. */
 .transclude-head {
   display: flex;
-  align-items: baseline;
-  padding: 8px 16px 0;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px 6px 14px;
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--sunk);
   font-family: var(--font-ui);
   font-size: 11.5px;
+  line-height: 1.5;
   letter-spacing: .01em;
   color: var(--faint);
 }
-.transclude-title {
+/* An anchored embed identifies itself in the borrowed content, so its frame
+   has no title strip. Keep Edit source as hover chrome in the corner instead
+   of losing that action with the redundant label. */
+.transclude.is-anchored { position: relative; }
+.transclude.is-anchored > .transclude-head {
+  position: absolute;
+  z-index: 2;
+  top: 5px;
+  right: 5px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+/* The crumb is the frame's label, so it stays quiet even though the note it
+   sits in paints every link with the accent. */
+.reading .transclude-head .transclude-title,
+.cm-content .transclude-head .transclude-title {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
   color: var(--muted);
   text-decoration: none;
 }
-.transclude-title:hover { color: var(--accent); }
+.transclude-crumb,
+.transclude-leaf {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The note it came from recedes; the section actually shown is the title. */
+.transclude-crumb { flex: 0 1 auto; color: var(--faint); }
+.transclude-leaf { flex: 1 1 auto; font-weight: 550; }
+.transclude-sep { flex: none; color: var(--line); }
+.reading .transclude-head .transclude-title:hover,
+.cm-content .transclude-head .transclude-title:hover { color: var(--accent); }
+.transclude-title:hover :is(.transclude-crumb, .transclude-sep) { color: inherit; }
+/* Chrome the frame only needs while you are pointing at it. */
 .transclude-edit {
+  flex: none;
   margin-left: auto;
-  border: 0;
-  padding: 1px 0 1px 10px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  padding: 1px 7px;
   background: transparent;
   color: var(--faint);
   font: inherit;
   cursor: pointer;
+  opacity: 0;
+  transition: opacity .12s, color .12s, border-color .12s;
 }
-.transclude-edit:hover { color: var(--accent); }
+.transclude:hover .transclude-edit,
+.transclude:focus-within .transclude-edit,
+.transclude.is-editing .transclude-edit { opacity: 1; }
+.transclude-edit:hover { border-color: var(--line); color: var(--accent); }
+.transclude-edit:focus-visible { opacity: 1; outline: 1px solid var(--accent); }
 .transclude-edit:disabled { opacity: .45; cursor: default; }
-.transclude > .note-fragment { padding: 8px 16px 14px; }
-.transclude.is-editing > .note-fragment { padding-top: 10px; }
+.transclude.is-editing .transclude-edit:disabled { opacity: .45; }
+/* A rendered fragment inside the editor is HTML, and HTML collapses its own
+   whitespace. The editor around it does not: CodeMirror sets `pre-wrap` on the
+   content, so every newline the renderer left between two `<li>` tags — or
+   after a heading, or at the end of the list — was drawn as a blank line.
+   A two-item list came out three lines taller than it should be, with the box
+   trailing off into empty space at the bottom. `pre` keeps its own value from
+   the browser's stylesheet, so code inside a fragment is unaffected. */
+.cm-content .note-fragment { white-space: normal; }
+
+/* The extra left padding is room for the heading-fold control, which lives in
+   the margin beside its heading: at the reading view's own offset it would hang
+   outside the frame's border. */
+.transclude > .note-fragment { padding: 12px 16px 14px 24px; }
+.transclude > .note-fragment .heading-fold { margin-left: -20px; }
+.transclude.is-editing > .note-fragment { padding: 12px 16px 14px; }
+
+/* A borrowed note is a passage inside this one, so its headings step down to
+   the frame's scale instead of shouting over the page that holds them. */
+.transclude > .note-fragment :is(h1, h2, h3, h4, h5, h6) { margin: 1.3em 0 .4em; }
+.transclude > .note-fragment h1 { font-size: 1.28em; }
+.transclude > .note-fragment h2 { font-size: 1.16em; }
+.transclude > .note-fragment h3 { font-size: 1.06em; }
+.transclude > .note-fragment :is(h4, h5, h6) { font-size: 1em; }
+.transclude > .note-fragment > :is(h1, h2, h3, h4, h5, h6):first-child { margin-top: 0; }
 .transclude-source {
   display: block;
   width: 100%;
@@ -4241,7 +4766,6 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   height: 27px;
   border-radius: 7px;
   opacity: .82;
-  cursor: default;
 }
 .tk-embed-source svg {
   width: 16px;
@@ -4314,7 +4838,8 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 46px 10px 10px 14px;
+  height: 46px;
+  padding: 0 10px 0 14px;
   flex: none;
   -webkit-app-region: drag;
 }
@@ -4369,6 +4894,36 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   color: var(--ink);
 }
 
+/* A question asked while the copilot was still answering the last one. It has
+   been taken — it is in the transcript — but not yet handed over, and saying so
+   is the whole point: the panel used to accept it and look identical to one
+   that had gone out. Dropped is the same message after Stop, which is the one
+   thing that can happen to it other than being sent. */
+.msg-you.is-queued {
+  background: color-mix(in srgb, var(--accent-dim) 45%, transparent);
+  color: var(--ink-soft);
+}
+.msg-you.is-queued::after {
+  content: "queued";
+  display: block;
+  margin-top: 3px;
+  font: 10px/1 var(--font-mono);
+  letter-spacing: .04em;
+  color: var(--faint);
+}
+.msg-you.is-dropped {
+  background: color-mix(in srgb, var(--accent-dim) 30%, transparent);
+  color: var(--faint);
+}
+.msg-you.is-dropped::after {
+  content: "not sent";
+  display: block;
+  margin-top: 3px;
+  font: 10px/1 var(--font-mono);
+  letter-spacing: .04em;
+  color: var(--faint);
+}
+
 .msg-bot { padding: 1px 0; }
 .msg-bot h1, .msg-bot h2, .msg-bot h3 {
   font-size: 13.5px;
@@ -4387,8 +4942,11 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   color: var(--muted);
 }
 /* The same chip as the note's, at the panel's smaller size: a path or a flag
-   the copilot names should be as findable in the reply as in the note. */
-.msg-bot code {
+   the copilot names should be as findable in the reply as in the note. Scoped
+   to .msg rather than .msg-bot: your own messages go through the same
+   markdown renderer, and a code block that only the bot's rules keep inside
+   its box overflows yours. */
+.msg code {
   font: 11.5px/1.5 var(--font-mono);
   color: var(--code-inline);
   background: color-mix(in srgb, var(--code-inline) 13%, var(--sunk));
@@ -4396,7 +4954,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   padding: 1.5px 4px;
   border-radius: 4px;
 }
-.msg-bot pre {
+.msg pre {
   background: var(--sunk);
   border: 1px solid var(--line-soft);
   border-radius: 8px;
@@ -4404,7 +4962,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   margin: 0 0 .6em;
   overflow-x: auto;
 }
-.msg-bot pre code { background: none; border: 0; color: inherit; padding: 0; font-size: 11.5px; }
+.msg pre code { background: none; border: 0; color: inherit; padding: 0; font-size: 11.5px; }
 
 /* Maths in a reply is set close to the prose size around it rather than at
    KaTeX's 1.21em default: that default assumes body text, and in a panel this
@@ -4427,7 +4985,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 }
 .msg-bot sup { top: -.45em; }
 .msg-bot sub { bottom: -.2em; }
-.msg-bot .math-block {
+.msg .math-block {
   margin: .5em 0 .7em;
   overflow-x: auto;
   overflow-y: hidden;
@@ -4435,7 +4993,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
      is narrow, so this is not the rare case it is in a note. */
   padding-bottom: 2px;
 }
-.msg-bot .math-block .katex-display { margin: 0; }
+.msg .math-block .katex-display { margin: 0; }
 
 /* A citation is a destination, not a footnote: it says the page and goes
    there. Sized down and set on the accent so it reads as an aside inside the
@@ -4481,7 +5039,22 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
-.step-label { min-width: 0; overflow-wrap: anywhere; }
+/* One line, cut with an ellipsis: a step row is a record that something
+   happened, and a four-line rg pattern is detail, not record. Opening the row
+   lets the label wrap out to its full length alongside the output it folded
+   away — the click already means "show me the whole of this". */
+.step-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.msg-step.is-open .step-label {
+  white-space: normal;
+  overflow: visible;
+  overflow-wrap: anywhere;
+}
 .step-tally {
   display: inline-flex;
   flex: none;
@@ -4597,6 +5170,47 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 .msg-step.is-error { color: var(--accent); }
 .msg-step.is-error::before { background: var(--accent); }
 
+/* What the tool said, folded under the row that says what it did.
+   A step is a flex row, so the detail claims a line of its own by taking the
+   full basis rather than by being taken out of the flow — it has to push the
+   messages below it down, not sit over them. */
+.msg-step.can-detail { cursor: pointer; border-radius: 5px; flex-wrap: wrap; padding-right: 16px; }
+.msg-step.can-detail:hover { color: var(--ink-soft); background: var(--hover); }
+.msg-step.can-detail:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+/* Pinned to the corner rather than pushed right in the flow: the row wraps —
+   that is how the opened detail gets a line of its own — and a chevron that
+   merely trails the label drops onto a wrapped line of its own the moment the
+   command is long, leaving the row a text line taller than its text. The
+   row's padding-right is what keeps the label from running under it. */
+.step-more {
+  position: absolute;
+  top: 0;
+  right: 4px;
+  opacity: .7;
+  transition: transform .12s var(--ease);
+}
+.msg-step.is-open .step-more { transform: rotate(90deg); }
+/* Closed is the resting state: a turn that read a dozen files would otherwise
+   open as a wall of their contents. */
+.step-detail { display: none; }
+.msg-step.is-open .step-detail {
+  display: block;
+  flex-basis: 100%;
+  margin: 5px 0 3px;
+  padding: 7px 9px;
+  max-height: 260px;
+  overflow: auto;
+  border-radius: 6px;
+  background: var(--hover);
+  color: var(--ink-soft);
+  font: 11px/1.5 var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* A call that has been made but not answered. The verb already says so —
    `Editing`, not `Edited` — and this is the same fact at a glance: the mark
    breathes, and the edit card borrows the accent instead of the green it earns
@@ -4633,12 +5247,28 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   margin: 6px 0;
 }
 .msg-warn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-size: 12.5px;
   color: var(--accent);
   background: var(--accent-dim);
   border-radius: 6px;
   padding: 6px 9px;
   margin: 6px 0;
+}
+/* A failure with a way out of it — see `failed` in copilot.js. The button sits
+   on the row rather than under it, because the sentence and the answer to it
+   are one thing to read. */
+.msg-warn .warn-text { flex: 1; min-width: 0; }
+.msg-warn .ai-again {
+  flex: none;
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
+}
+.msg-warn .ai-again:hover {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
 }
 
 /* Thinking. Live, it is a pulsing dot and a rising token count; finished, one
@@ -4717,8 +5347,17 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   font: 12px/1.5 var(--font-ui);
   color: var(--faint);
 }
-.ai-busy-label { font-weight: 550; }
-.ai-busy-time { font-variant-numeric: tabular-nums; opacity: .75; }
+/* The label now names the tool and what it is working on, which is as long as
+   the path it was given; the timer beside it is the part that must not be
+   pushed off the end. */
+.ai-busy-label {
+  font-weight: 550;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ai-busy-time { flex: none; font-variant-numeric: tabular-nums; opacity: .75; }
 
 /* An arc rather than a ring: a circle of even weight looks the same at every
    angle, so it reads as still however fast it turns. */
@@ -5006,47 +5645,118 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 }
 .ai-model-control .dd-button:hover { background: var(--hover); }
 
-/* A choice between named things, all of them shown: a segmented pill rather
-   than a menu you have to open to discover how few entries it had. */
-.ai-seg {
-  display: flex;
-  padding: 2px;
-  gap: 2px;
-  min-width: 0;
-  height: var(--pop-control);
-  border-radius: 8px;
-  background: var(--sunk);
-}
-.ai-seg button {
-  flex: 1;
-  min-width: 0;
-  border: 0;
-  background: none;
-  color: var(--faint);
-  font: 550 11.5px/1 var(--font-ui);
-  padding: 0 4px;
-  border-radius: 6px;
-  cursor: pointer;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  transition: color .12s, background .12s;
-}
-.ai-seg button:hover { color: var(--ink-soft); }
-.ai-seg button[aria-checked="true"] {
-  background: var(--surface);
-  color: var(--ink);
-  box-shadow: 0 1px 2px #0000000f;
-}
-.ai-seg button:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+/* Effort, as a slider over named stops.
+   The levels are an order, and what is being chosen is how far along it to go —
+   so the control is a track with a dot per stop and a thumb standing on one.
+   The names are not printed on it: five of them at this width was "Medi…" and
+   "High…", and the composer's own readout beside the model already spells out
+   the one in force.
 
-/* The top level is the one that spends the most of a subscription, so it is
-   worth seeing that it is the one selected. The accent says so on the segment
-   itself rather than as a loose dot beside it. */
-.ai-seg button[data-effort="max"][aria-checked="true"] {
-  background: var(--accent);
-  color: var(--paper);
-  box-shadow: none;
+   Drawn the way the OS draws one — a thin line, an accent fill up to a small
+   round knob, ticks on the part still ahead — rather than as a full-height
+   bar. The bar version made the control the heaviest thing in the popover:
+   28px of dark surface with a blank grip-tile floating in it, next to rows
+   that are mostly text. A 4px line has the same hit area (the input still
+   spans the whole row) without the weight. */
+.ai-effort {
+  --thumb: 14px;
+  --track: 4px;
+  --dot: 4px;
+  min-width: 0;
+  position: relative;
+  height: var(--pop-control);
+}
+
+/* The track, on a pseudo-element so the element itself can stay hit-area
+   height. Filled to the thumb, plain beyond it: the reading is "how far
+   along", and a bar that fills says that without a number. The seam sits
+   under the middle of the thumb, whose centre travels from `thumb/2` to
+   `width − thumb/2` — a fill measured over the whole width instead ran
+   visibly ahead of the thumb at one end and behind at the other. */
+.ai-effort::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  margin: auto 0;
+  height: var(--track);
+  border-radius: calc(var(--track) / 2);
+  --seam: calc(var(--thumb) / 2 + var(--at, 0) * (100% - var(--thumb)));
+  background:
+    linear-gradient(to right,
+      var(--accent) var(--seam),
+      color-mix(in srgb, var(--ink-soft) 16%, var(--sunk)) var(--seam));
+}
+
+/* The stops, spaced where the thumb can actually stand: inset by exactly half
+   a thumb at each end, which is the travel Chromium gives a range input. */
+.ai-effort-stops {
+  position: absolute;
+  inset: 0 calc(var(--thumb) / 2);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  pointer-events: none;
+}
+.ai-effort-stop {
+  width: var(--dot);
+  height: var(--dot);
+  /* Half its own width off each side, so what `space-between` spaces evenly is
+     the dots' centres rather than their boxes: without it the first and last
+     sit a couple of pixels inside the thumb's travel, which is exactly the
+     distance the thumb then misses them by at the two ends. */
+  margin: 0 calc(var(--dot) / -2);
+  border-radius: 50%;
+  background: var(--faint);
+  opacity: .6;
+  transition: opacity .12s var(--ease), background .12s var(--ease);
+}
+/* Dots the fill has reached vanish rather than lighting up: the dot is the
+   same height as the track, so a "lit" dot under the fill was just a speck of
+   the wrong colour breaking an otherwise clean line. */
+.ai-effort-stop.is-passed { opacity: 0; }
+/* The top level is the one that spends the most of a subscription, so the dot
+   that stands for it is the accent — visible before you drag as well as after. */
+.ai-effort-stop.is-top { background: var(--accent); opacity: .9; }
+
+.ai-effort-range {
+  -webkit-appearance: none;
+  appearance: none;
+  position: relative;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  background: none;
+  cursor: pointer;
+}
+.ai-effort-range::-webkit-slider-runnable-track {
+  height: 100%;
+  background: none;
+}
+.ai-effort-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: var(--thumb);
+  height: var(--thumb);
+  margin-top: calc((var(--pop-control) - var(--thumb)) / 2);
+  border-radius: 50%;
+  /* Light but not white: at this size a full-strength ink knob holds its own
+     against the accent fill without being the brightest thing in the popover,
+     the way the old full-width tile was. */
+  background: color-mix(in srgb, var(--ink-soft) 88%, var(--surface));
+  box-shadow: 0 1px 3px #00000038, 0 0 0 .5px #00000030;
+  transition: transform .12s var(--ease), background-color .12s var(--ease);
+}
+.ai-effort-range:hover::-webkit-slider-thumb {
+  background-color: var(--ink-soft);
+  transform: scale(1.1);
+}
+.ai-effort-range:active::-webkit-slider-thumb { transform: scale(1.18); }
+.ai-effort-range:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 8px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .ai-effort-range::-webkit-slider-thumb { transition: none; }
+  .ai-effort-range:hover::-webkit-slider-thumb,
+  .ai-effort-range:active::-webkit-slider-thumb { transform: none; }
 }
 
 /* One button, two jobs. Send and stop are never both available — the icon
@@ -5073,7 +5783,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 /* While a turn is running, what is answering and how hard it is thinking are
    fixed: all three are flags on the process still writing into the log, and
    none of them can change without starting a new one. */
-.ai[data-busy="yes"] .ai-seg,
+.ai[data-busy="yes"] .ai-effort,
 .ai[data-busy="yes"] .ai-model-control { pointer-events: none; opacity: .45; }
 
 
@@ -5111,7 +5821,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   line-height: 1.4;
   text-align: left;
   white-space: nowrap;
-  cursor: default;
+  cursor: pointer;
 }
 .outline-text { overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1; }
 
@@ -5230,7 +5940,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   font-size: 12.5px;
   font-weight: 550;
   text-align: left;
-  cursor: default;
+  cursor: pointer;
 }
 .link-note-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .link-note-count {
@@ -5254,7 +5964,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   font-size: 12px;
   line-height: 1.45;
   text-align: left;
-  cursor: default;
+  cursor: pointer;
   /* Two lines, then it stops. A quoted line is there to be recognised, not
      read — the note itself is one click away. */
   display: -webkit-box;
@@ -5355,10 +6065,8 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 .callout-body:empty { display: none; }
 
 /* Only a callout written with + or - discloses, so only that one gets the
-   affordances of one: a twist, and a body that goes away. The head keeps the
-   document's beam — it is a line of the note's text, and the twist beside it is
-   what says the card folds. */
-.callout.is-foldable > .callout-head { cursor: text; }
+   affordances of one: a twist, a body that goes away, and the hand its head
+   takes from the pointer rule near the top of this file. */
 .callout-twist {
   width: 11px; height: 11px;
   margin-left: auto;
@@ -5493,6 +6201,16 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 .app[data-code-numbers="off"] .code-nums,
 .app[data-code-numbers="off"] .tk-linenum { display: none; }
 
+/* ------------------------------------------------------ wrapped code lines
+   Reading view only — the editing view's per-line scroll sync assumes lines
+   that do not fold. The gutter goes with the wrap: its numbers count source
+   lines, and beside lines that fold they would drift from the first fold on. */
+.app[data-code-wrap="on"] .reading .code-wrap pre.code-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.app[data-code-wrap="on"] .reading .code-nums { display: none; }
+
 /* ----------------------------------------------------------- settings
    A rail of sections, flat rows against each. Every row is a label with its
    explanation on the left and one control on the right, so the eye runs down
@@ -5540,7 +6258,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   font-family: var(--font-ui);
   font-size: 13px;
   text-align: left;
-  cursor: default;
+  cursor: pointer;
 }
 .settings-tab:hover { background: var(--hover); color: var(--ink); }
 .settings-tab[aria-current="true"] {
@@ -5611,6 +6329,13 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   color: var(--faint);
   word-break: break-all;
 }
+/* A row's own small print, under its name — prose, unlike the path above. */
+.settings-hint {
+  margin-top: 2px;
+  font-family: var(--font-ui);
+  font-size: 11.5px;
+  color: var(--faint);
+}
 
 /* ------------------------------------------------------ settings controls */
 
@@ -5622,7 +6347,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   border: 0;
   border-radius: 11px;
   background: var(--line);
-  cursor: default;
+  cursor: pointer;
   transition: background .16s var(--ease);
 }
 .switch[aria-checked="true"] { background: var(--accent); }
@@ -5652,7 +6377,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   color: var(--muted);
   font-family: var(--font-ui);
   font-size: 12.5px;
-  cursor: default;
+  cursor: pointer;
 }
 .seg button:hover { color: var(--ink); }
 .seg button[aria-checked="true"] {
@@ -5800,7 +6525,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   color: var(--ink-soft);
   font-family: var(--font-ui);
   font-size: 12.5px;
-  cursor: default;
+  cursor: pointer;
 }
 .stepper button:hover:not(:disabled) { background: var(--hover); color: var(--ink); }
 .stepper button:disabled { color: var(--faint); }
@@ -5824,7 +6549,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   font-family: var(--font-ui);
   font-size: 12.5px;
   text-align: left;
-  cursor: default;
+  cursor: pointer;
 }
 .theme-card:hover { border-color: var(--faint); }
 .theme-card[aria-pressed="true"] {
@@ -5853,6 +6578,54 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   border-bottom: 1px solid var(--line-soft);
 }
 .model-search { flex: 1; min-width: 0; }
+
+/* Everything ticked, above the list rather than buried in it — see the
+   `catalogue` control. Wraps rather than scrolls: this is meant to be read at a
+   glance, and a strip you have to scroll sideways answers "which ones did I
+   choose" no better than the count did. */
+.model-picked {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 8px;
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--sunk);
+}
+.model-picked-none {
+  font: 12px/1.4 var(--font-ui);
+  color: var(--faint);
+}
+.model-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 3px 6px 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  font: 500 11.5px/1.35 var(--font-ui);
+  color: var(--ink-soft);
+  cursor: pointer;
+  transition: border-color .12s, color .12s;
+}
+.model-chip:hover { border-color: var(--accent); color: var(--ink); }
+.model-chip-group { color: var(--faint); font-weight: 400; }
+.model-chip-x { color: var(--faint); font-size: 12.5px; }
+.model-chip:hover .model-chip-x { color: var(--accent); }
+
+.model-refresh {
+  flex: none;
+  padding: 4px 9px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface);
+  font: 500 11.5px/1.35 var(--font-ui);
+  color: var(--ink-soft);
+  cursor: pointer;
+  transition: border-color .12s, color .12s;
+}
+.model-refresh:hover:not(:disabled) { border-color: var(--accent); color: var(--ink) }
+.model-refresh:disabled { color: var(--faint); cursor: default; }
 .model-picker-count {
   flex: none;
   font-family: var(--font-ui);
@@ -5886,7 +6659,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   font-family: var(--font-ui);
   font-size: 12.5px;
   text-align: left;
-  cursor: default;
+  cursor: pointer;
 }
 .model-group-head:hover { background: var(--hover); }
 .model-group-caret {
@@ -5916,7 +6689,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   color: var(--muted);
   font-family: var(--font-ui);
   font-size: 11px;
-  cursor: default;
+  cursor: pointer;
 }
 .model-group-all:hover { border-color: var(--faint); color: var(--ink); }
 
@@ -5939,7 +6712,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   font-family: var(--font-ui);
   font-size: 12px;
   text-align: left;
-  cursor: default;
+  cursor: pointer;
 }
 .model-option:hover { background: var(--hover); }
 .model-option.is-on { color: var(--ink); }
@@ -5988,12 +6761,20 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 :root {
   /* The pens. Fixed rather than themed: they are drawn over a white page in
      every theme, and a marker that changed colour with the app's palette would
-     stop matching what was on the page when it was made. */
-  --mark-yellow: #FFD54A;
-  --mark-rose:   #FF8FA8;
-  --mark-green:  #86D98B;
-  --mark-blue:   #86C7F5;
-  --mark-violet: #C2A5F0;
+     stop matching what was on the page when it was made.
+
+     Chosen in OKLCH and converted, rather than picked by eye, so the five are
+     one set: even chroma (.105–.155) and hues spread around the wheel, with
+     lightness rising towards yellow because a yellow held to the lightness of
+     the violet goes olive. Picked by eye they had drifted — a vivid amber and
+     a hot pink beside three pastels — which is what made the row read as five
+     unrelated dots. Each is inside sRGB at full strength, so the swatch on the
+     toolbar is exactly the pen, not a clipped approximation of it. */
+  --mark-yellow: #F6E057;   /* oklch(.900 .155 100) */
+  --mark-rose:   #F6979A;   /* oklch(.775 .115  18) */
+  --mark-green:  #88EAA5;   /* oklch(.860 .135 152) */
+  --mark-blue:   #81C7FE;   /* oklch(.805 .105 243) */
+  --mark-violet: #D0A9FE;   /* oklch(.800 .125 305) */
 }
 
 .pdf {
@@ -6206,7 +6987,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   font-family: inherit;
   font-size: 12px;
   font-weight: 550;
-  cursor: default;
+  cursor: pointer;
 }
 .pdf-pop-btn:hover { background: var(--hover); color: var(--ink); }
 .pdf-pop-btn.is-danger:hover { background: var(--accent-dim); color: var(--accent); }
@@ -6216,7 +6997,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   height: 19px;
   border: 1px solid #00000024;
   border-radius: 50%;
-  cursor: default;
+  cursor: pointer;
   transition: transform .12s var(--ease);
 }
 .pdf-swatch:hover { transform: scale(1.14); }
@@ -6265,7 +7046,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   border-radius: 6px;
   background: none;
   color: var(--muted);
-  cursor: default;
+  cursor: pointer;
   transition: background .12s, color .12s;
 }
 .pdf-bar-btn:hover { background: var(--hover); color: var(--ink); }
@@ -6294,7 +7075,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   border-radius: 6px;
   background: none;
   color: var(--muted);
-  cursor: default;
+  cursor: pointer;
   transition: background .12s, color .12s;
 }
 .pdf-tool:hover { background: var(--hover); color: var(--ink); }
@@ -6319,7 +7100,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   height: 15px;
   border: 1px solid #00000024;
   border-radius: 50%;
-  cursor: default;
+  cursor: pointer;
   transition: transform .12s var(--ease), box-shadow .12s var(--ease);
 }
 .pdf-pen:hover { transform: scale(1.18); }
@@ -6373,7 +7154,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   font-size: inherit;
   font-weight: 550;
   font-variant-numeric: tabular-nums;
-  cursor: default;
+  cursor: pointer;
   transition: background .12s, color .12s;
 }
 .pdf-scale:hover { background: var(--hover); color: var(--ink); }
@@ -6470,7 +7251,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   background: none;
   color: var(--muted);
   font: inherit;
-  cursor: default;
+  cursor: pointer;
   transition: background .12s, color .12s, opacity .12s;
 }
 .site-btn.is-wide {
@@ -6573,7 +7354,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   color: var(--ink-soft);
   font-family: inherit;
   font-size: 12px;
-  cursor: default;
+  cursor: pointer;
   transition: background .12s, border-color .12s;
 }
 .site-card-go:hover { background: var(--hover); border-color: var(--faint); }
@@ -6874,7 +7655,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   background: transparent;
   color: var(--muted);
   font: 550 10.5px/1.5 var(--font-ui);
-  cursor: default;
+  cursor: pointer;
 }
 .merge-choice button.is-active {
   background: var(--paper);

@@ -26,6 +26,7 @@
     "grammar": "| Pattern / rule | Meaning / use | Example | Notes |\n| --- | --- | --- | --- |\n|  |  |  |  |\n"
   },
   "attachmentDirectory": ".attachments",
+  "chatImageDirectory": "Chat",
   "annotationDirectory": ".annotations",
   "pdfTextSuffix": ".txt"
 }

@@ -132,6 +132,21 @@ cloned. So TeX is run with command execution refused outright, and a block that
 asks to open files is not drawn until you press Draw; two at a time, so a page
 of thirty figures does not start thirty of them at once.
 
+**Scenes in three.js.** A ```` ```three ```` block is a 3D scene, and the block
+holds only the part worth reading: `scene`, `camera`, `renderer`, `controls`
+(OrbitControls, damped), a `lights` group and a `timer` are already built and
+sized, so three lines that add a mesh are a whole block. Define
+`update(t, dt)` and it is called every frame; call `renderer.setAnimationLoop`
+yourself and that loop is the one that runs. Reading view draws the scene where
+the code was, when it scrolls into sight; Editing view keeps a Run button
+beside the fence. A scene that throws says so, in the block's own space.
+
+The three.js runtime ships with Tulip and is served to the block from the app
+itself — nothing is fetched, so a scene draws the same offline, and a note full
+of them reaches the network exactly as often as a note full of prose. Scenes
+run in the same sandboxed guest a ```` ```html ```` block does: their own
+process, no Node, no network at all, and no way back into Tulip or the vault.
+
 **Timed recordings.** A media embed can start at seconds, `MM:SS`, `HH:MM:SS`,
 or `1h2m3s`: `![[lecture.mp3#t=12:35]]`. The same address without the bang,
 `[[lecture.mp3#t=12:35]]`, opens one transient player at that moment rather
@@ -173,6 +188,16 @@ reload, and `⌘+`/`⌘-`/`⌘0` zoom the page rather than the window.
 Pages run as guests: their own process and their own session, with no reach
 into Tulip or the vault, and links that want a new window go to your real
 browser. A guest cannot ask for the camera, the microphone or your location.
+
+**Sizing the app.** `⌘+`, `⌘-` and `⌘0` step the window through named sizes, so
+a size you liked comes back exactly — everything grows together, because a
+window has one size — and the status bar names the size as it changes, then
+stands down once you are back at the normal one. The same sizes are in Settings.
+
+Pinching a note does nothing. Two fingers drifting apart mid-scroll is not a
+request for a bigger app, and a size arrived at that way is one you cannot ask
+for again. Over a PDF or a website the gesture does belong to what is on
+screen — those resize themselves, and the app around them does not.
 
 **Settings.** `⌘,` — theme, line width and zoom; autosave delay, spelling and
 code line numbers; the timeouts and quality that running a block uses; and the
@@ -224,6 +249,7 @@ terminal — see `--check` above.
 | `⌘⇧B` `⌘I` `⌘K` | Bold, italic, link |
 | `⌥↑` / `⌥↓` | Page up / down, in a PDF |
 | `+` `-` `0` | Zoom a PDF, and fit it again |
+| `⌘+` `⌘-` `⌘0` | Size the app up, down, back |
 | `⌥←` / `⌥→` | Back / forward, in a website |
 | `⌘L` / `⌘R` | Address bar / reload, in a website |
 
@@ -240,6 +266,10 @@ src/blocks.js        what a fenced block becomes when it is not shown as code
 src/mermaid.js       diagrams, for both views
 src/tikz.js          TikZ pictures — the TeX run, and both views' frames
 src/svg.js           svg blocks — read, stripped, drawn, for both views
+src/guest.js         a block that is really a page, and the sandbox it runs in
+src/htmlrun.js       html blocks — the page the note itself wrote
+src/threejs.js       three blocks — the page Tulip writes around a scene
+src/threelib.js      the three.js runtime the scene's guest is served
 src/pdf.js           the PDF reader: pages, text selection, and highlights
 src/site.js          websites: the address, the guest it loads in, its state
 src/transclude.js    a note rendered inside another — embeds and hover previews
@@ -289,6 +319,17 @@ CDP_PORT=9333 node scripts/drive.mjs --file probe.js
 
 `window.__tulip` exposes `state`, `editor`, `api`, `openNote`, `runCommand`, and
 `openOverlay`.
+
+For anything visual, take the picture rather than reasoning about the CSS —
+pass a selector to clip the shot to one piece of chrome:
+
+```bash
+CDP_PORT=9333 node scripts/shot.mjs out.png ".reading blockquote"
+```
+
+Note that a focus event only fires when the window itself has focus, so a probe
+driving an unfocused instance will find that clicking into a table cell does
+nothing. Activate the app first.
 
 ## Language learning
 

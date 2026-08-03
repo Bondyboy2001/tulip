@@ -1,0 +1,31 @@
+{
+  "_comment": [
+    "The callout kinds a note may be written with, in the one place both",
+    "processes read them from. src/callouts.js imports this and draws from it;",
+    "electron/ai.js requires it and names the ids in the copilot's briefing.",
+    "",
+    "Whole entries rather than ids alone: splitting the names from the tone and",
+    "icon would leave two lists to keep in step, which is the drift this file",
+    "exists to prevent. The tone names a palette custom property and the icon",
+    "names an entry in the renderer's icon set — both are read only by",
+    "src/callouts.js, and both are here so that adding a kind is one edit.",
+    "",
+    "The ids and aliases are Obsidian's, which is the dialect people's existing",
+    "notes are already written in."
+  ],
+  "kinds": [
+    { "id": "note", "label": "Note", "tone": "info", "icon": "pencil" },
+    { "id": "abstract", "label": "Abstract", "tone": "info", "icon": "clipboard", "alias": ["summary", "tldr"] },
+    { "id": "info", "label": "Info", "tone": "info", "icon": "info" },
+    { "id": "todo", "label": "Todo", "tone": "info", "icon": "check-circle" },
+    { "id": "tip", "label": "Tip", "tone": "mint", "icon": "flame", "alias": ["hint", "important"] },
+    { "id": "success", "label": "Success", "tone": "mint", "icon": "check", "alias": ["check", "done"] },
+    { "id": "question", "label": "Question", "tone": "amber", "icon": "help", "alias": ["help", "faq"] },
+    { "id": "warning", "label": "Warning", "tone": "amber", "icon": "alert", "alias": ["caution", "attention"] },
+    { "id": "failure", "label": "Failure", "tone": "rose", "icon": "cross", "alias": ["fail", "missing"] },
+    { "id": "danger", "label": "Danger", "tone": "rose", "icon": "zap", "alias": ["error"] },
+    { "id": "bug", "label": "Bug", "tone": "rose", "icon": "bug" },
+    { "id": "example", "label": "Example", "tone": "violet", "icon": "list" },
+    { "id": "quote", "label": "Quote", "tone": "grey", "icon": "quote", "alias": ["cite"] }
+  ]
+}

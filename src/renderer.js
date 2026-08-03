@@ -4,20 +4,21 @@ import { mountPanels } from './panels.js'
 import { mountAsk } from './ask.js'
 import { createEditor, openSearchPanel } from './editor.js'
 import { languageChip } from './languages.js'
-import { NOTE_EXT, PDF_EXT, SITE_EXT, isPdfPath, isSitePath } from './vault-paths.js'
+import { NOTE_EXT, PDF_EXT, SITE_EXT, isChatImage, isPdfPath, isSitePath } from './vault-paths.js'
 import { DEFAULT_ZOOM } from './zoom.js'
 import { highlightInto } from './highlight.js'
 /* `el` is this module's own name for the DOM registry, so blocks.js's element
    builder comes in under another — the same aliasing settings.js and copilot.js
    do. */
-import { svgIcon, el as node } from './blocks.js'
-import { prepareMath, equationIndex } from './math.js'
+import { copyButton, svgIcon, el as node } from './blocks.js'
+import { prepareMath, equationIndex, equationsFor, docText } from './math.js'
 import { dressCitations } from './citations.js'
 import { THEMES, resolveTheme, isTheme } from './themes.js'
 import { FONTS, FONT_ROLES, fontStack, fontLabel, isFont } from './fonts.js'
 import {
   assetIndex, embedSpec, specForEmbed, renderEmbed, isAsset,
-  isImageAsset, findEmbeds, destroyEmbeds, fileChip, assetUrl, assetKind
+  isImageAsset, findEmbeds, destroyEmbeds, fileChip, assetUrl, assetKind,
+  fitImageCell
 } from './assets.js'
 import {
   initTransclusion, refreshTransclusions, installNotePreview
@@ -27,13 +28,14 @@ import {
 } from './sidepane.js'
 import { routeFragmentClick } from './links.js'
 import { attachRunControl, onAskToFix } from './runcode.js'
-import { attachHtmlRun, isHtmlRun } from './htmlrun.js'
+import { htmlFence, isHtmlRun } from './htmlrun.js'
+import { isThree, threeFence } from './threejs.js'
 import { attachManim, isManim } from './manim.js'
 import { attachTikz, isTikz } from './tikz.js'
 import { attachMermaid, isMermaid, refreshDiagrams } from './mermaid.js'
 import { attachSvg, isSvg } from './svg.js'
 import {
-  headings, splitAnchor, findHeading, findBlock, installHeadingFolds
+  headings, headingsFor, splitAnchor, findHeading, findBlock, installHeadingFolds
 } from './headings.js'
 import { lintEdits } from './lint.js'
 import { mountSettings } from './settings.js'
@@ -107,6 +109,7 @@ const el = {
   panelInput: $('panel-input'),
   panelList: $('panel-list'),
   panelFoot: $('panel-foot'),
+  fontSample: $('font-sample'),
   toast: $('toast'),
   ask: $('ask'),
   askTitle: $('ask-title'),
@@ -144,11 +147,14 @@ const el = {
   aiInput: $('ai-input'),
   aiSend: $('ai-send'),
   aiClose: $('ai-close'),
+  aiToggle: $('ai-toggle'),
   aiModel: $('ai-model'),
   aiAttach: $('ai-attach'),
   aiWrite: $('ai-write'),
   aiEffort: $('ai-effort'),
   aiEffortRow: $('ai-effort-row'),
+  aiEffortRange: $('ai-effort-range'),
+  aiEffortStops: $('ai-effort-stops'),
   aiConfigSep: $('ai-config-sep'),
   aiContext: $('ai-context'),
   aiContextWrap: $('ai-context-wrap'),
@@ -232,6 +238,17 @@ function noteRef (path) {
       : isSitePath(path) ? 'site' : (language ? 'language' : 'note')
   }
 }
+
+/* --------------------------------------------------------------- asking */
+
+/* The dialog itself is src/ask.js — a primitive the tree, the context menu,
+   the overlays, the attachment sweep and the note history all reach for, and
+   mounted here, next to the registry it needs, for that reason: it used to be
+   built five thousand lines below its first user, and `mountHistory` capturing
+   `confirm: ask` at its own mount time therefore captured nothing at all —
+   bundling turns these into `var`, so instead of failing loudly every Restore
+   button in the app quietly rejected when pressed. */
+const { ask, answer } = mountAsk(el)
 
 /* -------------------------------------------------------------- markdown */
 
@@ -2146,6 +2163,14 @@ function retraceHistory (from, to) {
   // same rule — `moved` is the one place that rule is written.
   const next = moved(sideDoc())
   if (next !== sideDoc()) openToSide(next, { keepScroll: true })
+  /* And the conversations about it. They are filed under the note's path, so
+     until this existed renaming a note you had been discussing left the whole
+     transcript — the CLI session id with it — under a name nothing would ever
+     ask for again, to be dropped the next time the history was trimmed.
+     Handed `moved` rather than the two paths: the rule for what a move does to
+     a path is this function's, and the panel taking a copy of it is how the
+     folder case comes to be handled in one of them and not the other. */
+  copilot.renamed(moved)
 }
 
 /**
@@ -2577,6 +2602,8 @@ const copilot = mountCopilot({
     write: el.aiWrite,
     effort: el.aiEffort,
     effortRow: el.aiEffortRow,
+    effortRange: el.aiEffortRange,
+    effortStops: el.aiEffortStops,
     configSep: el.aiConfigSep,
     context: el.aiContext,
     contextWrap: el.aiContextWrap,
@@ -2596,6 +2623,10 @@ const copilot = mountCopilot({
   // Awaited before every turn: an unsaved buffer would otherwise send the
   // agent to read a stale copy of the very note being discussed.
   context: copilotContext,
+  /* What the vault holds, for the `@` picker. The list the tree is drawn from,
+     read live rather than handed over once — it changes with every note made,
+     and a picker offering yesterday's vault is worse than none. */
+  files: () => state.files,
   onCite: ({ path, page }) => {
     goToCitation(path, page).catch(() => toast('That page could not be opened.'))
   },
@@ -2652,17 +2683,38 @@ onAskToFix((prompt) => {
  * selection, and a PDF's outlives the selection that made it, since reaching the
  * message box costs the reader the selection on the page.
  */
+/* How much of a selection travels with the question. A passage longer than this
+   is cut rather than dropped: the agent is told the text was cut short (see
+   `opened` in electron/ai.js) and can read the file for the rest, which is
+   better than the silence a dropped selection used to be — the reader had
+   selected three pages and the agent was told of no selection at all. */
+const SELECTION_LIMIT = 4000
+
+const cut = (text) => String(text || '').slice(0, SELECTION_LIMIT)
+
+/** The heading the cursor sits under, for a question asked without a selection.
+ *  Through `headingsFor`, like every other part of the app that asks — a private
+ *  scan here would call the `# comment` at the top of a shell block a heading,
+ *  and it is cached per document besides. */
+function headingAt (pos) {
+  const here = editor.state.doc.lineAt(pos).number
+  const above = headingsFor(editor.state.doc).filter((heading) => heading.line <= here)
+  return above.at(-1)?.text || ''
+}
+
 async function copilotContext () {
   if (state.dirty) await saveNow()
 
   if (viewingPdf()) {
     const quote = pdf.quote()
+    const text = quote?.text || ''
     return {
       note: state.current.path,
       kind: 'pdf',
       page: quote?.page || pdf.page(),
       pages: pdf.pages(),
-      selection: quote && quote.text.length <= 4000 ? quote.text : '',
+      selection: cut(text),
+      truncated: text.length > SELECTION_LIMIT,
       marks: pdf.marks().length
     }
   }
@@ -2684,13 +2736,17 @@ async function copilotContext () {
     }
   }
 
-  const selection = reading()
-    ? ''
-    : editor.state.sliceDoc(editor.state.selection.main.from, editor.state.selection.main.to)
+  const caret = editor.state.selection.main
+  const selection = reading() ? '' : editor.state.sliceDoc(caret.from, caret.to)
   return {
     note: state.current?.path || '',
     kind: viewingLanguageTable() ? 'language' : 'note',
-    selection: selection.length > 4000 ? '' : selection
+    selection: cut(selection),
+    truncated: selection.length > SELECTION_LIMIT,
+    /* Where the reader is, when they have not said. The rendered view has no
+       caret worth reporting — it is a page, not a document being edited. */
+    line: reading() ? 0 : editor.state.doc.lineAt(caret.head).number,
+    heading: reading() ? '' : headingAt(caret.head)
   }
 }
 
@@ -2773,6 +2829,16 @@ const languageStudy = mountLanguageStudy({
 })
 
 el.aiClose.addEventListener('click', () => copilot.close())
+el.aiToggle.addEventListener('click', () => copilot.toggle())
+
+/* The button beside the tabs mirrors the panel — a toggle can come from the
+   chord, the palette or the button itself, and data-ai is where they all end
+   up. */
+const paintAiToggle = () =>
+  el.aiToggle.setAttribute('aria-pressed', String(el.app.dataset.ai === 'open'))
+new MutationObserver(paintAiToggle).observe(el.app, { attributeFilter: ['data-ai'] })
+paintAiToggle()
+
 el.studyStart.addEventListener('click', () => languageStudy.open())
 
 /* ------------------------------------------------- the language keyboard */
@@ -2901,8 +2967,13 @@ function paintZoomBadge () {
   el.zoom.hidden = viewingPdf() || viewingSite() || zoomPercent === DEFAULT_ZOOM_PERCENT
 }
 
+/**
+ * A size the window really is, reported by the main process — ⌘+, ⌘−, ⌘0, the
+ * View menu, the settings stepper, or the size a session was restored at. Every
+ * one of them is a deliberate act, so every one of them is worth a word.
+ */
 function showZoom (percent) {
-  if (!el.zoom) return
+  if (!el.zoom || percent === zoomPercent) return
   zoomPercent = percent
   el.zoom.textContent = `${percent}%`
   el.zoom.hidden = viewingPdf() || viewingSite()
@@ -2914,6 +2985,26 @@ function showZoom (percent) {
     paintZoomBadge()
   }, 1500)
 }
+
+/**
+ * Pinching a note does nothing.
+ *
+ * macOS delivers a pinch as a wheel event with ctrlKey set — as does a mouse's
+ * ⌘-scroll — and left alone Chromium answers it by resizing the whole window.
+ * Over a note that is the wrong size to be changing: two fingers drifting apart
+ * mid-scroll is not a request for a bigger app, and the reader who wanted one
+ * has ⌘+, ⌘− and the settings stepper, each of which lands on a stop and can be
+ * put back exactly. So the gesture is swallowed here, before the window sees it.
+ *
+ * A PDF and a website are documents rather than notes: each keeps a zoom of its
+ * own and prevents the event before it reaches this listener, which is why the
+ * claim is checked rather than assumed.
+ */
+document.addEventListener('wheel', (event) => {
+  if (!(event.ctrlKey || event.metaKey)) return
+  if (event.defaultPrevented || viewingPdf() || viewingSite()) return
+  event.preventDefault()
+}, { passive: false })
 
 /* The right-hand end of the status bar keeps its own timer: it is a passing
    remark, and clearing it must not cancel the word count settling on the left. */
@@ -3618,8 +3709,61 @@ function stopReadingHighlights ({ reset = false } = {}) {
   readingHighlightJobs.clear()
 }
 
-function renderReading () {
-  if (!state.current) return
+/**
+ * Everything the rendered page is built from besides the note's own text:
+ * where a relative `<img src>` resolves (the note's folder, and the attachment
+ * index behind it), which `![[Note]]` names now name a note, and the palette
+ * and typeface a mermaid diagram is drawn in — it reads both when it draws and
+ * paints them into its SVG, so neither is merely CSS as far as this page is
+ * concerned. Composed from state the app already keeps for its own no-op
+ * checks.
+ */
+const readingStamp = () => [
+  state.current?.path || '',
+  state.assetsKey,
+  state.treeShape,
+  document.documentElement.dataset.theme,
+  state.fonts.body,
+  state.fonts.ui
+].join(' ')
+
+/** What the reading pane is showing, as the two things that decide it. */
+let shown = null
+
+/**
+ * Build the reading view, and say whether it built anything.
+ *
+ * Most callers are here precisely because something outside the note changed —
+ * an attachment landed, a link began resolving, the palette moved under the
+ * diagrams — so a render is the default, and `reuse` is asked for by the one
+ * caller that knows nothing did: switching between the views of a note that is
+ * already on screen. Opt-in rather than an invalidation counter kept beside the
+ * state that matters: a call site added later renders again, which is only
+ * slower, where a forgotten invalidation would leave the page silently stale.
+ *
+ * The stamp is the second half of that. `reuse` says the *caller* believes
+ * nothing changed; the stamp checks the belief against the dependencies that
+ * can be named. Without it, an attachment landing while the editing view was up
+ * — where the call at `applyAssets` renders nothing, because nothing is
+ * showing — would still be missing when the reading view came back.
+ */
+function renderReading ({ reuse = false } = {}) {
+  if (!state.current) return false
+
+  /* The cached string for this document: `equationsFor` below reads the same
+     entry, and the money layer keeps it warm. Unchanged text is the same string
+     rather than an equal one, so the comparison is a pointer test. */
+  const body = docText(editor.state.doc)
+  const stamp = readingStamp()
+  if (reuse && shown && shown.body === body && shown.stamp === stamp &&
+      el.reading.firstChild) {
+    /* The page stands, but its colouring does not: leaving the reading view
+       took the spans back off every block and stopped the observer that would
+       put them on again. */
+    startReadingHighlights(el.reading)
+    return false
+  }
+
   stopReadingHighlights()
 
   // One column wrapper, so every block shares a left edge. Centring each child
@@ -3639,11 +3783,14 @@ function renderReading () {
   }
   col.append(title)
 
-  const body = editor.state.doc.toString()
-
   const rendered = document.createElement('div')
   rendered.className = 'reading-body'
-  rendered.innerHTML = md.render(body, { equations: equationIndex(body) })
+  /* `equationsFor` rather than `equationIndex`: the numbering is a fact about
+     this document, and the document's own cache already holds it — asking for
+     it by string would scan the whole note a second time, which is the mistake
+     src/math.js documents beside that cache. (Transclusion still goes in by
+     string: the note it renders is not the one in the editor.) */
+  rendered.innerHTML = md.render(body, { equations: equationsFor(editor.state.doc) })
   installHeadingFolds(rendered)
   col.append(rendered)
 
@@ -3666,6 +3813,9 @@ function renderReading () {
     resolve: state.resolveAsset,
     read: (path) => api.file.read(path)
   }).catch(() => {})
+
+  shown = { body, stamp }
+  return true
 }
 
 /**
@@ -3673,11 +3823,14 @@ function renderReading () {
  * every child of the pane, which snaps its scroll to the top; the line at the
  * top of the viewport is the one address that survives the rebuild — the same
  * one a view switch travels on.
+ *
+ * Nothing to restore when nothing was replaced: re-anchoring a page that never
+ * moved would drag the scroll from wherever it was up to the top of the line it
+ * was showing.
  */
-function rerenderReading () {
+function rerenderReading (opts) {
   const line = viewportLine()
-  renderReading()
-  scrollToLine(line)
+  if (renderReading(opts)) scrollToLine(line)
 }
 
 /**
@@ -3717,10 +3870,15 @@ function dressEmbeds (root) {
 
 /**
  * A table cell that holds nothing but a picture is the picture: the cell gives
- * up its padding and claims exactly the image's width, so the image fills it.
- * The editing view decides the same thing under the same class name — see
- * `has-image-only` in src/table.js — and the stylesheet then treats the two
- * alike, which is what keeps the same table looking the same in both views.
+ * up its padding and the picture fills it, edge to edge, whatever the column
+ * turns out to be. The editing view decides the same thing under the same class
+ * name — see `has-image-only` in src/table.js — and the stylesheet then treats
+ * the two alike, which is what keeps the same table looking the same in both
+ * views.
+ *
+ * The cell keeps the picture's asked-for width as a *hint* (`fitImageCell`),
+ * because a picture told to fill has no width of its own left to size the
+ * column with.
  *
  * Asked after `dressEmbeds` rather than of the stubs, because only the built
  * embed knows whether the attachment turned out to be an image: a PDF or a
@@ -3732,10 +3890,12 @@ function markImageCells (root) {
       (node) => node.nodeType !== Node.TEXT_NODE || node.textContent.trim() !== ''
     )
     const only = kids.length === 1 ? kids[0] : null
-    cell.classList.toggle(
-      'has-image-only',
-      only instanceof HTMLImageElement && only.classList.contains('embed-img')
-    )
+    const image = only instanceof HTMLImageElement && only.classList.contains('embed-img')
+      ? only
+      : null
+    cell.classList.toggle('has-image-only', Boolean(image))
+    cell.style.width = ''
+    if (image) fitImageCell(cell, image, Number(image.getAttribute('width')) || null)
   }
 }
 
@@ -3782,7 +3942,13 @@ const BLOCK_KINDS = [
   // HTML is always rendered in Reading view, inside its sandboxed guest.
   {
     matches: isHtmlRun,
-    attach: (wrap, head, code) => attachHtmlRun(wrap, code)
+    attach: (wrap, head, code) => htmlFence.attach(wrap, code)
+  },
+  // A scene, in the same guest and on the same terms: what the block is for is
+  // the thing it draws, so Reading view draws it.
+  {
+    matches: isThree,
+    attach: (wrap, head, code) => threeFence.attach(wrap, code)
   },
   /* The fallback: the button goes in the header beside the language mark, and
      the output box after the frame. Blocks in a language Tulip cannot run are
@@ -3796,26 +3962,66 @@ const BLOCK_KINDS = [
 /** Give every fenced block its language tile and, once the parser lands, its
  *  colours. Blocks without a language keep the plain frame. */
 function dressCodeBlocks (root) {
-  const canObserve = typeof IntersectionObserver === 'function'
-
-  for (const wrap of root.querySelectorAll('.code-wrap[data-lang]')) {
-    const lang = wrap.dataset.lang
-    const chip = languageChip(lang)
-    let head = null
-    if (chip) {
-      head = document.createElement('div')
-      head.className = 'code-head'
-      head.append(chip)
-      wrap.prepend(head)
-    }
-
+  for (const wrap of root.querySelectorAll('.code-wrap')) {
+    const lang = wrap.dataset.lang || ''
     const code = wrap.querySelector('code')
     if (!code) continue
     const source = code.textContent
 
-    if (head) {
-      BLOCK_KINDS.find((kind) => kind.matches(lang)).attach(wrap, head, source)
+    /* The header's two ends: the chip (and whatever the fence said after the
+       language) on the left, the controls on the right. The controls are one
+       group so the modules that add a Run or Draw button and the copy button
+       below all land in the same corner without knowing about each other. */
+    const tools = node('span', 'code-tools')
+
+    if (lang) {
+      const head = node('div', 'code-head')
+      const chip = languageChip(lang)
+      if (chip) head.append(chip)
+      /* A manim block names its scene there, a snippet its file — words the
+         fence carried that were parsed out and then shown nowhere. */
+      if (wrap.dataset.info) head.append(node('span', 'code-info', wrap.dataset.info))
+      head.append(tools)
+      wrap.prepend(head)
+      BLOCK_KINDS.find((kind) => kind.matches(lang)).attach(wrap, tools, source)
+    } else {
+      /* No language means no header — an empty bar is just a bar — so the
+         copy control floats over the code's corner and appears on hover. */
+      tools.classList.add('is-floating')
+      wrap.prepend(tools)
     }
+    tools.append(copyButton(source))
+  }
+
+  startReadingHighlights(root)
+}
+
+/**
+ * Arm the colouring of every fenced block on the page.
+ *
+ * Separate from the dressing above because it does not only follow it: leaving
+ * the reading view stops the observer and hands every block back its plain
+ * text (`stopReadingHighlights({ reset: true })`), and returning to a page that
+ * was kept rather than rebuilt has to arm it again — otherwise every block on
+ * a reused page stays grey for as long as it is shown. Everything a job needs
+ * is readable from the block itself, so a page already on screen can be armed
+ * as readily as one just built.
+ */
+function startReadingHighlights (root) {
+  const canObserve = typeof IntersectionObserver === 'function'
+  /* The blocks this call is arming, as opposed to the ones already armed —
+     which is what makes arming an armed page cost nothing and, more to the
+     point, keeps it from building a second observer over the first. */
+  const fresh = []
+
+  for (const wrap of root.querySelectorAll('.code-wrap')) {
+    const lang = wrap.dataset.lang || ''
+    const code = wrap.querySelector('code')
+    if (!lang || !code || readingHighlightJobs.has(wrap)) continue
+    /* The source outlives the colouring: highlighting replaces the text nodes
+       it was built from, and `textContent` reads the same string back through
+       the spans. */
+    const source = code.textContent
 
     if (canObserve) {
       readingHighlightJobs.set(wrap, {
@@ -3827,6 +4033,7 @@ function dressCodeBlocks (root) {
         highlighted: false,
         stopped: false
       })
+      fresh.push(wrap)
     } else {
       // Older Chromium fallback: keep the eager behaviour rather than leave
       // every block uncoloured when IntersectionObserver is unavailable.
@@ -3834,9 +4041,9 @@ function dressCodeBlocks (root) {
     }
   }
 
-  if (!canObserve || !readingHighlightJobs.size) return
+  if (!canObserve || !fresh.length) return
 
-  readingHighlightObserver = new IntersectionObserver((entries) => {
+  readingHighlightObserver ||= new IntersectionObserver((entries) => {
     for (const entry of entries) {
       const job = readingHighlightJobs.get(entry.target)
       if (!job) continue
@@ -3868,7 +4075,7 @@ function dressCodeBlocks (root) {
     rootMargin: '150% 0px 150% 0px'
   })
 
-  for (const wrap of readingHighlightJobs.keys()) readingHighlightObserver.observe(wrap)
+  for (const wrap of fresh) readingHighlightObserver.observe(wrap)
 }
 
 /**
@@ -3978,7 +4185,11 @@ function setView (view) {
 
   if (viewingPdf()) { api.config.set({ view }); return }
 
-  if (view === 'read') renderReading()
+  /* Switching views does not change the note, so the page already built for it
+     stands — which is the whole cost of a toggle on a long note. `scrollToLine`
+     below still runs: the line to land on is the one the view being left was
+     showing, whether or not the page was rebuilt. */
+  if (view === 'read') renderReading({ reuse: true })
   else {
     stopReadingHighlights({ reset: true })
     if (state.current) editor.focus()
@@ -4124,6 +4335,12 @@ function openOverlay (mode, meta = {}) {
   // fresh query, so it must not open already looking wrong.
   el.panel.classList.remove('is-bad')
   paintSearchChips()
+
+  /* The specimen belongs to the two font pickers and to nothing else, and
+     which role is being chosen is which property the card is set in. */
+  const fontRole = FONT_MODES[mode]
+  el.fontSample.hidden = !fontRole
+  el.fontSample.classList.toggle('is-ui', fontRole === 'ui')
 
   runOverlayQuery('')
   el.panelInput.focus()
@@ -4588,6 +4805,8 @@ function syncSelection () {
   const chosen = items[index]?.item
   if (!chosen) return
   if (mode === 'themes') preview(() => paintTheme(chosen.id))
+  // The specimen card is painted from the same custom property, so pointing
+  // the root at the new stack is the whole of what previewing a font is.
   else if (FONT_MODES[mode]) preview(() => paintFont(FONT_MODES[mode], chosen.id))
 }
 
@@ -5250,6 +5469,9 @@ function applySettings (cfg) {
 
   // Both views number their code from the same switch; the CSS decides how.
   el.app.dataset.codeNumbers = cfg.codeNumbers === false ? 'off' : 'on'
+  /* Reading view only: the editing view's whole scroll-sync machinery for code
+     (see codeblock.js) assumes lines that do not fold. */
+  el.app.dataset.codeWrap = cfg.codeWrap === true ? 'on' : 'off'
   editor.setSpellcheck(cfg.spellcheck !== false)
 
   /* `outline` was a boolean when there were two panes to choose between. It is
@@ -5539,7 +5761,8 @@ const attachable = (list) => [...list].filter((f) => isAsset(f.name || ''))
  */
 async function showOrphanedImages () {
   const { assets } = await api.vault.snapshot()
-  const images = assets.filter(isImageAsset)
+  // Chat pastes are deliberately referred to by no note — see `isChatImage`.
+  const images = assets.filter((path) => isImageAsset(path) && !isChatImage(path))
   if (!images.length) { toast('The vault holds no images.'); return }
 
   setStatusRight('Looking for orphaned images…')
@@ -5748,12 +5971,6 @@ for (const type of ['dragover', 'drop']) {
   window.addEventListener(type, (e) => { if (carriesFiles(e)) e.preventDefault() })
 }
 
-/* --------------------------------------------------------------- asking */
-
-/* The dialog itself is src/ask.js — a primitive the tree, the context menu,
-   the overlays and the attachment sweep all reach for. */
-const { ask, answer } = mountAsk(el)
-
 /* ---------------------------------------------------------------- toast */
 
 let toastTimer = null
@@ -5871,6 +6088,28 @@ el.stage.addEventListener('tulip:table-contextmenu', (event) => {
       }
     )
   }
+  /* How the column reads, which in markdown is a property of the column and
+     not of the cell that was right-clicked — the delimiter row carries it. The
+     ticked entry is the one in force; choosing it again clears the column back
+     to the default, so the three behave as one switch with an off position. */
+  items.push(
+    { sep: true },
+    {
+      label: 'Align left',
+      checked: detail.align === 'left',
+      run: () => detail.setAlign('left')
+    },
+    {
+      label: 'Center',
+      checked: detail.align === 'center',
+      run: () => detail.setAlign('center')
+    },
+    {
+      label: 'Align right',
+      checked: detail.align === 'right',
+      run: () => detail.setAlign('right')
+    }
+  )
   items.push(
     { sep: true },
     {

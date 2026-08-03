@@ -19,6 +19,7 @@
 const path = require('node:path')
 const { spawn, execFile } = require('node:child_process')
 const VAULT_CONTRACT = require('./vault-contract.json')
+const RUNNABLE = require('./runnable-languages.json')
 
 /* The three CLIs and what they offer before they are asked. Shared with the
    renderer (src/models.js) rather than restated here: the same fact deciding
@@ -43,6 +44,46 @@ const OPENCODE_TOOLS = {
 }
 /** Which of the shared tool names mean the file on disk has changed. */
 const wrote = (name) => name === 'Edit' || name === 'Write'
+
+/* How much of what a tool said travels to the panel. Enough to read why a
+   command failed or what a search turned up; not so much that a Read of a long
+   note is copied across the bridge and then into a transcript kept on disk. */
+const DETAIL_LIMIT = 2000
+
+/**
+ * What a tool reported, as text.
+ *
+ * The three CLIs hand this back in three shapes — a string, a list of content
+ * blocks, or an object with the output on a field of its own — so the shapes are
+ * flattened here and the panel is given one thing to show. Trimmed to the limit
+ * with a line saying so, because a truncation nobody is told about reads as a
+ * tool that stopped early.
+ */
+function detailOf (value) {
+  const parts = typeof value === 'string'
+    ? [value]
+    : Array.isArray(value)
+      ? value.map((block) => (typeof block === 'string' ? block : block?.text || ''))
+      : [String(value?.text ?? value?.output ?? '')]
+
+  /* Joined only as far as the limit. A Read of a long note arrives here whole,
+     and building the whole string to then throw all but the first two thousand
+     characters away is the copy this function exists to avoid — the point is
+     that the note does not travel across the bridge, not that it travels once
+     more before being cut. The tail is still measured, because "and 40,000
+     more" is most of what the truncation has to say. */
+  let text = ''
+  let over = 0
+  for (const part of parts) {
+    if (text.length < DETAIL_LIMIT + 1) text += (text ? '\n' : '') + part
+    else over += part.length + 1
+  }
+  const trimmed = text.trim()
+  const rest = Math.max(0, trimmed.length - DETAIL_LIMIT) + over
+  return rest
+    ? `${trimmed.slice(0, DETAIL_LIMIT)}\n… ${rest.toLocaleString()} more characters`
+    : trimmed
+}
 
 /* Read-and-write over the vault, and nothing else. Claude takes a tool
    allowlist directly; Codex has no per-tool switch, so its shell is fenced in
@@ -90,13 +131,33 @@ scroll the reader's document to that page. Cite the numbers in the \
 "--- page N of M ---" markers of the extracted text, which count sheets from \
 the front — not any number printed on the page itself, which front matter puts \
 out of step. Add the file name for a document other than the one open: \
-[Paper.pdf p. 12]. Cite the page, not a heading or a section number.`
+[Paper.pdf p. 12]. Cite the page, not a heading or a section number.
+- Citing a work rather than a page of one is the other bracket: \`[@key]\`, or \
+\`[@key, p. 4]\` for a place in it, resolved against a \`references.bib\` beside \
+the note. Read that file for the keys instead of inventing one: a key with no \
+entry there is still drawn as a citation, marked as missing, and left out of the \
+bibliography the app builds at the foot of the note.`
 
 /* The vocabulary table's columns, read off the template the app actually
    builds those tables from. Named in the briefing below, and a renamed column
    has to reach the agent or it will keep writing the old one. */
 const VOCABULARY_COLUMNS = VAULT_CONTRACT.languageTableTemplates.vocabulary
   .split('\n')[0].split('|').map((cell) => cell.trim()).filter(Boolean)
+
+/* Which fence languages the app itself does something with — the first alias of
+   each runner, and the fences that draw a picture rather than run. Both read off
+   the file the Run button and the drawing modules are built from, so a fence
+   added to the app is a fence the copilot hears about. Told to the agent because
+   a model that does not know what this app understands writes `graphviz` where
+   `mermaid` would have drawn, and `text` where a block would have run. */
+const RUNNABLE_LANGUAGES = Object.values(RUNNABLE.runners).map((names) => names[0])
+const DRAWN_LANGUAGES = Object.values(RUNNABLE.drawn)
+
+/* The callout kinds, off the table src/callouts.js draws them from — for the
+   same reason as the two lists above. An unknown kind still renders, in the
+   neutral tone, so naming them is about the agent reaching for one that has a
+   colour and an icon rather than about refusing the rest. */
+const CALLOUT_KINDS = require('./callout-kinds.json').kinds.map((kind) => kind.id)
 
 const systemPrompt = (dir) => `You are Copilot, the assistant inside Tulip, a markdown \
 notes app. The user's vault is the directory ${dir}, and every .md file under \
@@ -110,7 +171,28 @@ uses the columns ${VOCABULARY_COLUMNS.join(', ')}. Preserve those column names \
 and one vocabulary item per row when editing them; ${VOCABULARY_COLUMNS[0]} and \
 ${VOCABULARY_COLUMNS[1]} generate the app's study cards.
 - Attachments live in ${VAULT_CONTRACT.attachmentDirectory}/<Note name>/ and are embedded with ![[name.png]].
-- Fenced code blocks are runnable in the app, so keep their language tags accurate.
+- Fenced code blocks are runnable in the app, so keep their language tags \
+accurate. These run, from a button on the block: ${RUNNABLE_LANGUAGES.join(', ')}. \
+These are drawn rather than run: ${DRAWN_LANGUAGES.join(', ')} — \`three\` is a \
+three.js scene body, \`manim\` and \`tikz\` render to a picture kept in the vault. \
+A fence tagged with anything else is shown as plain code, so prefer one of these \
+when the user asks for a diagram or something they can run.
+- The reading view also draws callouts — \`> [!warning] Mind the gap\`, \
+optionally titled and foldable with \`+\`/\`-\`. The kinds that carry a colour \
+and an icon are: ${CALLOUT_KINDS.join(', ')}.
+- Notes embed one another: \`![[Note]]\` for the whole of one, \
+\`![[Note#Heading]]\` for a section, \`![[Note#^block-id]]\` for a single block. \
+A block earns that anchor by ending its last line with \`^block-id\` (letters, \
+digits and hyphens) — which is how one is made, and worth doing when you write \
+something you expect to be pointed at.
+- A picture may be given a width: \`![[diagram.png|400]]\`, or \
+\`![[diagram.png|400x260]]\` for both dimensions.
+- \`#tag\` marks a tag, and \`==text==\` a highlight. Both are drawn by the app \
+and neither is ordinary Markdown, so write them only when they are wanted.
+- A labelled display equation is numbered and can be pointed at: \`\\label{eq:name}\` \
+inside a \`$$…$$\` block gives it a number, \`\\eqref{eq:name}\` links to it from \
+anywhere in the note, and \`\\tag{...}\` sets what is shown instead of the number. \
+Labels on inline maths do nothing.
 - The vault also holds PDFs, which the user reads and highlights in the app. A \
 .pdf is binary and not worth opening: its text is in \
 ${VAULT_CONTRACT.annotationDirectory}/<name>.pdf${VAULT_CONTRACT.pdfTextSuffix}, whole and marked off one section per \
@@ -369,11 +451,21 @@ function draftFields (text) {
     }
     /* Anything else — a number, a boolean, `replace_all` — is skipped whole.
        Nothing here reads them, and stopping at the wrong comma would strand
-       every field after it. */
+       every field after it.
+
+       A string inside the value is stepped over rather than scanned, because a
+       bracket in one is not a bracket: `["a]b"]` counted naively closes the
+       array a character early, the loop then stops on the real `]`, and every
+       field after it is lost. Nothing Edit or Write takes is shaped like that
+       today — their arguments are strings and one boolean — which is the only
+       reason this has never been seen. */
     const from = i
     let depth = 0
     while (i < text.length) {
       const ch = text[i]
+      // `string` leaves `i` past the closing quote, or at the end of what has
+      // arrived when the quote has not.
+      if (ch === '"') { string(); continue }
       if (ch === '[' || ch === '{') depth++
       else if (ch === ']' || ch === '}') { if (!depth) break; depth-- }
       else if (ch === ',' && !depth) break
@@ -513,7 +605,11 @@ function onClaudeMessage (msg, pending, drafting) {
           id: block.tool_use_id,
           name: call.name,
           path: call.path,
-          error: !!block.is_error
+          error: !!block.is_error,
+          /* What the tool actually said. Without it a step that failed is a red
+             row with no reason on it, and a search that found nothing looks the
+             same as one that found everything. */
+          detail: detailOf(block.content)
         })
       }
       break
@@ -562,6 +658,21 @@ function startCodexTurn (text) {
   return launch('codex', args, onCodexMessage, { prompt: text })
 }
 
+/**
+ * A Codex item as a tool call, or nothing for the kinds that are not one.
+ *
+ * The same item is announced twice — running, then finished — and both have to
+ * name it the same way or the panel draws two rows where there was one call.
+ */
+function codexTool (item) {
+  switch (item.type) {
+    case 'command_execution': return { name: 'Bash', path: item.command || '' }
+    case 'file_search': return { name: 'Grep', path: item.query || '' }
+    case 'web_search': return { name: 'Fetch', path: item.query || '' }
+    default: return null
+  }
+}
+
 function onCodexMessage (msg) {
   switch (msg.type) {
     case 'thread.started':
@@ -570,6 +681,19 @@ function onCodexMessage (msg) {
       session.thread = msg.thread_id
       emit({ k: 'thread', thread: session.thread })
       break
+
+    /* A tool call, announced as it starts rather than once it is over.
+       A command or a search is most of the wall-clock of a turn and the part
+       that most looks like a hang, and until this the panel had nothing at all
+       to show for it — the row appeared already finished, however long it ran.
+       `item.completed` still announces the call itself, so a build that says
+       nothing until it is done goes on working exactly as it did. */
+    case 'item.started': {
+      const item = msg.item || {}
+      const tool = codexTool(item)
+      if (tool) emit({ k: 'tool', id: item.id, ...tool })
+      break
+    }
 
     case 'item.completed': {
       const item = msg.item || {}
@@ -586,7 +710,24 @@ function onCodexMessage (msg) {
           emit({ k: 'edited', id: item.id, name: 'Edit', path: file })
         }
       } else if (item.type === 'command_execution') {
-        emit({ k: 'tool', id: item.id, name: 'Bash', path: item.command || '' })
+        /* The call is named again alongside its result, for the builds that
+           announce nothing until it is over — `step` in the panel matches on
+           the id, so the row `item.started` already drew is the row this
+           finishes. `exit_code` is the whole of whether it worked. */
+        const failed = item.exit_code != null && item.exit_code !== 0
+        const tool = codexTool(item)
+        emit({ k: 'tool', id: item.id, ...tool })
+        emit({
+          k: 'tool-done',
+          id: item.id,
+          ...tool,
+          error: failed,
+          detail: detailOf(item.aggregated_output ?? item.output ?? '')
+        })
+      } else if (item.type === 'file_search' || item.type === 'web_search') {
+        const tool = codexTool(item)
+        emit({ k: 'tool', id: item.id, ...tool })
+        emit({ k: 'tool-done', id: item.id, ...tool, detail: detailOf(item.results ?? '') })
       } else if (item.type === 'error') {
         // Codex reports its startup warnings on the same channel as real
         // failures, and it starts up once per turn — so an unfiltered relay
@@ -679,7 +820,10 @@ function onOpencodeMessage (msg) {
           id,
           name,
           path: relative(where),
-          error: failed
+          error: failed,
+          // opencode files the output under `output` on the completed state, and
+          // the reason under `error` on the failed one.
+          detail: detailOf(failed ? (state.error ?? state.output) : state.output)
         })
       }
       break
@@ -918,7 +1062,18 @@ function start ({ provider = 'claude', model, effort = 'high', write = true, res
  * user can see.
  */
 function opened (context) {
-  const selection = context.selection ? `\n\nSelected text:\n${context.selection}` : ''
+  /* A selection the renderer had to cut short says so. Silently sending the
+     first four thousand characters of a passage would have the agent answer
+     confidently about a paragraph it was never shown the end of. */
+  const selection = context.selection
+    ? `\n\nSelected text${context.truncated ? ' (cut short — ask to read the file for the rest)' : ''}:\n${context.selection}`
+    : ''
+  /* Where the reader is, for the common question asked with nothing selected.
+     "Explain this" in a note of two thousand lines is otherwise a guess, and the
+     guess the agent makes is the top of the file. */
+  const caret = !context.selection && context.line
+    ? `\n\nTheir cursor is on line ${context.line}${context.heading ? `, under the heading “${context.heading}”` : ''}.`
+    : ''
   if (context.kind === 'language') {
     return `<open-language-table>${context.note}${selection}</open-language-table>`
   }
@@ -929,7 +1084,7 @@ function opened (context) {
     const title = context.title ? `\n\nThe page is titled “${context.title}”.` : ''
     return `<open-website>${context.note}\n\nThe reader is looking at ${context.url || 'no page yet'}.${title}</open-website>`
   }
-  if (context.kind !== 'pdf') return `<open-note>${context.note}${selection}</open-note>`
+  if (context.kind !== 'pdf') return `<open-note>${context.note}${caret}${selection}</open-note>`
 
   const where = `\n\nThe reader is on page ${context.page}${context.pages ? ` of ${context.pages}` : ''}.`
   /* Named outright rather than left to the briefing's rule about where a PDF's
@@ -953,7 +1108,17 @@ function send (text, context) {
      Then the house style, last before the question, because that is the only
      position that beats a transcript of the model's own earlier answers — see
      HOUSE_STYLE. */
-  const prompt = [context?.note ? opened(context) : '', HOUSE_STYLE, text]
+  /* Images are named, not carried. All three CLIs read a file for themselves and
+     none of them takes an image over a stream-json message, so a pasted picture
+     is written to disk by main and reaches the agent as the one thing it can
+     always act on: an absolute path. */
+  const images = Array.isArray(context?.images) && context.images.length
+    ? `The user attached ${context.images.length === 1 ? 'an image' : 'images'}. ` +
+      `Look at ${context.images.length === 1 ? 'it' : 'them'} with your file-reading tool:\n` +
+      context.images.map((file) => `- ${file}`).join('\n')
+    : ''
+
+  const prompt = [context?.note ? opened(context) : '', images, HOUSE_STYLE, text]
     .filter(Boolean).join('\n\n')
 
   session.busy = true
@@ -1001,4 +1166,17 @@ function stop (signal = 'SIGTERM') {
   return { ok: true }
 }
 
-module.exports = { setVault, attach, models, start, send, stop }
+/* What main talks to — and, under a name that says why they are here, the pure
+   functions underneath it. They are the fragile half of this file: three
+   hand-rolled parsers reading three CLIs' output, none of it reachable through
+   the six calls above and none of it exercised by anything short of running all
+   three programs. `scripts/test-ai.mjs` is what they are exported for. */
+module.exports = {
+  setVault,
+  attach,
+  models,
+  start,
+  send,
+  stop,
+  parsers: { draftFields, detailOf, readLines, parseCodex, parseOpencode, codexTool }
+}

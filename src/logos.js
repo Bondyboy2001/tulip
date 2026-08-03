@@ -15,7 +15,7 @@ import {
   siSass, siJson, siYaml, siToml, siMarkdown, siGnubash, siLua, siR, siDart,
   siVuedotjs, siSvelte, siHaskell, siElixir, siErlang, siClojure, siScala,
   siZig, siNim, siPerl, siJulia, siOcaml, siGraphql, siDocker, siNixos,
-  siSolidity, siPostgresql, siXml
+  siSolidity, siPostgresql, siXml, siThreedotjs
 } from 'simple-icons'
 import { svgIcon } from './blocks.js'
 
@@ -63,7 +63,8 @@ const MARKS = {
   dockerfile: siDocker,
   nix: siNixos,
   solidity: siSolidity,
-  sql: siPostgresql
+  sql: siPostgresql,
+  three: siThreedotjs
 }
 
 /**

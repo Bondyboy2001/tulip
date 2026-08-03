@@ -105,6 +105,58 @@ function equationSource (tex, equations = null) {
   return { source, label, tag }
 }
 
+/* The shorthands a note may use without defining them. */
+const MACROS = { '\\R': '\\mathbb{R}', '\\N': '\\mathbb{N}', '\\Z': '\\mathbb{Z}' }
+
+/**
+ * One option set for every caller. The reading view used to pass `macros` and
+ * the editing view not, so `$\R$` typeset in one view and came back red in the
+ * other — the disagreement between the two views this module exists to prevent,
+ * and the language table (src/table.js) took the editor's side of it.
+ *
+ * Built fresh per call rather than hoisted whole: KaTeX writes the definitions
+ * an expression makes with `\gdef` back into the macros object it is handed, so
+ * one shared object would leak a note's definitions into everything typeset
+ * after it — and would make the cache below, whose key is the source alone,
+ * wrong. `errorColor` is a custom property rather than a colour for the same
+ * reason: the markup must not depend on the theme in force when it was built.
+ */
+const mathOptions = (displayMode) => ({
+  displayMode,
+  throwOnError: false,
+  errorColor: 'var(--accent)',
+  strict: false,
+  trust: false,
+  output: 'htmlAndMathml',
+  macros: { ...MACROS }
+})
+
+/**
+ * Typeset markup for an expression, which — given the above — is a pure
+ * function of its source and its mode, and so is worth keeping.
+ *
+ * KaTeX is around 70% of what a reading render costs, and a note repeats
+ * itself heavily: the dense note this was measured against holds 1,903
+ * expressions over 634 distinct sources. Opening it went from 113ms to 60ms,
+ * and every render after that from 110ms to 15ms.
+ *
+ * Bounded, oldest first — a Map yields its keys in insertion order, so the
+ * first one is the one to drop. Values are markup, on the order of 1.5KB an
+ * expression.
+ */
+const RENDER_CAP = 3000
+const renders = new Map()
+
+function typeset (tex, displayMode) {
+  const key = (displayMode ? 'D' : 'I') + tex
+  const hit = renders.get(key)
+  if (hit !== undefined) return hit
+  const html = katex.renderToString(tex, mathOptions(displayMode))
+  if (renders.size >= RENDER_CAP) renders.delete(renders.keys().next().value)
+  renders.set(key, html)
+  return html
+}
+
 /**
  * Never throws: a half-typed expression is the normal state of an editor, so a
  * malformed one renders as the offending source in the error colour rather
@@ -115,15 +167,7 @@ function renderMath (tex, displayMode = false) {
     loadKatex().catch(() => {})
     return `<span class="math-pending">${escapeMath(tex)}</span>`
   }
-  return katex.renderToString(tex, {
-    displayMode,
-    throwOnError: false,
-    errorColor: 'var(--accent)',
-    strict: false,
-    trust: false,
-    output: 'htmlAndMathml',
-    macros: { '\\R': '\\mathbb{R}', '\\N': '\\mathbb{N}', '\\Z': '\\mathbb{Z}' }
-  })
+  return typeset(tex, displayMode)
 }
 
 export function renderMathInto (el, tex, displayMode = false) {
@@ -135,14 +179,10 @@ export function renderMathInto (el, tex, displayMode = false) {
     return el
   }
   try {
-    katex.render(tex, el, {
-      displayMode,
-      throwOnError: false,
-      errorColor: 'var(--accent)',
-      strict: false,
-      trust: false,
-      output: 'htmlAndMathml'
-    })
+    /* The same markup `renderToString` would produce, which is what
+       `katex.render` builds and appends anyway — but taken from the cache, so
+       scrolling a note full of maths typesets each expression once. */
+    el.innerHTML = typeset(tex, displayMode)
   } catch {
     el.textContent = tex
     el.classList.add('math-error')
@@ -194,18 +234,56 @@ export function mathPlugin (md) {
     return true
   })
 
+  /**
+   * KaTeX's own delimiters: `\(…\)` inline, `\[…\]` display.
+   *
+   * Papers, and anything an assistant writes, arrive punctuated this way as
+   * often as with dollars — and markdown-it's escape rule would otherwise eat
+   * the backslashes and leave "(n=1)" behind. Registered before `escape` so it
+   * gets first refusal on the backslash. `\\(` is not an opener: the pair of
+   * backslashes is an escaped backslash, and the escape rule below owns it.
+   */
+  md.inline.ruler.before('escape', 'math_delimited', (state, silent) => {
+    const { src, pos } = state
+    if (src[pos] !== '\\') return false
+    const opener = src[pos + 1]
+    if (opener !== '(' && opener !== '[') return false
+
+    const display = opener === '['
+    const close = display ? '\\]' : '\\)'
+    let end = pos + 2
+    while (end < src.length && !src.startsWith(close, end)) {
+      if (!display && src[end] === '\n') return false      // inline maths is single-line
+      end++
+    }
+    if (end >= src.length) return false
+    const tex = src.slice(pos + 2, end)
+    if (!tex.trim()) return false
+
+    if (!silent) {
+      const token = state.push(display ? 'math_inline_display' : 'math_inline', '', 0)
+      token.content = tex
+    }
+    state.pos = end + 2
+    return true
+  })
+
   md.block.ruler.before('fence', 'math_block', (state, startLine, endLine, silent) => {
     const start = state.bMarks[startLine] + state.tShift[startLine]
     const max = state.eMarks[startLine]
     if (start + 2 > max) return false
-    if (state.src.slice(start, start + 2) !== '$$') return false
+    /* `$$` and `\[` open the same block; whichever opened it is what closes
+       it, so a note may not start in one notation and end in the other. */
+    const open = state.src.slice(start, start + 2)
+    const close = open === '$$' ? '$$' : open === '\\[' ? '\\]' : null
+    if (!close) return false
 
     const firstLine = state.src.slice(start + 2, max).trim()
     let line = startLine
     let content = ''
     let closed = false
 
-    if (firstLine.endsWith('$$') && firstLine.length > 2) {
+    if (firstLine.endsWith(close) && firstLine.length > 2) {
       content = firstLine.slice(0, -2)
       closed = true
     } else {
@@ -214,7 +292,7 @@ export function mathPlugin (md) {
         const from = state.bMarks[line] + state.tShift[line]
         const to = state.eMarks[line]
         const text = state.src.slice(from, to)
-        if (text.trim().endsWith('$$')) {
+        if (text.trim().endsWith(close)) {
           const head = text.trim().slice(0, -2)
           if (head) parts.push(head)
           closed = true
@@ -244,6 +322,11 @@ export function mathPlugin (md) {
   }
   md.renderer.rules.math_inline = (tokens, i) =>
     renderMath(equationSource(tokens[i].content).source, false)
+  /* A `\[…\]` that did not open its own line — inside a table cell, or mid
+     sentence. It is still display maths, but it cannot be a block here, so it
+     is typeset in display mode inside the run of text it was written in. */
+  md.renderer.rules.math_inline_display = (tokens, i) =>
+    `<span class="tk-math tk-math-display">${renderMath(equationSource(tokens[i].content).source, true)}</span>`
   md.renderer.rules.math_block = (tokens, i, _opts, env) => {
     const equation = equationSource(tokens[i].content, env?.equations)
     const identity = equation.label
@@ -305,9 +388,39 @@ export function findMath (text) {
     return /^[ \t]*$/.test(text.slice(i, to === -1 ? text.length : to))
   }
 
+  /* The other notation, `\(…\)` and `\[…\]`, taken on the same terms as the
+     markdown-it rule above: single-line inline, and a `\[` block that may run
+     over lines. Unlike `$$`, a `\[` need not open its line — the reading view
+     typesets one inside a sentence too, so both views agree. */
+  const delimited = (i) => {
+    const opener = text[i + 1]
+    if (opener !== '(' && opener !== '[') return null
+    if (i > 0 && text[i - 1] === '\\') return null           // an escaped backslash
+    const display = opener === '['
+    const close = display ? '\\]' : '\\)'
+    let end = i + 2
+    while (end < text.length && !text.startsWith(close, end)) {
+      if (!display && text[end] === '\n') return null
+      end++
+    }
+    if (end >= text.length) return null
+    return { from: i, to: end + 2, tex: text.slice(i + 2, end), display }
+  }
+
   let i = 0
   while (i < text.length) {
     const ch = text[i]
+    if (ch === '\\') {
+      const span = delimited(i)
+      if (!span) { i++; continue }
+      let { tex } = span
+      if (span.display && tex.includes('\n') && /^ {0,3}(?:> ?)+/.test(text.slice(lineStart(i), i))) {
+        tex = tex.replace(/\n[ \t]*>[ \t]?/g, '\n')
+      }
+      if (tex.trim()) spans.push({ ...span, tex })
+      i = span.to
+      continue
+    }
     if (ch !== '$' || (i > 0 && text[i - 1] === '\\')) { i++; continue }
 
     const display = text[i + 1] === '$'
@@ -435,6 +548,7 @@ function touchedSpans (state) {
 function buildMathDeco (state) {
   const tree = syntaxTree(state)
   const ranges = []
+  const hidden = []
   const equations = equationsFor(state.doc)
 
   /* In code, `$` is a shell variable or a string literal, and the reading
@@ -463,11 +577,18 @@ function buildMathDeco (state) {
       Decoration.replace({ widget: new MathWidget(equation.source, span.display, equation.label) })
         .range(span.from, span.to)
     )
+    /* Only what conceals text is atomic — the same rule the rest of the live
+       preview follows (see editor.js). The spellcheck mark above leaves the
+       TeX visible, and handing *that* range to `atomicRanges` too made the
+       expression unenterable: every click inside the revealed source was
+       pushed back out to an edge, so the caret could only ever sit at the
+       ends of the block. */
+    hidden.push(Decoration.replace({}).range(span.from, span.to))
   }
-  return Decoration.set(ranges, true)
+  return { deco: Decoration.set(ranges, true), atomic: Decoration.set(hidden, true) }
 }
 
-const mathState = (state) => ({ deco: buildMathDeco(state), touched: touchedSpans(state) })
+const mathState = (state) => ({ ...buildMathDeco(state), touched: touchedSpans(state) })
 
 export const mathPreview = StateField.define({
   create: mathState,
@@ -483,12 +604,12 @@ export const mathPreview = StateField.define({
          key down through a note full of maths used to rebuild every widget in
          it on every intermediate position. */
       const touched = touchedSpans(tr.state)
-      return touched === value.touched ? value : { deco: buildMathDeco(tr.state), touched }
+      return touched === value.touched ? value : { ...buildMathDeco(tr.state), touched }
     }
     return value
   },
   provide: (field) => [
     EditorView.decorations.from(field, (value) => value.deco),
-    EditorView.atomicRanges.of((view) => view.state.field(field).deco)
+    EditorView.atomicRanges.of((view) => view.state.field(field).atomic)
   ]
 })

@@ -65,6 +65,51 @@ export function svgIcon (markup, {
   return svg
 }
 
+/**
+ * The control that puts a block's source on the clipboard, for both views'
+ * code headers. One face for the ask and one brief tick for the answer — the
+ * copy itself is silent, so the button is the only place the page can say it
+ * happened.
+ *
+ * The text is captured, not looked up: both callers rebuild this button
+ * whenever the block's code changes, so what it holds is what is on screen.
+ */
+export function copyButton (text) {
+  const face = () => svgIcon(
+    '<rect x="5.5" y="5.5" width="7" height="7" rx="1.6"/>' +
+    '<path d="M10.5 3.5h-5A1.5 1.5 0 0 0 4 5v5.5"/>',
+    { className: 'run-icon', stroke: 1.5 }
+  )
+  const tick = () => svgIcon('<path d="m4.2 8.4 2.7 2.7 5-5.4"/>',
+    { className: 'run-icon', stroke: 1.8 })
+
+  const button = el('button', 'run-btn is-icon tk-copy')
+  button.type = 'button'
+  const say = (title) => {
+    button.title = title
+    button.setAttribute('aria-label', title)
+  }
+  say('Copy code')
+  button.append(face())
+
+  let undo = 0
+  button.addEventListener('click', () => {
+    // Electron's clipboard, via the bridge: the page's own
+    // navigator.clipboard needs a permission the sandbox does not grant.
+    window.tulip.copy(text)
+    button.classList.add('is-copied')
+    button.replaceChildren(tick())
+    say('Copied')
+    clearTimeout(undo)
+    undo = setTimeout(() => {
+      button.classList.remove('is-copied')
+      button.replaceChildren(face())
+      say('Copy code')
+    }, 1300)
+  })
+  return button
+}
+
 /* The five characters that stop note text being read as markup. Here rather
    than beside either of the two modules that write untrusted text into an HTML
    string, because a second copy of an escaper is a copy that gets fixed once. */

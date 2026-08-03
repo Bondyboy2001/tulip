@@ -1,26 +1,38 @@
 {
-  "comment": "The three CLIs the copilot can be, and what they offer before they are asked. Shared because both processes need it: electron/ai.js decides what it will spawn, src/models.js decides what the dropdown shows, and two copies of that is how the two disagree. `offerByDefault` is false for opencode alone — its catalogue is an account property running to several hundred entries, which is what the Models-offered setting exists to keep out of the list. The Claude versions in the labels are the one thing here that goes stale on its own: the id is an alias that follows the newest model of that name, so when Anthropic ships the next Opus this label has to be moved by hand. `context` is the model's context window, used to draw how much of it a conversation has spent; Codex and opencode publish their own, so only Claude's is stated here.",
+  "comment": "The three CLIs the copilot can be, and what they offer before they are asked. Shared because both processes need it: electron/ai.js decides what it will spawn, src/models.js decides what the dropdown shows, and two copies of that is how the two disagree. `offerByDefault` is false for opencode alone — its catalogue is an account property running to several hundred entries, which is what the Models-offered setting exists to keep out of the list. The Claude versions in the labels are the one thing here that goes stale on its own: the id is an alias that follows the newest model of that name, so when Anthropic ships the next Opus this label has to be moved by hand. `context` is the model's context window, used to draw how much of it a conversation has spent; Codex and opencode publish their own, so only Claude's is stated here. `grants` is what each CLI can actually do in each of the two modes, in the user's words: Claude takes a tool allowlist and so gets no shell at all, while Codex and opencode have no per-tool switch and are fenced only by a sandbox — one toggle, three blast radii, and the panel says which one it is handing over.",
   "providers": [
     {
       "id": "claude",
       "label": "Claude",
       "command": "claude",
       "offerByDefault": true,
-      "default": "opus"
+      "default": "opus",
+      "grants": {
+        "read": "read and search your notes",
+        "write": "read, edit and create notes"
+      }
     },
     {
       "id": "codex",
       "label": "Codex",
       "command": "codex",
       "offerByDefault": true,
-      "default": "gpt-5.6-sol"
+      "default": "gpt-5.6-sol",
+      "grants": {
+        "read": "read and search your notes",
+        "write": "read, edit and create notes, and run shell commands inside the vault"
+      }
     },
     {
       "id": "opencode",
       "label": "opencode",
       "command": "opencode",
       "offerByDefault": false,
-      "default": ""
+      "default": "",
+      "grants": {
+        "read": "read and search your notes",
+        "write": "read, edit and create notes, run shell commands inside the vault, and fetch web pages"
+      }
     }
   ],
   "fallbacks": {
@@ -142,7 +154,7 @@
     },
     {
       "id": "xhigh",
-      "label": "Higher"
+      "label": "XHigh"
     },
     {
       "id": "max",

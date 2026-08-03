@@ -59,11 +59,13 @@ function fenceClose (line, open) {
  * not silently switch the linter off for everything below it.
  */
 function mathEnd (lines, i) {
-  if (!/^ {0,3}\$\$/.test(lines[i])) return -1
+  const open = /^ {0,3}(\$\$|\\\[)/.exec(lines[i])
+  if (!open) return -1
+  const close = open[1] === '$$' ? '$$' : '\\]'
   const head = lines[i].trim().slice(2).trim()
-  if (head.endsWith('$$') && head.length > 2) return i   // opened and closed on one line
+  if (head.endsWith(close) && head.length > 2) return i   // opened and closed on one line
   for (let j = i + 1; j < lines.length; j++) {
-    if (lines[j].trim().endsWith('$$')) return j
+    if (lines[j].trim().endsWith(close)) return j
   }
   return -1
 }

@@ -44,6 +44,11 @@ const MAX_DEPTH = 4
 
 const dirOf = (path) => String(path).split('/').slice(0, -1).join('/')
 
+/* The run of line breaks and blank lines a section ends on — everything after
+   its last line of text. Anchored at the end, and every branch consumes at
+   least one character, so it cannot backtrack its way into the content. */
+const TRAILING_BLANK = /(?:\r?\n[ \t]*)+$/
+
 /* ------------------------------------------------------------ fragments */
 
 /** The word from the reading view: a picture alone in its block is a figure. */
@@ -223,7 +228,7 @@ export function renderTransclusion (spec, onReady = () => {}, ancestors = null) 
   const chain = ancestors || [deps.currentPath()]
 
   const box = document.createElement('div')
-  box.className = 'transclude'
+  box.className = `transclude${spec.anchor ? ' is-anchored' : ''}`
 
   if (chain.includes(spec.path)) {
     box.classList.add('is-cut')
@@ -240,9 +245,21 @@ export function renderTransclusion (spec, onReady = () => {}, ancestors = null) 
   head.className = 'transclude-head'
   const title = document.createElement('a')
   title.className = 'transclude-title'
-  title.textContent = spec.anchor
-    ? `${noteName(spec.path)} › ${spec.anchor}`
-    : noteName(spec.path)
+  /* Note name and heading are separate spans so the crumb can fade the note it
+     came from and hold the section it shows, rather than one flat string. */
+  const note = document.createElement('span')
+  note.className = 'transclude-crumb'
+  note.textContent = noteName(spec.path)
+  title.append(note)
+  if (spec.anchor) {
+    const sep = document.createElement('span')
+    sep.className = 'transclude-sep'
+    sep.textContent = '›'
+    const leaf = document.createElement('span')
+    leaf.className = 'transclude-leaf'
+    leaf.textContent = spec.anchor
+    title.append(sep, leaf)
+  }
   title.title = 'Open the note' + (spec.anchor ? ' at this heading' : '')
   /* Opened by path rather than through the wikilink machinery: the name may be
      ambiguous in the vault, but the frame knows exactly which file it shows. */
@@ -252,7 +269,10 @@ export function renderTransclusion (spec, onReady = () => {}, ancestors = null) 
     hidePreview()
     deps.open(spec.path, spec.anchor, { newTab: e.metaKey || e.ctrlKey })
   })
-  head.append(title)
+  // A section already begins with its own heading or block, so repeating the
+  // source note and anchor above it adds a second title. Whole-note embeds do
+  // still need the note name to say what the borrowed document is.
+  if (!spec.anchor) head.append(title)
 
   const body = document.createElement('div')
   body.className = 'reading note-fragment'
@@ -282,13 +302,23 @@ export function renderTransclusion (spec, onReady = () => {}, ancestors = null) 
       return
     }
 
+    /* A heading's range runs to the *start* of the next heading's line, so the
+       blank line that separates the two sections sits at the end of it. That
+       separator belongs to the note's shape rather than to this section, and
+       showing it opens the field on a stray empty line — one the reader quite
+       reasonably deletes, which is how the gap before the following heading
+       goes missing. Hold it aside here and put it back at save time, so the
+       field shows the section and nothing else. */
+    const tail = range.source.match(TRAILING_BLANK)?.[0] || ''
+    const sectionText = tail ? range.source.slice(0, -tail.length) : range.source
+
     box.classList.add('is-editing')
     edit.disabled = true
     const field = document.createElement('textarea')
     field.className = 'transclude-source'
-    field.value = range.source
+    field.value = sectionText
     field.spellcheck = false
-    field.setAttribute('aria-label', `Markdown source for ${title.textContent}`)
+    field.setAttribute('aria-label', `Markdown source for ${noteName(spec.path)}${spec.anchor ? ` at ${spec.anchor}` : ''}`)
 
     const message = document.createElement('span')
     message.className = 'transclude-edit-message'
@@ -350,7 +380,12 @@ export function renderTransclusion (spec, onReady = () => {}, ancestors = null) 
         return
       }
 
-      let replacement = field.value
+      /* The separator the field never showed, restored — and any blank lines
+         typed at the end folded into it, so a section cannot grow a taller and
+         taller gap below it one save at a time. An emptied field deletes the
+         section outright, separator and all. */
+      const written = field.value.replace(TRAILING_BLANK, '')
+      let replacement = written ? written + tail : ''
       if (range.to < baseline.length && replacement && !replacement.endsWith('\n')) replacement += '\n'
       const next = baseline.slice(0, range.from) + replacement + baseline.slice(range.to)
       try {
@@ -437,11 +472,14 @@ async function showPreview (link) {
 
   const head = document.createElement('div')
   head.className = 'wiki-preview-head'
-  head.textContent = anchor ? `${noteName(path)} › ${anchor}` : noteName(path)
+  head.textContent = noteName(path)
 
   const body = document.createElement('div')
   body.className = 'reading note-fragment'
-  card.append(head, body)
+  // The anchored content names the exact place already; repeating the note
+  // and raw anchor above it is the same redundant title removed from embeds.
+  if (!anchor) card.append(head)
+  card.append(body)
 
   /* Anything clicked in the popover is routed the way the views route it —
      the popover hangs off <body>, where neither view's own handler reaches. */

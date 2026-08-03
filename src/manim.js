@@ -18,11 +18,12 @@
 
 import { embedSpec, renderEmbed } from './assets.js'
 import { attachArtefactBlock } from './runcode.js'
+import { DRAWN } from './languages.js'
 
 const api = window.tulip
 
 export function isManim (lang) {
-  return String(lang || '').trim().toLowerCase() === 'manim'
+  return String(lang || '').trim().toLowerCase() === DRAWN.manim
 }
 
 /* Renders in flight, keyed by note and code — the same bargain runcode's

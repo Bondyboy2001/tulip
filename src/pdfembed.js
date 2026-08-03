@@ -63,7 +63,11 @@ export function renderPdfEmbed (spec, onReady = () => {}, fileChip) {
     dead: false,
     doc: null,
     watcher: null,   // the IntersectionObserver over page wrappers
-    sizer: null,     // the ResizeObserver waiting for the box to have a width
+    sizer: null,     // the ResizeObserver watching the box's width
+    opening: false,
+    base: null,      // page 1 at scale 1, the shape everything is fitted to
+    width: 0,        // the width the current scale was computed from
+    scale: 1,
     drawing: false,
     queue: [],
     queued: new Set(),
@@ -106,14 +110,49 @@ export function renderPdfEmbed (spec, onReady = () => {}, fileChip) {
 
   /* Layout cannot start until the element is in the page with a real width —
      which, inside an editor widget, is strictly after this function returns.
-     A ResizeObserver is the one thing that fires on that moment. */
+     A ResizeObserver is the one thing that fires on that moment. It keeps
+     watching afterwards, because the column can be widened under a document
+     that is already drawn — turning readable line length off does exactly
+     that — and pages fitted to the old width would be stretched to the new
+     one. */
   state.sizer = new ResizeObserver(() => {
     if (state.dead || !pages.clientWidth) return
-    state.sizer.disconnect()
-    state.sizer = null
-    open().catch((err) => fail(err?.message || 'That PDF could not be read.'))
+    if (!state.doc) {
+      if (state.opening) return
+      state.opening = true
+      open().catch((err) => fail(err?.message || 'That PDF could not be read.'))
+      return
+    }
+    refit()
   })
   state.sizer.observe(pages)
+
+  /**
+   * Re-fit the pages to the box's current width.
+   *
+   * The wrappers take their new heights at once, so the aspect ratio is right
+   * in the same frame the column changes — a canvas stretched into a stale
+   * wrapper is the visible bug. What is already drawn is then queued for a
+   * redraw at the new scale, which only sharpens it; nothing is cleared, so
+   * the resize does not flash the paper blank.
+   */
+  function refit () {
+    const width = pages.clientWidth
+    if (!state.base || width === state.width) return
+    state.width = width
+    state.scale = Math.max(0.1, width / state.base.width)
+
+    const fallback = state.base.height / state.base.width
+    for (const wrap of pages.children) {
+      const ratio = Number(wrap.dataset.ratio) || fallback
+      wrap.style.height = `${Math.round(width * ratio)}px`
+      if (wrap.firstChild && state.visible.has(wrap) && !state.queued.has(wrap)) {
+        state.queued.add(wrap)
+        state.queue.push({ wrap, n: Number(wrap.dataset.page) })
+      }
+    }
+    pump()
+  }
 
   async function open () {
     const [source, pdfjs] = await Promise.all([
@@ -132,7 +171,9 @@ export function renderPdfEmbed (spec, onReady = () => {}, fileChip) {
     const first = await doc.getPage(1)
     if (state.dead) return
     const base = first.getViewport({ scale: 1 })
-    const scale = Math.max(0.1, pages.clientWidth / base.width)
+    state.base = base
+    state.width = pages.clientWidth
+    const scale = state.scale = Math.max(0.1, state.width / base.width)
 
     const wraps = []
     for (let n = 1; n <= doc.numPages; n++) {
@@ -153,7 +194,7 @@ export function renderPdfEmbed (spec, onReady = () => {}, fileChip) {
           state.visible.add(wrap)
           if (!wrap.firstChild && !state.queued.has(wrap)) {
             state.queued.add(wrap)
-            state.queue.push({ wrap, n: Number(wrap.dataset.page), scale })
+            state.queue.push({ wrap, n: Number(wrap.dataset.page) })
           }
         } else {
           state.visible.delete(wrap)
@@ -188,13 +229,19 @@ export function renderPdfEmbed (spec, onReady = () => {}, fileChip) {
     pump()
   }
 
-  async function draw ({ wrap, n, scale }) {
+  async function draw ({ wrap, n }) {
     if (state.dead || !state.doc || !state.visible.has(wrap)) return
     const page = await state.doc.getPage(n)
     if (state.dead || !state.visible.has(wrap)) return
 
-    // This page's true height, now that it is known.
-    wrap.style.height = `${Math.round(page.getViewport({ scale }).height)}px`
+    /* The scale is read here rather than carried in the job, so a page that
+       was queued before a resize is drawn at the width it will be shown at. */
+    const scale = state.scale
+    // This page's true shape, now that it is known — kept on the element so a
+    // later resize can size the wrapper without re-reading the document.
+    const shape = page.getViewport({ scale })
+    wrap.dataset.ratio = String(shape.height / shape.width)
+    wrap.style.height = `${Math.round(shape.height)}px`
 
     // The viewer's own render, so the resolution and the canvas ceiling are one
     // rule rather than two — the copy this had made did not carry the ceiling.
@@ -206,6 +253,13 @@ export function renderPdfEmbed (spec, onReady = () => {}, fileChip) {
 
     wrap.replaceChildren(canvas)
     wrap.classList.add('is-drawn')
+    /* The box was re-fitted while this page was rendering: what just landed is
+       the old width's picture, so ask for it again at the new one. */
+    if (state.scale !== scale && !state.queued.has(wrap)) {
+      wrap.style.height = `${Math.round(state.width * Number(wrap.dataset.ratio))}px`
+      state.queued.add(wrap)
+      state.queue.push({ wrap, n })
+    }
     onReady()
   }
 

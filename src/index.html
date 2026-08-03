@@ -103,18 +103,30 @@
           </button>
           <!-- All three views stay visible, so switching is one direct click
                and the current mode can be read without remembering a cycle. -->
-          <div class="view-switch" id="view-switch" role="group" aria-label="Document view">
-            <button class="view-option" data-view="read" title="Reading view (⌘1)"
-                    aria-label="Reading view" aria-pressed="false">
-              <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M8 4.4S6.6 3.2 3.4 3.2v8.2C6.6 11.4 8 12.6 8 12.6s1.4-1.2 4.6-1.2V3.2C9.4 3.2 8 4.4 8 4.4z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M8 4.6v8" stroke="currentColor" stroke-width="1.2"/></svg>
-            </button>
-            <button class="view-option" data-view="edit" title="Editing view (⌘2)"
-                    aria-label="Editing view" aria-pressed="false">
-              <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M1.7 8S4.1 3.9 8 3.9 14.3 8 14.3 8 11.9 12.1 8 12.1 1.7 8 1.7 8z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><circle cx="8" cy="8" r="1.9" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>
-            </button>
-            <button class="view-option" data-view="raw" title="Raw view (⌘3)"
-                    aria-label="Raw view" aria-pressed="false">
-              <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M5.9 4.3 2.6 8l3.3 3.7M10.1 4.3 13.4 8l-3.3 3.7" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <!-- One shared surface keeps the document views and Copilot tidy,
+               while the divider makes clear that Copilot is a panel rather
+               than a fourth way to render the note. -->
+          <div class="doc-control-cluster">
+            <div class="view-switch" id="view-switch" role="group" aria-label="Document view">
+              <button class="view-option" data-view="read" title="Reading view (⌘1)"
+                      aria-label="Reading view" aria-pressed="false">
+                <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M8 4.4S6.6 3.2 3.4 3.2v8.2C6.6 11.4 8 12.6 8 12.6s1.4-1.2 4.6-1.2V3.2C9.4 3.2 8 4.4 8 4.4z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M8 4.6v8" stroke="currentColor" stroke-width="1.2"/></svg>
+              </button>
+              <button class="view-option" data-view="edit" title="Editing view (⌘2)"
+                      aria-label="Editing view" aria-pressed="false">
+                <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M1.7 8S4.1 3.9 8 3.9 14.3 8 14.3 8 11.9 12.1 8 12.1 1.7 8 1.7 8z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><circle cx="8" cy="8" r="1.9" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>
+              </button>
+              <button class="view-option" data-view="raw" title="Raw view (⌘3)"
+                      aria-label="Raw view" aria-pressed="false">
+                <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M5.9 4.3 2.6 8l3.3 3.7M10.1 4.3 13.4 8l-3.3 3.7" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </button>
+            </div>
+            <!-- The ⌘⇧A the command palette carries, as a button — the panel
+                 can be opened without its chord being remembered. -->
+            <span class="doc-control-divider" aria-hidden="true"></span>
+            <button class="doc-tool" id="ai-toggle" title="Toggle Copilot (⌘⇧A)"
+                    aria-label="Toggle Copilot" aria-controls="ai" aria-pressed="false">
+              <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M8 2.4c.4 3 2.6 5.2 5.6 5.6-3 .4-5.2 2.6-5.6 5.6-.4-3-2.6-5.2-5.6-5.6 3-.4 5.2-2.6 5.6-5.6z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>
             </button>
           </div>
 
@@ -282,10 +294,11 @@
       <div class="ai-log" id="ai-log" role="log" aria-live="polite"></div>
 
       <form class="ai-compose">
-        <!-- Slash commands, and the past conversations /history offers. -->
+        <!-- Slash commands, the past conversations /history offers, and the
+             vault's own files as they are named after an `@`. -->
         <div class="ai-menu" id="ai-menu" hidden role="listbox" aria-label="Commands"></div>
 
-        <textarea id="ai-input" class="ai-input" rows="1" placeholder="Write a message, or / for commands…"
+        <textarea id="ai-input" class="ai-input" rows="1" placeholder="Write a message — @ for a file, / for commands…"
                   autocomplete="off" spellcheck="true"></textarea>
 
         <div class="ai-tools">
@@ -349,17 +362,27 @@
             <div class="ai-model-control" id="ai-model"></div>
           </div>
 
-          <!-- A segmented control rather than a slider: these are named stops,
-               not a continuum, and a thumb you had to drag hid every name but
-               the one under it.
+          <!-- A slider over named stops: the levels are ordered, and what you
+               are choosing is how far along that order to go — which a thumb
+               says at a glance and five buttons of equal weight do not. The
+               name of the stop is not lost, because the composer's own readout
+               beside the model spells out the one in force, and the thumb
+               carries it as a tooltip.
 
-               The buttons themselves are built in copilot.js, because how many there
-               are is the chosen model's business — Claude states five, Codex
-               publishes a different set per model up to `ultra`, and most of
-               opencode's have none at all, which hides this row. -->
+               A real range input, not a div: dragging, arrow keys, Home/End and
+               the screen reader's announcement all come with it, and a thumb
+               built out of pointer events reimplements every one of them badly.
+               Its stops are drawn in copilot.js, because how many there are is
+               the chosen model's business — Claude states five, Codex publishes
+               a different set per model up to `ultra`, and most of opencode's
+               have none at all, which hides this row. -->
           <div class="pop-row" id="ai-effort-row">
             <span class="pop-name">Effort</span>
-            <div class="ai-seg" id="ai-effort" role="radiogroup" aria-label="Effort"></div>
+            <div class="ai-effort" id="ai-effort">
+              <div class="ai-effort-stops" id="ai-effort-stops" aria-hidden="true"></div>
+              <input type="range" class="ai-effort-range" id="ai-effort-range"
+                     min="0" max="1" step="1" value="0" aria-label="Effort">
+            </div>
           </div>
         </div>
       </form>
@@ -404,6 +427,28 @@
       <ul class="panel-list" id="panel-list" role="listbox"></ul>
       <div class="panel-foot" id="panel-foot"></div>
     </div>
+
+    <!-- Beside the two font pickers only: a page of text set in whichever face
+         the highlighted row names. The row already names itself in its own
+         letters, which tells you what the face is; a paragraph tells you what
+         reading a note in it will actually be like, which is the thing being
+         chosen. It follows the arrow keys, so a run down the list is a run
+         through specimens. No heading over it, for the same reason: the row
+         names the face and the placeholder says which of the two is being
+         chosen, so the card is the specimen and nothing else. -->
+    <aside class="font-sample" id="font-sample" hidden aria-hidden="true">
+      <!-- Lorem ipsum, because a specimen is for looking at rather than
+           reading: real sentences pull the eye into what they say, and what is
+           being judged here is the shape of the letters. -->
+      <div class="font-sample-page">
+        <h3>Lorem ipsum</h3>
+        <p>Dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor
+           incididunt ut labore et <em>dolore</em> magna aliqua.</p>
+        <p>Ut enim ad minim veniam, quis <strong>nostrud</strong> exercitation
+           ullamco laboris nisi ut aliquip ex ea commodo.</p>
+        <p class="font-sample-glyphs">0123456789 · fi ffl · “quoted” · a—b</p>
+      </div>
+    </aside>
   </div>
 
   <div class="study" id="study" hidden>

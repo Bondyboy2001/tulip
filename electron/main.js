@@ -2,7 +2,7 @@
 
 const {
   app, BrowserWindow, ipcMain, dialog, Menu, shell, nativeTheme, protocol, net, session,
-  clipboard, utilityProcess
+  clipboard, utilityProcess, Notification
 } = require('electron')
 const path = require('node:path')
 const fs = require('node:fs/promises')
@@ -16,6 +16,9 @@ const { TrustStore } = require('./trust-store')
 const { makeStore: makeReviewStore } = require('./review-store')
 const VAULT_CONTRACT = require('./vault-contract.json')
 const WEB_PARTITIONS = require('./web-partitions.json')
+/* The one address a guest may fetch, shared with the renderer that writes it
+   into the scene's document — see src/threejs.js. */
+const GUEST_LIBRARY = require('./guest-library.json')
 
 const CONFIG_PATH = () => path.join(app.getPath('userData'), 'config.json')
 
@@ -135,6 +138,13 @@ const LEGACY_ATTACHMENT_DIRS = ['.images']
 /** Hidden folders the vault walk descends into anyway, because notes point at
  *  what is inside them. */
 const ATTACHMENT_DIRS = new Set([ATTACHMENT_DIR, ...LEGACY_ATTACHMENT_DIRS])
+
+/* Where a picture pasted into the copilot's message box is filed, inside the
+   attachments folder. Its own folder because it belongs to a conversation and
+   not to a note: dropped into a note's folder it would sit among that note's
+   embeds, and the attachment sweep would have to decide whether an image no
+   note embeds is rubbish. */
+const CHAT_IMAGE_DIR = VAULT_CONTRACT.chatImageDirectory
 
 /* The renderer reaches attachments through this scheme rather than file://,
    which the page's CSP does not admit. It has to be declared before the app is
@@ -1234,17 +1244,11 @@ function createWindow () {
     send('zoom', Math.round(saved * 100))
   })
 
-  // Ctrl+scroll and trackpad pinch bypass the menu, so the indicator is told
-  // about the resulting factor rather than the keystroke.
-  mainWindow.webContents.on('zoom-changed', (_event, direction) => {
-    /* Unless the page has claimed the gesture. A pinch over a PDF is the
-       reader resizing the document — the viewer handles it and says so in its
-       own toolbar — and zooming the window as well would answer one gesture
-       with two changes of size, neither of them the one asked for. */
-    if (pinchClaimed) return
-    nudgeZoom(direction === 'in' ? 1 : -1)
-  })
-
+  /* No `zoom-changed` listener: the window is not pinched. Ctrl+scroll and
+     trackpad pinch are swallowed in the renderer — over a note because two
+     fingers there mean nothing, over a PDF or a website because the document
+     resizes itself — so the only sizes the window ever takes are the ones the
+     menu, the keys and the settings stepper ask for. */
 }
 
 function send (channel, payload) {
@@ -1263,8 +1267,9 @@ function send (channel, payload) {
    would eventually disagree. Adding a stop, or moving home, is one edit. */
 const { steps: ZOOM_STEPS, start: DEFAULT_ZOOM } = require('./zoom-steps.json')
 
-/* Set by the renderer whenever what is on screen zooms itself: today, a PDF. */
-let pinchClaimed = false
+/* Set by the renderer whenever what is on screen zooms itself: a PDF, a
+   website. While one of those is open, ⌘+ is a question about the document. */
+let documentOwnsZoom = false
 
 function zoomFactor () {
   if (!mainWindow || mainWindow.isDestroyed()) return 1
@@ -1284,13 +1289,13 @@ function applyZoom (factor) {
  *
  * A PDF resizes itself, and while one is open the size the reader means by ⌘+
  * is the page's, not the app's: the viewer takes the keystroke and says what it
- * did in its own toolbar. Same claim the pinch uses, because it is the same
- * question — whose zoom is this? — asked with a key instead of two fingers.
+ * did in its own toolbar. The same claim decides where a pinch goes, because it
+ * is the same question — whose zoom is this? — asked with two fingers instead.
  *
  * @param {1|-1|0} direction  in, out, or back to the default size
  */
 function zoomCommand (direction) {
-  if (pinchClaimed) {
+  if (documentOwnsZoom) {
     send('menu', direction === 0 ? 'zoom-reset' : direction > 0 ? 'zoom-in' : 'zoom-out')
     return
   }
@@ -1302,7 +1307,9 @@ function nudgeZoom (direction) {
   const current = zoomFactor()
   let index = ZOOM_STEPS.findIndex((s) => Math.abs(s - current) < 0.005)
   if (index === -1) {
-    // Pinch zoom lands between stops; step from whichever stop is nearest.
+    /* A size that is not a stop — a config written by a version that pinched
+       the window, or a stop since removed from the list. Step from whichever
+       stop is nearest, which is how a session gets back onto the list. */
     index = ZOOM_STEPS.reduce(
       (best, s, i) => (Math.abs(s - current) < Math.abs(ZOOM_STEPS[best] - current) ? i : best),
       0
@@ -2336,9 +2343,16 @@ ipcMain.handle('links:to', async (_e, notePath) => {
  * note's own folder, so a vault's images are as navigable as its prose even
  * though the folder itself is hidden. The bytes arrive as a Uint8Array.
  */
+/* The extension a pasted file will be given. The renderer reads it off a MIME
+   type it does not control, so anything that is not a plain extension is not
+   one — and a picture with no name at all is a PNG, which is what a clipboard
+   image almost always is. Both paste routes ask, so both get the same answer. */
+const pastedExtension = (ext) =>
+  /^\.[a-z0-9]+$/i.test(ext || '') ? ext.toLowerCase() : '.png'
+
 ipcMain.handle('asset:write', async (_e, noteName, ext, bytes) => {
   const base = String(noteName || 'Untitled')
-  const suffix = /^\.[a-z0-9]+$/i.test(ext || '') ? ext.toLowerCase() : '.png'
+  const suffix = pastedExtension(ext)
 
   const folder = await realSafePath(path.join(ATTACHMENT_DIR, base.replace(/[/\\]/g, '-')))
   await fs.mkdir(folder, { recursive: true })
@@ -2355,6 +2369,37 @@ ipcMain.handle('asset:write', async (_e, noteName, ext, bytes) => {
   // The renderer re-reads the list straight away, before the watcher's debounce.
   invalidateVaultSnapshot()
   return { path: rel(target), name: path.basename(target) }
+})
+
+/**
+ * An image pasted into the copilot's message box.
+ *
+ * None of the three CLIs takes a picture over its message stream — they read
+ * files — so a paste has to become a file before it can become a question. It
+ * goes under the attachments folder like every other picture the app files, in
+ * a folder of its own: these belong to a conversation rather than to a note, and
+ * mixing them into a note's folder would leave the note carrying images it never
+ * embeds. Named by digest, so pasting the same screenshot twice writes once.
+ *
+ * The path handed back is vault-relative. That is what the agent is told to
+ * resolve everything against, and it keeps a screenshot readable by a CLI whose
+ * idea of what it may open stops at the vault.
+ */
+ipcMain.handle('ai:attach', async (_e, ext, bytes) => {
+  if (!vaultPath) throw new Error('Open a vault first.')
+  const suffix = pastedExtension(ext)
+  const buffer = Buffer.from(bytes)
+
+  const folder = await realSafePath(path.join(ATTACHMENT_DIR, CHAT_IMAGE_DIR))
+  await fs.mkdir(folder, { recursive: true })
+  const target = path.join(folder, `paste-${sha1(buffer, 10)}${suffix}`)
+  await assertReal(target)
+
+  noteSelfWrite(target)
+  await fs.writeFile(target, buffer)
+  noteSelfWrite(target)
+  invalidateVaultSnapshot()
+  return { path: rel(target) }
 })
 
 /* --------------------------------------------------------- pdf highlights
@@ -2589,6 +2634,7 @@ const { runners: RUNNER_LANGUAGES } = require('./runnable-languages.json')
 const runner = (id, spec) => {
   const langs = RUNNER_LANGUAGES[id]
   if (!langs) throw new Error(`no aliases declared for runner "${id}" in runnable-languages.json`)
+  spec.id = id
   for (const lang of langs) RUNNERS.set(lang, spec)
 }
 
@@ -2597,6 +2643,7 @@ const runner = (id, spec) => {
    running, not ten seconds minus however long rustc took — so it gets its own
    generous budget and its time is reported separately. */
 const BUILD = { build: true }
+const STAGE = { build: true, report: false }
 const BUILD_TIMEOUT_MS = 120_000
 
 const sha1 = (text, chars = 16) =>
@@ -2605,6 +2652,7 @@ const sha1 = (text, chars = 16) =>
 /* Compiled blocks' binaries, surviving restarts so a note full of Rust opens
    ready to re-run. Bounded: the newest stay, the rest go. */
 const RUN_CACHE_KEEP = 64
+const EXEC_SLOT_PREFIX = 'exec-'
 
 function runCacheDir () {
   const dir = path.join(app.getPath('userData'), 'run-cache')
@@ -2620,6 +2668,10 @@ async function pruneRunCache () {
   try { entries = await fs.readdir(dir) } catch { return }
   const stats = []
   for (const name of entries) {
+    // Stable execution slots are infrastructure, not compiled-result entries.
+    // Keeping their inode is what avoids making macOS validate a brand-new
+    // local executable after every edit to a compiled block.
+    if (name.startsWith(EXEC_SLOT_PREFIX)) continue
     const abs = path.join(dir, name)
     // A .tmp is a build that never finished; it is junk at any age.
     if (name.endsWith('.tmp')) { fs.rm(abs, { force: true }).catch(() => {}); continue }
@@ -2632,6 +2684,43 @@ async function pruneRunCache () {
   }
 }
 
+/* A compiled result is cached by source hash, but executing that cache file
+   directly gives every edit a brand-new Mach-O inode. macOS then spends about
+   150–250 ms validating it before main() begins. Copying into a small stable
+   slot retains the inode and the cache: compilation is still source-keyed,
+   while execution pays that admission once per concurrent slot. */
+const executionSlots = new Map()
+
+function claimExecutionSlot (kind) {
+  let slots = executionSlots.get(kind)
+  if (!slots) executionSlots.set(kind, (slots = []))
+  let slot = slots.find((candidate) => !candidate.busy)
+  if (!slot) {
+    slot = {
+      path: path.join(runCacheDir(), `${EXEC_SLOT_PREFIX}${kind}-${slots.length}`),
+      busy: false
+    }
+    slots.push(slot)
+  }
+  slot.busy = true
+  return {
+    path: slot.path,
+    release: () => { slot.busy = false }
+  }
+}
+
+function compiledPlan (kind, binary, buildSteps) {
+  const slot = claimExecutionSlot(kind)
+  return {
+    steps: [
+      ...buildSteps,
+      ['/bin/cp', [binary, slot.path], STAGE],
+      [slot.path, []]
+    ],
+    release: slot.release
+  }
+}
+
 runner('node', {
   // Node needs `.mjs` before it will accept a top-level `import`, and `.js`
   // before it will accept `require`.
@@ -2639,7 +2728,10 @@ runner('node', {
   steps: (file) => [['node', [file]]]
 })
 
-runner('python', { file: 'block.py', steps: (f) => [['python3', [f]]] })
+/* stdout is a pipe, so Python otherwise block-buffers it and a long-running
+   block can look silent until it exits. `-u` makes each print available to the
+   streaming panel immediately; the renderer coalesces the resulting chunks. */
+runner('python', { file: 'block.py', steps: (f) => [['python3', ['-u', f]]] })
 runner('sh', { file: 'block.sh', steps: (f) => [['sh', [f]]] })
 runner('bash', { file: 'block.sh', steps: (f) => [['bash', [f]]] })
 runner('zsh', { file: 'block.sh', steps: (f) => [['zsh', [f]]] })
@@ -2676,32 +2768,53 @@ runner('lean', {
   ]
 })
 
-/* Rust is the reason steps are a list. rustc is asked for an edition
-   explicitly: called bare it still defaults to 2015, where `async` is not a
-   keyword and `dyn` is optional — not what anyone writing Rust today means.
+/* Register the common compiled-language lifecycle once: source-keyed cache,
+   atomic build, LRU touch, stable execution slot, and a tiny program for the
+   idle warmup. Only the compiler command and language-specific names vary. */
+function compiledRunner (id, { file, prefix, seed, warmCode, compile }) {
+  const binaryFor = (code) => path.join(runCacheDir(), `${prefix}-${sha1(`${seed}\n${code}`)}`)
+  const build = (source, output) => [...compile(source, output), BUILD]
+  const compiled = { slot: prefix, warmCode, build }
 
-   The binary is kept, keyed by a hash of the code, because the compile is not
-   even the slow part: macOS validates every executable it has never seen
-   (measured at 200ms–2.6s on first exec, 7ms after). Compiling into a fresh
-   temp dir made every run a first exec. Building into the cache — via a
-   same-volume `mv`, so the file appears whole and keeps its inode — means an
-   unchanged block re-runs in milliseconds, and the validation is paid once
-   per edit rather than once per click. */
-runner('rust', {
-  file: 'main.rs',
-  steps: (file, _dir, code) => {
-    const bin = path.join(runCacheDir(), 'rs-' + sha1(`2021\n${code}`))
-    if (fsSync.existsSync(bin)) {
-      // A hit is a use; the prune keeps recently-used, not recently-built.
-      try { fsSync.utimesSync(bin, new Date(), new Date()) } catch {}
-      return [[bin, []]]
+  runner(id, {
+    file,
+    compiled,
+    cached: (code) => fsSync.existsSync(binaryFor(code)),
+    steps: (source, _dir, code) => {
+      const binary = binaryFor(code)
+      if (fsSync.existsSync(binary)) {
+        // A hit is a use; the prune keeps recently-used, not recently-built.
+        try { fsSync.utimesSync(binary, new Date(), new Date()) } catch {}
+        return compiledPlan(prefix, binary, [])
+      }
+      return compiledPlan(prefix, binary, [
+        build(source, `${binary}.tmp`),
+        ['/bin/mv', [`${binary}.tmp`, binary], BUILD]
+      ])
     }
-    return [
-      ['rustc', ['--edition', '2021', '-A', 'dead_code', '-o', `${bin}.tmp`, file], BUILD],
-      ['/bin/mv', [`${bin}.tmp`, bin], BUILD],
-      [bin, []]
-    ]
-  }
+  })
+}
+
+/* rustc defaults to edition 2015 when called bare. Pinning 2021 keeps modern
+   snippets modern; warning about unused practice-code helpers is just noise. */
+compiledRunner('rust', {
+  file: 'main.rs',
+  prefix: 'rs',
+  seed: '2021',
+  warmCode: 'fn main() {}\n',
+  compile: (source, output) => [
+    'rustc', ['--edition', '2021', '-A', 'dead_code', '-o', output, source]
+  ]
+})
+
+/* `c++` follows the platform compiler; pin the standard so its default age
+   does not decide whether a note's structured bindings or lambdas compile. */
+compiledRunner('cpp', {
+  file: 'main.cpp',
+  prefix: 'cpp',
+  seed: 'c++20',
+  warmCode: 'int main() { return 0; }\n',
+  compile: (source, output) => ['c++', ['-std=c++20', '-o', output, source]]
 })
 
 /**
@@ -2804,10 +2917,22 @@ function runnerFor (lang) {
  *
  * @returns {Promise<{code:number|null, signal:string|null, timedOut:boolean, error?:string}>}
  */
-function startRun (id, cmd, args, { cwd, timeoutMs, env: extraEnv }) {
+function startRun (id, cmd, args, { cwd, timeoutMs, env: extraEnv, quiet = false }) {
   const child = spawn(cmd, args, {
     cwd,
-    env: { ...process.env, PATH: runnerPath(), TULIP_VAULT: vaultPath || '', ...extraEnv },
+    /* The output lands in a panel, not a terminal, and a tool that colours
+       anyway (FORCE_COLOR honourers, Python's rich) leaves escape codes as
+       litter there. Stated three ways because tools check different flags; the
+       renderer still strips whatever ignores all three. */
+    env: {
+      ...process.env,
+      NO_COLOR: '1',
+      FORCE_COLOR: '0',
+      TERM: 'dumb',
+      PATH: runnerPath(),
+      TULIP_VAULT: vaultPath || '',
+      ...extraEnv
+    },
     // Its own process group, so killing a shell takes the pipeline it started
     // with it rather than leaving orphans behind.
     detached: true,
@@ -2829,7 +2954,7 @@ function startRun (id, cmd, args, { cwd, timeoutMs, env: extraEnv }) {
       const chunk = text.length > room ? text.slice(0, room) : text
       sizes[name] += chunk.length
       if (chunk.length < text.length) truncated = true
-      send('run:out', { id, stream: name, text: chunk })
+      if (!quiet) send('run:out', { id, stream: name, text: chunk })
     })
   }
   pipe(child.stdout, 'stdout')
@@ -2879,7 +3004,7 @@ function runTimeoutMs (key, fallback) {
  * has to mean ten seconds from pressing Run, or a language that compiles first
  * would quietly get twice the budget of one that does not.
  */
-async function runSequence (id, steps, { cwd, timeoutMs, cleanup }) {
+async function runSequence (id, steps, { cwd, timeoutMs, cleanup, quiet = false }) {
   let left = timeoutMs        // the program's remaining budget
   let ms = 0                  // wall clock across every step, build included
   let buildMs = 0
@@ -2900,12 +3025,16 @@ async function runSequence (id, steps, { cwd, timeoutMs, cleanup }) {
 
     result = await startRun(id, cmd, args, {
       cwd,
-      timeoutMs: opts.build ? BUILD_TIMEOUT_MS : left
+      timeoutMs: opts.build ? BUILD_TIMEOUT_MS : left,
+      quiet
     })
 
     ms += result.ms
-    if (opts.build) buildMs += result.ms
-    else left -= result.ms
+    if (opts.build) {
+      if (opts.report !== false) buildMs += result.ms
+    } else {
+      left -= result.ms
+    }
 
     if (result.error || result.timedOut || result.signal || result.code !== 0) break
   }
@@ -2917,17 +3046,72 @@ async function runSequence (id, steps, { cwd, timeoutMs, cleanup }) {
   return { ...(result || { code: null }), ms, buildMs }
 }
 
+/** A simple runner returns its steps; a compiled runner also owns a reserved
+ *  stable execution slot which must be released after the sequence settles. */
+function executionPlan (made) {
+  return Array.isArray(made) ? { steps: made, release: null } : made
+}
+
+/* One prewarm per compiled language and app launch. The source is deliberately
+   written into the ordinary temp run directory, not the persistent cache: its
+   job is to page the compiler in and validate the stable execution slot, not
+   to masquerade as a result from one of the reader's blocks. */
+const runnerWarmups = new Map()
+
+function warmRunner (lang) {
+  const spec = runnerFor(lang)
+  if (!spec?.compiled) return Promise.resolve({ ok: false })
+  const existing = runnerWarmups.get(spec.id)
+  if (existing) return existing
+
+  const warming = (async () => {
+    const id = ++nextRunId
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), `tulip-warm-${spec.id}-`))
+    const source = path.join(dir, spec.file)
+    const binary = path.join(dir, 'program')
+    const slot = claimExecutionSlot(spec.compiled.slot)
+
+    try {
+      await fs.writeFile(source, spec.compiled.warmCode, 'utf8')
+      const result = await runSequence(id, [
+        spec.compiled.build(source, binary),
+        ['/bin/cp', [binary, slot.path], STAGE],
+        [slot.path, []]
+      ], { cwd: dir, timeoutMs: DEFAULT_TIMEOUT_MS, cleanup: dir, quiet: true })
+      return { ok: result.code === 0 }
+    } finally {
+      slot.release()
+      discard(dir)
+    }
+  })()
+  runnerWarmups.set(spec.id, warming)
+  warming.catch(() => {
+    if (runnerWarmups.get(spec.id) === warming) runnerWarmups.delete(spec.id)
+  })
+  return warming
+}
+
+ipcMain.handle('run:warm', (_e, lang) => warmRunner(lang))
+
 ipcMain.handle('run:start', async (_e, lang, code) => {
   const spec = runnerFor(lang)
   if (!spec) throw new Error(`Tulip cannot run "${lang}" blocks.`)
   if (typeof code !== 'string') throw new Error('Nothing to run.')
+
+  /* If its control already started a compiler warmup, let that finish before
+     compiling a new block. A cache hit skips the wait: it has no need for a
+     warm compiler, and can claim another slot if the warmup still owns one. */
+  if (spec.compiled && !spec.cached(code)) {
+    await warmRunner(lang).catch(() => {})
+  }
 
   const id = ++nextRunId
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tulip-run-'))
   const file = path.join(dir, typeof spec.file === 'function' ? spec.file(code) : spec.file)
   await fs.writeFile(file, code, 'utf8')
 
-  const steps = spec.steps(file, dir, code)
+  const plan = executionPlan(spec.steps(file, dir, code))
+  const steps = plan.steps
   // A language that spends its first seconds starting itself up says so; the
   // `runTimeout` setting still overrides whatever it asked for.
   const timeoutMs = runTimeoutMs('runTimeout', spec.timeout || DEFAULT_TIMEOUT_MS)
@@ -2951,6 +3135,7 @@ ipcMain.handle('run:start', async (_e, lang, code) => {
       })
       discard(dir)
     })
+    .finally(() => plan.release?.())
 
   return { id, cmd: steps[0][0], timeoutMs }
 })
@@ -3422,7 +3607,7 @@ ipcMain.handle('ai:start', (_e, opts) => {
   ai.setVault(vaultPath)
   return ai.start(opts || {})
 })
-ipcMain.handle('ai:models', () => ai.models())
+ipcMain.handle('ai:models', (_e, opts) => ai.models({ fresh: !!opts?.fresh }))
 ipcMain.handle('ai:send', async (_e, text, context) => {
   ai.setVault(vaultPath)
   aiBaseline = await snapshotNotes()
@@ -3433,6 +3618,36 @@ ipcMain.handle('ai:send', async (_e, text, context) => {
   }
   return result
 })
+/**
+ * A turn that finished while the reader was somewhere else.
+ *
+ * The panel decides whether the turn was long enough to be worth interrupting
+ * for; this decides whether there is anybody to interrupt. Both tests are
+ * needed and neither can be made where the other is: the renderer knows how
+ * long the turn ran, and only main can say whether the window has come back to
+ * the front in the moment since the event was sent.
+ */
+ipcMain.handle('ai:announce', (_e, info) => {
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.isFocused()) return { ok: false }
+  if (!Notification.isSupported()) return { ok: false }
+
+  const where = info?.note ? ` about ${info.note}` : ''
+  const notice = new Notification({
+    title: info?.trouble ? 'The copilot stopped' : 'The copilot has replied',
+    // What went wrong is the whole of what the banner has to say; a reply that
+    // landed is not quoted, because it is on screen a click away.
+    body: String(info?.trouble || `Your answer${where} is waiting.`).slice(0, 200)
+  })
+  // The banner is gone in a few seconds; the dock goes on saying so until the
+  // window is looked at, which is the half of this that survives a coffee.
+  notice.on('click', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.show(); mainWindow.focus() }
+  })
+  notice.show()
+  app.dock?.bounce?.('informational')
+  return { ok: true }
+})
+
 ipcMain.handle('ai:stop', async () => {
   const stopped = ai.stop()
   const operation = await finishAiHistory().catch(() => null)
@@ -3680,7 +3895,7 @@ ipcMain.handle('zoom:reset', () => applyZoom(DEFAULT_ZOOM))
 /* Settings can set it outright rather than nudging: the panel shows the stops
    as a stepper, and it is applyZoom that decides what is in range. */
 ipcMain.handle('zoom:set', (_e, factor) => applyZoom(Number(factor) || 1))
-ipcMain.handle('zoom:claim', (_e, on) => { pinchClaimed = !!on })
+ipcMain.handle('zoom:claim', (_e, on) => { documentOwnsZoom = !!on })
 /* The browser's own undo, for the plain text fields — the message box, the
    rename field, a search query. What the `undo` role used to do, asked for
    only when the renderer has decided this is the field's history to walk and
@@ -3807,10 +4022,45 @@ function guardGuests () {
      needs the network — the block is its own document, whole in the note — so
      the partition is simply not given one. Requests that never leave the page
      (`data:`, `blob:`, `about:`) are what remains, which is everything a
-     self-contained preview is made of. */
-  session.fromPartition(HTML_RUN_PARTITION).webRequest.onBeforeRequest(
-    (details, callback) => callback({ cancel: !/^(data|blob|about):/i.test(details.url) })
-  )
+     self-contained preview is made of.
+
+     With one address added to that list. A ```three block's page is built by
+     Tulip rather than by the note, and it needs the three.js runtime — three
+     quarters of a megabyte, which is not something to inline into a document
+     URL once per block. So the guest may ask for exactly that file, from the
+     app's own dist, and the handler below is the only thing on this partition
+     that answers: it knows one URL and 404s everything else, so nothing here
+     reaches the vault the way `tulip-file://vault/…` does for the app's own
+     page. Still no network — the file comes off the disk it was installed to. */
+  const guests = session.fromPartition(HTML_RUN_PARTITION)
+
+  /* Read once and held: the runtime is three quarters of a megabyte, a note can
+     hold several scenes, and the partition is not persistent — so without this
+     every guest is another full read of the same file off disk. The immutable
+     cache header is what keeps a second guest from reaching the handler at all;
+     the copy here is what makes it cheap when it does. */
+  let threeLibrary = null
+  const readThreeLibrary = () => (threeLibrary ??= fs.readFile(appAsset('three.js')))
+
+  guests.protocol.handle('tulip-file', async (request) => {
+    if (request.url !== GUEST_LIBRARY.three) return new Response('Not found', { status: 404 })
+    try {
+      return new Response(await readThreeLibrary(), {
+        headers: {
+          'content-type': 'text/javascript',
+          'cache-control': 'public, max-age=31536000, immutable'
+        }
+      })
+    } catch {
+      // A dist without the bundle in it: the scene says so rather than hanging.
+      threeLibrary = null
+      return new Response('Not found', { status: 404 })
+    }
+  })
+
+  guests.webRequest.onBeforeRequest((details, callback) => callback({
+    cancel: !/^(data|blob|about):/i.test(details.url) && details.url !== GUEST_LIBRARY.three
+  }))
 
   app.on('web-contents-created', (_e, contents) => {
     if (contents.getType() !== 'webview') return

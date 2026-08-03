@@ -21,6 +21,7 @@ import { rawHtmlPlugin } from './rawhtml.js'
 import { blockReferencePlugin } from './headings.js'
 import { highlightPlugin } from './marks.js'
 import { parseEmbedSuffix } from './assets.js'
+import { columnWidthPlugin } from './table.js'
 
 /**
  * @param {object} deps
@@ -42,6 +43,10 @@ export function createMarkdown ({ resolveEmbedSrc }) {
   md.use(calloutPlugin)
   md.use(blockReferencePlugin)
   md.use(highlightPlugin)
+  /* A column dragged wider in the editing view is a fact about the note, so
+     the reading view sets the table to the same measurements — see the account
+     of the marker line in src/table.js. */
+  md.use(columnWidthPlugin)
   /* A relative `<img src>` in raw HTML is resolved the way the note's own embeds
      are — same index, same folder — because nothing downstream walks raw HTML
      looking for attachments the way `dressEmbeds` walks the slots. */

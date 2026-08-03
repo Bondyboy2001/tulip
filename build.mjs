@@ -98,6 +98,24 @@ const pdfText = {
   logLevel: 'info'
 }
 
+/* The three.js runtime a ```three block draws with — see src/threelib.js. One
+   self-contained script exposing a `THREE` global, because the guest loads it
+   with a plain <script src> from a document that has no module graph and no
+   import map. It is three quarters of a megabyte and nothing else in the app
+   touches it, so it stays out of the renderer's bundle entirely: only a note
+   with a scene in it ever pays for the file. */
+const three = {
+  entryPoints: ['src/threelib.js'],
+  bundle: true,
+  format: 'iife',
+  globalName: 'THREE',
+  platform: 'browser',
+  target: ['chrome130'],
+  outfile: 'dist/three.js',
+  minify: !watch,
+  logLevel: 'info'
+}
+
 /* The markdown linter, for the one caller that is not the renderer:
    scripts/tidy-vault.mjs, which runs the same rules over a folder of notes from
    the terminal. Compiled rather than imported for the same reason pdf-text is —
@@ -115,14 +133,16 @@ const lint = {
   logLevel: 'info'
 }
 
+/* Named once: a bundle listed for one of the two branches and forgotten in the
+   other is a file that either never rebuilds or never builds. */
+const bundles = [options, worker, pdfText, lint, three]
+
 if (watch) {
-  for (const config of [options, worker, pdfText, lint]) {
+  for (const config of bundles) {
     const ctx = await esbuild.context(config)
     await ctx.watch()
   }
   console.log('watching…')
 } else {
-  await Promise.all([
-    esbuild.build(options), esbuild.build(worker), esbuild.build(pdfText), esbuild.build(lint)
-  ])
+  await Promise.all(bundles.map((config) => esbuild.build(config)))
 }

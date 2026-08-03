@@ -24,8 +24,7 @@ import { ZOOM_STEPS, DEFAULT_ZOOM, nearestStep } from './zoom.js'
    different things. */
 import {
   DEFAULT_CATALOGUE,
-  allModels, asOptions, defaultEnabled, effortLabel, effortsFor,
-  modelFromConfig, nearestEffort
+  allModels, asOptions, defaultEnabled, modelFromConfig
 } from './models.js'
 
 const SECTIONS = [
@@ -92,6 +91,13 @@ const SECTIONS = [
         type: 'toggle',
         name: 'Number code lines',
         fallback: true
+      },
+      {
+        key: 'codeWrap',
+        type: 'toggle',
+        name: 'Wrap long code lines',
+        note: 'In the reading view; a wrapped block hides its line numbers.',
+        fallback: false
       },
       {
         key: 'outline',
@@ -173,15 +179,14 @@ const SECTIONS = [
         type: 'catalogue',
         name: 'Models offered'
       },
-      {
-        key: 'aiEffort',
-        type: 'effort',
-        name: 'Effort',
-        fallback: 'high'
-      }
-      /* "May edit notes" lives on the composer instead — it is a per-turn
-         decision, and the pencil beside the message box is where you are when
-         you make it. The setting itself (`aiWrite`) is unchanged. */
+      /* Effort and "may edit notes" live on the composer instead — both are
+         per-turn decisions, and the popover beside the message box is where you
+         are when you make them. The settings themselves (`aiEffort`, `aiWrite`)
+         are unchanged and still persisted; this is only about where the control
+         for them sits. Effort had the additional problem of being a property of
+         the model rather than of the app — the stops are whatever the chosen
+         model publishes — so a copy of it here could offer a level the model in
+         the panel does not take. */
     ]
   },
   {
@@ -221,12 +226,6 @@ export function mountSettings ({ el, api, values, onChange }) {
     renderBody()
   }
 
-  /** The model everything in the Copilot section is relative to. */
-  const chosenModel = () => {
-    const key = modelFromConfig(values())
-    return allModels(modelCatalogue).find((model) => model.key === key)
-  }
-
   const CONTROLS = {
     toggle (row) {
       const on = valueOf(row) !== false
@@ -252,27 +251,6 @@ export function mountSettings ({ el, api, values, onChange }) {
         group.append(button)
       }
       return group
-    },
-
-    /**
-     * The same segmented control, with the stops the chosen model takes.
-     *
-     * Claude states five levels for everything it runs, Codex publishes a
-     * different set per model — as far as `ultra` — and most of opencode's have
-     * none at all, which leaves nothing here to say. A fixed four would offer
-     * levels the CLI rejects and hide ones it accepts.
-     */
-    effort (row) {
-      const model = chosenModel()
-      const levels = effortsFor(model)
-      if (!levels.length) return node('span', 'settings-none', 'This model has no effort setting.')
-      return CONTROLS.segment({
-        ...row,
-        // A level stored against a model that has since changed is shown as the
-        // nearest this one takes — the same rule the panel settles by.
-        cast: (level) => nearestEffort(model, level),
-        options: levels.map((level) => ({ value: level, label: effortLabel(level) }))
-      })
     },
 
     /* The app's own menu rather than a native `<select>`, whose popup the
@@ -345,18 +323,81 @@ export function mountSettings ({ el, api, values, onChange }) {
       }
 
       const wrap = node('div', 'model-picker')
+
+      /**
+       * Everything ticked, in one place.
+       *
+       * The list below is four hundred models deep and closed by default, so
+       * what you had chosen was only ever visible a group at a time — a count
+       * saying "7 of 412" and no way to see which seven without opening every
+       * shelf. These are those seven, and clicking one takes it out again,
+       * which is the other thing you come to this row wanting to do.
+       */
+      const picked = node('div', 'model-picked')
+
       const head = node('div', 'model-picker-head')
       const search = node('input', 'field model-search')
       search.type = 'search'
       search.spellcheck = false
       search.placeholder = `Search ${all.length} models…`
       const count = node('span', 'model-picker-count')
-      head.append(search, count)
+
+      /* Asking the CLIs again. The catalogue is read when the pane opens, but
+         main holds its answer for a few minutes, and the moment you want this
+         is the moment you have just installed something. */
+      const again = node('button', 'model-refresh')
+      again.type = 'button'
+      again.title = 'Ask the CLIs for their models again'
+      again.append(node('span', 'model-refresh-label', 'Refresh'))
+      again.addEventListener('click', () => {
+        if (again.disabled) return
+        again.disabled = true
+        again.querySelector('.model-refresh-label').textContent = 'Refreshing…'
+        /* `loadModels` redraws the pane, which builds this row again from the
+           new catalogue — so there is nothing to put back on success. A failure
+           leaves the old list, and says so where the button was. */
+        loadModels({ fresh: true }).catch(() => {
+          again.disabled = false
+          again.querySelector('.model-refresh-label').textContent = 'Not reachable'
+        })
+      })
+
+      head.append(search, count, again)
 
       const list = node('div', 'model-picker-list')
-      wrap.append(head, list)
+      wrap.append(picked, head, list)
 
       const tally = () => { count.textContent = `${chosen.size} of ${all.length} offered` }
+
+      function paintPicked () {
+        const on = all.filter((model) => chosen.has(model.key))
+        if (!on.length) {
+          picked.replaceChildren(node(
+            'span', 'model-picked-none',
+            'Nothing ticked — the panel falls back to Claude’s and Codex’s own models.'
+          ))
+          return
+        }
+        picked.replaceChildren(...on.map((model) => {
+          const chip = node('button', 'model-chip')
+          chip.type = 'button'
+          chip.title = `Stop offering ${model.label}`
+          chip.append(
+            node('span', 'model-chip-group', model.group),
+            node('span', 'model-chip-name', model.label),
+            node('span', 'model-chip-x', '×')
+          )
+          chip.addEventListener('click', () => {
+            chosen.delete(model.key)
+            persist()
+            // The row for it in the list below may be on screen and ticked, so
+            // this one does repaint — unticking from here is a deliberate act,
+            // not the per-model ticking the list's fast path exists for.
+            paint()
+          })
+          return chip
+        }))
+      }
 
       /* Written down without redrawing. Ticking one model used to rebuild every
          row in the list — four hundred-odd buttons — to change one checkbox. */
@@ -438,6 +479,9 @@ export function mountSettings ({ el, api, values, onChange }) {
                 else chosen.delete(model.key)
                 mark(on)
                 refresh()
+                // The strip at the top is the one other thing on screen that
+                // has just gone out of date; the four hundred rows have not.
+                paintPicked()
                 persist()
               })
               body.append(option)
@@ -448,6 +492,7 @@ export function mountSettings ({ el, api, values, onChange }) {
         }))
 
         if (!shown.length) list.append(node('div', 'model-picker-empty', NO_MATCH))
+        paintPicked()
       }
 
       search.addEventListener('input', () => {
@@ -569,6 +614,8 @@ export function mountSettings ({ el, api, values, onChange }) {
       const line = node('div', 'settings-row')
       const label = node('div', 'settings-label')
       label.append(node('div', 'settings-name', row.name))
+      // The one line of small print a setting is allowed: what it will not do.
+      if (row.note) label.append(node('div', 'settings-hint', row.note))
       line.append(label)
 
       const control = CONTROLS[row.type]?.(row)
@@ -597,15 +644,21 @@ export function mountSettings ({ el, api, values, onChange }) {
   /* --------------------------------------------------------------- shell */
 
   /**
-   * The real catalogue, read whenever the pane is opened. It replaced a
-   * refresh button beside the select: a list that reads itself when you go
-   * looking at it is never stale enough to be worth a control of its own.
+   * The real catalogue, read whenever the pane is opened.
+   *
+   * Opening the pane is the ordinary way it refreshes, and for a while that was
+   * the only way — a list that reads itself when you go looking at it seemed
+   * never stale enough to be worth a control of its own. It is, for one case:
+   * main holds the answer for a few minutes (two CLI subprocesses and most of a
+   * megabyte of JSON), so installing a model or signing into a provider and
+   * coming straight back here shows the list from before you did. `fresh` asks
+   * the CLIs again regardless, which is what the Refresh button sends.
    */
-  async function loadModels () {
+  async function loadModels ({ fresh = false } = {}) {
     /* Taken whole. A provider that answers with nothing keeps its built-in list
        — but `allModels` already applies that rule, so restating it here was a
        second copy of the same decision. */
-    modelCatalogue = await api.ai.models()
+    modelCatalogue = await api.ai.models({ fresh })
     if (!el.root.hidden) renderBody()
   }
 

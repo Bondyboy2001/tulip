@@ -15,26 +15,17 @@
    ================================================================== */
 
 import { svgIcon } from './blocks.js'
+import { kinds } from '../electron/callout-kinds.json'
 
 /* The kinds, each with the icon it is drawn with and the hue it borrows. The
    hue names a custom property rather than a colour, so a callout is themed by
-   the palette like everything else. Aliases are Obsidian's own. Exported for
-   the slash menu, which offers one insert command per kind. */
-export const CALLOUT_KINDS = [
-  { id: 'note', label: 'Note', tone: 'info', icon: 'pencil' },
-  { id: 'abstract', label: 'Abstract', tone: 'info', icon: 'clipboard', alias: ['summary', 'tldr'] },
-  { id: 'info', label: 'Info', tone: 'info', icon: 'info' },
-  { id: 'todo', label: 'Todo', tone: 'info', icon: 'check-circle' },
-  { id: 'tip', label: 'Tip', tone: 'mint', icon: 'flame', alias: ['hint', 'important'] },
-  { id: 'success', label: 'Success', tone: 'mint', icon: 'check', alias: ['check', 'done'] },
-  { id: 'question', label: 'Question', tone: 'amber', icon: 'help', alias: ['help', 'faq'] },
-  { id: 'warning', label: 'Warning', tone: 'amber', icon: 'alert', alias: ['caution', 'attention'] },
-  { id: 'failure', label: 'Failure', tone: 'rose', icon: 'cross', alias: ['fail', 'missing'] },
-  { id: 'danger', label: 'Danger', tone: 'rose', icon: 'zap', alias: ['error'] },
-  { id: 'bug', label: 'Bug', tone: 'rose', icon: 'bug' },
-  { id: 'example', label: 'Example', tone: 'violet', icon: 'list' },
-  { id: 'quote', label: 'Quote', tone: 'grey', icon: 'quote', alias: ['cite'] }
-]
+   the palette like everything else. Aliases are Obsidian's own.
+
+   Read from the contract both processes share — see the account in that file —
+   because the copilot is told which kinds a note may use, and a briefing that
+   named a list of its own would go quietly stale the first time one was added.
+   Exported for the slash menu, which offers one insert command per kind. */
+export const CALLOUT_KINDS = kinds
 
 const INDEX = new Map()
 for (const kind of CALLOUT_KINDS) {

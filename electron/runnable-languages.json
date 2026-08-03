@@ -1,5 +1,5 @@
 {
-  "_comment": "Which fence languages run, and which runner each one names. The main process builds its RUNNERS table from these aliases and the renderer decides whether to draw a Run button from the same list, so a language can never run from one side and be invisible on the other. Only the aliases live here — what a runner actually spawns is code, and stays in electron/main.js.",
+  "_comment": "Which fence languages run, and which runner each one names. The main process builds its RUNNERS table from these aliases and the renderer decides whether to draw a Run button from the same list, so a language can never run from one side and be invisible on the other. Only the aliases live here — what a runner actually spawns is code, and stays in electron/main.js. `drawn` is the other half of the same fact: the fences the app turns into a picture or a page rather than running as a process. Each drawing module reads its own name from here, and electron/ai.js reads the whole set — so the copilot is told which fences this app understands instead of being handed a list that goes stale the next time one is added.",
   "runners": {
     "node": ["js", "javascript", "node", "mjs", "cjs"],
     "python": ["py", "python", "python3"],
@@ -9,6 +9,15 @@
     "julia": ["jl", "julia"],
     "go": ["go", "golang"],
     "lean": ["lean", "lean4"],
-    "rust": ["rs", "rust"]
+    "rust": ["rs", "rust"],
+    "cpp": ["cpp", "c++", "cxx", "cc"]
+  },
+  "drawn": {
+    "mermaid": "mermaid",
+    "tikz": "tikz",
+    "manim": "manim",
+    "three": "three",
+    "svg": "svg",
+    "html": "html"
   }
 }

@@ -257,14 +257,106 @@ export function embedResizeGrip () {
 }
 
 /**
- * Drag-to-resize for one picture, in the one place it is written. Both surfaces
- * that offer it — the editing view's paragraph images (src/editor.js) and the
- * grid's cell images (src/table.js) — used to carry their own copy of this
- * gesture, and the copies had drifted: one dragged on the horizontal axis
+ * The drag behind a resize handle, in the one place it is written.
+ *
+ * Everything a handle does that has nothing to do with *what* is being
+ * resized: the button and capture bookkeeping, keeping the work paced to the
+ * display, cancelling cleanly, and staying out of the selection gestures both
+ * surfaces start on mousedown. Three handles are drawn on this — a paragraph
+ * picture, a picture in a grid cell, and a table column — and the copies that
+ * came before it had already drifted: one dragged on the horizontal axis
  * alone, the other on both; one paced its work to the display and the other
- * wrote a width per pointer event; only one of them stopped at the edge of the
- * space the picture had to grow into. Sharing the gesture is what makes a drag
- * feel the same everywhere, and `withEmbedSize` above already guarantees the
+ * wrote a width per pointer event; only one stopped at the edge of the space
+ * it had to grow into.
+ *
+ * `begin` measures the thing being dragged and returns the shape of the
+ * gesture — where it starts, what bounds it, and how a pointer movement reads
+ * as a number — or null to decline the drag. `paint` shows a value, at most
+ * once per frame; `commit` is handed the value the drag landed on, `restore`
+ * puts back what was there when nothing was written, and `settle` runs at the
+ * end of every gesture either way.
+ */
+export function wireResizeHandle (handle, {
+  begin,
+  paint,
+  commit,
+  restore = () => {},
+  reset = null,
+  settle = () => {}
+}) {
+  handle.addEventListener('pointerdown', (start) => {
+    if (start.button !== 0) return
+    start.preventDefault()
+    start.stopPropagation()
+
+    const gesture = begin(start)
+    if (!gesture) return
+    const { from, min = 1, max = Infinity, read } = gesture
+
+    let value = from
+    let pending = from
+    let frame = 0
+
+    handle.setPointerCapture?.(start.pointerId)
+
+    /* Pointer events arrive faster than the display paints. Painting for every
+       one of them — each relaying the element, and everything the layout hangs
+       off it — is work that is never shown, and makes a drag feel like it is
+       catching up rather than following. Keep only the newest position for
+       each animation frame. */
+    const draw = () => {
+      frame = 0
+      value = pending
+      paint(value)
+    }
+    const move = (event) => {
+      const delta = read(event.clientX - start.clientX, event.clientY - start.clientY)
+      pending = Math.round(Math.min(max, Math.max(min, from + delta)))
+      if (!frame) frame = requestAnimationFrame(draw)
+    }
+    const done = (end) => {
+      handle.removeEventListener('pointermove', move)
+      handle.removeEventListener('pointerup', done)
+      handle.removeEventListener('pointercancel', done)
+      // A pointer-up can beat the frame carrying its final position.
+      if (frame) {
+        cancelAnimationFrame(frame)
+        draw()
+      }
+
+      // Nothing moved, or the drag was taken away: the note stays as it was.
+      if (end?.type !== 'pointercancel' && value !== from) commit(value)
+      else restore()
+      settle()
+    }
+
+    handle.addEventListener('pointermove', move)
+    handle.addEventListener('pointerup', done)
+    handle.addEventListener('pointercancel', done)
+  })
+
+  if (reset) {
+    handle.addEventListener('dblclick', (event) => {
+      event.preventDefault()
+      event.stopPropagation()
+      reset()
+      settle()
+    })
+  }
+
+  /* Both surfaces begin a selection gesture on mousedown — the editor a text
+     selection, the grid a rectangle of cells. Keep the handle out of both,
+     even on engines that synthesize mouse events after pointer ones. */
+  handle.addEventListener('mousedown', (event) => {
+    event.preventDefault()
+    event.stopPropagation()
+  })
+}
+
+/**
+ * Drag-to-resize for one picture, in the one place it is written — the editing
+ * view's paragraph images (src/editor.js) and the grid's cell images
+ * (src/table.js) share it, and `withEmbedSize` above already guarantees the
  * two write the same Markdown at the end of it.
  *
  * `commit` is handed the new width in pixels, or null for "no size at all";
@@ -279,104 +371,117 @@ export function wireEmbedResize (grip, {
   commit,
   settle = () => {}
 }) {
-  grip.addEventListener('pointerdown', (start) => {
-    if (start.button !== 0) return
-    start.preventDefault()
-    start.stopPropagation()
+  /* What the picture was wearing before the drag, so a cancelled one can put
+     it back — an inline width from an earlier drag, or nothing at all. */
+  let was = null
 
-    const rect = image.getBoundingClientRect()
-    const startWidth = Math.max(1, rect.width)
-    const ratio = startWidth / Math.max(1, rect.height)
-    /* What the picture was wearing before the drag, so a cancelled one can put
-       it back — an inline width from an earlier drag, or nothing at all. */
-    const wasWidth = image.style.width
-    const wasHeight = image.style.height
-    const wasSized = host.classList.contains('is-sized')
-    // No wider than the space it has: past that a CSS cap holds the picture
-    // still while the number keeps growing, which reads as a dead drag.
-    const ceiling = Math.max(MIN_EMBED_WIDTH, limit())
+  wireResizeHandle(grip, {
+    begin: () => {
+      const rect = image.getBoundingClientRect()
+      const width = Math.max(1, rect.width)
+      const height = Math.max(1, rect.height)
+      was = {
+        width: image.style.width,
+        height: image.style.height,
+        sized: host.classList.contains('is-sized')
+      }
 
-    let width = Math.round(startWidth)
-    let pending = width
-    let frame = 0
-    let moved = false
+      /* Sized *before* the class goes on, and at the width it is already
+         showing. `.is-sized` is what lifts the cap a picture is drawn under —
+         a table image is capped at `min(640px, 70vw)` until then — so putting
+         the class on a picture that has no width of its own let a capped
+         picture snap out to its natural size the instant the grip was touched,
+         before the pointer had moved at all. Writing the measured width first
+         means the class lifts a cap that nothing is asking for, and there is
+         nothing to see. */
+      paintWidth(image, Math.round(width))
+      host.classList.add('is-resizing', 'is-sized')
 
-    host.classList.add('is-resizing', 'is-sized')
-    grip.setPointerCapture?.(start.pointerId)
-
-    /* Pointer events arrive faster than the display paints. Writing a width for
-       every one of them — each relaying the picture, and everything the layout
-       hangs off it — was work that was never shown, and made the drag feel like
-       it was catching up rather than following. Keep only the newest position
-       for each animation frame. */
-    const paint = () => {
-      frame = 0
-      width = pending
-      image.style.width = `${width}px`
-      /* The height stays automatic: the ratio is the picture's own, and a
-         second driven dimension is a second reflow per frame. */
-      image.style.height = 'auto'
-    }
-    const move = (event) => {
-      const dx = event.clientX - start.clientX
-      const dy = event.clientY - start.clientY
-      /* The grip sits at a corner, so both axes drive it — whichever the hand
-         moved further, read as a width. */
-      const delta = Math.abs(dx) >= Math.abs(dy) ? dx : dy * ratio
-      pending = Math.round(
-        Math.min(ceiling, Math.max(MIN_EMBED_WIDTH, startWidth + delta))
-      )
-      moved = true
-      if (!frame) frame = requestAnimationFrame(paint)
-    }
-    const done = (end) => {
-      grip.removeEventListener('pointermove', move)
-      grip.removeEventListener('pointerup', done)
-      grip.removeEventListener('pointercancel', done)
+      return {
+        from: Math.round(width),
+        min: MIN_EMBED_WIDTH,
+        // No wider than the space it has: past that a CSS cap holds the
+        // picture still while the number keeps growing, a dead-feeling drag.
+        max: Math.max(MIN_EMBED_WIDTH, limit()),
+        /* The grip sits at a corner, so both axes drive it — as one projection
+           onto the picture's own diagonal, not as whichever axis moved
+           further. Picking an axis put a step in the middle of the gesture:
+           the moment the hand crossed the diagonal the width stopped reading
+           `dx` and started reading `dy * ratio`, and on a wide picture that is
+           several times as much width for a pointer that moved a pixel. The
+           projection agrees with both axes at the corner and everywhere
+           between them, so the picture follows the hand instead of flicking
+           past it. */
+        read: (dx, dy) => (dx * width + dy * height) * width / (width * width + height * height)
+      }
+    },
+    paint: (width) => paintWidth(image, width),
+    commit,
+    restore: () => {
+      image.style.width = was.width
+      image.style.height = was.height
+      host.classList.toggle('is-sized', was.sized)
+    },
+    // Double-click takes the size off: the picture back at its natural width.
+    reset: () => {
+      /* Undressed here rather than by a redraw, because not every caller
+         redraws: what a drag put on the picture is what has to come off it. */
+      image.style.width = ''
+      image.style.height = ''
+      host.classList.remove('is-sized')
+      commit(null)
+    },
+    settle: () => {
       host.classList.remove('is-resizing')
-      // A pointer-up can beat the frame carrying its final position.
-      if (frame) {
-        cancelAnimationFrame(frame)
-        paint()
-      }
-
-      const kept = end?.type !== 'pointercancel' && moved &&
-                   width !== Math.round(startWidth)
-      if (kept) commit(width)
-      else {
-        // Nothing moved, or the drag was taken away: the note stays as it was.
-        image.style.width = wasWidth
-        image.style.height = wasHeight
-        host.classList.toggle('is-sized', wasSized)
-      }
       settle()
     }
-
-    grip.addEventListener('pointermove', move)
-    grip.addEventListener('pointerup', done)
-    grip.addEventListener('pointercancel', done)
   })
+}
 
-  // Double-click takes the size off: the picture back at its natural width.
-  grip.addEventListener('dblclick', (event) => {
-    event.preventDefault()
-    event.stopPropagation()
-    /* Undressed here rather than by a redraw, because not every caller redraws:
-       what a drag put on the picture is what has to come off it. */
-    image.style.width = ''
-    image.style.height = ''
-    host.classList.remove('is-sized')
-    commit(null)
-    settle()
-  })
+/* The height stays automatic: the ratio is the picture's own, and a second
+   driven dimension is a second reflow per frame. */
+function paintWidth (image, width) {
+  image.style.width = `${width}px`
+  image.style.height = 'auto'
+}
 
-  /* Both surfaces begin a selection gesture on mousedown — the editor a text
-     selection, the grid a rectangle of cells. Keep the grip out of both, even
-     on engines that synthesize mouse events after pointer ones. */
-  grip.addEventListener('mousedown', (event) => {
-    event.preventDefault()
-    event.stopPropagation()
-  })
+/* What an unsized picture in a cell is drawn no wider than — the number the
+   stylesheet caps it at, kept here as well because the cell's width hint below
+   has to agree with it. */
+const CELL_IMAGE_CAP = 640
+
+/**
+ * How wide a picture-only cell would *like* to be.
+ *
+ * The picture itself fills the cell (`.has-image-only` in the stylesheet), so
+ * it can no longer say how wide the column should be — and left to itself a
+ * stretched picture reports its file's own pixel width as the column's ideal,
+ * which is how one 800-pixel screenshot pushed the rest of the table off the
+ * side. The number the note asked for (`|140`), or an unsized picture's natural
+ * width under the same cap the stylesheet draws it at, is the column's
+ * preference; whatever the column then turns out to be — a longer heading, a
+ * table stretched to the width of the note — is what the picture fills.
+ *
+ * A preference and not a floor: a cell width in an auto-laid-out table is a
+ * suggestion, so the column still grows for its other rows.
+ */
+export function fitImageCell (cell, image, asked) {
+  if (asked) {
+    cell.style.width = `${asked}px`
+    return
+  }
+  const natural = () => {
+    cell.style.width = image.naturalWidth
+      ? `${Math.min(image.naturalWidth, CELL_IMAGE_CAP, Math.round(window.innerWidth * 0.7))}px`
+      : ''
+  }
+  // A lazily-loaded picture has no natural width to ask for yet, and a cell
+  // sized from a zero is a column collapsed to nothing.
+  if (image.complete && image.naturalWidth) natural()
+  else {
+    cell.style.width = ''
+    image.addEventListener('load', natural, { once: true })
+  }
 }
 
 /* ----------------------------------------------------------- the network

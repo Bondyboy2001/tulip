@@ -13,9 +13,10 @@
 import { WidgetType } from '@codemirror/view'
 import { StateEffect } from '@codemirror/state'
 import { el, pictureBlock, pictureBlocks } from './blocks.js'
+import { DRAWN } from './languages.js'
 
 export function isMermaid (lang) {
-  return String(lang || '').trim().toLowerCase() === 'mermaid'
+  return String(lang || '').trim().toLowerCase() === DRAWN.mermaid
 }
 
 /* Mermaid is themed from the page's own custom properties, read at render

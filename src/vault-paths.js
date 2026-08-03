@@ -36,6 +36,16 @@ export const LANGUAGE_FLAG = new RegExp(VAULT_CONTRACT.languageFlagPattern, 'u')
 export const isPdfPath = (path) => PDF_EXT.test(path || '')
 export const isSitePath = (path) => SITE_EXT.test(path || '')
 
+/* A picture pasted into the copilot's message box, which lives under the
+   attachments folder like every other image but belongs to a conversation
+   rather than to a note. Named here because the orphan sweep has to know: no
+   note embeds these, and a sweep that did not know would call every screenshot
+   anyone ever asked a question about clutter. */
+const CHAT_IMAGE_PREFIX =
+  `${VAULT_CONTRACT.attachmentDirectory}/${VAULT_CONTRACT.chatImageDirectory}/`
+
+export const isChatImage = (path) => String(path || '').startsWith(CHAT_IMAGE_PREFIX)
+
 /** A path's last segment with the extension taken off — the name to show. */
 export const noteName = (path) =>
   String(path || '').split('/').pop().replace(NOTE_EXT, '')

@@ -20,9 +20,10 @@
 
 import { WidgetType } from '@codemirror/view'
 import { el, pictureBlock, pictureBlocks } from './blocks.js'
+import { DRAWN } from './languages.js'
 
 export function isSvg (lang) {
-  return String(lang || '').trim().toLowerCase() === 'svg'
+  return String(lang || '').trim().toLowerCase() === DRAWN.svg
 }
 
 /* ------------------------------------------------------------ reading it */

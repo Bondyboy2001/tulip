@@ -20,6 +20,11 @@ const api = window.tulip
    whether to draw the control at all without a round trip, and cannot decide
    it differently from the process that would run the block. */
 const RUNNABLE = new Set(Object.values(RUNNERS).flat())
+const WARMABLE = new Set([
+  ...(RUNNERS.rust || []),
+  ...(RUNNERS.cpp || [])
+])
+const warming = new Set()
 
 export function isRunnable (lang) {
   return RUNNABLE.has(String(lang || '').trim().toLowerCase())
@@ -46,19 +51,44 @@ api.on('run:out', ({ id, stream, text }) => {
   const state = live.get(id)
   if (state) {
     state[stream] += text
-    state.render()
+    scheduleRender(state)
     return
   }
   const box = held(id)
   box[stream] += text
 })
 
+/* A chatty process can deliver hundreds of chunks between two screen paints.
+   Rebuilding the complete output panel for every one makes rendering grow with
+   the square of the output: chunk 200 redraws chunks 1 through 199 yet again.
+   One paint per frame keeps streaming live while doing only the work a person
+   can see. `run:done` still paints immediately below, so the last frame cannot
+   lag behind the verdict. */
+const pendingRenders = new Set()
+let renderFrame = null
+
+function scheduleRender (state) {
+  pendingRenders.add(state)
+  if (renderFrame != null) return
+  renderFrame = requestAnimationFrame(() => {
+    renderFrame = null
+    const states = [...pendingRenders]
+    pendingRenders.clear()
+    for (const pending of states) pending.render()
+  })
+}
+
+function renderNow (state) {
+  pendingRenders.delete(state)
+  state.render()
+}
+
 api.on('run:done', (payload) => {
   const state = live.get(payload.id)
   if (state) {
     live.delete(payload.id)
     Object.assign(state, payload, { status: 'done' })
-    state.render()
+    renderNow(state)
     return
   }
   held(payload.id).done = payload
@@ -68,6 +98,22 @@ function held (id) {
   let box = inbox.get(id)
   if (!box) inbox.set(id, (box = { stdout: '', stderr: '', done: null }))
   return box
+}
+
+/* Rust and C++ pay most of their first click loading the compiler and having
+   macOS admit the first locally-built executable. Start that harmless work in
+   an idle moment as soon as a block control exists, rather than after Run is
+   pressed. Main still decides whether the named runner supports warming. */
+function warmRunner (lang) {
+  const name = String(lang || '').trim().toLowerCase()
+  if (!WARMABLE.has(name) || warming.has(name)) return
+  warming.add(name)
+  const begin = () => api.run.warm(name).catch(() => warming.delete(name))
+  if (typeof requestIdleCallback === 'function') {
+    requestIdleCallback(begin, { timeout: 750 })
+  } else {
+    setTimeout(begin, 0)
+  }
 }
 
 /**
@@ -123,12 +169,27 @@ function adopt (id, state) {
 function stateFor (lang, code) {
   const key = `${String(lang || '').trim().toLowerCase()}\n${code}`
   let state = results.get(key)
-  if (state) return state
+  if (state) {
+    /* Re-entered so a block still on screen counts as recent. Insertion order
+       is the only recency a Map keeps, and without this the cache evicted by
+       age-of-first-run — the note you have open all session was the first
+       thing to go. */
+    results.delete(key)
+    results.set(key, state)
+    return state
+  }
 
   /* One state can be on screen more than once — the same snippet twice in a
      note — so every panel showing it registers its own painter. */
   state = runState()
-  if (results.size >= MAX_RESULTS) results.delete(results.keys().next().value)
+  if (results.size >= MAX_RESULTS) {
+    /* Oldest first, but never a run still going: evicted mid-run, the next
+       widget rebuild would mint a fresh idle state for the same code while
+       the live one streamed into panels nothing points at any more. */
+    for (const old of results.keys()) {
+      if (results.get(old).status !== 'running') { results.delete(old); break }
+    }
+  }
   results.set(key, state)
   return state
 }
@@ -203,9 +264,21 @@ function requestStop (state) {
   state.stopRequested = true
 }
 
+/* Escape sequences a runner prints despite the env saying not to (see
+   startRun's env in main.js): CSI — colours, cursor moves — OSC — titles,
+   hyperlinks — and the lone two-byte escapes. Stripped where text is shown
+   rather than where it arrives, so a sequence split across two chunks is
+   whole again by the time the regex sees it. The state keeps what was really
+   printed. */
+const ANSI = /\x1b(?:\[[0-9;?]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[@-Z\\-_])/g
+
+function plain (text) {
+  return String(text || '').replace(ANSI, '')
+}
+
 /** The line of a runner's chatter worth showing while a compact render works. */
 function lastLine (text) {
-  const lines = String(text || '').trimEnd().split('\n')
+  const lines = plain(text).trimEnd().split('\n')
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i].trim()
     if (line) return line.slice(0, 90)
@@ -239,8 +312,8 @@ function drawArtefactStatus (status, state, { busy, keep, silent, transcript }, 
     if (transcript && stop) bar.append(stop)
     status.append(bar)
     if (transcript) {
-      if (state.stdout) status.append(el('pre', 'run-out-stream', state.stdout))
-      if (state.stderr) status.append(el('pre', 'run-out-stream is-stderr', state.stderr))
+      if (state.stdout) status.append(el('pre', 'run-out-stream', plain(state.stdout)))
+      if (state.stderr) status.append(el('pre', 'run-out-stream is-stderr', plain(state.stderr)))
       if (state.truncated) {
         status.append(el('div', 'run-out-note',
           'Output truncated — the render printed more than Tulip will hold.'))
@@ -266,10 +339,10 @@ function drawArtefactStatus (status, state, { busy, keep, silent, transcript }, 
      above already say `is-bad` for the same reason. */
   status.classList.add('is-bad')
 
-  const said = state.error || ''
+  const said = plain(state.error || '')
   if (said) status.append(el('pre', 'run-out-stream is-stderr', said))
-  if (transcript && state.stdout) status.append(el('pre', 'run-out-stream', state.stdout))
-  const trace = state.stderr
+  if (transcript && state.stdout) status.append(el('pre', 'run-out-stream', plain(state.stdout)))
+  const trace = plain(state.stderr)
   if (trace) {
     status.append(el('pre', 'run-out-stream is-stderr',
       transcript ? trace : trace.trim().slice(-keep)))
@@ -531,7 +604,7 @@ export function attachArtefactBlock (wrap, head, {
 function verdict (state) {
   const time = (n) => (n < 1000 ? `${n} ms` : `${(n / 1000).toFixed(1)} s`)
   const ms = time(state.ms)
-  if (state.error) return { text: state.error, tone: 'bad' }
+  if (state.error) return { text: plain(state.error), tone: 'bad' }
   if (state.timedOut) return { text: `timed out · ${ms}`, tone: 'bad' }
   if (state.signal) return { text: `stopped · ${ms}`, tone: 'plain' }
 
@@ -579,8 +652,8 @@ function worthFixing (state) {
  * what is kept — a traceback finishes with the line that raised.
  */
 function fixPrompt (lang, code, state) {
-  const printed = [state.error, state.stdout, state.stderr]
-    .filter(Boolean).join('\n').trimEnd()
+  const printed = plain([state.error, state.stdout, state.stderr]
+    .filter(Boolean).join('\n')).trimEnd()
   const shown = printed.length > FIX_OUTPUT_MAX
     ? `…\n${printed.slice(-FIX_OUTPUT_MAX)}`
     : printed
@@ -647,9 +720,11 @@ function drawOutput (panel, state, lang, code) {
   }
   panel.append(bar)
 
-  if (state.stdout) panel.append(el('pre', 'run-out-stream', state.stdout))
-  if (state.stderr) panel.append(el('pre', 'run-out-stream is-stderr', state.stderr))
-  if (!state.stdout && !state.stderr && state.status === 'done') {
+  const out = plain(state.stdout)
+  const err = plain(state.stderr)
+  if (out) panel.append(el('pre', 'run-out-stream', out))
+  if (err) panel.append(el('pre', 'run-out-stream is-stderr', err))
+  if (!out && !err && state.status === 'done') {
     panel.append(el('pre', 'run-out-stream is-empty', 'No output.'))
   }
   if (state.truncated) {
@@ -710,6 +785,7 @@ export function retirePainters (root) {
  * reading view drive one run between them.
  */
 export function runButtonUI (lang, code) {
+  warmRunner(lang)
   const state = stateFor(lang, code)
   const button = runButton()
 

@@ -188,8 +188,12 @@ export function fenceLanguages (context) {
   }
 
   const query = before.text.slice(3).toLowerCase()
+  /* Asked for by hand — the chip's language picker, or ⌃Space over a word
+     that is already complete — the list is the whole catalogue: the word
+     under the caret is what is being replaced, not a prefix being finished.
+     Typing afterwards re-queries implicitly and narrows as usual. */
   const options = LANG_OPTIONS
-    .filter((l) => !query || l.haystack.includes(query))
+    .filter((l) => context.explicit || !query || l.haystack.includes(query))
     .map((l) => l.completion)
   if (!options.length) return null
 

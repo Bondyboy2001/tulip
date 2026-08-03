@@ -21,7 +21,7 @@
 
 /* The same stops the window's zoom and the View menu walk. A reader who sizes
    a page and then sizes the window expects the two to land together. */
-import { ZOOM_STEPS } from './zoom.js'
+import { ZOOM_STEPS, pinchFactor } from './zoom.js'
 
 /* pdf.js is the largest thing the app can load and most sessions never open a
    document, so it is fetched the first time one is opened rather than sitting
@@ -206,6 +206,9 @@ export function mountPdf ({
     queue: [],
     drawing: null,
     inFlight: null,     // the promise of that render, so a close can wait on it
+    /* Set for as long as fingers are on the glass. Rasterising is the one thing
+       a pinch must not do while it lasts — see the wheel listener. */
+    pinching: false,
     stuck: false,       // a render went quiet; the document needs parsing again
     recovering: false,
     recoveries: 0
@@ -574,6 +577,11 @@ export function mountPdf ({
    */
   async function pump () {
     if (state.drawing || !state.doc) return
+    /* Nothing is rasterised mid-pinch. Every frame of the gesture is a
+       different scale, so a render started for one is stale before it finishes
+       — and pdf.js renders on this thread, so the frames the gesture needs go
+       into drawing pages the fingers have already zoomed past. */
+    if (state.pinching) return
     const page = state.queue.shift()
     if (!page) return
     if (page.drawn === state.scale || page.failed === state.scale) { pump(); return }
@@ -627,20 +635,60 @@ export function mountPdf ({
   /**
    * Pinch, and ⌘-scroll, zoom the document rather than the app.
    *
-   * A trackpad pinch arrives as a wheel event with ctrlKey set, which is also
-   * what the window's own zoom listens for — so this has to say it has handled
-   * it, or a pinch over a PDF would zoom the interface around it.
+   * A trackpad pinch arrives as a wheel event with ctrlKey set. Nothing else in
+   * the app zooms on that — a pinch over a note is swallowed and ignored — so a
+   * document is the one place the gesture still means something.
    */
+  /* A pinch arrives as a stream of wheel events — one per frame of the gesture,
+     often several — and answering each one with a full zoom is what made the
+     gesture feel like it was being dragged through treacle. Two things are
+     separated here so it does not:
+
+     the *layout* of a zoom is cheap (the drawn bitmaps are stretched by CSS —
+     see `size`), so it happens once per animation frame no matter how many
+     events land in one, with the events in between accumulating into the size
+     the frame will use;
+
+     the *rasterising* is not cheap, and every frame of a pinch asks for a scale
+     the next frame will replace — so it is held back until the fingers stop
+     (`pump` refuses while `state.pinching`), and the sharp pages come in once,
+     at the size the reader actually let go at. */
+  const PINCH_SETTLE_MS = 140
+  let pinchFrame = null
+  let pinchTo = null
+  let pinchTimer = null
+
   host.addEventListener('wheel', (event) => {
     if (!state.doc || !(event.ctrlKey || event.metaKey)) return
     event.preventDefault()
 
     /* Continuous rather than stepped: a pinch is a continuous gesture, and
-       snapping it to the stops the buttons use makes it feel broken. */
-    const current = state.zoom === 'fit' ? state.scale : state.zoom
-    const factor = Math.exp(-event.deltaY / 220)
-    setZoom(Math.round(current * factor * 1000) / 1000)
-    onZoom()
+       snapping it to the stops the buttons use makes it feel broken. The
+       gesture's feel comes from zoom.js, so any other document reader added
+       later answers a reader's fingers the same way. */
+    const current = pinchTo ?? (state.zoom === 'fit' ? state.scale : state.zoom)
+    pinchTo = Math.round(current * pinchFactor(event.deltaY) * 1000) / 1000
+
+    state.pinching = true
+    if (!pinchFrame) {
+      pinchFrame = requestAnimationFrame(() => {
+        pinchFrame = null
+        setZoom(pinchTo)
+        /* Dropped once applied, so the next event reads the size that actually
+           took — a pinch held past the last stop would otherwise go on
+           accumulating a number the document had already refused, and unpinching
+           would do nothing until the phantom zoom had been wound back. */
+        pinchTo = null
+        onZoom()
+      })
+    }
+
+    clearTimeout(pinchTimer)
+    pinchTimer = setTimeout(() => {
+      pinchTimer = null
+      state.pinching = false
+      refresh()
+    }, PINCH_SETTLE_MS)
   }, { passive: false })
 
   /**
@@ -1346,6 +1394,10 @@ export function mountPdf ({
 
     Object.assign(state, {
       path: '', doc: null, pages: [], marks: [], base: null, at: 1, quote: null, flashing: null,
+      // A gesture over the document that is going belongs to it: left set, it
+      // would hold the next document's first pages back for as long as the
+      // settle lasts.
+      pinching: false,
       // Not the tool or the pen — those are the reader's, not the document's.
       past: [], future: []
     })

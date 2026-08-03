@@ -22,11 +22,12 @@ import { Facet } from '@codemirror/state'
 import { embedSpec, renderEmbed } from './assets.js'
 import { el, pictureBlocks } from './blocks.js'
 import { artefactRun, attachArtefactBlock } from './runcode.js'
+import { DRAWN } from './languages.js'
 
 const api = window.tulip
 
 export function isTikz (lang) {
-  return String(lang || '').trim().toLowerCase() === 'tikz'
+  return String(lang || '').trim().toLowerCase() === DRAWN.tikz
 }
 
 /* Runs in flight, keyed by note and code — the same bargain runcode's

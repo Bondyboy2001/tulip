@@ -14,7 +14,7 @@ import { search, searchKeymap, highlightSelectionMatches, openSearchPanel } from
 import { findConfig } from './find.js'
 import { EXTERNAL_SCHEME, flashTarget } from './links.js'
 import { autocompletion, closeBrackets, closeBracketsKeymap,
-         completionKeymap } from '@codemirror/autocomplete'
+         completionKeymap, startCompletion } from '@codemirror/autocomplete'
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
 import { tags as t } from '@lezer/highlight'
 import { mathPreview, equationsFor } from './math.js'
@@ -235,13 +235,16 @@ const tulipTheme = EditorView.theme({
    the other. */
 const highlight = HighlightStyle.define([
   { tag: t.processingInstruction, class: 'tk-mark' },
-  // Emphasis carries a colour of its own — warm for bold, cool for italic —
-  // so the two are told apart at a glance rather than by weight and slant
-  // alone, which a serif at reading size gives away only faintly.
-  { tag: t.strong, fontWeight: '650', color: 'var(--strong)' },
-  { tag: t.emphasis, fontStyle: 'italic', color: 'var(--emph)' },
-  // A class, not inline styles: the active line strips the decoration (see
-  // .tk-strike in styles.css) so the text being edited reads as source.
+  /* Emphasis carries a colour of its own — warm for bold, cool for italic —
+     so the two are told apart at a glance rather than by weight and slant
+     alone, which a serif at reading size gives away only faintly.
+
+     Classes rather than styles, for all three: the line being edited strips
+     the rendering off every one of them (see .tk-strong, .tk-em and .tk-strike
+     in styles.css), and a style declared here would be a generated class name
+     nothing in the stylesheet can name to override. */
+  { tag: t.strong, class: 'tk-strong' },
+  { tag: t.emphasis, class: 'tk-em' },
   { tag: t.strikethrough, class: 'tk-strike' },
   { tag: t.link, class: 'tk-link' },
   { tag: t.url, class: 'tk-mark' },
@@ -342,14 +345,52 @@ class TitleWidget extends WidgetType {
 }
 
 class LangChipWidget extends WidgetType {
-  constructor (info, label) { super(); this.info = info; this.label = label }
-  eq (other) { return other.info === this.info && other.label === this.label }
-  toDOM () {
+  constructor (info, label, rest = '') {
+    super()
+    this.info = info
+    this.label = label
+    this.rest = rest
+  }
+
+  eq (other) {
+    return other.info === this.info && other.label === this.label && other.rest === this.rest
+  }
+
+  toDOM (view) {
     const chip = languageChip(this.info, { label: this.label })
     if (!chip) return document.createElement('span')
     chip.classList.add('tk-lang-chip')
-    return chip
+    chip.title = 'Change language'
+
+    /* The chip is also the way to a different language: a click puts the
+       caret at the end of the token it stands for — which brings the raw
+       text back — and opens the fence completion over it. Asked for rather
+       than typed at, the completion offers the whole list (see
+       fenceLanguages), and picking one replaces the word. */
+    chip.addEventListener('mousedown', (event) => {
+      event.preventDefault()
+      const pos = view.posAtDOM(chip)
+      const line = view.state.doc.lineAt(pos)
+      const token = /^(\s*(?:```|~~~)\s*)(\S+)/.exec(line.text)
+      if (!token) return
+      view.dispatch({ selection: { anchor: line.from + token[1].length + token[2].length } })
+      view.focus()
+      startCompletion(view)
+    })
+
+    if (!this.rest) return chip
+    /* What the fence said after its language, the same as the reading view's
+       header shows it. Beside the chip, not inside it: the words are not part
+       of the language control a click on the chip is. */
+    const slot = document.createElement('span')
+    slot.append(chip)
+    const rest = document.createElement('span')
+    rest.className = 'code-info'
+    rest.textContent = this.rest
+    slot.append(rest)
+    return slot
   }
+
   ignoreEvent () { return true }
 }
 
@@ -1044,12 +1085,39 @@ function buildDecorations (view, imageSource = null) {
     }
   }
 
+  /* What has already been decorated, for the nodes that span more than a line.
+     The tree is walked once per visible range, and a range boundary falls
+     wherever a block widget stands — a displayed `$$…$$` is one — so a quote
+     with maths in it is entered once for the part above and once for the part
+     below. Everything it draws was then drawn twice: two line decorations per
+     line (the class arrived doubled), and two callout icons on its title. */
+  const painted = new Set()
+  const once = (node) => {
+    const key = `${node.name}@${node.from}`
+    if (painted.has(key)) return false
+    painted.add(key)
+    return true
+  }
+
   for (const { from, to } of view.visibleRanges) {
     tree.iterate({
       from,
       to,
       enter: (node) => {
         const name = node.name
+
+        /* Clicking into a code span shows its source, the way clicking into
+           bold or italic shows the asterisks. The backticks come back on their
+           own — CodeMark is in HIDDEN_MARKS, which already spares the active
+           line — but the chip around them did not, so a span you were editing
+           was still drawn as a rendered pill with the markup sitting inside it.
+           This undoes the pill for as long as the caret is on the line. The
+           highlighter paints .tk-inline-code from the syntax tag and cannot be
+           told about the selection, so the class is layered over the top. */
+        if (name === 'InlineCode' && isActive(node.from)) {
+          ranges.push(Decoration.mark({ class: 'tk-code-raw' }).range(node.from, node.to))
+          return
+        }
 
         const heading = HEADING.exec(name)
         if (heading) {
@@ -1074,6 +1142,28 @@ function buildDecorations (view, imageSource = null) {
         }
 
         if (name === 'Blockquote') {
+          /* A quote inside a quote is already painted. The enclosing blockquote
+             decorated every line between its own ends, this one included, so
+             descending would put a second set of edges partway down the bubble
+             — a seam across the middle of it, where the reader sees one quote.
+             Skipping the whole node keeps it one shape. */
+          for (let up = node.node.parent; up; up = up.parent) {
+            if (up.name === 'Blockquote') return false
+          }
+          /* And once per quote, however many visible ranges it is split across.
+             `return`, not `return false`: the quote's own decorations are all
+             drawn on the first visit, but its children have not been — a fence
+             or a nested quote below the split still has to be entered, and
+             refusing to descend here was the fence inside a callout losing its
+             block entirely.
+
+             Named `once` rather than `first`, which the branch below declares
+             for the quote's own first line: a const shadowing it in this block
+             is not merely a shadow at the point of this call, it is a temporal
+             dead zone and a ReferenceError that takes every decoration in the
+             document down with it. */
+          if (!once(node)) return
+
           /* A blockquote whose first line names a kind is a callout, not a
              quotation — see src/callouts.js, which the reading view reads the
              same table from. The marker is hidden the way every other piece of
@@ -1089,7 +1179,13 @@ function buildDecorations (view, imageSource = null) {
           for (let n = first; n <= last; n++) {
             const line = state.doc.line(n)
             if (!head) {
-              ranges.push(Decoration.line({ class: 'tk-quote' }).range(line.from))
+              /* The ends are marked so the quote can be drawn as one shape
+                 rather than a stack of bands — the top line carries the
+                 rounded top, the bottom line the tail. A one-line quote is
+                 both at once. Same arrangement as a callout's edges below. */
+              const edge = (n === first ? ' tk-quote-top' : '') +
+                           (n === last ? ' tk-quote-bottom' : '')
+              ranges.push(Decoration.line({ class: `tk-quote${edge}` }).range(line.from))
               continue
             }
             const edge = (n === first ? ' tk-callout-top' : '') +
@@ -1171,10 +1267,18 @@ function buildDecorations (view, imageSource = null) {
             }).range(node.from, node.to)
           )
           hidden.push([node.from, node.to])
-          // A finished task reads as finished, not just as a ticked box.
+          // A finished task reads as finished, not just as a ticked box. The
+          // rule is drawn over the task's own words and nothing else: as a line
+          // decoration it covered the whole line box, and a nested item's
+          // leading indent is part of that — a stroke hanging in the margin to
+          // the left of the checkbox, attached to nothing.
           if (/[xX]/.test(text)) {
             const line = state.doc.lineAt(node.from)
-            ranges.push(Decoration.line({ class: 'tk-done' }).range(line.from))
+            let from = node.to
+            while (from < line.to && state.doc.sliceString(from, from + 1) === ' ') from++
+            if (from < line.to) {
+              ranges.push(Decoration.mark({ class: 'tk-done' }).range(from, line.to))
+            }
           }
           return
         }
@@ -1183,14 +1287,18 @@ function buildDecorations (view, imageSource = null) {
            token stays put — you cannot retype what you cannot see — everywhere
            else the chip stands in for it. */
         if (name === 'CodeInfo') {
-          const info = state.doc.sliceString(node.from, node.to).trim().split(/\s+/)[0]
+          const full = state.doc.sliceString(node.from, node.to).trim()
+          const info = full.split(/\s+/)[0]
+          // Everything after the language travels with the chip: a manim
+          // block names its scene there, and the reading view shows it too.
+          const rest = full.slice(info.length).trim()
           // On the line being edited the fence is just text: ```python, plain,
           // with nothing standing beside it. A chip there competes with the
           // token it is meant to replace.
           if (isActive(node.from)) return
 
           ranges.push(
-            Decoration.widget({ widget: new LangChipWidget(info, true), side: -1 })
+            Decoration.widget({ widget: new LangChipWidget(info, true, rest), side: -1 })
               .range(node.from)
           )
           hide(node.from, node.to)
@@ -1267,12 +1375,16 @@ function buildDecorations (view, imageSource = null) {
         const start = line.from + block.from
         const marker = line.from + block.markerFrom
         const end = line.from + block.to
+        /* A block ID stays on screen whether or not the caret is on its line.
+           Every other mark here is punctuation around text you can already
+           see, so hiding it costs nothing — but this one *is* the content: it
+           is the address other notes link to, and an address that appears only
+           when you happen to click the line is one you cannot find, check for
+           collisions, or copy without hunting. It is set small and faint (see
+           .tk-block-id), which is enough to keep it out of the way of the
+           prose it names. */
         if (!inCode(start, end) && !isClaimed(start, end)) {
-          if (active) {
-            ranges.push(Decoration.mark({ class: 'tk-block-id' }).range(marker, end))
-          } else {
-            hide(start, end)
-          }
+          ranges.push(Decoration.mark({ class: 'tk-block-id' }).range(marker, end))
         }
       }
 

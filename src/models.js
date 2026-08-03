@@ -140,6 +140,19 @@ export const asOptions = (models) =>
 export const providerLabel = (provider) => PROVIDER[provider]?.label || provider
 
 /**
+ * What this CLI may actually do in this mode, in words.
+ *
+ * One switch, three blast radii: Claude takes a tool allowlist and so has no
+ * shell at all, while Codex and opencode have no per-tool switch and are fenced
+ * only by a sandbox — which leaves them able to run commands in the vault. The
+ * toggle used to promise the same thing for all three. It now says which of the
+ * three it is handing over; the words are the catalogue's, beside the command
+ * they describe.
+ */
+export const providerGrant = (provider, write) =>
+  PROVIDER[provider]?.grants?.[write ? 'write' : 'read'] || ''
+
+/**
  * The chosen model, out of the config.
  *
  * `aiModel` is the one key now, but an install from before the two questions

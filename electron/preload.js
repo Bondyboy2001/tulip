@@ -69,6 +69,7 @@ contextBridge.exposeInMainWorld('tulip', {
    */
   run: {
     start: (lang, code) => ipcRenderer.invoke('run:start', lang, code),
+    warm: (lang) => ipcRenderer.invoke('run:warm', lang),
     kill: (id) => ipcRenderer.invoke('run:kill', id)
   },
 
@@ -92,9 +93,22 @@ contextBridge.exposeInMainWorld('tulip', {
    */
   ai: {
     start: (opts) => ipcRenderer.invoke('ai:start', opts),
-    models: () => ipcRenderer.invoke('ai:models'),
+    /* `{ fresh: true }` asks the CLIs again rather than taking the answer main
+       is holding — what the Refresh button in Settings is for, after installing
+       a model or signing into a provider mid-session. */
+    models: (opts) => ipcRenderer.invoke('ai:models', opts),
     send: (text, context) => ipcRenderer.invoke('ai:send', text, context),
     stop: () => ipcRenderer.invoke('ai:stop'),
+    /* A picture pasted into the message box, filed in the vault so the agent —
+       which reads files and takes no images over its message stream — can be
+       pointed at it. `bytes` is a Uint8Array; the answer is a vault path. */
+    attach: (ext, bytes) => ipcRenderer.invoke('ai:attach', ext, bytes),
+    /* A long turn that has ended while the window is in the background. Main
+       owns this rather than the renderer raising its own `Notification`,
+       because the two things worth doing with it — checking that the window
+       really is unfocused, and bouncing the dock — are the main process's to
+       do. */
+    announce: (info) => ipcRenderer.invoke('ai:announce', info),
     // Transcripts, per note, kept with the app's state rather than the vault.
     history: {
       load: () => ipcRenderer.invoke('ai:history:load'),
