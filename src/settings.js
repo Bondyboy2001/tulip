@@ -388,7 +388,6 @@ export function mountSettings ({ el, api, values, onChange }) {
       search.type = 'search'
       search.spellcheck = false
       search.placeholder = `Search ${all.length} models…`
-      const count = node('span', 'model-picker-count')
 
       /* Asking the CLIs again. The catalogue is read when the pane opens, but
          main holds its answer for a few minutes, and the moment you want this
@@ -410,12 +409,10 @@ export function mountSettings ({ el, api, values, onChange }) {
         })
       })
 
-      head.append(search, count, again)
+      head.append(search, again)
 
       const list = node('div', 'model-picker-list')
       wrap.append(picked, head, list)
-
-      const tally = () => { count.textContent = `${chosen.size} of ${all.length} offered` }
 
       function paintPicked () {
         const on = all.filter((model) => chosen.has(model.key))
@@ -457,16 +454,15 @@ export function mountSettings ({ el, api, values, onChange }) {
         const shown = groups
           .map((group) => ({ ...group, models: group.models.filter((m) => hit(m.search)) }))
           .filter((group) => group.models.length)
-        tally()
-
         list.replaceChildren(...shown.map((group) => {
           const of = group.models.length
           let ticked = group.models.filter((model) => chosen.has(model.key)).length
-          // Open when the user says so; otherwise when there is something to
-          // see — a search hit, or a group they have already chosen from.
+          // A newly opened settings pane starts with every provider folded.
+          // Search results open automatically; otherwise only an explicit
+          // click changes a group's state for the lifetime of this pane.
           const open = opened.has(group.name)
             ? opened.get(group.name)
-            : (!!query || ticked > 0)
+            : !!query
 
           const box = node('div', 'model-group')
           box.classList.toggle('is-open', open)
@@ -487,7 +483,6 @@ export function mountSettings ({ el, api, values, onChange }) {
             every.title = ticked === of
               ? 'Take all of these out of the list'
               : 'Put all of these in the list'
-            tally()
           }
           refresh()
 

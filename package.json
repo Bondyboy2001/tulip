@@ -8,7 +8,7 @@
   "type": "commonjs",
   "license": "MIT",
   "scripts": {
-    "test": "npm run test:srs && npm run test:study-match && npm run test:language-cards && npm run test:language-row && npm run test:lint && npm run test:ai && npm run test:pdf && npm run test:language-history && npm run test:optimizations && npm run test:renderer-optimizations && npm run test:codeblocks && npm run test:diff && npm run test:search-narrow && npm run test:platform && npm run test:table && npm run test:export-print",
+    "test": "npm run test:srs && npm run test:study-match && npm run test:language-cards && npm run test:language-row && npm run test:lint && npm run test:ai && npm run test:pdf && npm run test:language-history && npm run test:optimizations && npm run test:renderer-optimizations && npm run test:codeblocks && npm run test:diff && npm run test:search-narrow && npm run test:settings && npm run test:platform && npm run test:table && npm run test:export-print",
     "build": "node build.mjs",
     "icon": "electron scripts/make-icon.cjs",
     "package:dir": "npm run build && npm run icon && electron-builder --dir --publish never",
@@ -36,6 +36,7 @@
     "bench": "node bench/bench.mjs",
     "bench:dom": "node bench/dom-bench.mjs",
     "test:search-narrow": "node scripts/test-search-narrow.cjs",
+    "test:settings": "node scripts/test-settings.cjs",
     "test:platform": "esbuild scripts/test-platform.mjs --bundle --format=esm --platform=node --outfile=node_modules/.cache/test-platform.mjs --log-level=error && node node_modules/.cache/test-platform.mjs",
     "test:export-print": "node scripts/test-export-print.cjs",
     "test:agent-diff": "node scripts/test-agent-diff.mjs"
