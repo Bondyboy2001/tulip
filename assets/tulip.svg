@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Tulip</title>
+  <desc id="desc">A rose tulip with a green stem on a warm paper background.</desc>
+  <defs>
+    <linearGradient id="paper" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fdfcfa"/>
+      <stop offset="1" stop-color="#efe8de"/>
+    </linearGradient>
+  </defs>
+  <rect x="18" y="18" width="220" height="220" rx="52" fill="url(#paper)" stroke="#000" stroke-opacity=".10"/>
+  <path d="M128 142c2 28 0 42 0 63" fill="none" stroke="#4f6b4b" stroke-width="7" stroke-linecap="round"/>
+  <path d="M129 186c-23 0-39-14-45-35 25 3 40 15 45 35Z" fill="#4f6b4b"/>
+  <path d="M128 147c29 0 42-22 42-50 0-16-3-25-5-31-7 9-15 16-25 18-3-9-7-17-12-24-5 7-9 15-12 24-10-2-18-9-25-18-2 6-5 15-5 31 0 28 13 50 42 50Z" fill="#8e2f4c"/>
+  <path d="M128 61c12 22 14 55 0 86-14-31-12-64 0-86Z" fill="#a63a5a"/>
+</svg>
