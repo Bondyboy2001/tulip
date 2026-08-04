@@ -11,6 +11,7 @@ output/
 # The packaged .app that scripts/build-app.sh assembles — ~280MB of copied
 # Electron, rebuildable from source in one command.
 build/
+release/
 
 # Scratch written by agent tooling run inside the repo.
 .pi-subagents/

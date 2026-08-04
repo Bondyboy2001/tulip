@@ -26,6 +26,9 @@ const WEB_PARTITIONS = require('./web-partitions.json')
 /* The one address a guest may fetch, shared with the renderer that writes it
    into the scene's document — see src/threejs.js. */
 const GUEST_LIBRARY = require('./guest-library.json')
+const IS_MAC = process.platform === 'darwin'
+const IS_WINDOWS = process.platform === 'win32'
+const EXECUTABLE_EXT = IS_WINDOWS ? '.exe' : ''
 
 const CONFIG_PATH = () => path.join(app.getPath('userData'), 'config.json')
 
@@ -1267,8 +1270,9 @@ function createWindow () {
     height: 780,
     minWidth: 680,
     minHeight: 460,
-    titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 18, y: 20 },
+    ...(IS_MAC
+      ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 18, y: 20 } }
+      : {}),
     backgroundColor: nativeTheme.shouldUseDarkColors ? '#141317' : '#FBFAF8',
     show: false,
     webPreferences: {
@@ -1435,9 +1439,9 @@ function buildMenu () {
            in it, so it is asked for here rather than under File — where it sat
            among New Note and Save, and where nobody looking to switch vaults
            thought to look. */
-        { label: 'Open Vault…', accelerator: 'Cmd+Shift+O', click: () => pickVault() },
+        { label: 'Open Vault…', accelerator: 'CmdOrCtrl+Shift+O', click: () => pickVault() },
         { type: 'separator' },
-        { label: 'Settings…', accelerator: 'Cmd+,', click: () => send('menu', 'settings') },
+        { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: () => send('menu', 'settings') },
         { type: 'separator' },
         { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' },
         { type: 'separator' },
@@ -1447,18 +1451,18 @@ function buildMenu () {
     {
       label: 'File',
       submenu: [
-        { label: 'New Note', accelerator: 'Cmd+N', click: () => send('menu', 'new-note') },
+        { label: 'New Note', accelerator: 'CmdOrCtrl+N', click: () => send('menu', 'new-note') },
         { label: 'New Website', click: () => send('menu', 'new-website') },
         { label: 'New Language', click: () => send('menu', 'new-language') },
-        { label: 'New Folder', accelerator: 'Cmd+Shift+N', click: () => send('menu', 'new-folder') },
+        { label: 'New Folder', accelerator: 'CmdOrCtrl+Shift+N', click: () => send('menu', 'new-folder') },
         { type: 'separator' },
-        { label: 'New Tab', accelerator: 'Cmd+T', click: () => send('menu', 'new-tab') },
-        { label: 'Close Tab', accelerator: 'Cmd+W', click: () => send('menu', 'close-tab') },
-        { label: 'Reopen Closed Tab', accelerator: 'Cmd+Shift+T', click: () => send('menu', 'reopen-tab') },
+        { label: 'New Tab', accelerator: 'CmdOrCtrl+T', click: () => send('menu', 'new-tab') },
+        { label: 'Close Tab', accelerator: 'CmdOrCtrl+W', click: () => send('menu', 'close-tab') },
+        { label: 'Reopen Closed Tab', accelerator: 'CmdOrCtrl+Shift+T', click: () => send('menu', 'reopen-tab') },
         { type: 'separator' },
-        { label: 'Reveal in Finder', click: () => send('menu', 'reveal') },
+        { label: IS_MAC ? 'Reveal in Finder' : 'Show in File Explorer', click: () => send('menu', 'reveal') },
         { type: 'separator' },
-        { label: 'Save', accelerator: 'Cmd+S', click: () => send('menu', 'save') },
+        { label: 'Save', accelerator: 'CmdOrCtrl+S', click: () => send('menu', 'save') },
         { label: 'Export as PDF…', click: () => send('menu', 'export-pdf') }
       ]
     },
@@ -1469,41 +1473,41 @@ function buildMenu () {
            means depends on what is on screen: a note undoes an edit, a PDF
            undoes a highlight, and a plain text field wants the browser's own
            history — which the renderer asks for back through `edit:undo`. */
-        { label: 'Undo', accelerator: 'Cmd+Z', click: () => send('menu', 'undo') },
-        { label: 'Redo', accelerator: 'Shift+Cmd+Z', click: () => send('menu', 'redo') },
+        { label: 'Undo', accelerator: 'CmdOrCtrl+Z', click: () => send('menu', 'undo') },
+        { label: 'Redo', accelerator: 'Shift+CmdOrCtrl+Z', click: () => send('menu', 'redo') },
         { type: 'separator' },
         { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' },
         { type: 'separator' },
-        { label: 'Find in Note', accelerator: 'Cmd+F', click: () => send('menu', 'find') },
-        { label: 'Search Vault', accelerator: 'Cmd+Shift+F', click: () => send('menu', 'search') }
+        { label: 'Find in Note', accelerator: 'CmdOrCtrl+F', click: () => send('menu', 'find') },
+        { label: 'Search Vault', accelerator: 'CmdOrCtrl+Shift+F', click: () => send('menu', 'search') }
       ]
     },
     {
       label: 'View',
       submenu: [
-        { label: 'Back', accelerator: 'Cmd+[', click: () => send('menu', 'back') },
-        { label: 'Forward', accelerator: 'Cmd+]', click: () => send('menu', 'forward') },
+        { label: 'Back', accelerator: 'CmdOrCtrl+[', click: () => send('menu', 'back') },
+        { label: 'Forward', accelerator: 'CmdOrCtrl+]', click: () => send('menu', 'forward') },
         { type: 'separator' },
-        { label: 'Previous Tab', accelerator: 'Alt+Cmd+Left', click: () => send('menu', 'prev-tab') },
-        { label: 'Next Tab', accelerator: 'Alt+Cmd+Right', click: () => send('menu', 'next-tab') },
+        { label: 'Previous Tab', accelerator: 'Alt+CmdOrCtrl+Left', click: () => send('menu', 'prev-tab') },
+        { label: 'Next Tab', accelerator: 'Alt+CmdOrCtrl+Right', click: () => send('menu', 'next-tab') },
         { type: 'separator' },
-        { label: 'Quick Switcher', accelerator: 'Cmd+O', click: () => send('menu', 'switcher') },
+        { label: 'Quick Switcher', accelerator: 'CmdOrCtrl+O', click: () => send('menu', 'switcher') },
         { label: 'Jump to Heading', click: () => send('menu', 'headings') },
-        { label: 'Command Palette', accelerator: 'Cmd+P', click: () => send('menu', 'commands') },
+        { label: 'Command Palette', accelerator: 'CmdOrCtrl+P', click: () => send('menu', 'commands') },
         { type: 'separator' },
-        { label: 'Toggle Sidebar', accelerator: 'Cmd+B', click: () => send('menu', 'sidebar') },
+        { label: 'Toggle Sidebar', accelerator: 'CmdOrCtrl+B', click: () => send('menu', 'sidebar') },
         // The old key still works. A menu item carries one accelerator, so the
         // second one needs a twin of its own, kept out of the menu.
-        { label: 'Toggle Sidebar', accelerator: 'Cmd+\\', visible: false, click: () => send('menu', 'sidebar') },
-        { label: 'Toggle Outline', accelerator: 'Cmd+Shift+E', click: () => send('menu', 'outline') },
-        { label: 'Toggle Backlinks', accelerator: 'Cmd+Shift+K', click: () => send('menu', 'links') },
-        { label: 'Toggle Info', accelerator: 'Cmd+Shift+I', click: () => send('menu', 'info') },
-        { label: 'Toggle Copilot', accelerator: 'Cmd+Shift+A', click: () => send('menu', 'copilot') },
-        { label: 'Reading View', accelerator: 'Cmd+1', click: () => send('menu', 'view-read') },
-        { label: 'Editing View', accelerator: 'Cmd+2', click: () => send('menu', 'view-edit') },
-        { label: 'Raw View', accelerator: 'Cmd+3', click: () => send('menu', 'view-raw') },
-        { label: 'Toggle Reading View', accelerator: 'Cmd+E', click: () => send('menu', 'reading') },
-        { label: 'Toggle Theme', accelerator: 'Cmd+Shift+L', click: () => send('menu', 'theme') },
+        { label: 'Toggle Sidebar', accelerator: 'CmdOrCtrl+\\', visible: false, click: () => send('menu', 'sidebar') },
+        { label: 'Toggle Outline', accelerator: 'CmdOrCtrl+Shift+E', click: () => send('menu', 'outline') },
+        { label: 'Toggle Backlinks', accelerator: 'CmdOrCtrl+Shift+K', click: () => send('menu', 'links') },
+        { label: 'Toggle Info', accelerator: 'CmdOrCtrl+Shift+I', click: () => send('menu', 'info') },
+        { label: 'Toggle Copilot', accelerator: 'CmdOrCtrl+Shift+A', click: () => send('menu', 'copilot') },
+        { label: 'Reading View', accelerator: 'CmdOrCtrl+1', click: () => send('menu', 'view-read') },
+        { label: 'Editing View', accelerator: 'CmdOrCtrl+2', click: () => send('menu', 'view-edit') },
+        { label: 'Raw View', accelerator: 'CmdOrCtrl+3', click: () => send('menu', 'view-raw') },
+        { label: 'Toggle Reading View', accelerator: 'CmdOrCtrl+E', click: () => send('menu', 'reading') },
+        { label: 'Toggle Theme', accelerator: 'CmdOrCtrl+Shift+L', click: () => send('menu', 'theme') },
         { label: 'Change Theme…', click: () => send('menu', 'themes') },
         { type: 'separator' },
         { label: 'Default Size', accelerator: 'CmdOrCtrl+0', click: () => zoomCommand(0) },
@@ -1525,12 +1529,24 @@ function buildMenu () {
         { role: 'minimize' },
         { role: 'zoom' },
         { type: 'separator' },
-        { label: 'Close Window', accelerator: 'Cmd+Shift+W', role: 'close' },
+        { label: 'Close Window', accelerator: 'CmdOrCtrl+Shift+W', role: 'close' },
         { type: 'separator' },
         { role: 'front' }
       ]
     }
   ]
+  if (!IS_MAC) {
+    // Windows has no application menu. Keep vault and settings commands under
+    // File, and put Exit there where Windows users expect it.
+    const appMenu = template[0]
+    const fileMenu = template[1]
+    const commands = appMenu.submenu.filter((item) =>
+      item.label === 'Open Vault…' || item.label === 'Settings…'
+    )
+    fileMenu.submenu.unshift(...commands, { type: 'separator' })
+    fileMenu.submenu.push({ type: 'separator' }, { role: 'quit' })
+    template.shift()
+  }
   Menu.setApplicationMenu(Menu.buildFromTemplate(template))
 }
 
@@ -3105,11 +3121,14 @@ function extractPdfTextOffThread (pdf, relPath) {
       if (!settled) finish(new Error(`PDF text worker exited with code ${code}`))
     })
     child.once('spawn', () => {
+      const ocr = IS_MAC && fsSync.existsSync(appAsset('pdf-ocr'))
+        ? appAsset('pdf-ocr')
+        : null
       child.postMessage({
         pdf,
         name: path.basename(relPath),
         extractor: appAsset('pdf-text.cjs'),
-        ocr: appAsset('pdf-ocr'),
+        ocr,
         fonts: path.join(appAsset('pdfjs'), 'standard_fonts') + path.sep,
         cmaps: path.join(appAsset('pdfjs'), 'cmaps') + path.sep,
         wasm: path.join(appAsset('pdfjs'), 'wasm') + path.sep
@@ -3531,7 +3550,7 @@ function claimExecutionSlot (kind) {
   let slot = slots.find((candidate) => !candidate.busy)
   if (!slot) {
     slot = {
-      path: path.join(runCacheDir(), `${EXEC_SLOT_PREFIX}${kind}-${slots.length}`),
+      path: path.join(runCacheDir(), `${EXEC_SLOT_PREFIX}${kind}-${slots.length}${EXECUTABLE_EXT}`),
       busy: false
     }
     slots.push(slot)
@@ -3548,7 +3567,7 @@ function compiledPlan (kind, binary, buildSteps) {
   return {
     steps: [
       ...buildSteps,
-      ['/bin/cp', [binary, slot.path], STAGE],
+      [null, [binary, slot.path], { ...STAGE, operation: 'copy' }],
       [slot.path, []]
     ],
     release: slot.release
@@ -3565,7 +3584,10 @@ runner('node', {
 /* stdout is a pipe, so Python otherwise block-buffers it and a long-running
    block can look silent until it exits. `-u` makes each print available to the
    streaming panel immediately; the renderer coalesces the resulting chunks. */
-runner('python', { file: 'block.py', steps: (f) => [['python3', ['-u', f]]] })
+runner('python', {
+  file: 'block.py',
+  steps: (f) => [[IS_WINDOWS ? 'python' : 'python3', ['-u', f]]]
+})
 runner('sh', { file: 'block.sh', steps: (f) => [['sh', [f]]] })
 runner('bash', { file: 'block.sh', steps: (f) => [['bash', [f]]] })
 runner('zsh', { file: 'block.sh', steps: (f) => [['zsh', [f]]] })
@@ -3606,7 +3628,10 @@ runner('lean', {
    atomic build, LRU touch, stable execution slot, and a tiny program for the
    idle warmup. Only the compiler command and language-specific names vary. */
 function compiledRunner (id, { file, prefix, seed, warmCode, compile }) {
-  const binaryFor = (code) => path.join(runCacheDir(), `${prefix}-${sha1(`${seed}\n${code}`)}`)
+  const binaryFor = (code) => path.join(
+    runCacheDir(),
+    `${prefix}-${sha1(`${seed}\n${code}`)}${EXECUTABLE_EXT}`
+  )
   const build = (source, output) => [...compile(source, output), BUILD]
   const compiled = { slot: prefix, warmCode, build }
 
@@ -3623,7 +3648,7 @@ function compiledRunner (id, { file, prefix, seed, warmCode, compile }) {
       }
       return compiledPlan(prefix, binary, [
         build(source, `${binary}.tmp`),
-        ['/bin/mv', [`${binary}.tmp`, binary], BUILD]
+        [null, [`${binary}.tmp`, binary], { ...BUILD, operation: 'move' }]
       ])
     }
   })
@@ -3664,7 +3689,7 @@ compiledRunner('cpp', {
  * session. The well-known locations below are a fallback for when that fails,
  * and a backstop for shells that only export PATH for interactive use.
  */
-const FALLBACK_PATHS = [
+const FALLBACK_PATHS = IS_WINDOWS ? [] : [
   '/opt/homebrew/bin', '/opt/homebrew/sbin',   // Homebrew, Apple silicon
   '/usr/local/bin', '/usr/local/sbin',         // Homebrew, Intel — and much else
   '/opt/local/bin',                            // MacPorts
@@ -3677,6 +3702,7 @@ const FALLBACK_PATHS = [
 let loginPath = null        // resolved once, at startup
 
 function readLoginPath () {
+  if (IS_WINDOWS) return Promise.resolve(process.env.PATH || '')
   return new Promise((resolve) => {
     const shell = process.env.SHELL || '/bin/zsh'
     // -l runs the profile files, -i because an interactive session is where
@@ -3770,6 +3796,7 @@ function startRun (id, cmd, args, { cwd, timeoutMs, env: extraEnv, quiet = false
     // Its own process group, so killing a shell takes the pipeline it started
     // with it rather than leaving orphans behind.
     detached: true,
+    windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe']
   })
 
@@ -3857,11 +3884,23 @@ async function runSequence (id, steps, { cwd, timeoutMs, cleanup, quiet = false 
       break
     }
 
-    result = await startRun(id, cmd, args, {
-      cwd,
-      timeoutMs: opts.build ? BUILD_TIMEOUT_MS : left,
-      quiet
-    })
+    if (opts.operation) {
+      const started = Date.now()
+      try {
+        if (opts.operation === 'copy') await fs.copyFile(args[0], args[1])
+        else if (opts.operation === 'move') await fs.rename(args[0], args[1])
+        else throw new Error(`Unknown file operation: ${opts.operation}`)
+        result = { code: 0, signal: null, timedOut: false, ms: Date.now() - started }
+      } catch (err) {
+        result = { code: null, error: err.message, ms: Date.now() - started }
+      }
+    } else {
+      result = await startRun(id, cmd, args, {
+        cwd,
+        timeoutMs: opts.build ? BUILD_TIMEOUT_MS : left,
+        quiet
+      })
+    }
 
     ms += result.ms
     if (opts.build) {
@@ -3902,14 +3941,14 @@ function warmRunner (lang) {
     const id = ++nextRunId
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), `tulip-warm-${spec.id}-`))
     const source = path.join(dir, spec.file)
-    const binary = path.join(dir, 'program')
+    const binary = path.join(dir, `program${EXECUTABLE_EXT}`)
     const slot = claimExecutionSlot(spec.compiled.slot)
 
     try {
       await fs.writeFile(source, spec.compiled.warmCode, 'utf8')
       const result = await runSequence(id, [
         spec.compiled.build(source, binary),
-        ['/bin/cp', [binary, slot.path], STAGE],
+        [null, [binary, slot.path], { ...STAGE, operation: 'copy' }],
         [slot.path, []]
       ], { cwd: dir, timeoutMs: DEFAULT_TIMEOUT_MS, cleanup: dir, quiet: true })
       return { ok: result.code === 0 }
@@ -3978,15 +4017,34 @@ ipcMain.handle('run:start', async (_e, lang, code) => {
    sequence is only *in* `runs` while one of its steps is actually running. */
 const cancelled = new Set()
 
+/** Stop a process and its descendants on the host platform. */
+function signalProcessTree (child, signal) {
+  if (!child?.pid) return
+  if (IS_WINDOWS) {
+    const args = ['/pid', String(child.pid), '/t']
+    if (signal === 'SIGKILL') args.push('/f')
+    try {
+      const killer = spawn('taskkill.exe', args, {
+        stdio: 'ignore', windowsHide: true, detached: true
+      })
+      killer.unref()
+    } catch {
+      try { child.kill() } catch { /* already gone */ }
+    }
+    return
+  }
+  try { process.kill(-child.pid, signal) } catch {
+    try { child.kill(signal) } catch { /* already gone */ }
+  }
+}
+
 /** SIGTERM first so a program can tidy up, SIGKILL if it will not go. */
 function stopRun (id) {
   cancelled.add(id)
   const run = runs.get(id)
   if (!run || run.done) return false
 
-  const signal = (sig) => {
-    try { process.kill(-run.child.pid, sig) } catch { try { run.child.kill(sig) } catch {} }
-  }
+  const signal = (sig) => signalProcessTree(run.child, sig)
   signal('SIGTERM')
   run.killTimer = setTimeout(() => signal('SIGKILL'), 2000)
   return true
@@ -4004,9 +4062,7 @@ function stopAllRuns () {
    `stopRun` would never fire, so the groups go outright. */
 function killAllRuns () {
   for (const run of runs.values()) {
-    try { process.kill(-run.child.pid, 'SIGKILL') } catch {
-      try { run.child.kill('SIGKILL') } catch { /* already gone */ }
-    }
+    signalProcessTree(run.child, 'SIGKILL')
   }
 }
 
