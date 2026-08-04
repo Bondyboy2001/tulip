@@ -7,12 +7,13 @@ import { when } from './time.js'
 import { mathPlugin } from './math.js'
 import { citePlugin } from './cite.js'
 import { routeAnchor, revealAnchorTarget } from './links.js'
+import { assetKind, assetUrl } from './assets.js'
 import {
   DEFAULT_CATALOGUE, DEFAULT_MODEL,
   asOptions, effortLabel, effortsFor, modelFromConfig, nearestEffort,
   offeredModels, providerGrant, providerLabel, splitKey
 } from './models.js'
-import { isChatImage, isPdfPath, isSitePath, noteName } from './vault-paths.js'
+import { isChatAttachment, isPdfPath, isSitePath, noteName } from './vault-paths.js'
 
 /**
  * The copilot panel.
@@ -211,6 +212,23 @@ export function mountCopilot ({
   busyRow.append(busySpinner, busyLabel, busyTime)
   el.log.append(busyRow)
 
+  /* One top-layer viewer for image attachments in both the composer and sent
+     messages. It lives outside the panel so a narrow Copilot column cannot
+     clip the image the reader asked to inspect. */
+  const attachmentDialog = element('dialog', 'ai-attachment-dialog')
+  const attachmentDialogFigure = element('figure', 'ai-attachment-dialog-figure')
+  const attachmentDialogImage = document.createElement('img')
+  const attachmentDialogCaption = element('figcaption', 'ai-attachment-dialog-caption')
+  const attachmentDialogClose = element('button', 'ai-attachment-dialog-close')
+  attachmentDialogClose.type = 'button'
+  attachmentDialogClose.title = 'Close image preview (Esc)'
+  attachmentDialogClose.setAttribute('aria-label', 'Close image preview')
+  attachmentDialogClose.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4.6 4.6 6.8 6.8M11.4 4.6l-6.8 6.8"/></svg>'
+  attachmentDialogFigure.append(attachmentDialogImage, attachmentDialogCaption)
+  attachmentDialog.append(attachmentDialogFigure, attachmentDialogClose)
+  document.body.append(attachmentDialog)
+  let attachmentPreviewFocus = null
+
   let busyAt = 0
   let busyTick = 0
   let busyPhase = 'Working'
@@ -309,6 +327,26 @@ export function mountCopilot ({
      work, and is what the cap sheds first. */
   const prose = (msg) => msg.t === 'you' || msg.t === 'bot'
 
+  /* The empty-chat invitation is UI, not conversation history. Older saved
+     chats contain it as an ordinary note, so recognise both the new marker and
+     that exact legacy shape while cleaning them up. */
+  const isStarter = (msg) => msg?.starter === true ||
+    (msg?.t === 'note' &&
+      (/^Ask about .+? or anything else in the vault\. You will see it edit\. Type @ for a file, \/ for commands\.$/.test(msg.text) ||
+       /has your vault open\. Open a note to start a conversation about it\.$/.test(msg.text)))
+
+  function dismissStarters (convo) {
+    let removed = false
+    for (let at = convo.messages.length - 1; at >= 0; at--) {
+      if (!isStarter(convo.messages[at])) continue
+      const [starter] = convo.messages.splice(at, 1)
+      starter.node?.remove()
+      starter.node = null
+      removed = true
+    }
+    return removed
+  }
+
   /**
    * The cap, applied to a conversation that has just grown.
    *
@@ -339,6 +377,7 @@ export function mountCopilot ({
   function push (msg, to = null) {
     const path = to?.path ?? state.notePath
     const convo = to?.convo ?? chat(path)
+    if (msg.t === 'you') dismissStarters(convo)
     convo.messages.push(msg)
     convo.at = file(path).at = Date.now()
     trim(convo)
@@ -613,9 +652,102 @@ export function mountCopilot ({
       }
     }
     if (msg === state.stream) paintStream(node, msg.text || '')
+    else if (msg.t === 'you') paintUserMessage(node, msg)
     else node.innerHTML = html(msg)
     msg.node = node
     return node
+  }
+
+  /** A filename, kept intact for the attachment card rather than shortened to
+   *  the extensionless document titles used elsewhere in the panel. */
+  const attachmentName = (path) => String(path || '').split('/').pop() || 'Attachment'
+
+  /** The compact visual representation shared by the composer and the sent
+   *  message. Images are their own preview; PDFs and other files retain their
+   *  useful filename beside a familiar document mark. */
+  function attachmentCard (path, removable = false) {
+    const kind = assetKind(path)
+    const card = element('div', `ai-attachment is-${kind}`)
+    card.dataset.path = path
+
+    const preview = element(kind === 'image' ? 'button' : 'span', 'ai-attachment-preview')
+    if (kind === 'image') {
+      preview.type = 'button'
+      preview.dataset.previewImage = path
+      preview.title = `Preview ${attachmentName(path)}`
+      preview.setAttribute('aria-label', `Preview ${attachmentName(path)}`)
+      const thumb = document.createElement('img')
+      thumb.src = assetUrl(path)
+      thumb.alt = ''
+      preview.append(thumb)
+    } else {
+      preview.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true">' +
+        '<path d="M6.4 2.6h6.6L19 8.6V20a1.6 1.6 0 0 1-1.6 1.6H6.4A1.6 1.6 0 0 1 4.8 20V4.2a1.6 1.6 0 0 1 1.6-1.6z"/>' +
+        '<path class="ai-attachment-fold" d="M13 2.6 19 8.6h-4.4A1.6 1.6 0 0 1 13 7z"/></svg>'
+      if (kind === 'pdf') preview.append(element('span', 'ai-attachment-kind', 'PDF'))
+    }
+    card.append(preview)
+
+    if (kind !== 'image') {
+      const copy = element('span', 'ai-attachment-copy')
+      copy.append(element('span', 'ai-attachment-name', attachmentName(path)))
+      if (kind === 'pdf') copy.append(element('span', 'ai-attachment-type', 'PDF'))
+      card.append(copy)
+    }
+
+    if (removable) {
+      const remove = element('button', 'ai-attachment-remove')
+      remove.type = 'button'
+      remove.dataset.removeAttachment = path
+      remove.title = `Remove ${attachmentName(path)}`
+      remove.setAttribute('aria-label', `Remove ${attachmentName(path)}`)
+      remove.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4.6 4.6 6.8 6.8M11.4 4.6l-6.8 6.8"/></svg>'
+      card.append(remove)
+    }
+    return card
+  }
+
+  function openAttachmentPreview (path, from) {
+    attachmentPreviewFocus = from
+    attachmentDialogImage.src = assetUrl(path)
+    attachmentDialogImage.alt = attachmentName(path)
+    attachmentDialogCaption.textContent = attachmentName(path)
+    attachmentDialog.showModal()
+    attachmentDialogClose.focus()
+  }
+
+  function closeAttachmentPreview () {
+    if (!attachmentDialog.open) return
+    attachmentDialog.close()
+  }
+
+  attachmentDialogClose.addEventListener('click', closeAttachmentPreview)
+  attachmentDialog.addEventListener('click', (event) => {
+    if (event.target === attachmentDialog) closeAttachmentPreview()
+  })
+  attachmentDialog.addEventListener('close', () => {
+    attachmentDialogImage.removeAttribute('src')
+    attachmentPreviewFocus?.focus()
+    attachmentPreviewFocus = null
+  })
+
+  el.panel.addEventListener('click', (event) => {
+    const preview = event.target.closest('[data-preview-image]')
+    if (preview) openAttachmentPreview(preview.dataset.previewImage, preview)
+  })
+
+  function paintUserMessage (node, msg) {
+    const attached = Array.isArray(msg.attachments) ? msg.attachments : []
+    if (attached.length) {
+      const strip = element('div', 'msg-attachments')
+      for (const path of attached) strip.append(attachmentCard(path))
+      node.append(strip)
+    }
+    if (msg.text) {
+      const copy = element('div', 'msg-you-copy')
+      copy.innerHTML = html(msg)
+      node.append(copy)
+    }
   }
 
   function drawReview (msg) {
@@ -999,6 +1131,10 @@ export function mountCopilot ({
       case 'thinking':
         thinking(event, to)
         phase('Thinking')
+        break
+
+      case 'preparing-pdf':
+        phase('Preparing PDF')
         break
 
       case 'answering':
@@ -1476,11 +1612,11 @@ export function mountCopilot ({
    * of speech: the words were left in the message box, and a reader who kept
    * typing lost the follow-up under whatever they wrote next.
    */
-  function enqueue (text, images) {
+  function enqueue (text, attachments) {
     const path = state.notePath
     const convo = chat(path)
-    const msg = push({ t: 'you', text, queued: true }, { path, convo })
-    state.queue.push({ text, images, msg, path, convo })
+    const msg = push({ t: 'you', text, attachments, queued: true }, { path, convo })
+    state.queue.push({ text, attachments, msg, path, convo })
   }
 
   /** The next queued question, once the copilot is free to hear it. */
@@ -1496,25 +1632,24 @@ export function mountCopilot ({
 
   async function submit () {
     const text = el.input.value.trim()
-    if (!text) return
+    const attachments = [...pendingAttachments]
+    if (!text && !attachments.length) return
 
     // Typed straight through without the menu — a command all the same.
     const found = command(text)
     if (found) { el.input.value = ''; sizeInput(); hideMenu(); found.run(); return }
 
-    /* Pictures pasted into the box are already files in the vault; the message
-       carries their paths, so what is sent is read off the text rather than
-       kept alongside it — a path the reader deleted was never attached. */
-    const images = imagesIn(text)
-
+    /* Selected files and pasted pictures are already in the vault. Their paths
+       travel beside the reader's words and never have to appear inside them. */
     el.input.value = ''
+    clearAttachments()
     sizeInput()
-    if (state.busy) { enqueue(text, images); return }
+    if (state.busy) { enqueue(text, attachments); return }
 
     const path = state.notePath
     const convo = chat(path)
-    const msg = push({ t: 'you', text }, { path, convo })
-    await deliver({ text, images, msg, path, convo })
+    const msg = push({ t: 'you', text, attachments }, { path, convo })
+    await deliver({ text, attachments, msg, path, convo })
   }
 
   /**
@@ -1524,13 +1659,35 @@ export function mountCopilot ({
    * later and possibly with the reader looking at another note — so everything
    * this needs is passed in rather than read off what happens to be on screen.
    */
-  async function deliver ({ text, images, path, convo }) {
+  async function deliver ({ text, attachments, path, convo }) {
     // The turn is anchored to this conversation before anything can answer,
     // so browsing away while it runs cannot redirect what comes back.
     state.turn = { path, convo }
     const to = state.turn
     setBusy(true)
 
+    /* Every way out of the rest of this either settles the panel or hands it to
+       a turn that will. A *throw* did neither: `setBusy(true)` is already spent
+       above, and the caller's `.catch(() => {})` — drain, askAgain, submit —
+       swallowed it, so a bridge that rejected rather than answering left the
+       working strip up, the composer showing Stop, and no way back short of
+       reopening the app. Anything unforeseen is reported as the failure it is.
+       Guarded on the turn's identity for the same reason the returns below are:
+       a newer turn owns the panel by then, and settling it would put down a
+       strip that belongs to something still running. */
+    try {
+      await sendTurn(to, { text, attachments, convo })
+    } catch (err) {
+      if (state.turn === to) {
+        state.started = false
+        failed(err?.message || 'The copilot could not be reached.', to)
+        setBusy(false)
+      }
+    }
+  }
+
+  /** The body of a turn — everything `deliver` guards. */
+  async function sendTurn (to, { text, attachments, convo }) {
     if (!await ensureSession(convo)) { setBusy(false); return }
     /* Stop may have been pressed while the session was starting — `halt` has
        nothing to signal yet at that point, so it settles the panel and returns,
@@ -1553,7 +1710,7 @@ export function mountCopilot ({
        round trip to be answered with "thank you". */
     const opening = convo.seed ? `${convo.seed}\n\n${text}` : text
 
-    const result = await api.ai.send(opening, { ...context_, images })
+    const result = await api.ai.send(opening, { ...context_, attachments })
     // Spent only once it has actually gone out: a send that failed leaves the
     // digest for the message that tries again.
     if (result?.ok) convo.seed = ''
@@ -1581,11 +1738,17 @@ export function mountCopilot ({
     const at = convo.messages.findIndex((msg) => msg.node === node)
     const asked = [...convo.messages.slice(0, at === -1 ? undefined : at)]
       .reverse().find((msg) => msg.t === 'you' && !msg.dropped)
-    if (!asked?.text) { note('There is nothing above this to ask again.'); return }
+    if (!asked || (!asked.text && !asked.attachments?.length)) {
+      note('There is nothing above this to ask again.')
+      return
+    }
 
     const path = state.notePath
-    const msg = push({ t: 'you', text: asked.text }, { path, convo })
-    deliver({ text: asked.text, images: imagesIn(asked.text), msg, path, convo })
+    const attachments = Array.isArray(asked.attachments)
+      ? [...asked.attachments]
+      : attachmentsIn(asked.text)
+    const msg = push({ t: 'you', text: asked.text, attachments }, { path, convo })
+    deliver({ text: asked.text, attachments, msg, path, convo })
       .catch(() => {})
   }
 
@@ -1618,9 +1781,8 @@ export function mountCopilot ({
    *
    * None of the three CLIs takes an image over its message stream — they read
    * files — so the paste becomes a file in the vault first and the message
-   * carries its path. The path is written into the box in plain sight rather
-   * than held invisibly beside it: what is attached is then something the
-   * reader can see, move and delete like any other part of what they typed.
+   * carries its path. The composer shows the resulting file as a removable
+   * card, keeping delivery data out of the words the reader is writing.
    */
   el.input.addEventListener('paste', (event) => {
     const files = [...(event.clipboardData?.files || [])]
@@ -1643,14 +1805,48 @@ export function mountCopilot ({
       return
     }
     if (!result?.path) return
-    quote(`\`${result.path}\``)
+    addAttachments([result.path])
   }
 
-  /** The paths in a message that name a picture pasted into this box. */
-  const imagesIn = (text) =>
+  /** Compatibility for a retry of an older transcript whose attachment path
+   *  was written into its message text before the composer gained cards. */
+  const attachmentsIn = (text) =>
     [...String(text).matchAll(/`([^`\n]+)`/g)]
       .map((found) => found[1].trim())
-      .filter(isChatImage)
+      .filter(isChatAttachment)
+
+  /* Paths are delivery data, not message copy. The composer keeps them here
+     and paints them as cards so a filesystem location never has to masquerade
+     as something the reader typed. */
+  let pendingAttachments = []
+
+  function paintAttachments () {
+    el.attachments.replaceChildren(...pendingAttachments.map((path) => attachmentCard(path, true)))
+    el.attachments.hidden = !pendingAttachments.length
+  }
+
+  function addAttachments (paths) {
+    const next = [...pendingAttachments]
+    for (const path of paths || []) {
+      if (isChatAttachment(path) && !next.includes(path)) next.push(path)
+    }
+    pendingAttachments = next
+    paintAttachments()
+    el.input.focus()
+  }
+
+  function clearAttachments () {
+    pendingAttachments = []
+    paintAttachments()
+  }
+
+  el.attachments.addEventListener('click', (event) => {
+    const remove = event.target.closest('[data-remove-attachment]')
+    if (!remove) return
+    pendingAttachments = pendingAttachments.filter((path) => path !== remove.dataset.removeAttachment)
+    paintAttachments()
+    el.input.focus()
+  })
 
   el.input.addEventListener('keydown', (e) => {
     // While the menu is up it owns the keys that mean "move" and "choose";
@@ -1738,22 +1934,12 @@ export function mountCopilot ({
        is for — watching the number climb — and a percentage is what the ring
        already says without needing to be read. */
     const said = `${used.toLocaleString()} of ${room.toLocaleString()}`
-    /* What the conversation has cost, when anybody is counting. Beside the
-       context because they are the two running totals a turn adds to.
-
-       Only Claude prices a turn. For the other two the readout says whose
-       silence it is rather than simply stopping after the token count — an
-       absent number where one usually sits reads as a turn that was free, and
-       the asymmetry is the CLI's, not the app's. Attributed to the copilot the
-       conversation was actually had with, which is not always the one the
-       control is showing now. */
-    const by = convo.threadOf || provider()
+    /* What the conversation has cost, when its provider reports one. Beside
+       the context because they are the two running totals a turn adds to; an
+       unavailable total is simply omitted. */
     const spent = convo.cost
       ? ` · $${convo.cost < 0.01 ? convo.cost.toFixed(4) : convo.cost.toFixed(2)}`
-      /* Claude with nothing on the meter is a transcript from before this was
-         recorded, not a copilot that keeps no accounts — so it says nothing,
-         which is what it has always done. */
-      : by === 'claude' ? '' : ` · ${providerLabel(by)} does not report cost`
+      : ''
     el.contextPop.textContent = said + spent
     el.context.setAttribute('aria-label', `Context used: ${said}${spent}`)
 
@@ -1942,11 +2128,16 @@ export function mountCopilot ({
    */
   function paintWrite () {
     el.write.setAttribute('aria-pressed', state.write ? 'true' : 'false')
+    const label = el.write.querySelector('.ai-write-label')
+    if (label) label.textContent = state.write ? 'Can edit' : 'Read only'
     const may = providerGrant(provider(), state.write)
     const said = may ? `${providerLabel(provider())} may ${may}.` : ''
     el.write.title = state.write
       ? `${said} Click to make it read-only.`
       : `${said} Click to let it edit.`
+    el.write.setAttribute('aria-label', state.write
+      ? `${providerLabel(provider())} can edit notes. Click for read only.`
+      : `${providerLabel(provider())} is read only. Click to allow editing.`)
   }
 
   /**
@@ -1968,19 +2159,19 @@ export function mountCopilot ({
     paintConfig()
   }
 
-  /* The open document, named the way the vault names it, so the agent can
-     resolve it the same way a wikilink would. A PDF and a website are named by
-     their paths instead: a wikilink means a note, and neither of those is one
-     — the agent opens both as files. */
+  /* Chosen files are copied into the vault, then represented by compact cards
+     above the text field. The path remains delivery data rather than appearing
+     as message text. */
   el.attach.addEventListener('click', async () => {
-    const { note: path, kind } = await context()
-    if (!path) { note('Nothing is open.'); return }
-    const gap = el.input.value && !el.input.value.endsWith(' ') ? ' ' : ''
-    el.input.value += kind === 'pdf' || kind === 'site'
-      ? `${gap}\`${path}\` `
-      : `${gap}[[${displayName(path)}]] `
-    sizeInput()
-    el.input.focus()
+    el.attach.disabled = true
+    try {
+      const paths = await api.ai.pickAttachments()
+      if (paths?.length) addAttachments(paths)
+    } catch (err) {
+      note(err?.message || 'Those files could not be attached.', 'warn')
+    } finally {
+      el.attach.disabled = false
+    }
   })
 
   /* ---------------------------------------------------------- the panel */
@@ -2019,6 +2210,10 @@ export function mountCopilot ({
   function repaint () {
     dropDirty()
     const convo = chat()
+    /* Upgrade transcripts saved before starters were marked. Once somebody
+       has spoken, the invitation has done its job and does not come back on
+       the next launch or note switch. */
+    if (convo.messages.some((msg) => msg.t === 'you') && dismissStarters(convo)) save()
     if (shown && shown !== convo) for (const msg of shown.messages) msg.node = null
     shown = convo
     el.log.replaceChildren(...convo.messages.map(draw), busyRow)
@@ -2035,9 +2230,13 @@ export function mountCopilot ({
   /** Said once per note, and only into an empty transcript. */
   function greet () {
     if (chat().messages.length) return
-    note(state.notePath
-      ? `Ask about ${displayName(state.notePath)}, or anything else in the vault. You will see it edit. Type @ for a file, / for commands.`
-      : `${providerLabel(provider())} has your vault open. Open a note to start a conversation about it.`)
+    push({
+      t: 'note',
+      starter: true,
+      text: state.notePath
+        ? `Ask about ${displayName(state.notePath)}, or anything else in the vault. You will see it edit. Type @ for a file, / for commands.`
+        : `${providerLabel(provider())} has your vault open. Open a note to start a conversation about it.`
+    })
   }
 
   /* The real catalogue costs two CLI subprocesses and a megabyte of JSON, and

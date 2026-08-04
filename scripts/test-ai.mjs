@@ -22,7 +22,8 @@ import MarkdownIt from 'markdown-it'
 import ai from '../electron/ai.js'
 import { citePlugin } from '../src/cite.js'
 
-const { draftFields, detailOf, readLines, parseCodex, parseOpencode, codexTool } = ai.parsers
+const { draftFields, detailOf, readLines, parseCodex, parseOpencode, parseClaude, mergeClaude, codexTool } = ai.parsers
+const { systemPrompt, turnRules, promptFor } = ai.prompts
 
 let failures = 0
 const check = (name, ok, detail = '') => {
@@ -33,6 +34,39 @@ const check = (name, ok, detail = '') => {
 const same = (name, got, want) =>
   check(name, JSON.stringify(got) === JSON.stringify(want),
         `got ${JSON.stringify(got)}, wanted ${JSON.stringify(want)}`)
+
+/* --------------------------------------------------------------- prompts */
+
+const briefing = systemPrompt('/tmp/example-vault')
+check('the system prompt stays compact', briefing.length < 5000,
+      `${briefing.length.toLocaleString()} characters`)
+check('the vault boundary is explicit',
+      briefing.includes('The vault root is /tmp/example-vault') &&
+      briefing.includes('Work only inside it'))
+check('Tulip-owned annotations stay read-only',
+      briefing.includes('Never write inside .annotations/'))
+check('new notes omit unsolicited YAML',
+      turnRules.includes('Add YAML frontmatter only when explicitly requested'))
+check('new notes do not duplicate the filename title',
+      turnRules.includes('do not repeat it as a `#` heading'))
+check('PDF and bibliography citation forms survive',
+      turnRules.includes('`[page 12]`') && turnRules.includes('`[@key]`'))
+
+const pdfTurn = promptFor('What time is the cruise?', {
+  attachments: ['.attachments/Chat/ticket.pdf', '.attachments/Chat/photo.png'],
+  pdfDocuments: [{
+    path: '.attachments/Chat/ticket.pdf',
+    textPath: '.annotations/.attachments/Chat/ticket.pdf.txt',
+    ocrPages: 1
+  }],
+  pdfContext: '--- ticket.pdf page 1 of 1 ---\nTIME: 16:00'
+})
+check('PDF attachments name prepared text rather than asking to open the binary',
+      pdfTurn.includes('.annotations/.attachments/Chat/ticket.pdf.txt') &&
+      !pdfTurn.includes('Open it with your file-reading tool:\n- .attachments/Chat/ticket.pdf'))
+check('ranked PDF pages ride the turn', pdfTurn.includes('TIME: 16:00'))
+check('ordinary attachments still reach the file tool',
+      pdfTurn.includes('.attachments/Chat/photo.png'))
 
 /* ------------------------------------------------------------ draftFields */
 
@@ -230,6 +264,54 @@ same('the non-verbose form is read by the same parser',
      ['opencode/big-pickle', 'anthropic/claude-opus-5'])
 same('a line that is not an id is not a model', parseOpencode('Models:\n\n'), [])
 
+/* Shaped as `claude models list` answers: a prose preamble, then a table with
+   the label, the full id and the context size, newest first — then more prose
+   for the model that is not in the table. Copied from the real output, because
+   the row shape (an optional "Claude " prefix, backticked id, `1M`/`200K`)
+   is exactly what the row reader depends on. */
+const claudeCatalogue = `
+Here's the current Claude model lineup (from the API reference, cached 2026-06-24):
+
+| Model | ID | Context | Input $/1M | Output $/1M |
+|---|---|---|---|---|
+| Claude Fable 5 | \`claude-fable-5\` | 1M | $10.00 | $50.00 |
+| Claude Opus 6 | \`claude-opus-6\` | 1M | $5.00 | $25.00 |
+| Claude Opus 5 | \`claude-opus-5\` | 1M | $5.00 | $25.00 |
+| Claude Sonnet 5 | \`claude-sonnet-5\` | 1M | $3.00 | $15.00 |
+| Claude Haiku 4.5 | \`claude-haiku-4-5\` | 200K | $1.00 | $5.00 |
+
+(There's also Claude Mythos 5, only available through Project Glasswing.)
+`
+
+const claudeNewest = parseClaude(claudeCatalogue)
+same('each family is read once, from its newest row',
+     [...claudeNewest.keys()], ['fable', 'opus', 'sonnet', 'haiku'])
+same('the newest of a family is what an alias now means',
+     claudeNewest.get('opus').label, 'Opus 6')
+check('the context column is read as a count',
+      claudeNewest.get('opus').context === 1000000 && claudeNewest.get('haiku').context === 200000)
+check('a header row is not a model', !claudeNewest.has('model'))
+check('prose is not a model', !claudeNewest.has('mythos'))
+
+/* mergeClaude: what the CLI said, over the hand-written fallback — so "Opus 5"
+   becomes "Opus 6" the day the alias moves, without an edit to ai-models.json. */
+const claudeMerged = mergeClaude(
+  [
+    { id: 'opus', label: 'Opus 5', effort: 'high', efforts: ['low', 'high'], context: 1000000 },
+    { id: 'sonnet', label: 'Sonnet 5', effort: 'high', efforts: ['low', 'high'], context: 1000000 }
+  ],
+  claudeNewest
+)
+same('a newer lineup re-labels the alias',
+     [claudeMerged[0].id, claudeMerged[0].label], ['opus', 'Opus 6'])
+check('its effort ladder survives — the lineup does not publish one',
+      claudeMerged[0].efforts.length === 2 && claudeMerged[0].effort === 'high')
+check('a family the CLI did not name keeps its fallback label',
+      claudeMerged[1].label === 'Sonnet 5')
+same('a CLI that answers nothing changes nothing',
+     mergeClaude([{ id: 'opus', label: 'Opus 5' }], parseClaude('')).map((m) => m.label),
+     ['Opus 5'])
+
 /* -------------------------------------------------------------- codexTool */
 
 /* Codex announces a call twice — running, then finished — and both have to name
@@ -257,10 +339,16 @@ const md = new MarkdownIt({ html: false, linkify: true, breaks: true, typographe
 const cited = (text) => md.render(text)
 const pageOf = (text) => /data-cite-page="(\d+)"/.exec(cited(text))?.[1] || null
 const pathOf = (text) => /data-cite-path="([^"]*)"/.exec(cited(text))?.[1] || null
+const labelOf = (text) => /class="ai-cite"[^>]*>([^<]*)<\/a>/.exec(cited(text))?.[1] || null
 
 check('[p. 12]', pageOf('See [p. 12].') === '12')
+check('[p. 12] is displayed as page 12', labelOf('See [p. 12].') === 'page 12')
 check('[pp. 12–14] cites the first page', pageOf('See [pp. 12–14].') === '12')
+check('[pp. 12–14] is displayed with pages',
+      labelOf('See [pp. 12–14].') === 'pages 12–14')
 check('[pp. 12-14] with a plain hyphen', pageOf('See [pp. 12-14].') === '12')
+check('[pp. 1, 5] remains a citation with a readable label',
+      pageOf('See [pp. 1, 5].') === '1' && labelOf('See [pp. 1, 5].') === 'pages 1, 5')
 check('[page 3]', pageOf('See [page 3].') === '3')
 check('[pages 3 to 5]', pageOf('See [pages 3 to 5].') === '3')
 check('a named document', pathOf('See [Paper.pdf p. 12].') === 'Paper.pdf')

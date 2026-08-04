@@ -11,10 +11,11 @@
  */
 
 /**
- * `[p. 12]`, `[pp. 12–14]`, `[page 12]`, and — when the answer ranges over more
- * than the document on screen — `[Paper.pdf p. 12]`. The copilot is asked for
- * this shape in the system prompt (electron/ai.js), but the pattern is
- * deliberately the one a person would write anyway: a model that has never
+ * `[page 12]`, `[pages 12–14]`, `[pages 1, 5]`, and — when the answer ranges
+ * over more than the document on screen — `[Paper.pdf page 12]`. Older replies
+ * using `p.` and `pp.` remain valid and are displayed with the full words. The
+ * copilot is asked for this shape in the system prompt (electron/ai.js), but
+ * the pattern is deliberately the one a person would write anyway: a model that has never
  * heard the instruction still lands on it half the time, and a reply from
  * before the instruction existed becomes clickable when it is read back.
  *
@@ -22,7 +23,7 @@
  * that is re-rendered on every frame while it streams, and slicing the tail of
  * the message each time is a copy per bracket.
  */
-export const CITE = /\[(?:([^[\]|<>]{1,120}?\.pdf)[,;]?\s+)?(pp?\.|pages?|p)\s*(\d{1,5})(?:\s*(?:–|—|-|to)\s*(\d{1,5}))?\]/iy
+const CITE = /\[(?:([^[\]|<>]{1,120}?\.pdf)[,;]?\s+)?(pp?\.|pages?|p)\s*(\d{1,5}(?:\s*(?:–|—|-|to|,)\s*\d{1,5})*)\]/iy
 
 export function citePlugin (md) {
   /* After `link`, so `[p. 12](https://…)` stays the link it was written as —
@@ -37,16 +38,24 @@ export function citePlugin (md) {
     if (!silent) {
       const token = state.push('cite', '', 0)
       token.content = match[0].slice(1, -1).trim()
-      token.meta = { path: match[1] || '', page: Number(match[3]) }
+      const pages = match[3]
+        .replace(/\s*(?:–|—|-|to)\s*/gi, '–')
+        .replace(/\s*,\s*/g, ', ')
+      const path = match[1] || ''
+      token.meta = {
+        path,
+        page: Number.parseInt(pages, 10),
+        label: `${path ? `${path} ` : ''}${/[–,]/.test(pages) ? 'pages' : 'page'} ${pages}`
+      }
     }
     state.pos += match[0].length
     return true
   })
 
   md.renderer.rules.cite = (tokens, i) => {
-    const { path, page } = tokens[i].meta
+    const { path, page, label } = tokens[i].meta
     const where = path ? ` data-cite-path="${md.utils.escapeHtml(path)}"` : ''
     return `<a class="ai-cite" href="#" data-cite-page="${page}"${where}>` +
-           `${md.utils.escapeHtml(tokens[i].content)}</a>`
+           `${md.utils.escapeHtml(label)}</a>`
   }
 }

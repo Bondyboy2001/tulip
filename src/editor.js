@@ -21,7 +21,11 @@ import { mathPreview, equationsFor } from './math.js'
 import { moneyPreview } from './money.js'
 import { codeBlockKeymap, proseBrackets, codeBlockView } from './codeblock.js'
 import { runBlocks } from './runblocks.js'
-import { languageTableMode, tableAssetResolver, tableCursorGuard, tablePreview } from './table.js'
+import { propertiesPreview } from './properties.js'
+import {
+  languageTableMode, tableAssetResolver, tableCursorGuard, tablePreview,
+  tableSearchHighlight, insertTable, fitAllColumns
+} from './table.js'
 import {
   findEmbeds, specForEmbed, renderEmbed, destroyEmbeds, withEmbedSize,
   embedResizeGrip, wireEmbedResize
@@ -34,7 +38,7 @@ import { svgBlocks } from './svg.js'
 import { headingsFor, blockReferences, blockReferenceOnLine } from './headings.js'
 import { findInlineHighlights } from './marks.js'
 import { findCitations } from './citations.js'
-import { fileDiff } from './linediff.js'
+import { fileDiff, withinLines } from './linediff.js'
 
 /* ---------------------------------------------------------------- theme */
 
@@ -117,12 +121,12 @@ const tulipTheme = EditorView.theme({
   /* A Copilot edit is shown as a familiar diff without putting any of the
      removed text back into the Markdown. Added source lines are the real
      document; removed ones are read-only block widgets beside them. */
-  '&.is-raw .cm-agent-added-line': {
+  '.cm-agent-added-line': {
     position: 'relative',
     background: 'color-mix(in srgb, var(--code-added) 14%, transparent)',
     boxShadow: 'inset 3px 0 0 color-mix(in srgb, var(--code-added) 72%, transparent)'
   },
-  '&.is-raw .cm-agent-added-line::before': {
+  '.cm-agent-added-line::before': {
     content: '"+"',
     position: 'absolute',
     left: '7px',
@@ -130,6 +134,16 @@ const tulipTheme = EditorView.theme({
     fontFamily: 'var(--font-mono)',
     fontWeight: '650',
     userSelect: 'none'
+  },
+  /* The words that moved, marked the way the panel's diff card marks them: a
+     deeper wash of the line's colour over what actually changed. */
+  '.cm-agent-word-added': {
+    background: 'color-mix(in srgb, var(--code-added) 34%, transparent)',
+    borderRadius: '2px'
+  },
+  '.cm-agent-word-removed': {
+    background: 'color-mix(in srgb, var(--code-removed) 34%, transparent)',
+    borderRadius: '2px'
   },
   '.cm-agent-working-line': {
     background: 'color-mix(in srgb, var(--accent) 12%, transparent)',
@@ -156,10 +170,6 @@ const tulipTheme = EditorView.theme({
     boxShadow: '0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent)'
   },
   '.cm-agent-deleted': {
-    display: 'none'
-  },
-  '&.is-raw .cm-agent-deleted': {
-    display: 'block',
     margin: '1px -24px',
     color: 'var(--code-removed)',
     background: 'color-mix(in srgb, var(--code-removed) 13%, transparent)',
@@ -194,16 +204,27 @@ const tulipTheme = EditorView.theme({
     boxShadow: '0 10px 30px -10px rgb(0 0 0 / .5)',
     overflow: 'hidden'
   },
+  '.cm-tooltip.cm-tooltip-autocomplete': { padding: '4px' },
   '.cm-tooltip.cm-tooltip-autocomplete > ul': {
     fontFamily: 'var(--font-ui)',
-    fontSize: '12.5px',
-    maxHeight: '19em',
-    minWidth: '220px'
+    fontSize: '12px',
+    maxHeight: '17em',
+    minWidth: '176px',
+    maxWidth: '260px'
   },
+  /* A list of short labels, so the row is only as tall as one: the menu is
+     read by scanning down a column of names, and every pixel between them is
+     one more the eye has to travel. The selected row is a rounded band inside
+     the card's padding rather than a stripe across it — the same shape the
+     sidebar and the quick switcher use for the row you are on. */
   '.cm-tooltip.cm-tooltip-autocomplete > ul > li': {
-    padding: '4px 12px',
+    padding: '4px 9px',
+    borderRadius: '5px',
     color: 'var(--ink-soft)',
-    lineHeight: '1.45'
+    lineHeight: '1.4',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis'
   },
   '.cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected]': {
     background: 'var(--accent-dim)',
@@ -211,16 +232,23 @@ const tulipTheme = EditorView.theme({
   },
   // The group headers the slash menu sets — quiet, like the sidebar's labels.
   '.cm-tooltip.cm-tooltip-autocomplete > ul > completion-section': {
-    padding: '7px 12px 2px',
-    fontSize: '10px',
+    padding: '7px 9px 3px',
+    fontSize: '9.5px',
     fontWeight: '650',
-    letterSpacing: '.07em',
+    letterSpacing: '.08em',
     textTransform: 'uppercase',
     color: 'var(--faint)',
     borderBottom: 'none',
     opacity: '1'
   },
-  // What a command inserts, kept to a whisper on the right edge.
+  '.cm-tooltip.cm-tooltip-autocomplete > ul > completion-section:first-child': {
+    paddingTop: '3px'
+  },
+  /* Only the lists whose right-hand column says something the label does not —
+     a language's spelled-out name beside its id. The slash menu carries no
+     detail at all: a column of `![[…]]` beside "Image or file" was syntax
+     shown to someone who opened a menu precisely so they would not have to
+     know it. */
   '.cm-completionDetail': {
     float: 'right',
     marginLeft: '18px',
@@ -1615,11 +1643,18 @@ const agentFlash = StateField.define({
 const agentDiffEffect = StateEffect.define() // { before, after } | null
 
 class AgentDeletedWidget extends WidgetType {
-  constructor (rows) { super(); this.rows = rows }
+  constructor (rows) { super(); this.rows = rows } // [{ text, pieces }]
+
   eq (other) {
+    const samePieces = (a, b) => (a == null || b == null)
+      ? a == b
+      : a.length === b.length &&
+        a.every((piece, i) => piece.text === b[i].text && piece.changed === b[i].changed)
     return other.rows.length === this.rows.length &&
-      other.rows.every((row, i) => row.before === this.rows[i].before && row.text === this.rows[i].text)
+      this.rows.every((row, i) =>
+        row.text === other.rows[i].text && samePieces(row.pieces, other.rows[i].pieces))
   }
+
   toDOM () {
     const block = document.createElement('div')
     block.className = 'cm-agent-deleted'
@@ -1632,7 +1667,20 @@ class AgentDeletedWidget extends WidgetType {
       mark.className = 'cm-agent-diff-mark'
       mark.textContent = '−'
       const text = document.createElement('span')
-      text.textContent = row.text || ' '
+      /* On a line the copilot rewrote rather than removed from nothing, the
+         words that actually moved take a deeper colour; a fully removed line
+         keeps the row's flat tint. */
+      if (row.pieces) {
+        for (const piece of row.pieces) {
+          if (!piece.changed) { text.append(piece.text); continue }
+          const moved = document.createElement('span')
+          moved.className = 'cm-agent-word-removed'
+          moved.textContent = piece.text
+          text.append(moved)
+        }
+      } else {
+        text.textContent = row.text || ' '
+      }
       line.append(mark, text)
       block.append(line)
     }
@@ -1644,17 +1692,23 @@ class AgentDeletedWidget extends WidgetType {
 function buildAgentDiff (state, change) {
   if (!change || change.before === change.after) return Decoration.none
   const { rows } = fileDiff(change.before, change.after)
+  const words = withinLines(rows)
   const decorations = []
 
   // Added lines are already in the new document, so colour those real lines.
-  const added = new Set(rows
-    .filter((row) => row.kind === 'add' && row.after != null)
-    .map((row) => row.after))
-  for (const number of added) {
-    if (number >= 1 && number <= state.doc.lines) {
-      decorations.push(Decoration.line({ class: 'cm-agent-added-line' }).range(state.doc.line(number).from))
+  rows.forEach((row, at) => {
+    if (row.kind !== 'add' || row.after == null || row.after < 1 || row.after > state.doc.lines) return
+    const line = state.doc.line(row.after)
+    decorations.push(Decoration.line({ class: 'cm-agent-added-line' }).range(line.from))
+    let caret = line.from
+    for (const piece of words.get(at) || []) {
+      const end = Math.min(caret + piece.text.length, line.to)
+      if (piece.changed && end > caret) {
+        decorations.push(Decoration.mark({ class: 'cm-agent-word-added' }).range(caret, end))
+      }
+      caret = end
     }
-  }
+  })
 
   /* A run of deleted lines sits immediately before the next surviving/added
      line, or at the end of the document. This is the old half of the diff,
@@ -1662,7 +1716,10 @@ function buildAgentDiff (state, change) {
   for (let i = 0; i < rows.length;) {
     if (rows[i].kind !== 'del') { i++; continue }
     const removed = []
-    while (i < rows.length && rows[i].kind === 'del') removed.push(rows[i++])
+    while (i < rows.length && rows[i].kind === 'del') {
+      removed.push({ text: rows[i].text, pieces: words.get(i) || null })
+      i++
+    }
     const next = rows.slice(i).find((row) => row.after != null)
     const at = next && next.after <= state.doc.lines
       ? state.doc.line(next.after).from
@@ -1829,7 +1886,8 @@ function diffRange (a, b) {
    no idea what markdown is would show it — leaving bold orange and inline code
    in a box is still an opinion about the markup, and the view's whole claim is
    that it has none. */
-const RENDERED = [livePreview, mathPreview, tablePreview, tableCursorGuard, moneyPreview, runBlocks,
+const RENDERED = [livePreview, mathPreview, tablePreview, tableCursorGuard, tableSearchHighlight,
+                  moneyPreview, runBlocks, propertiesPreview,
                   mermaidBlocks, tikzBlocks, svgBlocks, codeBlockView,
                   headingFoldService, codeFolding({ placeholderText: ' … ' }),
                   keymap.of(foldKeymap),
@@ -1868,7 +1926,10 @@ const markdownKeymap = [
   { key: 'Mod-i', run: (v) => wrapSelection(v, '*') },
   { key: 'Mod-Shift-x', run: (v) => wrapSelection(v, '~~') },
   { key: 'Mod-e', run: () => true },   // owned by the menu; swallow the default
-  { key: 'Mod-k', run: (v) => wrapSelection(v, '[', ']()') }
+  { key: 'Mod-k', run: (v) => wrapSelection(v, '[', ']()') },
+  // A table is the one construct here that is never shown as source, so it is
+  // also the one you cannot start by typing its markup and watching it form.
+  { key: 'Mod-Alt-t', run: (v) => insertTable(v) }
 ]
 
 /* ----------------------------------------------------------- the editor */
@@ -1962,10 +2023,13 @@ export function createEditor ({
         titleFor(noteTitle, onRename, noteFlag, titleEditable),
         languageTableMode.of(languageTable || (() => false)),
         /* Language documents are table editors, not free-form buffers. Cell
-           writes and row controls identify themselves as input.table. */
+           writes and row controls identify themselves as input.table. The
+           tags panel's writes (input.tags) edit the note's head,
+           which is config rather than grid, and safe for the same reason. */
         EditorState.transactionFilter.of((tr) => {
           if (!languageTable?.() || !tr.docChanged) return tr
           if (tr.isUserEvent('input.table') ||
+              tr.isUserEvent('input.tags') ||
               tr.isUserEvent('input.agent') ||
               tr.isUserEvent('undo') ||
               tr.isUserEvent('redo')) return tr
@@ -2111,7 +2175,7 @@ export function createEditor ({
     // be re-applied or opening a note would quietly drop you back into preview.
     if (raw) view.dispatch({ effects: preview.reconfigure([]) })
     // CodeMirror rebuilds its root classes with the state. This one is ours,
-    // and the Raw-only Copilot review marks depend on it surviving the note.
+    // and the Copilot review marks depend on it surviving the note.
     view.dom.classList.toggle('is-raw', raw)
     view.contentDOM.spellcheck = spellcheck
   }
@@ -2323,6 +2387,9 @@ export function createEditor ({
    */
   view.undo = () => undo(view)
   view.redo = () => redo(view)
+
+  /** Give every column in the note back to its content — see fitAllColumns. */
+  view.fitAllColumns = () => fitAllColumns(view)
 
   /** Fold every Markdown heading that owns a section, including nested ones. */
   view.foldAllHeadings = () => {

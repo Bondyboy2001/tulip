@@ -165,6 +165,54 @@ const SECTIONS = [
       }
     ]
   },
+  /* Four settings, and every one of them is a decision the scheduler cannot
+     make for you: how much new material you have appetite for, how much
+     forgetting you are willing to trade for fewer reviews, and whether you want
+     to type and hear the words or only look at them. Everything else about the
+     schedule — when each card comes back — is arithmetic, and arithmetic does
+     not get a control. */
+  {
+    id: 'study',
+    label: 'Study',
+    rows: [
+      {
+        key: 'studyNewPerDay',
+        type: 'number',
+        name: 'New words a day',
+        note: 'Cards you have never seen. Low is right if you are also learning this language elsewhere — the reviews stack up either way.',
+        placeholder: '8',
+        min: 1,
+        max: 200
+      },
+      {
+        key: 'studyRetention',
+        type: 'select',
+        name: 'Aim to remember',
+        note: 'How likely a card should be to come back to you when it is next asked. Lower means longer gaps and more forgetting.',
+        options: [
+          { value: 0.85, label: '85% — fewer reviews' },
+          { value: 0.9, label: '90% — the usual balance' },
+          { value: 0.95, label: '95% — forget less, review more' }
+        ],
+        fallback: 0.9,
+        cast: Number
+      },
+      {
+        key: 'studyTyping',
+        type: 'toggle',
+        name: 'Type the answer',
+        note: 'For the cards that ask you to produce the word rather than recognise it. An accent missed counts as Hard, not wrong.',
+        fallback: true
+      },
+      {
+        key: 'studySpeaking',
+        type: 'toggle',
+        name: 'Speak the words',
+        note: 'Uses a system voice, where your Mac has one for the language. Also turns on cards prompted by sound alone.',
+        fallback: true
+      }
+    ]
+  },
   {
     id: 'copilot',
     label: 'Copilot',

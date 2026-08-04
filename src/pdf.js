@@ -22,6 +22,8 @@
 /* The same stops the window's zoom and the View menu walk. A reader who sizes
    a page and then sizes the window expects the two to land together. */
 import { ZOOM_STEPS, pinchFactor } from './zoom.js'
+import { searchablePage, itemAtOffset, foldCase } from './pdf-search.js'
+import { firstPageEndingAfter } from './pdf-window.js'
 
 /* pdf.js is the largest thing the app can load and most sessions never open a
    document, so it is fetched the first time one is opened rather than sitting
@@ -145,6 +147,24 @@ export async function renderPageToCanvas (proxy, scale, { settle = (p) => p } = 
    being wrong is re-parsing a document the reader is in the middle of. */
 const RENDER_TIMEOUT = 12000
 
+/* How long after a gesture's last frame the document is taken to have stopped
+   moving, and so is worth rasterising sharply again. Shared by the two gestures
+   that change the scale continuously — a pinch and a panel edge being dragged —
+   because it is answering the same question for both: has the reader finished?
+   Long enough not to fire mid-gesture between two unhurried mouse moves, short
+   enough that letting go and getting a sharp page reads as one action. */
+const SETTLE_MS = 140
+
+/* Plays a one-shot animation again on an element that is already wearing it.
+   Removing the class and adding it back in the same task is not enough — the
+   browser coalesces the two and nothing happens — so the layout read in between
+   is what makes it a restart rather than a no-op. */
+const restart = (node, className) => {
+  node.classList.remove(className)
+  void node.offsetWidth
+  node.classList.add(className)
+}
+
 const uid = () => `h${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`
 
 /**
@@ -206,9 +226,6 @@ export function mountPdf ({
     queue: [],
     drawing: null,
     inFlight: null,     // the promise of that render, so a close can wait on it
-    /* Set for as long as fingers are on the glass. Rasterising is the one thing
-       a pinch must not do while it lasts — see the wheel listener. */
-    pinching: false,
     stuck: false,       // a render went quiet; the document needs parsing again
     recovering: false,
     recoveries: 0
@@ -219,6 +236,9 @@ export function mountPdf ({
   const sheet = document.createElement('div')
   sheet.className = 'pdf-sheet'
   host.replaceChildren(sheet)
+  // Only pages in this bounded set need eviction checks. Walking every wrapper
+  // on every scroll defeats the canvas window on long documents.
+  const drawnPages = new Set()
 
   /* ------------------------------------------------------------- geometry */
 
@@ -296,6 +316,7 @@ export function mountPdf ({
   /** Fresh wrappers for a newly opened document. */
   function build (count) {
     state.pages = []
+    drawnPages.clear()
     sheet.replaceChildren()
 
     for (let n = 1; n <= count; n++) {
@@ -390,6 +411,7 @@ export function mountPdf ({
       page.canvas.replaceWith(canvas)
       page.canvas = canvas
       page.drawn = scale
+      drawnPages.add(page)
       state.recoveries = 0
       size(page)
       page.wrap.classList.add('is-drawn')
@@ -502,6 +524,7 @@ export function mountPdf ({
     // would be the same mistake as cancelling it. The refresh that follows will
     // find the page far away and free it then.
     if (page === state.drawing) return
+    drawnPages.delete(page)
     page.gen++
     if (page.drawn) {
       page.canvas.width = page.canvas.height = 0
@@ -537,8 +560,19 @@ export function mountPdf ({
     let bestOverlap = 0
     const wanted = []
 
-    for (const page of state.pages) {
+    /* Wrapper positions are ordered. Find the first page whose bottom reaches
+       the render band, then read geometry only until that band ends. Mixed page
+       sizes remain correct because the binary search uses each wrapper's real
+       measured bottom rather than an estimated page height. */
+    const lo = firstPageEndingAfter(state.pages.length, near.from, (index) => {
+      const wrap = state.pages[index].wrap
+      return { from: wrap.offsetTop, to: wrap.offsetTop + wrap.offsetHeight }
+    })
+
+    for (let at = lo; at < state.pages.length; at++) {
+      const page = state.pages[at]
       const from = page.wrap.offsetTop
+      if (from >= near.to) break
       const to = from + page.wrap.offsetHeight
 
       if (to > near.from && from < near.to) {
@@ -547,13 +581,19 @@ export function mountPdf ({
           // so the reader always gets what they are looking at first.
           wanted.push({ page, distance: Math.abs((from + to) / 2 - middle) })
         }
-      } else if (page.drawn && (to < keep.from || from > keep.to)) undraw(page)
-
+      }
       /* The page being read is the one showing most of itself, not the first
          one intersecting the fold — on a two-page-wide fold those differ, and
          the wrong answer makes the page number flicker while scrolling. */
       const overlap = Math.min(to, top + height) - Math.max(from, top)
       if (overlap > bestOverlap) { bestOverlap = overlap; reading = page.n }
+    }
+
+    // At most the keep-window's pages, rather than every page in the document.
+    for (const page of [...drawnPages]) {
+      const from = page.wrap.offsetTop
+      const to = from + page.wrap.offsetHeight
+      if (to < keep.from || from > keep.to) undraw(page)
     }
 
     wanted.sort((a, b) => a.distance - b.distance)
@@ -577,11 +617,12 @@ export function mountPdf ({
    */
   async function pump () {
     if (state.drawing || !state.doc) return
-    /* Nothing is rasterised mid-pinch. Every frame of the gesture is a
-       different scale, so a render started for one is stale before it finishes
-       — and pdf.js renders on this thread, so the frames the gesture needs go
-       into drawing pages the fingers have already zoomed past. */
-    if (state.pinching) return
+    /* Nothing is rasterised mid-gesture — mid-pinch, and equally mid-drag of a
+       panel edge. Every frame of either is a different scale, so a render
+       started for one is stale before it finishes — and pdf.js renders on this
+       thread, so the frames the gesture needs go into drawing pages the reader
+       has already zoomed or squeezed past. */
+    if (settling()) return
     const page = state.queue.shift()
     if (!page) return
     if (page.drawn === state.scale || page.failed === state.scale) { pump(); return }
@@ -617,9 +658,47 @@ export function mountPdf ({
    * changes — a resize, and also the sidebar or a side panel being dragged,
    * which change the room the pages have without any window event at all.
    *
-   * Coalesced onto a frame: a drag delivers a size on every mouse move, and each
-   * one would otherwise be a full re-render of every visible page.
+   * Two separate rates, for the same reason a pinch has two (see the wheel
+   * listener below, whose settle this shares).
+   *
+   * The *fit* is answered once per frame: it is CSS, the drawn bitmaps are
+   * stretched to the new width, and the pages must track the edge being dragged
+   * or the drag reads as the panel sliding over a document that is ignoring it.
+   *
+   * The *rasterising* is held back until the edge stops moving. It was not, and
+   * that is what made a drag with a PDF open feel like wading. Every frame threw
+   * away every page's bitmap and started a fresh render on this thread, which
+   * the next frame then abandoned mid-flight — so the whole of it was work whose
+   * result was never once shown, competing with the pointer for the same thread.
+   * Now the sharp pages come in one time, at the width the reader let go at.
    */
+  /* The one thing a continuous gesture must not do is rasterise, and there are
+   * two such gestures — a pinch and a panel edge being dragged. They were a
+   * flag and a timer each, with `pump` guarding on the pair and `close`
+   * resetting both; the two copies had already drifted apart, `close` stopping
+   * one timer and leaving the other running.
+   *
+   * So there is one timer, and "a gesture is happening" is a question about it
+   * rather than a second fact kept alongside it. Whichever gesture moved last
+   * owns the settle, which is also the right answer when they overlap: a pinch
+   * during a drag should push the sharp pages out to the end of both, not to
+   * the end of whichever timer happened to be started first. */
+  let settleTimer = null
+  const settling = () => settleTimer !== null
+
+  /** Called on every frame of a gesture. Rasterising waits for the quiet. */
+  function hold () {
+    clearTimeout(settleTimer)
+    settleTimer = setTimeout(() => { settleTimer = null; refresh() }, SETTLE_MS)
+  }
+
+  /** The gesture is over and nothing is owed — for a document being closed,
+   *  where the refresh a settle ends with would be about the next one. */
+  function release () {
+    clearTimeout(settleTimer)
+    settleTimer = null
+  }
+
   let fitTick = null
   const observer = new ResizeObserver(() => {
     if (!state.doc || state.zoom !== 'fit' || fitTick) return
@@ -627,7 +706,9 @@ export function mountPdf ({
       fitTick = null
       const next = scaleFor()
       // A hair either way is not worth repainting every page over.
-      if (Math.abs(next - state.scale) > 0.004) rescale()
+      if (Math.abs(next - state.scale) <= 0.004) return
+      hold()
+      rescale()
     })
   })
   observer.observe(host)
@@ -651,12 +732,10 @@ export function mountPdf ({
 
      the *rasterising* is not cheap, and every frame of a pinch asks for a scale
      the next frame will replace — so it is held back until the fingers stop
-     (`pump` refuses while `state.pinching`), and the sharp pages come in once,
+     (`pump` refuses while a settle is pending), and the sharp pages come in once,
      at the size the reader actually let go at. */
-  const PINCH_SETTLE_MS = 140
   let pinchFrame = null
   let pinchTo = null
-  let pinchTimer = null
 
   host.addEventListener('wheel', (event) => {
     if (!state.doc || !(event.ctrlKey || event.metaKey)) return
@@ -669,7 +748,6 @@ export function mountPdf ({
     const current = pinchTo ?? (state.zoom === 'fit' ? state.scale : state.zoom)
     pinchTo = Math.round(current * pinchFactor(event.deltaY) * 1000) / 1000
 
-    state.pinching = true
     if (!pinchFrame) {
       pinchFrame = requestAnimationFrame(() => {
         pinchFrame = null
@@ -683,12 +761,7 @@ export function mountPdf ({
       })
     }
 
-    clearTimeout(pinchTimer)
-    pinchTimer = setTimeout(() => {
-      pinchTimer = null
-      state.pinching = false
-      refresh()
-    }, PINCH_SETTLE_MS)
+    hold()
   }, { passive: false })
 
   /**
@@ -1216,8 +1289,12 @@ export function mountPdf ({
   })
 
   /* A highlight is clickable, but the layer holding it must not be: the text
-     over it is what a selection is made from. So the cursor is the only hint,
-     and it comes from hit-testing rather than from the element under the mouse. */
+     over it is what a selection is made from. So the hit-test happens here
+     rather than through the element under the mouse, and what it finds is said
+     by lightening the mark itself — see `is-hot`. It used to be said a second
+     time by turning the cursor into a hand, which was set on the whole pane
+     because the marks cannot be hit; that is gone, and with it the class that
+     carried it. */
   let hoverTick = null
   host.addEventListener('mousemove', (event) => {
     if (!state.marks.length || hoverTick) return
@@ -1225,7 +1302,6 @@ export function mountPdf ({
       hoverTick = null
       const page = pageOf(event.target)
       const mark = page ? markAt(page, event.clientX, event.clientY) : null
-      host.classList.toggle('on-mark', Boolean(mark))
       for (const div of host.querySelectorAll('.pdf-mark.is-hot')) div.classList.remove('is-hot')
       if (!mark) return
       for (const div of host.querySelectorAll(`.pdf-mark[data-mark="${mark.id}"]`)) {
@@ -1390,20 +1466,20 @@ export function mountPdf ({
     try { await state.inFlight } catch { /* its own business */ }
 
     for (const page of state.pages) undraw(page)
+    drawnPages.clear()
+    /* A gesture over the document that is going belongs to it. Left running,
+       its settle would fire against the next one — holding that document's
+       first pages back, and then refreshing a viewer that had moved on. */
+    release()
     const doc = state.doc
 
     Object.assign(state, {
       path: '', doc: null, pages: [], marks: [], base: null, at: 1, quote: null, flashing: null,
-      // A gesture over the document that is going belongs to it: left set, it
-      // would hold the next document's first pages back for as long as the
-      // settle lasts.
-      pinching: false,
       // Not the tool or the pen — those are the reader's, not the document's.
       past: [], future: []
     })
     hidePop()
     sheet.replaceChildren()
-    host.classList.remove('on-mark')
     // The words belonged to that document; the next one has its own.
     pageText.clear()
     try { await doc.destroy() } catch { /* going away regardless */ }
@@ -1415,15 +1491,48 @@ export function mountPdf ({
    * @param {number} n    the page to bring into view
    * @param {number} [y]  how far down that page to stop, 0–1
    */
+  /* A page number as the reader might give it — off the end, fractional, or a
+     string that rounded oddly — turned into the page it must mean. Named
+     because the clamp is the non-obvious part and three callers need it. */
+  const pageAt = (n) =>
+    state.pages[Math.min(Math.max(1, Math.round(n)), state.pages.length) - 1]
+
   function goToPage (n, y = 0) {
     if (!state.doc) return
     state.flashing = null   // going somewhere else is a change of mind
-    const page = state.pages[Math.min(Math.max(1, Math.round(n)), state.pages.length) - 1]
+    const page = pageAt(n)
     if (!page) return
     const top = page.wrap.offsetTop + y * page.wrap.offsetHeight
     host.scrollTo({ top: Math.max(0, top - 12) })
     refresh()
   }
+
+  /* ----------------------------------------------------------- the found line
+
+     Where a search hit is, marked on the page it is on.
+
+     A band across the line rather than a box around the words: what a hit's
+     position is known to is the text item it falls in, which gives the height
+     down the page and nothing about where along it the phrase sits. A box drawn
+     from a guess at the rest would be wrong by a word most of the time, and a
+     highlight in the wrong place is worse than none — so the band claims only
+     the line, which is what is actually known.
+
+     One element, moved. A search steps from hit to hit and only ever has one
+     current, so a second would be a stale answer left on the page. */
+  const hitBand = document.createElement('div')
+  hitBand.className = 'pdf-hit'
+  hitBand.setAttribute('aria-hidden', 'true')
+
+  function markHit (n, y) {
+    const page = pageAt(n)
+    if (!page) { clearHit(); return }
+    hitBand.style.top = `${y * 100}%`
+    page.wrap.append(hitBand)
+    restart(hitBand, 'is-lit')
+  }
+
+  const clearHit = () => hitBand.remove()
 
   /**
    * A table-of-contents entry, which is a point rather than a page: a section
@@ -1492,57 +1601,69 @@ export function mountPdf ({
   async function textOf (n) {
     if (pageText.has(n)) return pageText.get(n)
     const epoch = state.epoch
-    let out = { text: '', items: [] }
-    try {
-      const proxy = state.pages[n - 1]?.proxy || await state.doc.getPage(n)
-      const content = await proxy.getTextContent()
-      // The document may have been closed or swapped while the worker answered.
-      if (epoch !== state.epoch) return out
-      /* Where each item begins in the joined string, so a hit found in the
-         string can be traced back to the item — and therefore to the height on
-         the page — that carries it. */
-      const items = []
-      let text = ''
-      for (const item of content.items) {
-        if (typeof item.str !== 'string') continue
-        items.push({ at: text.length, y: item.transform?.[5] })
-        text += item.str
-        if (item.hasEOL) text += '\n'
-      }
-      out = { text, items }
-    } catch { /* an unreadable page finds nothing */ }
-    if (epoch === state.epoch) pageText.set(n, out)
+    const pending = (async () => {
+      let out = { display: '', search: '', items: [] }
+      try {
+        const proxy = state.pages[n - 1]?.proxy || await state.doc.getPage(n)
+        const content = await proxy.getTextContent()
+        // The document may have been closed or swapped while the worker answered.
+        if (epoch !== state.epoch) return out
+        /* Where each item begins in the joined string, so a hit found in the
+           normalized string can be traced back to the item — and therefore to
+           the height on the page — that carries it. */
+        const items = []
+        let text = ''
+        for (const item of content.items) {
+          if (typeof item.str !== 'string') continue
+          items.push({ at: text.length, y: item.transform?.[5] })
+          text += item.str
+          if (item.hasEOL) text += '\n'
+        }
+        out = searchablePage(text, items)
+      } catch { /* an unreadable page finds nothing */ }
+      return out
+    })()
+    // Stored before awaiting so overlapping queries share the extraction.
+    pageText.set(n, pending)
+    const out = await pending
+    if (epoch !== state.epoch && pageText.get(n) === pending) pageText.delete(n)
     return out
   }
 
   /**
    * Every place a query appears, in reading order.
    *
-   * Case-insensitive and whitespace-flattened, because a phrase that runs
-   * across a line break in a two-column paper is still the phrase the reader
-   * typed. Capped: a one-letter query in a four-hundred-page book has tens of
-   * thousands of hits and nobody is walking them.
+   * Whitespace-flattened, because a phrase that runs across a line break in a
+   * two-column paper is still the phrase the reader typed — and case-insensitive
+   * unless asked otherwise, since a printed page capitalises for typography as
+   * often as for meaning. Capped: a one-letter query in a four-hundred-page book
+   * has tens of thousands of hits and nobody is walking them.
    */
-  async function find (query, { limit = 500 } = {}) {
-    const needle = String(query || '').replace(/\s+/g, ' ').trim().toLowerCase()
+  let findGeneration = 0
+
+  async function find (query, { limit = 500, caseSensitive = false } = {}) {
+    const generation = ++findGeneration
+    const typed = String(query || '').replace(/\s+/g, ' ').trim()
+    // The same fold the page went through, or the two disagree about the
+    // characters that do not fold one-for-one — see foldCase.
+    const needle = caseSensitive ? typed : foldCase(typed)
     if (!state.doc || !needle) return []
 
     const epoch = state.epoch
     const hits = []
     for (let n = 1; n <= state.pages.length && hits.length < limit; n++) {
-      const { text, items } = await textOf(n)
-      if (epoch !== state.epoch) return []
-      const hay = text.replace(/\s+/g, ' ').toLowerCase()
+      const { display, search, items } = await textOf(n)
+      if (epoch !== state.epoch || generation !== findGeneration) return []
 
+      /* `search` is the page folded to lower case, kept alongside `display` so
+         the common search does no work per keystroke; matching case is a search
+         of the page as it is actually written. Both are the same string
+         otherwise — same length, same offsets — so a hit found in either points
+         at the same place. */
+      const hay = caseSensitive ? display : search
       let at = hay.indexOf(needle)
       while (at !== -1 && hits.length < limit) {
-        hits.push({
-          page: n,
-          at,
-          // A line of context either side, tidied, for the results list.
-          excerpt: text.replace(/\s+/g, ' ').slice(Math.max(0, at - 40), at + needle.length + 40).trim(),
-          y: offsetOf(items, at, n)
-        })
+        hits.push({ page: n, at, y: offsetOf(items, at, n) })
         at = hay.indexOf(needle, at + needle.length)
       }
     }
@@ -1553,11 +1674,7 @@ export function mountPdf ({
      PDF text coordinates run up from the bottom of the page, so the fraction is
      turned over to match the way the viewer scrolls. */
   function offsetOf (items, at, n) {
-    let found = null
-    for (const item of items) {
-      if (item.at > at) break
-      found = item
-    }
+    const found = itemAtOffset(items, at)
     if (typeof found?.y !== 'number') return 0
     // `unit` is the page's size at scale 1, filled in when the page is first
     // measured; a page nobody has scrolled to yet has none, and 0 puts the jump
@@ -1571,12 +1688,7 @@ export function mountPdf ({
    *  there were any — a mark on an undrawn page has none yet. */
   function flash (id) {
     const divs = host.querySelectorAll(`.pdf-mark[data-mark="${id}"]`)
-    for (const div of divs) {
-      div.classList.remove('is-found')
-      // Reading offsetWidth restarts the animation rather than skipping it.
-      void div.offsetWidth
-      div.classList.add('is-found')
-    }
+    for (const div of divs) restart(div, 'is-found')
     return divs.length > 0
   }
 
@@ -1630,16 +1742,22 @@ export function mountPdf ({
   return {
     open,
     close,
+    flush,
     goToPage,
     goToOutline,
     goToMark,
 
     /**
-     * Every place a phrase appears in the open document, as
-     * `{ page, y, excerpt }` in reading order — `y` being how far down its page
-     * a hit sits, which is what `goToPage` takes as its second argument.
+     * Every place a phrase appears in the open document, as `{ page, y }` in
+     * reading order — `y` being how far down its page a hit sits, which is what
+     * `goToPage` and `markHit` both take as their second argument.
      */
     find,
+    /* Where the hit the reader is standing on is, and taking the mark off again
+       when the search is done with. Kept here rather than in the find bar
+       because it is drawn into a page, and the pages are this module's. */
+    markHit,
+    clearHit,
     setZoom,
     setTool,
     setPen,

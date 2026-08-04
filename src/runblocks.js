@@ -12,7 +12,7 @@
    ================================================================== */
 
 import { Decoration, WidgetType } from '@codemirror/view'
-import { copyButton, eachFence, fenceField } from './blocks.js'
+import { codeCopilotButton, copyButton, eachFence, fenceField } from './blocks.js'
 import { isRunnable, retirePainters, runButtonUI, runPanelUI } from './runcode.js'
 import { htmlFence, isHtmlRun } from './htmlrun.js'
 import { isThree, threeFence } from './threejs.js'
@@ -58,6 +58,7 @@ class RunButtonWidget extends WidgetType {
     const slot = document.createElement('span')
     slot.className = 'tk-run-top'
     if (this.runs) slot.append(uiFor(this.lang).button(this.lang, this.code))
+    slot.append(codeCopilotButton(this.lang, this.code))
     slot.append(copyButton(this.code))
     return slot
   }

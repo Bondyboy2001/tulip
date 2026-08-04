@@ -14,6 +14,13 @@ const { pathToFileURL } = require('node:url')
 const ai = require('./ai')
 const { TrustStore } = require('./trust-store')
 const { makeStore: makeReviewStore } = require('./review-store')
+const { makeStore: makeLanguageHistoryStore } = require('./language-history-store')
+const { classifyVaultEvent } = require('./vault-events')
+const { narrowsFrom } = require('./search-narrow')
+const { parseByteRange, streamFileRange } = require('./range-response')
+const { ocrPagesOf, parsePages, relevantPdfContext } = require('./pdf-context')
+const { parseFrontmatter, propsOf, propValues } = require('./frontmatter.cjs')
+const PDF_TEXT_FORMAT = require('./pdf-text-format.json').version
 const VAULT_CONTRACT = require('./vault-contract.json')
 const WEB_PARTITIONS = require('./web-partitions.json')
 /* The one address a guest may fetch, shared with the renderer that writes it
@@ -65,11 +72,7 @@ const languageTableStem = (p) => {
     ? name.slice(0, -LANGUAGE_TABLE_SUFFIX.length)
     : path.basename(name, path.extname(name))
 }
-const {
-  vocabulary: LANGUAGE_TABLE_TEMPLATE,
-  sounds: LANGUAGE_SOUNDS_TEMPLATE,
-  grammar: LANGUAGE_GRAMMAR_TEMPLATE
-} = VAULT_CONTRACT.languageTableTemplates
+const { vocabulary: LANGUAGE_TABLE_TEMPLATE } = VAULT_CONTRACT.languageTableTemplates
 const languageName = (value) => {
   const text = String(value || '')
   const match = LANGUAGE_FLAG.exec(text)
@@ -169,6 +172,9 @@ let trust = null
    being rebuilt on every vault switch: the store keys everything on the vault
    it was asked about, and re-reads when that changes. */
 const review = makeReviewStore({ vault: () => vaultPath || '' })
+/* When a language row first became complete and when it last changed. Kept in
+   the same hidden vault state area as review history, not in visible columns. */
+const languageHistory = makeLanguageHistoryStore({ vault: () => vaultPath || '' })
 
 /* ---------------------------------------------------------------- config */
 
@@ -424,12 +430,21 @@ const MAX_INDEX_BYTES = 4 * 1024 * 1024
 let indexDirty = true
 let syncing = null
 
+/* Which state of the index an answer belongs to. Only the narrowed search
+   below reads it: a result set held from the last keystroke describes the
+   notes as they were, and one edit anywhere in the vault — the reader's own
+   autosave included — is enough to make "the notes that matched" the wrong
+   set to look in. Bumped by every writer of `index`, so the cache expires by
+   being unable to recognise itself rather than by being remembered about. */
+let indexGeneration = 0
+
 /**
  * Brings the index back in line with the disk. `indexDirty` is cleared before
  * the walk, not after, so a change that lands mid-walk leaves the flag set and
  * the next caller syncs again rather than trusting a half-stale pass.
  */
 async function syncIndex () {
+  indexGeneration++
   if (!vaultPath) { index.clear(); forgetLinkTables(); return }
   indexDirty = false
 
@@ -498,6 +513,7 @@ function changedNotes (before, after) {
 function touchIndex (absPath, text, stamp) {
   try {
     const stat = stamp || fsSync.statSync(absPath)
+    indexGeneration++
     // A note this index has not seen before is a key the link tables lack.
     if (!index.has(rel(absPath))) forgetLinkTables()
     index.set(rel(absPath), {
@@ -547,9 +563,15 @@ const invalidateVaultSnapshot = () => {
 async function scanVaultDirectory (dir, includeInTree = true) {
   let entries
   try { entries = await fs.readdir(dir, { withFileTypes: true }) } catch {
-    return { tree: [], files: [] }
+    return { tree: [], files: [], evicted: 0 }
   }
 
+  /* A `.icloud` file is iCloud's placeholder for something it has not
+     downloaded: it is not the note, and opening it hands the user the
+     placeholder's own bytes. Counted rather than walked — everything else
+     starting with a dot is hidden from the tree (see `kept`) — so the sync
+     readout can say "12 files are not here yet". */
+  const evictedHere = entries.filter((entry) => entry.name.endsWith('.icloud')).length
   const kept = entries.filter((entry) => {
     if (IGNORED_DIRS.has(entry.name)) return false
     return !entry.name.startsWith('.') || ATTACHMENT_DIRS.has(entry.name)
@@ -561,6 +583,7 @@ async function scanVaultDirectory (dir, includeInTree = true) {
       const child = await scanVaultDirectory(abs, show)
       return {
         files: child.files,
+        evicted: child.evicted,
         node: show
           ? { type: 'folder', name: entry.name, path: rel(abs), children: child.tree }
           : null
@@ -590,7 +613,7 @@ async function scanVaultDirectory (dir, includeInTree = true) {
         name: path.basename(entry.name, path.extname(entry.name)), path: rel(abs)
       }
     }
-    return { files: [abs], node }
+    return { files: [abs], evicted: 0, node }
   })
 
   const tree = parts.map((part) => part.node).filter(Boolean)
@@ -598,11 +621,69 @@ async function scanVaultDirectory (dir, includeInTree = true) {
     if (a.type !== b.type) return a.type === 'folder' ? -1 : 1
     return BY_NAME.compare(a.name, b.name)
   })
-  return { tree, files: parts.flatMap((part) => part.files) }
+  return {
+    tree,
+    files: parts.flatMap((part) => part.files),
+    evicted: evictedHere + parts.reduce((sum, part) => sum + part.evicted, 0)
+  }
+}
+
+/**
+ * A short stand-in for everything the renderer draws off a snapshot.
+ *
+ * The sidebar and the asset resolver are rebuilt only when the vault actually
+ * moved, and the renderer used to establish that by receiving the whole tree
+ * and joining it into a signature itself — so an outside change to one note
+ * (a sync client, or the copilot editing files as it works) cost a structured
+ * clone of every node in the vault across the IPC boundary, plus the join,
+ * only to conclude that nothing on screen had changed. Computed here instead,
+ * once per walk, and handed over as a string the renderer can compare against
+ * the one it is holding; see the `known` argument of `vault:snapshot`.
+ *
+ * Hashed rather than kept whole because it is sent on its own: the signature
+ * of a large vault is the same order of size as the tree it stands for, which
+ * would give back the transfer this exists to avoid.
+ *
+ * `flag` joins the fields the old renderer-side signature covered — a language
+ * note that gains one redraws its row, which it did not before. Anything the
+ * revision misses is a change the sidebar will not notice, so it errs towards
+ * naming a field that does not need it rather than omitting one that does.
+ */
+function snapshotRevision ({ tree, assets }) {
+  /* Field and record separators, written as escapes rather than as the bytes
+     themselves: neighbouring fields must not be able to spell each other — a
+     note named `ab` with no kind and one named `a` of kind `b` are different
+     vaults, and a bare concatenation would hand both the same signature. The
+     same characters, and the same reasoning, as the tree signature this
+     replaces (see SHAPE_SEP in src/renderer.js). */
+  const FIELD = '\x1f'
+  const RECORD = '\x1e'
+
+  const hash = crypto.createHash('sha1')
+  const walk = (nodes) => {
+    for (const node of nodes) {
+      hash.update(
+        [node.type, node.path, node.name, node.kind || '', node.flag || '']
+          .join(FIELD) + RECORD
+      )
+      if (node.children) walk(node.children)
+    }
+  }
+  /* Signed apart, because they are guarded apart on the other side: pasting
+     an image changes the attachments and not a single row of the tree, and one
+     combined signature would make the renderer redraw the whole sidebar for
+     it. */
+  walk(tree)
+  const treeRevision = hash.digest('base64')
+
+  const assetHash = crypto.createHash('sha1')
+  for (const asset of assets) assetHash.update(asset + RECORD)
+
+  return { tree: treeRevision, assets: assetHash.digest('base64') }
 }
 
 async function getVaultSnapshot ({ fresh = false } = {}) {
-  if (!vaultPath) return { tree: [], assets: [], notes: [], pdfs: [] }
+  if (!vaultPath) return { tree: [], assets: [], notes: [], pdfs: [], evicted: 0 }
   // The held answer is the thing being refused; a scan started since the last
   // change is still the current one and is joined rather than repeated.
   if (fresh) vaultSnapshotCache = null
@@ -619,14 +700,16 @@ async function getVaultSnapshot ({ fresh = false } = {}) {
     if (earlier) await earlier.catch(() => {})
     if (vaultSnapshotCache && vaultSnapshotGeneration === generation) return vaultSnapshotCache
 
-    const { tree, files } = await scanVaultDirectory(vault)
-    if (vaultPath !== vault) return { tree: [], assets: [], notes: [], pdfs: [] }
+    const { tree, files, evicted } = await scanVaultDirectory(vault)
+    if (vaultPath !== vault) return { tree: [], assets: [], notes: [], pdfs: [], evicted: 0 }
     const snapshot = {
       tree,
+      evicted,
       assets: files.filter((abs) => ASSET_EXT.has(path.extname(abs).toLowerCase())).map(rel),
       notes: files.filter((abs) => MD_EXT.has(path.extname(abs).toLowerCase())),
       pdfs: files.filter(isPdf).map(rel)
     }
+    snapshot.revision = snapshotRevision(snapshot)
     // Something changed while we were reading; the answer is already behind.
     if (vaultSnapshotGeneration === generation) vaultSnapshotCache = snapshot
     return snapshot
@@ -808,6 +891,8 @@ async function relocate (srcAbs, targetAbs) {
      in the table to never-seen — the same loss as throwing the history away,
      and harder to notice, because all the words are still there. */
   await review.relocate(rel(srcAbs), rel(targetAbs)).catch(() => {})
+  await languageHistory.relocate(rel(srcAbs), rel(targetAbs)).catch(() => {})
+  trust?.relocateCreations(moves)
   const rewritten = await followMoves(moves)
   return { path: rel(targetAbs), links: rewritten.length, rewritten }
 }
@@ -979,6 +1064,9 @@ function watchVault () {
      between a warning worth reading and one that fires because a sync client
      touched a folder on the other side of the vault. */
   let changed = new Set()
+  let changedPdfs = new Set()
+  let sweepPdfs = false
+  let notifyUnknown = false
   try {
     watcher = fsSync.watch(vaultPath, { recursive: true }, (_event, filename) => {
       // The app's own saves come back through here — the temp file and the
@@ -986,20 +1074,37 @@ function watchVault () {
       // already know, so a self-write neither dirties them nor wakes the
       // renderer. External changes carry unfamiliar names and get through.
       if (isSelfWrite(filename)) return
+      const change = classifyVaultEvent(filename, {
+        ignoredDirs: IGNORED_DIRS,
+        attachmentDirs: ATTACHMENT_DIRS,
+        noteExtensions: MD_EXT,
+        pdfExtension: PDF_EXT,
+        siteExtension: SITE_EXT,
+        assetExtensions: ASSET_EXT
+      })
+      if (change.ignore) return
       // Marked immediately, not on the debounce: a search that lands inside the
       // quiet window must still see that something moved.
-      indexDirty = true
-      invalidateVaultSnapshot()
-      if (filename) changed.add(filename.split(path.sep).join('/'))
+      if (change.index) indexDirty = true
+      if (change.snapshot) invalidateVaultSnapshot()
+      if (change.notify && change.path) changed.add(change.path)
+      if (change.notify && !change.path) notifyUnknown = true
+      if (change.pdf === 'sweep') sweepPdfs = true
+      else if (change.pdf) changedPdfs.add(change.pdf)
       clearTimeout(timer)
       timer = setTimeout(() => {
         const paths = [...changed]
         changed = new Set()
-        notifyVaultChanged(paths)
-        /* A PDF dropped into the vault from Finder arrives this way and no
-           other. Cheap to run on every quiet moment — a stat per document, and
-           the app's own writes never reach here to start with. */
-        sweepPdfText().catch(() => {})
+        if (paths.length || notifyUnknown) notifyVaultChanged(paths)
+        notifyUnknown = false
+        const pdfs = [...changedPdfs]
+        changedPdfs = new Set()
+        if (sweepPdfs) {
+          sweepPdfs = false
+          sweepPdfText().catch(() => {})
+        } else {
+          for (const pdf of pdfs) ensurePdfText(pdf).catch(() => {})
+        }
       }, 180)
     })
     // Watching again from scratch: a later blip should be retried promptly
@@ -1101,7 +1206,7 @@ async function migrateAttachments (dir) {
 
 async function openVault (dir) {
   vaultPath = dir
-  trust?.setVault(dir)
+  trust?.setVault(dir, readConfig().historyInVault === true)
   /* An explicitly chosen vault is the user's home vault, not merely the
      folder open for this process. Keep the old key during the migration so
      older packaged renderers and configs remain harmlessly compatible. */
@@ -1121,7 +1226,7 @@ async function openVault (dir) {
   sweepPdfText().catch(() => {})
   if (mainWindow) {
     mainWindow.setTitle(path.basename(dir))
-    mainWindow.webContents.send('vault:opened', { path: dir, name: path.basename(dir) })
+    mainWindow.webContents.send('vault:opened', { path: dir, name: path.basename(dir), sync: syncProviderFor(dir) })
   }
 }
 
@@ -1353,7 +1458,8 @@ function buildMenu () {
         { type: 'separator' },
         { label: 'Reveal in Finder', click: () => send('menu', 'reveal') },
         { type: 'separator' },
-        { label: 'Save', accelerator: 'Cmd+S', click: () => send('menu', 'save') }
+        { label: 'Save', accelerator: 'Cmd+S', click: () => send('menu', 'save') },
+        { label: 'Export as PDF…', click: () => send('menu', 'export-pdf') }
       ]
     },
     {
@@ -1385,16 +1491,13 @@ function buildMenu () {
         { label: 'Jump to Heading', click: () => send('menu', 'headings') },
         { label: 'Command Palette', accelerator: 'Cmd+P', click: () => send('menu', 'commands') },
         { type: 'separator' },
-        // Study had no key, no menu item and no palette entry — the one way in
-        // was a button that only appears while a language table is open.
-        { label: 'Review Due Cards', accelerator: 'Ctrl+Cmd+S', click: () => send('menu', 'study') },
-        { type: 'separator' },
         { label: 'Toggle Sidebar', accelerator: 'Cmd+B', click: () => send('menu', 'sidebar') },
         // The old key still works. A menu item carries one accelerator, so the
         // second one needs a twin of its own, kept out of the menu.
         { label: 'Toggle Sidebar', accelerator: 'Cmd+\\', visible: false, click: () => send('menu', 'sidebar') },
         { label: 'Toggle Outline', accelerator: 'Cmd+Shift+E', click: () => send('menu', 'outline') },
         { label: 'Toggle Backlinks', accelerator: 'Cmd+Shift+K', click: () => send('menu', 'links') },
+        { label: 'Toggle Info', accelerator: 'Cmd+Shift+I', click: () => send('menu', 'info') },
         { label: 'Toggle Copilot', accelerator: 'Cmd+Shift+A', click: () => send('menu', 'copilot') },
         { label: 'Reading View', accelerator: 'Cmd+1', click: () => send('menu', 'view-read') },
         { label: 'Editing View', accelerator: 'Cmd+2', click: () => send('menu', 'view-edit') },
@@ -1455,18 +1558,113 @@ async function pickVault () {
 
 ipcMain.handle('vault:pick', () => pickVault())
 
+/* -------------------------------------------------------------- sync health
+
+   Tulip owns no sync client by design: a vault is synced by whatever the
+   folder already is — iCloud Drive, Dropbox, Git — and the app's share of
+   the bargain is to be a good citizen of it (atomic writes, watching for
+   outside changes, merging over an unsaved buffer) and to say which citizen
+   it is being. The readout answers from the folder's own address: each
+   provider keeps its roots in known places on macOS.
+   ================================================================== */
+
+/**
+ * The sync provider a vault's path says it lives under, or null.
+ *
+ * Compared against the real path as well as the literal one: an iCloud vault
+ * reached through a symlink still resolves into `Library/Mobile Documents`.
+ * The `Library/CloudStorage` roots are the post-2022 file-provider locations;
+ * `~/Dropbox` survives for the accounts that predate the move.
+ */
+function syncProviderFor (dir) {
+  if (!dir) return null
+  let real = dir
+  try { real = fsSync.realpathSync(dir) } catch {}
+
+  for (const where of new Set([dir, real])) {
+    const p = where.replace(/\\/g, '/')
+    if (/Library\/Mobile Documents\/com~apple~CloudDocs(\/|$)/.test(p)) {
+      return { id: 'icloud', label: 'iCloud Drive' }
+    }
+    const cloudStorage = /Library\/CloudStorage\/([^/]+)/.exec(p)
+    if (cloudStorage) {
+      const root = cloudStorage[1]
+      if (/^Dropbox/i.test(root)) return { id: 'dropbox', label: 'Dropbox' }
+      if (/^GoogleDrive/i.test(root)) return { id: 'googledrive', label: 'Google Drive' }
+      if (/^OneDrive/i.test(root)) return { id: 'onedrive', label: 'OneDrive' }
+      return { id: 'fileprovider', label: root }
+    }
+    if (/(^|\/)Dropbox(\/|$)/.test(p)) return { id: 'dropbox', label: 'Dropbox' }
+  }
+  /* A Git vault is visible at its root rather than by address — and worth
+     saying, because its sync behaviour is the manual kind: history travels
+     only if `.tulip/` is committed. */
+  if (fsSync.existsSync(path.join(dir, '.git'))) return { id: 'git', label: 'Git' }
+  return null
+}
+
 ipcMain.handle('vault:current', () => {
   if (!vaultPath) return null
-  return { path: vaultPath, name: path.basename(vaultPath) }
+  return { path: vaultPath, name: path.basename(vaultPath), sync: syncProviderFor(vaultPath) }
 })
 
-ipcMain.handle('vault:snapshot', async () => {
-  const { tree, assets } = await getVaultSnapshot({ fresh: true })
-  return { tree, assets }
+/**
+ * The tree and the attachments, or word that they are the ones already held.
+ *
+ * `known` is the revision the renderer last drew from. The walk still has to
+ * happen — it is how the question is answered at all — but when it lands on
+ * the same vault the caller is already showing, the tree is not sent: an
+ * outside change to a single note (a sync client, or the copilot working
+ * through a series of edits) used to clone every node in the vault across
+ * this boundary so the renderer could compute a signature and discard the
+ * lot. Callers with nothing to compare — the asset refresh after a paste —
+ * pass nothing and always get the whole answer.
+ */
+ipcMain.handle('vault:snapshot', async (_e, known) => {
+  const { tree, assets, evicted, revision } = await getVaultSnapshot()
+  const same = known && revision &&
+    known.tree === revision.tree && known.assets === revision.assets
+  if (same) return { unchanged: true, revision, evicted }
+  return { tree, assets, evicted, revision }
 })
 
 ipcMain.handle('file:read', async (_e, p) => {
-  return fs.readFile(await realSafePath(p), 'utf8')
+  const abs = await realSafePath(p)
+  const text = await fs.readFile(abs, 'utf8')
+  if (isLanguageTable(abs)) {
+    await languageHistory.sync(rel(abs), text, { trackNew: false }).catch((err) => {
+      console.error('language history sync failed', err)
+    })
+  }
+  return text
+})
+
+/**
+ * What the filesystem knows about a file: its size and its two dates.
+ *
+ * The Info pane's top half. Everything else it shows is derived from text the
+ * renderer already has in the buffer, and these three are the ones only the
+ * disk can answer for. `birthtime` is a real creation date on APFS; where a
+ * filesystem does not keep one it comes back as the epoch or as the mtime, so
+ * the caller is told the number and decides whether it is worth showing.
+ */
+ipcMain.handle('file:info', async (_e, p) => {
+  try {
+    const abs = await realSafePath(p)
+    const stat = await fs.stat(abs)
+    const filesystemCreated = stat.birthtimeMs || 0
+    const created = MD_EXT.has(path.extname(abs).toLowerCase())
+      ? trust?.creationTime(rel(abs), filesystemCreated) || filesystemCreated
+      : filesystemCreated
+    return {
+      ok: true,
+      size: stat.size,
+      modified: stat.mtimeMs,
+      created
+    }
+  } catch (err) {
+    return { ok: false, error: err.message }
+  }
 })
 
 /**
@@ -1520,9 +1718,16 @@ ipcMain.handle('file:write', async (_e, p, content) => {
      the same text the write is about to replace, and reading after would hand
      the history store the text being written. Read even when the file is new,
      so the note's first save is recorded as the thing it replaced — nothing. */
-  const before = isNote
-    ? await fs.readFile(abs, 'utf8').catch(() => null)
-    : null
+  const [before, oldStat] = isNote
+    ? await Promise.all([
+        fs.readFile(abs, 'utf8').catch(() => null),
+        fs.stat(abs).catch(() => null)
+      ])
+    : [null, null]
+  /* Capture the old inode's birthtime before the atomic rename replaces it.
+     Info can then keep saying when the note was created rather than when its
+     newest crash-safe save landed. */
+  if (oldStat) trust?.creationTime(rel(abs), oldStat.birthtimeMs)
   const stamp = await writeAtomic(abs, content, {
     durable: readConfig().durability === 'full'
   })
@@ -1540,6 +1745,11 @@ ipcMain.handle('file:write', async (_e, p, content) => {
      own name with a row that is not a note — until the next walk of the vault
      quietly dropped it again, which is the worse half of the bug. */
   if (isNote) touchIndex(abs, content, stamp)
+  if (isLanguageTable(abs)) {
+    await languageHistory.sync(rel(abs), content).catch((err) => {
+      console.error('language history sync failed', err)
+    })
+  }
   return true
 })
 
@@ -1552,6 +1762,9 @@ ipcMain.handle('file:create', async (_e, dir, name) => {
   await fs.mkdir(path.dirname(target), { recursive: true })
   noteSelfWrite(target)
   await fs.writeFile(target, '', 'utf8')
+  trust?.creationTime(rel(target), Date.now())
+  indexDirty = true
+  invalidateVaultSnapshot()
   return rel(target)
 })
 
@@ -1564,36 +1777,64 @@ ipcMain.handle('site:create', async (_e, dir, name) => {
   await fs.mkdir(path.dirname(target), { recursive: true })
   noteSelfWrite(target)
   await fs.writeFile(target, '', 'utf8')
+  invalidateVaultSnapshot()
   return rel(target)
 })
 
-/* A language is a small workspace rather than one overloaded note. Its three
-   table-only Markdown files always start with the same roles, while the flag
-   and chosen name belong to their shared folder. */
+/* A language is one portable Markdown table of words the reader has learned.
+   Nothing else is created with it: an alphabet, a table of sounds or a page of
+   grammar are all the reader's own content, and seeding them would be guessing
+   at what this language needs said about it. */
 ipcMain.handle('language:create', async (_e, dir, name) => {
   const folder = freeName(await realSafePath(dir || ''), name || 'New language')
   noteSelfWrite(folder)
   await fs.mkdir(folder, { recursive: true })
 
   const vocabulary = path.join(folder, `Vocabulary${LANGUAGE_TABLE_SUFFIX}`)
-  const sounds = path.join(folder, `Sounds${LANGUAGE_TABLE_SUFFIX}`)
-  const grammar = path.join(folder, `Grammar${LANGUAGE_TABLE_SUFFIX}`)
   noteSelfWrite(vocabulary)
-  noteSelfWrite(sounds)
-  noteSelfWrite(grammar)
-  await Promise.all([
-    fs.writeFile(vocabulary, LANGUAGE_TABLE_TEMPLATE, 'utf8'),
-    fs.writeFile(sounds, LANGUAGE_SOUNDS_TEMPLATE, 'utf8'),
-    fs.writeFile(grammar, LANGUAGE_GRAMMAR_TEMPLATE, 'utf8')
-  ])
+  await fs.writeFile(vocabulary, LANGUAGE_TABLE_TEMPLATE, 'utf8')
+  trust?.creationTime(rel(vocabulary), Date.now())
 
+  indexDirty = true
+  invalidateVaultSnapshot()
   return { folder: rel(folder), vocabulary: rel(vocabulary) }
+})
+
+/* An ordinary note that starts as an empty Markdown table.
+   Deliberately a plain `.md` and not a `.language.md`: this is a table for
+   anything — the alphabet, a set of verb endings, a packing list — so it gets
+   the ordinary grid, where the header row is typed like any other cell and
+   columns can be added, removed and moved. A language deck's header is its
+   schema and locked for that reason, which is exactly what is not wanted here.
+
+   Three columns and three rows, and the same shape the editor's own "insert
+   table" makes, so a table created from the tree and one created inside a note
+   are the same thing. Every cell of it, the header included, is typed over. */
+const TABLE_TEMPLATE = [
+  '| Column 1 | Column 2 | Column 3 |',
+  '| --- | --- | --- |',
+  '| | | |',
+  '| | | |',
+  '| | | |',
+  ''
+].join('\n')
+
+ipcMain.handle('table:create', async (_e, dir, name) => {
+  const target = freeName(await realSafePath(dir || ''), name || 'Untitled', '.md')
+  await fs.mkdir(path.dirname(target), { recursive: true })
+  noteSelfWrite(target)
+  await fs.writeFile(target, TABLE_TEMPLATE, 'utf8')
+  trust?.creationTime(rel(target), Date.now())
+  indexDirty = true
+  invalidateVaultSnapshot()
+  return rel(target)
 })
 
 ipcMain.handle('folder:create', async (_e, dir, name) => {
   const target = freeName(await realSafePath(dir || ''), name || 'New folder')
   noteSelfWrite(target)
   await fs.mkdir(target, { recursive: true })
+  invalidateVaultSnapshot()
   return rel(target)
 })
 
@@ -1637,6 +1878,7 @@ ipcMain.handle('file:rename', async (_e, p, nextName) => {
 
   const result = await relocate(abs, target)
   indexDirty = true
+  invalidateVaultSnapshot()
   return result
 })
 
@@ -1656,6 +1898,7 @@ ipcMain.handle('file:move', async (_e, from, destDir) => {
   const ext = isLanguageTable(src) ? LANGUAGE_TABLE_SUFFIX : path.extname(src)
   const result = await relocate(src, freeName(dir, path.basename(src, ext), ext))
   indexDirty = true
+  invalidateVaultSnapshot()
   return result
 })
 
@@ -1664,6 +1907,7 @@ ipcMain.handle('file:delete', async (_e, p) => {
   // Goes to the system Trash, not an unlink — deletes should be recoverable.
   noteSelfWrite(abs)
   await shell.trashItem(abs)
+  trust?.forgetCreations(rel(abs))
   /* Attachment removal is followed immediately by a renderer refresh. The
      watcher invalidates these caches too, but only after its debounce; without
      doing it here that immediate refresh reads the old asset list and redraws
@@ -1693,6 +1937,7 @@ ipcMain.handle('file:delete', async (_e, p) => {
      and unguarded, unlike `prune`: this is somebody saying the note is gone,
      not a scan concluding it. */
   await review.remove(p).catch(() => {})
+  await languageHistory.remove(p).catch(() => {})
   return true
 })
 
@@ -1738,6 +1983,9 @@ ipcMain.handle('file:import', async (_e, destDir, sources) => {
     const target = freeName(dir, path.basename(source, ext), ext)
     noteSelfWrite(target)
     await fs.copyFile(source, target)
+    if (MD_EXT.has(path.extname(target).toLowerCase())) {
+      trust?.creationTime(rel(target), Date.now())
+    }
     imported++
     if (!first) first = rel(target)
   }
@@ -1751,6 +1999,7 @@ ipcMain.handle('file:import', async (_e, destDir, sources) => {
   }
 
   indexDirty = true
+  invalidateVaultSnapshot()
   return { imported, skipped, first }
 })
 
@@ -1816,7 +2065,7 @@ function termRegex (term, { regex, caseSensitive, word }) {
   return { find: new RegExp(source, `g${flags}`), has: new RegExp(source, flags) }
 }
 
-const FILTER = /^(tag|path|file):(.*)$/i
+const FILTER = /^(tag|path|file|prop|type):(.*)$/i
 const TOKEN = /"([^"]*)"|(\S+)/g
 
 /**
@@ -1826,9 +2075,13 @@ const TOKEN = /"([^"]*)"|(\S+)/g
  * would walk every note in the vault to report that almost all of them match,
  * which is not a search but a pause. A filter is specific by construction, so
  * `tag:x` on its own is allowed to stand.
+ *
+ * `prop:` is the one filter with two halves: `prop:status` asks for the mere
+ * existence of the property, `prop:status=reading` for a value — and a list
+ * property answers when any of its items says it.
  */
 function compileQuery (raw, opts = {}) {
-  const filters = { tag: [], path: [], file: [] }
+  const filters = { tag: [], path: [], file: [], prop: [], type: [] }
   const words = []
   // Once, not per iteration: `TOKEN` is global, so it walks the string it was
   // handed, and building a fresh copy of it each time round is pure waste.
@@ -1843,14 +2096,22 @@ function compileQuery (raw, opts = {}) {
     // Only an unquoted token can be a filter: `"tag:x"` asks for that text.
     const filter = !quoted && FILTER.exec(piece)
     if (filter) {
+      const kind = filter[1].toLowerCase()
       const value = filter[2].replace(/^"|"$/g, '').toLowerCase()
-      if (value) filters[filter[1].toLowerCase()].push(value)
+      if (kind === 'prop') {
+        const eq = value.indexOf('=')
+        const key = (eq === -1 ? value : value.slice(0, eq)).trim()
+        if (key) filters.prop.push({ key, value: eq === -1 ? null : value.slice(eq + 1).trim() })
+        continue
+      }
+      if (value) filters[kind].push(value)
       continue
     }
     words.push(piece)
   }
 
-  const filtered = filters.tag.length + filters.path.length + filters.file.length > 0
+  const filtered = filters.tag.length + filters.path.length + filters.file.length +
+    filters.prop.length + filters.type.length > 0
   let terms
   try {
     terms = words.map((w) => termRegex(w, opts))
@@ -1859,7 +2120,7 @@ function compileQuery (raw, opts = {}) {
     return { error: 'Not a valid pattern.', terms: [], filters, usable: false }
   }
 
-  return { terms, filters, usable: filtered || words.some((w) => w.length >= 2) }
+  return { terms, words, filters, usable: filtered || words.some((w) => w.length >= 2) }
 }
 
 /* `#tag`, matched the way both views match it — see the hashtag rule in
@@ -1877,14 +2138,28 @@ function hasTag (text, wanted) {
 }
 
 /**
+ * A note's properties, parsed once and held against the entry. The object is
+ * replaced wholesale by `syncIndex`/`touchIndex` when the note changes, so
+ * caching on it cannot hand back stale values.
+ */
+function entryProps (entry) {
+  if (entry.props === undefined) {
+    entry.props = propsOf(parseFrontmatter(entry.text))
+  }
+  return entry.props
+}
+
+/**
  * Whether a note survives the query's filters, answered before it is read.
  *
  * Each test is skipped when nothing asked for it. Most queries carry no filter
  * at all, and lowercasing a path and a name per note per keystroke is two
  * allocations for every note in the vault to answer a question nobody asked.
- * Ordered cheapest first: the tag test is the only one that walks the text.
+ * Ordered cheapest first: the tag and property tests are the only ones that
+ * walk the text, and the property one walks only its head.
  */
 function passesFilters (key, entry, filters) {
+  if (filters.type.length && !filters.type.every((kind) => kind === entry.kind)) return false
   if (filters.path.length) {
     const where = key.toLowerCase()
     if (!filters.path.every((p) => where.includes(p))) return false
@@ -1896,7 +2171,98 @@ function passesFilters (key, entry, filters) {
   if (filters.tag.length) {
     if (!filters.tag.every((t) => hasTag(entry.text, t))) return false
   }
+  if (filters.prop.length) {
+    const props = entryProps(entry)
+    for (const { key: wantKey, value: wantValue } of filters.prop) {
+      const prop = props.find((p) => p.key.toLowerCase() === wantKey)
+      if (!prop) return false
+      /* No value asked: existence. With one: equality against any of the
+         property's values — one for a scalar, one per item for a list, all
+         compared lowercase, so `prop:status=Reading` finds `status: reading`. */
+      if (wantValue === null || wantValue === '') continue
+      if (!propValues(prop).includes(wantValue)) return false
+    }
+  }
   return true
+}
+
+async function pdfMarksForSearch (pdfPath) {
+  try {
+    const file = annotationFile(pdfPath)
+    await assertReal(file)
+    const parsed = JSON.parse(await fs.readFile(file, 'utf8'))
+    return Array.isArray(parsed?.highlights) ? parsed.highlights : []
+  } catch { return [] }
+}
+
+/** Search the local page-text and highlight sidecars that the PDF reader and
+ * Copilot already share. Missing sidecars are reported, never generated in the
+ * keystroke path; the background PDF sweep is responsible for preparation. */
+async function searchPdfDocuments (q) {
+  const { pdfs } = await getVaultSnapshot()
+  const results = []
+  const unsearchedPaths = []
+
+  await Promise.all(pdfs.map(async (pdfPath) => {
+    const name = path.basename(pdfPath)
+    const base = { name, text: '', kind: 'pdf', props: [] }
+    const wantsPdf = !q.filters.type.length || q.filters.type.includes('pdf')
+    const wantsHighlights = !q.filters.type.length || q.filters.type.includes('highlight')
+    const pathPasses = (kind) => passesFilters(pdfPath, { ...base, kind }, q.filters)
+
+    if (wantsPdf && pathPasses('pdf')) {
+      if (!q.terms.length) {
+        results.push({
+          path: pdfPath, name, kind: 'pdf',
+          hits: [{ page: 1, text: 'PDF document', source: 'pdf' }], total: 0, score: 0
+        })
+      } else if (await pdfTextIsCurrent(pdfPath)) {
+        try {
+          const entry = await pdfPagesOf(pdfTextFile(pdfPath))
+          const hits = []
+          let total = 0
+          for (const page of entry.pages) {
+            const found = findSpots(page.text, q.terms)
+            if (!found) continue
+            total += found.total
+            for (const hit of hitLines(page.text, found.spots, 3)) {
+              if (hits.length >= 6) break
+              hits.push({ ...hit, page: page.page, source: 'pdf' })
+            }
+          }
+          if (hits.length) {
+            const named = q.terms.filter((term) => term.has.test(name)).length
+            results.push({ path: pdfPath, name, kind: 'pdf', hits, total, score: total + named * 8 })
+          }
+        } catch { unsearchedPaths.push(pdfPath) }
+      } else unsearchedPaths.push(pdfPath)
+    }
+
+    if (wantsHighlights && pathPasses('highlight')) {
+      const marks = await pdfMarksForSearch(pdfPath)
+      const hits = []
+      let total = 0
+      for (const mark of marks) {
+        const text = String(mark?.text || '')
+        if (!text) continue
+        if (!q.terms.length) {
+          hits.push({ page: mark.rects?.[0]?.page || 1, text: text.slice(0, 220), source: 'highlight', mark: mark.id })
+          continue
+        }
+        const found = findSpots(text, q.terms)
+        if (!found) continue
+        total += found.total
+        hits.push({ page: mark.rects?.[0]?.page || 1, text: text.trim().slice(0, 220), source: 'highlight', mark: mark.id })
+        if (hits.length >= 6) break
+      }
+      if (hits.length) results.push({
+        path: pdfPath, name, kind: 'highlight', hits, total,
+        score: total + 6
+      })
+    }
+  }))
+
+  return { results, unsearchedPaths: [...new Set(unsearchedPaths)] }
 }
 
 /* Past this many matches of one term in one note, the exact number stops being
@@ -2000,9 +2366,19 @@ function hitLines (text, spots, max = 4) {
  * A note larger than MAX_INDEX_BYTES is held with empty text, so it is never
  * found and — see `search:replace` — never rewritten either.
  */
+/* The last query answered, and the notes that answered it — kept so that the
+   next keystroke can look at those notes instead of the whole vault. Whether
+   it may is electron/search-narrow.js; this is only the holding of it.
+
+   `keys` holds every note that passed the filters and either matched or was
+   too large to read, not merely the ones shown: the cap is applied to the
+   answer, and narrowing from a truncated result would quietly lose the notes
+   ranked below it. */
+let lastSearch = null
+
 ipcMain.handle('search:vault', async (_e, raw, opts = {}) => {
   // One shape, whichever way this answers.
-  const nothing = { results: [], truncated: false, unsearched: 0 }
+  const nothing = { results: [], truncated: false, unsearched: 0, unsearchedPaths: [] }
   if (!vaultPath) return nothing
   const q = compileQuery(raw, opts)
   if (q.error) return { ...nothing, error: q.error }
@@ -2016,20 +2392,46 @@ ipcMain.handle('search:vault', async (_e, raw, opts = {}) => {
      whole index, so the number describes the search that was actually run —
      a `path:` filter narrows it, and a query with no terms to look for has
      nothing to report. A search that quietly skips notes reads as "covered
-     everything" when it did not. */
+     everything" when it did not; and the names travel alongside the count,
+     because "3 notes" with no way to learn which three is a caveat that
+     cannot be acted on. */
   let unsearched = 0
+  const unsearchedPaths = []
 
-  for (const [key, entry] of index) {
-    if (!passesFilters(key, entry, q.filters)) continue
+  /* Where to look. The previous answer when this query is a narrowing of the
+     one that produced it — see narrowsFrom — and the whole index otherwise.
+     The filters do not have to be re-applied to a narrowed set: they are the
+     same filters over the same index, so they would drop the same notes. */
+  const narrowed = narrowsFrom(lastSearch, q, opts, indexGeneration)
+  const looking = narrowed
+    ? lastSearch.keys.map((key) => [key, index.get(key)]).filter(([, entry]) => entry)
+    : index
+
+  // What this answer will be narrowed from next, gathered as it is built.
+  const keys = []
+
+  for (const [key, entry] of looking) {
+    entry.kind = 'note'
+    if (!narrowed && !passesFilters(key, entry, q.filters)) continue
 
     /* A filter on its own is a query: `tag:book` asks for the notes carrying
        it, and the note's opening line is the only context there is to show. */
     if (!q.terms.length) {
-      results.push({ path: key, name: entry.name, hits: hitLines(entry.text, [0], 1), total: 0, score: 0 })
+      keys.push(key)
+      results.push({ path: key, name: entry.name, kind: 'note', hits: hitLines(entry.text, [0], 1), total: 0, score: 0 })
       continue
     }
 
-    if (entry.size > MAX_INDEX_BYTES) { unsearched++; continue }
+    if (entry.size > MAX_INDEX_BYTES) {
+      unsearched++
+      // Twenty is all a reader will open; the count keeps the whole truth.
+      if (unsearchedPaths.length < 20) unsearchedPaths.push(key)
+      /* Carried forward even though it matched nothing: it passed the filters,
+         and the narrower query still has to be able to report that this note
+         went unread rather than quietly dropping the caveat. */
+      keys.push(key)
+      continue
+    }
 
     const found = findSpots(entry.text, q.terms)
     if (!found) continue
@@ -2042,7 +2444,23 @@ ipcMain.handle('search:vault', async (_e, raw, opts = {}) => {
     const named = q.terms.filter((term) => term.has.test(entry.name)).length
     const score = found.total + named * 8 + hits.filter((h) => h.heading).length * 3
 
-    results.push({ path: key, name: entry.name, hits, total: found.total, score })
+    keys.push(key)
+    results.push({ path: key, name: entry.name, kind: 'note', hits, total: found.total, score })
+  }
+
+  const pdfAnswer = await searchPdfDocuments(q)
+  results.push(...pdfAnswer.results)
+  for (const pdfPath of pdfAnswer.unsearchedPaths) {
+    unsearched++
+    if (unsearchedPaths.length < 20) unsearchedPaths.push(pdfPath)
+  }
+
+  lastSearch = {
+    generation: indexGeneration,
+    words: q.words,
+    filters: q.filters,
+    opts: { regex: !!opts.regex, word: !!opts.word, caseSensitive: !!opts.caseSensitive },
+    keys
   }
 
   /* Sorted before the cap, not after. Ranking the first 200 notes the index
@@ -2057,7 +2475,74 @@ ipcMain.handle('search:vault', async (_e, raw, opts = {}) => {
      it: a custom property on an array does not survive the structured clone
      the IPC boundary performs, so the flag arrived as undefined every time and
      the cap was silent. */
-  return { results: truncated ? results.slice(0, 200) : results, truncated, unsearched }
+  return { results: truncated ? results.slice(0, 200) : results, truncated, unsearched, unsearchedPaths }
+})
+
+/**
+ * Every tag in the vault and how many notes carry it — the inventory the
+ * editor's `#` completion offers and the search overlay lists. One count per
+ * note rather than per occurrence: a note that says `#book` five times is one
+ * book-note, not five.
+ *
+ * Not cached. A full scan costs what one search keystroke costs — the texts
+ * are already in memory — and the callers debounce; a cache would only be a
+ * third place the truth could go stale.
+ */
+ipcMain.handle('tags:vault', async () => {
+  if (!vaultPath) return []
+  await ensureIndex()
+
+  const counts = new Map()
+  for (const entry of index.values()) {
+    if (!entry.text) continue
+    const seenHere = new Set()
+    HASHTAG.lastIndex = 0
+    for (let m = HASHTAG.exec(entry.text); m; m = HASHTAG.exec(entry.text)) {
+      const tag = m[2].toLowerCase()
+      if (seenHere.has(tag)) continue
+      seenHere.add(tag)
+      counts.set(tag, (counts.get(tag) || 0) + 1)
+    }
+  }
+
+  return [...counts]
+    .map(([tag, notes]) => ({ tag, notes }))
+    .sort((a, b) => b.notes - a.notes || a.tag.localeCompare(b.tag))
+})
+
+/**
+ * The local extensions a vault carries in `.tulip/extensions/`, as raw source.
+ *
+ * Opt in at the app's level (`extensionsEnabled` in config): these files are
+ * code the user asked Tulip to run, and a vault received from somebody else
+ * must not start running itself the first time it is opened. Read-only from
+ * here — what an extension may *do* is bounded by the bridge in
+ * src/extensions.js, and a malformed one reports itself in `error` rather
+ * than dropping the list.
+ */
+ipcMain.handle('extensions:list', async () => {
+  if (!vaultPath || !readConfig().extensionsEnabled) return []
+  const dir = path.join(vaultPath, '.tulip', 'extensions')
+  let names
+  try {
+    names = (await fs.readdir(dir)).filter((n) => n.endsWith('.js')).sort()
+  } catch { return [] }
+
+  const out = []
+  for (const name of names.slice(0, 100)) {
+    try {
+      const source = await fs.readFile(path.join(dir, name), 'utf8')
+      // Larger than this is not an extension, it is an accident.
+      if (source.length > 256 * 1024) {
+        out.push({ id: name.replace(/\.js$/, ''), file: name, error: 'Too large to load (256 KB cap).' })
+        continue
+      }
+      out.push({ id: name.replace(/\.js$/, ''), file: name, source })
+    } catch (err) {
+      out.push({ id: name.replace(/\.js$/, ''), file: name, error: String(err.message || err) })
+    }
+  }
+  return out
 })
 
 /**
@@ -2173,11 +2658,10 @@ function linkTables () {
  *
  * The rule the renderer follows in `bestLinkTarget`: the note beside the one
  * doing the linking wins, failing that the one sharing the most of the way
- * there, with the shorter path breaking ties. The last tiebreak differs — the
- * renderer falls back to the order the tree was flattened in, which is a shape
- * this side does not have — so a vault holding three notes of one name in
- * unrelated folders can have one link attributed to the wrong twin. Two is the
- * case that happens, and two is decided before it gets that far.
+ * there, with the shorter path then the alphabetical path breaking ties. The
+ * two are one rule on purpose — this side resolves links for the backlink
+ * scan, the other side for clicks, and a twin attributed differently by each
+ * is how a backlink used to land on the wrong note of the same name.
  */
 function nearestNamed (candidates, fromKey) {
   if (candidates.length < 2) return candidates[0] || null
@@ -2248,7 +2732,7 @@ function mentionRow (key, entry, spots) {
 }
 
 ipcMain.handle('links:to', async (_e, notePath) => {
-  const none = { linked: [], unlinked: [] }
+  const none = { linked: [], unlinked: [], outgoing: [] }
   if (!vaultPath || !notePath) return none
   await ensureIndex()
 
@@ -2257,6 +2741,51 @@ ipcMain.handle('links:to', async (_e, notePath) => {
 
   const tables = linkTables()
   const name = self.name
+
+  /* Which notes this one links to — the other direction of the same question.
+     One row per distinct target, first occurrence's line. A link that names
+     nothing in the vault is kept and marked missing: it is a promise of a note
+     rather than a reference to one, and the pane offers to create it. Self
+     links (`[[#Heading]]`) name this note and are nobody's outgoing, so they
+     are left out. */
+  const outgoing = []
+  {
+    const scanner = new RegExp(CODE_OR_LINK.source, CODE_OR_LINK.flags)
+    const seen = new Map()   // identity → index into outgoing
+    const spots = []         // positions of first occurrences, in document order
+    for (let m = scanner.exec(self.text); m; m = scanner.exec(self.text)) {
+      const { link, target } = m.groups
+      if (!link) continue
+      if (target.trim().startsWith('#')) continue   // `[[#Heading]]`: this note itself
+      const resolved = linkTarget(target, notePath, tables)
+      if (resolved === notePath) continue
+      const identity = (resolved || link.toLowerCase())
+      if (seen.has(identity)) continue
+      seen.set(identity, outgoing.length)
+      spots.push({ order: outgoing.length, at: m.index })
+      /* What to call it: the note's own name when it resolved, the target as
+         written when it did not — "Fundamentals" rather than
+         "fundamentales 2" is the point of resolving. */
+      const bare = target.split('#')[0].split('|')[0].trim()
+      outgoing.push({
+        target,
+        path: resolved,
+        name: resolved ? index.get(resolved)?.name || path.basename(stripExt(resolved)) : bare,
+        missing: !resolved
+      })
+    }
+    /* First occurrence per target — the place a click lands on. Counted here
+       rather than through `hitLines`, which would collapse two links sharing a
+       line into one row and misnumber every target after them. */
+    let lineAt = 1
+    let scanned = 0
+    for (const spot of spots) {
+      for (let i = self.text.indexOf('\n', scanned); i !== -1 && i < spot.at; i = self.text.indexOf('\n', i + 1)) lineAt++
+      scanned = spot.at
+      outgoing[spot.order].line = lineAt
+    }
+  }
+
 
   /* The name in prose. Whole-word, so a note called "Set" is not found inside
      every "Settings" in the vault — the same lookarounds the search's
@@ -2329,7 +2858,7 @@ ipcMain.handle('links:to', async (_e, notePath) => {
   linked.sort(rank)
   unlinked.sort(rank)
 
-  return { linked: linked.slice(0, 200), unlinked: unlinked.slice(0, 200) }
+  return { linked: linked.slice(0, 200), unlinked: unlinked.slice(0, 200), outgoing: outgoing.slice(0, 200) }
 })
 
 /**
@@ -2399,7 +2928,50 @@ ipcMain.handle('ai:attach', async (_e, ext, bytes) => {
   await fs.writeFile(target, buffer)
   noteSelfWrite(target)
   invalidateVaultSnapshot()
+  if (isPdf(target)) ensurePdfText(rel(target)).catch(() => {})
   return { path: rel(target) }
+})
+
+/**
+ * Files chosen from the copilot's paperclip.
+ *
+ * The native picker is the grant to read them. Main copies each regular file
+ * straight into the conversation attachment folder, preserving its useful
+ * name and extension without carrying potentially large bytes through the
+ * renderer. Symlinks and non-files are ignored, and collisions get the same
+ * friendly numeric suffix as every other imported file.
+ */
+ipcMain.handle('ai:pick-attachments', async () => {
+  if (!vaultPath) throw new Error('Open a vault first.')
+  const picked = await dialog.showOpenDialog(mainWindow, {
+    title: 'Attach files or images',
+    properties: ['openFile', 'multiSelections'],
+    buttonLabel: 'Attach'
+  })
+  if (picked.canceled) return []
+
+  const folder = await realSafePath(path.join(ATTACHMENT_DIR, CHAT_IMAGE_DIR))
+  await fs.mkdir(folder, { recursive: true })
+  const attached = []
+
+  for (const source of picked.filePaths) {
+    let stat
+    try { stat = await fs.lstat(source) } catch { continue }
+    if (!stat.isFile() || stat.isSymbolicLink()) continue
+
+    const parsed = path.parse(source)
+    const target = freeName(folder, parsed.name, parsed.ext)
+    await assertReal(target)
+    noteSelfWrite(target)
+    await fs.copyFile(source, target)
+    noteSelfWrite(target)
+    const relative = rel(target)
+    attached.push(relative)
+    if (isPdf(target)) ensurePdfText(relative).catch(() => {})
+  }
+
+  if (attached.length) invalidateVaultSnapshot()
+  return attached
 })
 
 /* --------------------------------------------------------- pdf highlights
@@ -2441,6 +3013,43 @@ ipcMain.handle('pdf:marks:save', async (_e, p, highlights) => {
   return true
 })
 
+/* --------------------------------------------------------- pdf export
+
+   The open note as a PDF file. All the deciding happened in the renderer,
+   which re-rendered the note in the paper palette before invoking; this side
+   asks where the file goes, prints the window, and writes the bytes.
+
+   `to` skips the save dialog: the scripted probes cannot click it, and a
+   probe is how an export is verified. Nobody else hands a path. */
+
+ipcMain.handle('pdf:export', async (_e, name, to) => {
+  if (!mainWindow) return { ok: false, error: 'There is no window to print from.' }
+
+  const safe = String(name || 'note').replace(/[\\/:*?"<>|]/g, '-').trim().slice(0, 120) || 'note'
+  let filePath = typeof to === 'string' && to.endsWith('.pdf') ? to : null
+  if (!filePath) {
+    const chosen = await dialog.showSaveDialog(mainWindow, {
+      title: 'Export as PDF',
+      defaultPath: path.join(app.getPath('documents'), `${safe}.pdf`),
+      filters: [{ name: 'PDF', extensions: ['pdf'] }]
+    })
+    if (chosen.canceled || !chosen.filePath) return { ok: false, canceled: true }
+    filePath = chosen.filePath
+  }
+
+  try {
+    const bytes = await mainWindow.webContents.printToPDF({
+      printBackground: true,
+      pageSize: 'Letter',
+      preferCSSPageSize: true
+    })
+    await fs.writeFile(filePath, bytes)
+    return { ok: true, path: filePath, bytes: bytes.length }
+  } catch (err) {
+    return { ok: false, error: err.message }
+  }
+})
+
 /* ---------------------------------------------------------- pdf text
 
    A PDF's words, in a file beside its highlights: `Papers/thesis.pdf` reads out
@@ -2458,6 +3067,7 @@ ipcMain.handle('pdf:marks:save', async (_e, p, highlights) => {
    it looks or is not. */
 
 const PDF_TEXT_SUFFIX = VAULT_CONTRACT.pdfTextSuffix
+const PDF_TEXT_MARKER = `Tulip-PDF-Text: ${PDF_TEXT_FORMAT}`
 
 const pdfTextFile = (relPath) => safePath(path.join(ANNOTATION_DIR, `${relPath}${PDF_TEXT_SUFFIX}`))
 
@@ -2467,7 +3077,7 @@ const pdfTextFile = (relPath) => safePath(path.join(ANNOTATION_DIR, `${relPath}$
    chains onto, so one bad document silently ends PDF text for the session. Set
    far above what a real book costs (seconds), because the only thing being
    caught here is "never". */
-const PDF_TEXT_TIMEOUT_MS = 90000
+const PDF_TEXT_TIMEOUT_MS = 10 * 60 * 1000
 
 function extractPdfTextOffThread (pdf, relPath) {
   return new Promise((resolve, reject) => {
@@ -2476,12 +3086,12 @@ function extractPdfTextOffThread (pdf, relPath) {
     })
     let settled = false
     let timer = null
-    const finish = (err, text) => {
+    const finish = (err, result) => {
       if (settled) return
       settled = true
       clearTimeout(timer)
       child.kill()
-      err ? reject(err) : resolve(text)
+      err ? reject(err) : resolve(result)
     }
     timer = setTimeout(
       () => finish(new Error(`PDF text worker timed out after ${PDF_TEXT_TIMEOUT_MS / 1000}s`)),
@@ -2489,7 +3099,7 @@ function extractPdfTextOffThread (pdf, relPath) {
     )
     timer.unref?.()
     child.once('message', (message) => {
-      finish(message.error ? new Error(message.error) : null, message.text)
+      finish(message.error ? new Error(message.error) : null, message)
     })
     child.once('exit', (code) => {
       if (!settled) finish(new Error(`PDF text worker exited with code ${code}`))
@@ -2499,7 +3109,10 @@ function extractPdfTextOffThread (pdf, relPath) {
         pdf,
         name: path.basename(relPath),
         extractor: appAsset('pdf-text.cjs'),
-        fonts: path.join(appAsset('pdfjs'), 'standard_fonts') + path.sep
+        ocr: appAsset('pdf-ocr'),
+        fonts: path.join(appAsset('pdfjs'), 'standard_fonts') + path.sep,
+        cmaps: path.join(appAsset('pdfjs'), 'cmaps') + path.sep,
+        wasm: path.join(appAsset('pdfjs'), 'wasm') + path.sep
       })
     })
   })
@@ -2507,50 +3120,214 @@ function extractPdfTextOffThread (pdf, relPath) {
 
 /* One document at a time. Parsing is CPU on the thread that also answers every
    file the renderer asks for, and a vault of papers opened at once would hold
-   the window's first paint behind fourteen of them. The set is what keeps a
-   burst of watcher ticks from queueing the same document twice. */
-let pdfTextQueue = Promise.resolve()
-const pdfTextQueued = new Set()
+   the window's first paint behind fourteen of them. The map is what keeps a
+   burst of watcher ticks from queueing the same document twice.
+
+   Waiting in the queue is not the same as waiting for a queue that is about to
+   matter, though: `sweepPdfText` puts every PDF in the vault into it at open,
+   and a question asked about the document on screen a moment later would sit
+   behind all of them — a wait of minutes, silently, because the panel only
+   knows to say "Preparing PDF" once this document's own job starts. So the
+   queue is a list rather than a promise chain, and a caller that is waiting on
+   an answer takes the next slot: at most one background document to sit out,
+   never the whole shelf. */
+let pdfTextRunning = null
+const pdfTextWaiting = []
+const pdfTextQueued = new Map()
+
+function pumpPdfText () {
+  if (pdfTextRunning || !pdfTextWaiting.length) return
+  let at = pdfTextWaiting.findIndex((record) => record.urgent)
+  if (at < 0) at = 0
+  const record = pdfTextWaiting.splice(at, 1)[0]
+  pdfTextRunning = record.start()
+  pdfTextRunning.then(() => {
+    pdfTextRunning = null
+    pumpPdfText()
+  }, () => {
+    pdfTextRunning = null
+    pumpPdfText()
+  })
+}
+
+/**
+ * Whether a PDF's extracted text is already on disk and still true of the file.
+ *
+ * Two stats and eighty bytes, which is the whole reason it is worth asking
+ * separately from doing the work: the answer decides whether a turn has
+ * anything to wait for, and the copilot used to announce "Preparing PDF" before
+ * anyone had looked. The format marker is checked as well as the times, because
+ * an extractor upgrade has to invalidate sidecars the PDF itself never touched
+ * — the OCR release must revisit the old "no selectable text" files rather than
+ * trusting their newer mtime.
+ */
+async function pdfTextIsCurrent (relPath) {
+  try {
+    const pdf = await realSafePath(relPath)
+    const sidecar = pdfTextFile(relPath)
+    await assertReal(sidecar)
+
+    const [source, existing] = await Promise.all([
+      fs.stat(pdf),
+      fs.stat(sidecar).catch(() => null)
+    ])
+    if (!existing || existing.mtimeMs < source.mtimeMs) return false
+
+    const handle = await fs.open(sidecar, 'r')
+    try {
+      const prefix = Buffer.alloc(80)
+      const { bytesRead } = await handle.read(prefix, 0, prefix.length, 0)
+      return prefix.subarray(0, bytesRead).toString('utf8').startsWith(PDF_TEXT_MARKER)
+    } finally {
+      await handle.close()
+    }
+  } catch {
+    // Unreadable, missing, outside the vault: all of them mean "there is work
+    // to do", and the work itself is where they get reported properly.
+    return false
+  }
+}
+
+/**
+ * The extracted text, split into pages, for as long as the file behind it is
+ * unchanged.
+ *
+ * The sidecar is written once and then read on every turn that mentions the
+ * document — and reading it is the cheap half. Splitting a four-hundred-page
+ * book on its page markers and folding every page to compare against a query is
+ * work that produced exactly the same pages the last question produced, and it
+ * happened again for each one. The extraction was cached; the parse was not.
+ *
+ * Keyed by the sidecar's own identity — path, size and mtime — so a re-extract
+ * replaces the entry without anyone having to remember to clear it.
+ */
+const pdfPagesCache = new Map()
+const PDF_PAGES_CACHED = 8
+
+async function pdfPagesOf (sidecar) {
+  const stamp = await fs.stat(sidecar)
+  const hit = pdfPagesCache.get(sidecar)
+  if (hit && hit.mtimeMs === stamp.mtimeMs && hit.size === stamp.size) {
+    // Re-inserted so it counts as recently used: `set` on a key the Map already
+    // has leaves it where it was, which would evict by first sight rather than
+    // by use — and the document a reader keeps coming back to is exactly the
+    // one that would go first.
+    pdfPagesCache.delete(sidecar)
+    pdfPagesCache.set(sidecar, hit)
+    return hit
+  }
+
+  const text = await fs.readFile(sidecar, 'utf8')
+  const entry = {
+    mtimeMs: stamp.mtimeMs,
+    size: stamp.size,
+    pages: parsePages(text),
+    // Read off the header the extractor wrote, once, rather than of the whole
+    // book on every turn — and as the count it actually is.
+    ocrPages: ocrPagesOf(text)
+  }
+  /* A handful of documents, because that is how many a reader has in play at
+     once and the pages hold the book's text in memory. Least recently used out
+     first — Map keeps insertion order, and every hit above re-inserts itself,
+     so the first key is the one longest untouched. */
+  pdfPagesCache.delete(sidecar)
+  pdfPagesCache.set(sidecar, entry)
+  if (pdfPagesCache.size > PDF_PAGES_CACHED) {
+    pdfPagesCache.delete(pdfPagesCache.keys().next().value)
+  }
+  return entry
+}
 
 /**
  * Writes `<pdf>.txt` if the PDF is newer than it. Resolves either way — a
  * document that will not parse is worth a line in the log and nothing else.
+ *
+ * `onWork` is called if — and only if — this actually has to read a document,
+ * which is the one moment anybody waits for. It is how the copilot knows to say
+ * "Preparing PDF" without asking the same question the job is about to ask
+ * itself: the caller that wants to say so passes a callback, and the background
+ * sweep, which has nobody to tell, passes nothing. A caller joining a job
+ * already queued or in flight is told too, because it waits just the same — and
+ * passing a callback is also what marks the job as one somebody is waiting on,
+ * which is what takes it to the front of the queue.
+ *
+ * The absolute sidecar path comes back with the answer. It was validated to get
+ * here, and the callers that need it were re-deriving and re-validating it.
  */
-function ensurePdfText (relPath) {
-  if (!isPdf(relPath) || pdfTextQueued.has(relPath)) return pdfTextQueue
-  pdfTextQueued.add(relPath)
+function ensurePdfText (relPath, { onWork } = {}) {
+  if (!isPdf(relPath)) return Promise.resolve({ ok: false, error: 'Only PDFs can be prepared.' })
+  const running = pdfTextQueued.get(relPath)
+  if (running) {
+    if (onWork) {
+      running.urgent = true
+      if (running.working) onWork()
+      else running.watchers.add(onWork)
+    }
+    return running.job
+  }
 
-  pdfTextQueue = pdfTextQueue.then(async () => {
+  const record = { working: false, urgent: Boolean(onWork), watchers: new Set() }
+  if (onWork) record.watchers.add(onWork)
+  const announce = () => {
+    record.working = true
+    for (const watcher of record.watchers) {
+      try { watcher() } catch { /* telling someone is never the point of the job */ }
+    }
+    record.watchers.clear()
+  }
+
+  record.start = () => (async () => {
     const vault = vaultPath
     try {
       const pdf = await realSafePath(relPath)
       const sidecar = pdfTextFile(relPath)
       await assertReal(sidecar)
 
-      const [source, existing] = await Promise.all([
-        fs.stat(pdf),
-        fs.stat(sidecar).catch(() => null)
-      ])
-      // Rewritten only when the PDF has moved on. Every walk of the vault runs
-      // through here, so this comparison is what makes the sweep free.
-      if (existing && existing.mtimeMs >= source.mtimeMs) return
+      if (await pdfTextIsCurrent(relPath)) {
+        return { ok: true, textPath: rel(sidecar), sidecar, cached: true }
+      }
 
-      const text = await extractPdfTextOffThread(pdf, relPath)
+      announce()
+      const extracted = await extractPdfTextOffThread(pdf, relPath)
 
       // The vault can change under a long extraction — a book is a second of
       // parsing, and `safePath` resolved against the old one would write into
       // a folder the user has closed.
-      if (vaultPath !== vault) return
+      if (vaultPath !== vault) return { ok: false, error: 'The vault changed while the PDF was being prepared.' }
       await fs.mkdir(path.dirname(sidecar), { recursive: true })
-      await writeAtomic(sidecar, text)
+      await writeAtomic(sidecar, extracted.text)
+      return {
+        ok: true,
+        textPath: rel(sidecar),
+        sidecar,
+        pages: extracted.pages || 0,
+        ocrPages: extracted.ocrPages || 0
+      }
     } catch (err) {
       console.error('pdf text failed', relPath, err.message)
-    } finally {
-      pdfTextQueued.delete(relPath)
+      return { ok: false, error: err.message }
     }
-  })
+  })()
 
-  return pdfTextQueue
+  /* The promise the callers hold is settled by the run whenever the queue gets
+     to it — so a job can be waiting, jumped over, and joined by a second caller
+     without anything it handed out having to change. */
+  record.job = new Promise((resolve) => { record.resolve = resolve })
+  const run = record.start
+  record.start = () => {
+    const done = run()
+    done.then(record.resolve, record.resolve)
+    return done
+  }
+
+  pdfTextQueued.set(relPath, record)
+  pdfTextWaiting.push(record)
+  record.job.finally(() => {
+    if (pdfTextQueued.get(relPath) === record) pdfTextQueued.delete(relPath)
+  }).catch(() => {})
+  pumpPdfText()
+
+  return record.job
 }
 
 /**
@@ -2565,6 +3342,63 @@ async function sweepPdfText () {
   if (!vaultPath) return
   const { pdfs } = await getVaultSnapshot()
   for (const pdf of pdfs) ensurePdfText(pdf)
+}
+
+/** PDFs that this turn actually concerns: the document on screen and PDF
+ * attachments. Other vault PDFs stay out of the prompt and out of the wait. */
+function turnPdfs (context) {
+  const paths = []
+  if (context?.kind === 'pdf' && context.note) paths.push(context.note)
+  for (const attachment of context?.attachments || []) {
+    if (isPdf(String(attachment || ''))) paths.push(attachment)
+  }
+  return [...new Set(paths)]
+}
+
+async function preparePdfTurn (question, context) {
+  const paths = turnPdfs(context)
+  if (!paths.length) return { context: context || null, failures: [] }
+
+  /* Said once however many documents a turn carries, and only if one of them
+     actually has to be read — see `ensurePdfText`, which is where that is
+     known. Two PDFs both needing extraction are one wait, not two phases. */
+  let announced = false
+  const onWork = () => {
+    if (announced) return
+    announced = true
+    send('ai:event', { k: 'preparing-pdf' })
+  }
+
+  const prepared = await Promise.all(paths.map(async (pdfPath) => {
+    const result = await ensurePdfText(pdfPath, { onWork })
+    if (!result?.ok) return { path: pdfPath, error: result?.error || 'PDF extraction failed.' }
+    try {
+      // The sidecar path arrives validated from the job that wrote it.
+      const { pages, ocrPages } = await pdfPagesOf(result.sidecar)
+      return {
+        path: pdfPath,
+        textPath: result.textPath,
+        pages,
+        openPage: context?.kind === 'pdf' && context.note === pdfPath ? context.page : 0,
+        ocrPages: result.ocrPages || ocrPages
+      }
+    } catch (err) {
+      return { path: pdfPath, error: err.message }
+    }
+  }))
+
+  const failures = prepared.filter((document) => document.error)
+  const documents = prepared.filter((document) => !document.error)
+  return {
+    failures,
+    context: {
+      ...(context || {}),
+      // The pages are for ranking here; what crosses to the agent is the path
+      // to the file they came out of, which it can read for itself.
+      pdfDocuments: documents.map(({ pages: _pages, ...document }) => document),
+      pdfContext: relevantPdfContext(question, documents)
+    }
+  }
 }
 
 /**
@@ -3610,8 +4444,14 @@ ipcMain.handle('ai:start', (_e, opts) => {
 ipcMain.handle('ai:models', (_e, opts) => ai.models({ fresh: !!opts?.fresh }))
 ipcMain.handle('ai:send', async (_e, text, context) => {
   ai.setVault(vaultPath)
+  const words = String(text || '')
+  const prepared = await preparePdfTurn(words, context || null)
+  if (prepared.failures.length) {
+    const names = prepared.failures.map((failure) => failure.path).join(', ')
+    return { ok: false, error: `Tulip could not prepare ${names} for the copilot.` }
+  }
   aiBaseline = await snapshotNotes()
-  const result = await ai.send(String(text || ''), context || null)
+  const result = await ai.send(words, prepared.context)
   if (!result?.ok) {
     const operation = await finishAiHistory().catch(() => null)
     if (operation) send('ai:event', { k: 'review', operation })
@@ -3780,6 +4620,43 @@ ipcMain.handle('review:history', async () => {
   return review.history()
 })
 
+/* The dates shown when a language row is focused or hovered. Synchronisation
+   happens on file read/write; this call returns no Markdown, only the metadata
+   already associated with the note's visible rows. */
+ipcMain.handle('language-history:rows', async (_e, notePath) => {
+  if (!vaultPath || !isLanguageTable(notePath)) return []
+  return languageHistory.rows(notePath)
+})
+
+/* ------------------------------------------------------- language decks
+
+   Every vocabulary table in the vault, and the two ways a word gets into one.
+
+   The decks are what makes "review everything due" mean anything: before this,
+   a study session could only be built from the note that happened to be on
+   screen, so a daily review was a thing you first had to navigate to. The index
+   is already holding every note's text, so answering costs a filter rather than
+   a walk of the disk.
+   ================================================================== */
+
+ipcMain.handle('language:decks', async () => {
+  if (!vaultPath) return []
+  await ensureIndex()
+  const out = []
+  for (const [key, entry] of index) {
+    if (!isLanguageTable(key)) continue
+    out.push({
+      path: key,
+      name: entry.name,
+      // The folder is where the flag and the language's name are, which is what
+      // decides the voice; see src/speech.js.
+      folder: path.dirname(key),
+      text: entry.text
+    })
+  }
+  return out
+})
+
 /* ------------------------------------------------------------- drafts
 
    What was typed but not yet saved, kept somewhere a crash cannot take with it.
@@ -3904,7 +4781,15 @@ ipcMain.handle('edit:undo', (e) => e.sender.undo())
 ipcMain.handle('edit:redo', (e) => e.sender.redo())
 
 ipcMain.handle('config:get', () => readConfig())
-ipcMain.handle('config:set', (_e, patch) => writeConfig(patch))
+ipcMain.handle('config:set', (_e, patch) => {
+  const next = writeConfig(patch)
+  /* The two settings that move something on disk rather than repaint it.
+     Setting them lands nowhere unless the thing that reads them is told. */
+  if (Object.prototype.hasOwnProperty.call(patch, 'historyInVault') && vaultPath) {
+    trust?.setVault(vaultPath, next.historyInVault === true)
+  }
+  return next
+})
 
 ipcMain.handle('durability:flush', () => flushPendingDurability())
 ipcMain.handle('theme:system', () => (nativeTheme.shouldUseDarkColors ? 'dark' : 'light'))
@@ -4233,14 +5118,14 @@ app.whenReady().then(async () => {
 
     try {
       if (url.host !== 'app') {
-        const stat = await fs.stat(abs)
-        const size = stat.size
         const range = request.headers.get('range')
         if (!range && request.method !== 'HEAD') {
           const res = await net.fetch(pathToFileURL(abs).toString())
           const headers = sealVaultReply(new Headers(res.headers), abs)
           return new Response(res.body, { status: res.status, headers })
         }
+        const stat = await fs.stat(abs)
+        const size = stat.size
         let start = 0
         let end = Math.max(0, size - 1)
         const unsatisfied = () => new Response(null, {
@@ -4249,20 +5134,9 @@ app.whenReady().then(async () => {
         })
 
         if (range) {
-          const match = /^bytes=(\d*)-(\d*)$/.exec(range.trim())
-          if (!match) return unsatisfied()
-          if (match[1]) start = Number(match[1])
-          if (match[2]) end = Number(match[2])
-          if (!match[1] && match[2]) {
-            const suffix = Number(match[2])
-            start = Math.max(0, size - suffix)
-            end = Math.max(0, size - 1)
-          }
-          end = Math.min(end, Math.max(0, size - 1))
-          // Keep any one reply bounded even if a malformed document asks for
-          // the rest of a multi-gigabyte file as one range.
-          end = Math.min(end, start + 8 * 1024 * 1024 - 1)
-          if (start > end || start >= size) return unsatisfied()
+          const parsed = parseByteRange(range, size)
+          if (!parsed) return unsatisfied()
+          ;({ start, end } = parsed)
         }
 
         const status = range ? 206 : 200
@@ -4278,15 +5152,11 @@ app.whenReady().then(async () => {
         if (request.method === 'HEAD' || size === 0) {
           return new Response(null, { status, headers })
         }
-        const length = end - start + 1
-        const file = await fs.open(abs, 'r')
-        const body = Buffer.allocUnsafe(length)
-        try {
-          await file.read(body, 0, length, start)
-        } finally {
-          await file.close()
-        }
-        return new Response(body, { status, headers })
+        /* A range may be eight megabytes and several PDFs/media elements can
+           ask at once. Stream bounded chunks from the file instead of holding
+           one full Buffer per request; cancelling the response closes the file
+           descriptor through the Web-stream adapter. */
+        return new Response(streamFileRange(abs, start, end, request.signal), { status, headers })
       }
 
       const res = await net.fetch(pathToFileURL(abs).toString())
@@ -4318,7 +5188,7 @@ app.whenReady().then(async () => {
     if (cfg.defaultVaultPath !== savedVault) {
       writeConfig({ defaultVaultPath: savedVault, vaultPath: savedVault })
     }
-    trust.setVault(vaultPath)
+    trust.setVault(vaultPath, cfg.historyInVault === true)
     /* The same tidy-up `openVault` does, for the vault that is simply still
        open from last time — which is how the app is started nearly always, and
        so the path the migration actually runs on. */

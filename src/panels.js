@@ -24,9 +24,18 @@ const NUDGE_FAST = 32
  *   Run whenever the columns have been refitted. Narrowing the main column is
  *   one of the ways the tab strip starts to overflow, and only the caller knows
  *   what else depends on its width.
+ * @param {(key: string, width: number) => boolean|void} [deps.onResizeStart]
+ * @param {(key: string, width: number) => void} [deps.onResizeEnd]
+ *   The renderer uses these edges to suspend expensive document relayout while
+ *   a divider is moving. The width itself still follows every pointer event.
+ * @param {(key: string, width: number) => void} [deps.onResizePreview]
+ *   When `onResizeStart` returns true, the grid width is committed only at the
+ *   end and this callback supplies the live preview width in between.
  * @returns {{restorePanelWidths: (cfg: object) => void}}
  */
-export function mountPanels ({ el, api, onResize }) {
+export function mountPanels ({
+  el, api, onResize, onResizeStart, onResizePreview, onResizeEnd
+}) {
   /* Each panel states its own width the way the stylesheet does: one custom
      property, one stored key. The column arithmetic stays in the CSS — this only
      ever moves a number, so a panel that is closed needs no special case.
@@ -46,19 +55,19 @@ export function mountPanels ({ el, api, onResize }) {
    * apart: a narrow window squeezes a panel without forgetting how wide it was
    * asked to be, so widening the window gives the width back.
    */
-  function setPanelWidth (p, px) {
+  function setPanelWidth (p, px, paint = true) {
     p.want = Math.round(Math.max(p.min, Math.min(p.max, px)))
-    return fitPanel(p)
+    return fitPanel(p, paint)
   }
 
-  function fitPanel (p) {
+  function fitPanel (p, paint = true) {
     // The other open panels are already spoken for, so the room this one may
     // take is what is left over once they and the note's floor are counted.
     const taken = PANELS.reduce(
       (sum, q) => sum + (q === p || !panelOpen(q) ? 0 : q.width), 0)
     const room = window.innerWidth - taken - MAIN_FLOOR
     p.width = Math.max(p.min, Math.min(p.want, room))
-    el.app.style.setProperty(p.prop, `${p.width}px`)
+    if (paint) el.app.style.setProperty(p.prop, `${p.width}px`)
     return p.width
   }
 
@@ -87,12 +96,37 @@ export function mountPanels ({ el, api, onResize }) {
       p.grip.setPointerCapture(e.pointerId)
       el.app.dataset.resizing = 'yes'
       p.grip.classList.add('is-live')
+      const deferred = onResizeStart?.(p.key, p.width) === true
 
-      const move = (ev) => setPanelWidth(p, (ev.clientX - anchor) * p.grow)
+      /* A trackpad and a high-polling mouse can send several pointer events
+         before Chromium paints one frame. Applying a grid width for each of
+         them makes those obsolete intermediate positions compete with the
+         document for the main thread — especially a large Reading page. Keep
+         only the newest coordinate and paint it once per frame. */
+      let nextX = null
+      let moveFrame = 0
+      const paintMove = () => {
+        moveFrame = 0
+        if (nextX == null) return
+        const x = nextX
+        nextX = null
+        const width = setPanelWidth(p, (x - anchor) * p.grow, !deferred)
+        if (deferred) onResizePreview?.(p.key, width)
+      }
+      const move = (ev) => {
+        nextX = ev.clientX
+        if (!moveFrame) moveFrame = requestAnimationFrame(paintMove)
+      }
       const done = () => {
         p.grip.removeEventListener('pointermove', move)
+        if (moveFrame) cancelAnimationFrame(moveFrame)
+        moveFrame = 0
+        // A release between frames still commits the divider where it ended.
+        paintMove()
+        if (deferred) el.app.style.setProperty(p.prop, `${p.width}px`)
         delete el.app.dataset.resizing
         p.grip.classList.remove('is-live')
+        onResizeEnd?.(p.key, p.width)
         onResize?.()
         api.config.set({ [p.key]: p.want })
       }

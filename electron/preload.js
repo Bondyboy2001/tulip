@@ -11,11 +11,15 @@ contextBridge.exposeInMainWorld('tulip', {
   vault: {
     pick: () => ipcRenderer.invoke('vault:pick'),
     current: () => ipcRenderer.invoke('vault:current'),
-    snapshot: () => ipcRenderer.invoke('vault:snapshot'),
+    // `known` is the revision the caller already drew; passing it lets main
+    // answer "still that one" instead of sending the whole tree back.
+    snapshot: (known) => ipcRenderer.invoke('vault:snapshot', known),
     notes: () => ipcRenderer.invoke('vault:notes')
   },
   file: {
     read: (p) => ipcRenderer.invoke('file:read', p),
+    // Size and dates, for the Info pane.
+    info: (p) => ipcRenderer.invoke('file:info', p),
     write: (p, content) => ipcRenderer.invoke('file:write', p, content),
     create: (dir, name) => ipcRenderer.invoke('file:create', dir, name),
     rename: (p, name) => ipcRenderer.invoke('file:rename', p, name),
@@ -42,8 +46,20 @@ contextBridge.exposeInMainWorld('tulip', {
   site: {
     create: (dir) => ipcRenderer.invoke('site:create', dir)
   },
+  /* A note that starts as an empty Markdown table — an ordinary note, so the
+     grid it opens in is the ordinary one: headers typed, columns added and
+     removed like any other table in any other note. */
+  table: {
+    create: (dir, name) => ipcRenderer.invoke('table:create', dir, name)
+  },
   language: {
-    create: (dir, name) => ipcRenderer.invoke('language:create', dir, name)
+    create: (dir, name) => ipcRenderer.invoke('language:create', dir, name),
+    /* Every vocabulary table in the vault, text and all — what a review of
+       everything due is built from, rather than of whatever note is open. */
+    decks: () => ipcRenderer.invoke('language:decks')
+  },
+  languageHistory: {
+    rows: (path) => ipcRenderer.invoke('language-history:rows', path)
   },
   asset: {
     // `bytes` is a Uint8Array; the structured clone carries it across intact.
@@ -61,6 +77,10 @@ contextBridge.exposeInMainWorld('tulip', {
       save: (p, highlights) => ipcRenderer.invoke('pdf:marks:save', p, highlights)
     }
   },
+
+  /* The open note as a PDF file. `to` is the scripted seam — the save dialog
+     cannot be driven from a probe, so scripts hand a path and skip it. */
+  exportPdf: (name, to) => ipcRenderer.invoke('pdf:export', name, to),
 
   /**
    * Executing a fenced block. The renderer sends the language and the code and
@@ -103,6 +123,10 @@ contextBridge.exposeInMainWorld('tulip', {
        which reads files and takes no images over its message stream — can be
        pointed at it. `bytes` is a Uint8Array; the answer is a vault path. */
     attach: (ext, bytes) => ipcRenderer.invoke('ai:attach', ext, bytes),
+    /* The main process owns the native picker and copies the chosen files into
+       the vault. Keeping the bytes out of the renderer also makes large PDFs
+       and archives no more expensive to attach than an ordinary file copy. */
+    pickAttachments: () => ipcRenderer.invoke('ai:pick-attachments'),
     /* A long turn that has ended while the window is in the background. Main
        owns this rather than the renderer raising its own `Notification`,
        because the two things worth doing with it — checking that the window
@@ -148,9 +172,20 @@ contextBridge.exposeInMainWorld('tulip', {
   replaceAll: (query, replacement, opts) =>
     ipcRenderer.invoke('search:replace', query, replacement, opts),
 
+  /* Every tag in the vault with its note count — the inventory behind `#`
+     completion and the search overlay's tag rows. */
+  tags: () => ipcRenderer.invoke('tags:vault'),
+
   /* Which notes point at this one, and which say its name without pointing. */
   links: {
     to: (p) => ipcRenderer.invoke('links:to', p)
+  },
+
+  /* Local extensions from `.tulip/extensions/`, as raw source — only when the
+     user has turned them on in Settings. What they can do is bounded by the
+     bridge in src/extensions.js. */
+  extensions: {
+    list: () => ipcRenderer.invoke('extensions:list')
   },
   config: {
     get: () => ipcRenderer.invoke('config:get'),

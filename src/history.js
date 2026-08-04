@@ -11,7 +11,7 @@
  */
 
 import { el as element } from './blocks.js'
-import { fileDiff } from './linediff.js'
+import { fileDiff, withinLines } from './linediff.js'
 import { when } from './time.js'
 import { noteName } from './vault-paths.js'
 
@@ -75,19 +75,33 @@ export function diffBlock (change) {
   node.append(head)
 
   const body = element('div', 'history-diff-body')
-  for (const row of rows.slice(0, DIFF_ROWS)) {
+  const shown = rows.slice(0, DIFF_ROWS)
+  const inner = withinLines(shown)
+  shown.forEach((row, at) => {
     if (row.kind === 'gap') {
       body.append(element('div', 'history-diff-gap', `${count(row.hidden)} unchanged lines`))
-      continue
+      return
     }
     const line = element('div', `history-diff-line is-${row.kind}`)
+    const text = element('span', 'history-diff-text')
+    const moved = inner.get(at)
+    /* The changed words, where the line was edited rather than replaced.
+       Everything else is one text node: a span per word on a note-sized diff
+       is thousands of elements to say nothing. */
+    if (moved) {
+      for (const piece of moved) {
+        if (!piece.changed) { text.append(piece.text); continue }
+        text.append(element('span', `history-diff-word is-${row.kind}`, piece.text))
+      }
+    } else text.textContent = row.text
+
     line.append(
       element('span', 'history-diff-no', String(row.after ?? row.before ?? '')),
       element('span', 'history-diff-mark', row.kind === 'add' ? '+' : row.kind === 'del' ? '−' : ' '),
-      element('span', 'history-diff-text', row.text)
+      text
     )
     body.append(line)
-  }
+  })
   if (rows.length > DIFF_ROWS) {
     body.append(element('div', 'history-diff-gap', `${count(rows.length - DIFF_ROWS)} more lines`))
   }
@@ -116,51 +130,88 @@ export function mountHistory ({ el, api, confirm, beforeRestore }) {
     const node = element('article', 'history-row')
 
     const head = element('div', 'history-row-head')
+    /* What the row says about itself is also the control that opens it: a
+       button, so the diff is one Tab and one Enter away rather than a double
+       click a keyboard cannot make, and unstyled, so the row still reads as a
+       line of text rather than growing a second Restore. */
+    const open = element('button', 'history-open')
+    open.type = 'button'
+    open.setAttribute('aria-expanded', 'false')
     const time = element('time', 'history-when', when(at))
     time.dateTime = new Date(at).toISOString()
     time.title = new Date(at).toLocaleString()
-    head.append(time)
+    open.append(time)
     /* Lines gained or lost, which is the one number that says how big a step
        back this is before you take it. */
     const delta = (summary?.added || 0) - (summary?.removed || 0)
     if (delta) {
-      head.append(element(
+      open.append(element(
         'span',
         `history-delta is-${delta > 0 ? 'add' : 'del'}`,
         `${delta > 0 ? '+' : '−'}${count(Math.abs(delta))}`
       ))
     }
-    if (operation.source === 'restore') head.append(element('span', 'history-tag', 'restore point'))
-    else if (operation.source === 'save') head.append(element('span', 'history-tag', 'saved'))
-    else head.append(element('span', 'history-tag', 'copilot'))
+    if (operation.source === 'restore') open.append(element('span', 'history-tag', 'restore point'))
+    else if (operation.source === 'save') open.append(element('span', 'history-tag', 'saved'))
+    else open.append(element('span', 'history-tag', 'copilot'))
+    head.append(open)
 
     const actions = element('div', 'history-actions')
-    const view = element('button', 'ghost is-compact', 'Changes')
-    view.type = 'button'
+
     /* The before and after text is not in the list payload — a hundred entries
        would carry the note a hundred times over — so a diff is fetched the
-       first time it is asked for. */
-    async function toggle () {
-      const open = node.querySelector('.history-diff')
-      if (open) {
-        open.remove()
-        node.classList.remove('is-open')
-        view.textContent = 'Changes'
+       first time it is asked for, and kept once it has been. Shutting a row and
+       opening it again is a gesture people repeat, and each round trip is the
+       whole note twice over the wire and a fresh diff of it. */
+    let diff = null
+    async function show () {
+      if (diff) {
+        node.classList.toggle('is-open')
+        diff.hidden = !node.classList.contains('is-open')
         return
       }
       const detail = await api.trust.operation(operation.id)
       const change = detail?.changes.find((one) => one.path === state.path)
       if (!change) return
-      view.textContent = 'Hide'
+      diff = diffBlock(change)
       node.classList.add('is-open')
-      node.append(diffBlock(change))
+      node.append(diff)
     }
-    view.addEventListener('click', () => { toggle().catch(() => {}) })
+
+    function toggle () {
+      return show().finally(() => {
+        open.setAttribute('aria-expanded', String(node.classList.contains('is-open')))
+      })
+    }
+
+    /* Clicking what the row says shows what changed in it. There was a Changes
+       button on every row before this, and a column of the same word repeated
+       down the panel is a column of noise: the rows are already the list of
+       changes, so a button on each one to say "changes" was labelling the thing
+       it was standing in. The row's own summary is the control instead — no
+       extra word, and still a button, which is what keeps the diff reachable
+       from the keyboard. */
+    open.addEventListener('click', () => { toggle().catch(() => {}) })
+
+    /* And double-clicking anywhere else in the head does the same, because that
+       is the gesture the tree already answers to for renaming and a file
+       manager answers to everywhere. Nothing stops it selecting a word
+       underneath, because nothing in the head is selectable —
+       `.history-row-head` says so in the stylesheet, which is where that
+       belongs. */
+    head.addEventListener('dblclick', (event) => {
+      /* Not the summary button, which has already toggled twice on the way to
+         being double-clicked, and not Restore, which has its own answer to
+         being clicked and must not be given a second one. */
+      if (event.target.closest('.history-open, .history-actions')) return
+      toggle().catch(() => {})
+    })
+
     if (expanded) toggle().catch(() => {})
     const back = element('button', 'ghost is-compact is-accent', 'Restore')
     back.type = 'button'
     back.addEventListener('click', () => restore(operation, state.path))
-    actions.append(view, back)
+    actions.append(back)
 
     head.append(actions)
     node.append(head)

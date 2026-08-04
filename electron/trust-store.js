@@ -1,9 +1,9 @@
 'use strict'
 
-const fs = require('node:fs/promises')
 const fsSync = require('node:fs')
 const path = require('node:path')
 const crypto = require('node:crypto')
+const { makeCoalescedWriter, writeAtomicSync } = require('./atomic-store')
 
 const MAX_OPERATIONS = 300
 
@@ -26,6 +26,7 @@ const COALESCE_MS = 120000
    note it replaced. Applied on load as well, so a store written by an older
    build sheds anything else the first time it is opened. */
 const KEPT = new Set(['copilot', 'restore', 'save'])
+const emptyData = () => ({ operations: [], created: {} })
 
 const digest = (value) =>
   crypto.createHash('sha1').update(String(value || '')).digest('hex')
@@ -45,30 +46,58 @@ class TrustStore {
   constructor (base) {
     this.base = base
     this.vault = ''
-    this.data = { operations: [] }
+    this.inVault = false
+    this.data = emptyData()
     this.timer = null
+    this.writer = makeCoalescedWriter()
   }
 
-  setVault (vault) {
-    this.flushSync()
-    this.vault = vault || ''
-    this.data = { operations: [] }
-    if (!this.vault) return
-    try {
-      const parsed = JSON.parse(fsSync.readFileSync(this.file(), 'utf8'))
-      if (Array.isArray(parsed.operations)) {
-        this.data.operations = parsed.operations.filter((row) => KEPT.has(row.source))
-      }
-    } catch {}
+  /* Two homes: beside the rest of the app's state (the default, digest-named),
+     or the vault's own `.tulip/` folder, for the vault where the history
+     should travel with the folder's sync the way the review schedule does.
+     `inVault` is the user's setting, not this store's choice. */
+  fileFor (vault, inVault) {
+    return inVault && vault
+      ? path.join(vault, '.tulip', 'history.json')
+      : path.join(this.base, 'trust', `${digest(vault)}.json`)
   }
 
   file () {
-    return path.join(this.base, 'trust', `${digest(this.vault)}.json`)
+    return this.fileFor(this.vault, this.inVault)
+  }
+
+  setVault (vault, inVault = false) {
+    this.flushSync()
+    const previousFile = this.vault ? this.file() : null
+    this.vault = vault || ''
+    this.inVault = !!inVault
+    this.data = emptyData()
+    if (!this.vault) return
+
+    let parsed = null
+    try { parsed = JSON.parse(fsSync.readFileSync(this.file(), 'utf8')) } catch {}
+    /* A location that has never been written to inherits what the other one
+       holds, so flipping the setting migrates the history rather than starting
+       it over. The old copy stays put: deleting it is nobody's emergency, and
+       flipping back finds it intact. */
+    if (!parsed && previousFile && previousFile !== this.file()) {
+      try { parsed = JSON.parse(fsSync.readFileSync(previousFile, 'utf8')) } catch {}
+    }
+    if (parsed && Array.isArray(parsed.operations)) {
+      this.data.operations = parsed.operations.filter((row) => KEPT.has(row.source))
+      if (parsed.created && typeof parsed.created === 'object' && !Array.isArray(parsed.created)) {
+        for (const [note, at] of Object.entries(parsed.created)) {
+          if (Number.isFinite(at) && at > 0) this.data.created[String(note)] = at
+        }
+      }
+    }
   }
 
   schedule () {
     clearTimeout(this.timer)
-    this.timer = setTimeout(() => this.flush().catch(() => {}), 250)
+    this.timer = setTimeout(() => this.flush().catch((err) => {
+      console.error('note history write failed', err)
+    }), 250)
   }
 
   async flush () {
@@ -76,42 +105,38 @@ class TrustStore {
     this.timer = null
     if (!this.vault) return
     const file = this.file()
-    await fs.mkdir(path.dirname(file), { recursive: true })
-    const temp = `${file}.${process.pid}.tmp`
-    await fs.writeFile(temp, this.serialized(), 'utf8')
-    await fs.rename(temp, file)
+    const data = this.data
+    await this.writer.flush(file, () => this.serialized(data))
   }
 
   flushSync () {
-    if (!this.timer || !this.vault) return
+    if (!this.vault) return
     clearTimeout(this.timer)
     this.timer = null
     try {
-      const file = this.file()
-      fsSync.mkdirSync(path.dirname(file), { recursive: true })
-      const temp = `${file}.${process.pid}.tmp`
-      fsSync.writeFileSync(temp, this.serialized(), 'utf8')
-      fsSync.renameSync(temp, file)
-    } catch {}
+      writeAtomicSync(this.file(), this.serialized(this.data))
+    } catch (err) {
+      console.error('note history final write failed', err)
+    }
   }
 
   /* The store as text, pruned to the byte budget. Pruning here rather than in
      `record` keeps the hot save path free of a full stringify per autosave —
      a save during a session only ever appends, and the bill is paid when the
      store is next written out. */
-  serialized () {
-    while (this.data.operations.length) {
+  serialized (data = this.data) {
+    while (data.operations.length) {
       let size = 0
-      try { size = Buffer.byteLength(JSON.stringify(this.data)) } catch { break }
+      try { size = Buffer.byteLength(JSON.stringify(data)) } catch { break }
       if (size <= MAX_BYTES) break
       let drop = -1
-      for (let i = this.data.operations.length - 1; i >= 0; i--) {
-        if (this.data.operations[i].source === 'save') { drop = i; break }
+      for (let i = data.operations.length - 1; i >= 0; i--) {
+        if (data.operations[i].source === 'save') { drop = i; break }
       }
       if (drop === -1) break
-      this.data.operations.splice(drop, 1)
+      data.operations.splice(drop, 1)
     }
-    return JSON.stringify(this.data)
+    return JSON.stringify(data)
   }
 
   record ({ source, changes }) {
@@ -181,6 +206,60 @@ class TrustStore {
 
   operation (id) {
     return this.data.operations.find((row) => row.id === id) || null
+  }
+
+  /**
+   * The earliest trustworthy moment at which a file existed.
+   *
+   * Atomic note saves replace the destination inode, which makes APFS birthtime
+   * say "created at the last save". Remember the birthtime before that can
+   * happen. For vaults already affected, the oldest History operation touching
+   * the path proves the note existed by then and repairs the date once.
+   */
+  creationTime (notePath, filesystemTime = 0) {
+    const key = String(notePath || '')
+    if (!key) return Number(filesystemTime) || 0
+    const stored = this.data.created[key]
+    if (Number.isFinite(stored) && stored > 0) return stored
+
+    const candidates = [Number(filesystemTime)]
+      .filter((at) => Number.isFinite(at) && at > 0)
+    for (const operation of this.data.operations) {
+      if (operation.changes.some((change) => change.path === key)) candidates.push(operation.at)
+    }
+    const created = candidates.length ? Math.min(...candidates) : 0
+    if (created) {
+      this.data.created[key] = created
+      this.schedule()
+    }
+    return created
+  }
+
+  /** Creation metadata follows note and folder moves just as the file does. */
+  relocateCreations (moves) {
+    let changed = false
+    for (const { from, to } of moves || []) {
+      if (!Object.prototype.hasOwnProperty.call(this.data.created, from)) continue
+      const at = this.data.created[from]
+      delete this.data.created[from]
+      this.data.created[to] = Math.min(this.data.created[to] ?? Infinity, at)
+      changed = true
+    }
+    if (changed) this.schedule()
+  }
+
+  /** A newly created file at the same path must not inherit a deleted note's age. */
+  forgetCreations (notePath) {
+    const key = String(notePath || '')
+    if (!key) return
+    const prefix = key.endsWith('/') ? key : `${key}/`
+    let changed = false
+    for (const stored of Object.keys(this.data.created)) {
+      if (stored !== key && !stored.startsWith(prefix)) continue
+      delete this.data.created[stored]
+      changed = true
+    }
+    if (changed) this.schedule()
   }
 }
 

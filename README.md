@@ -218,14 +218,27 @@ lines you are asked which to keep.
 
 **Linting.** Every save brings the note to the house style: a run of blank lines
 becomes one, the top and bottom of the file lose theirs, the file ends in a
-single newline, and every fenced code block gets one blank line above and below
-it. Nothing inside a code block or a `$$` block is touched, and an edit that
+single newline, and every fenced code block and every heading gets one blank
+line above and below it. Heading levels are held to a ladder — `#`, then `##`,
+then `###` — so a skipped level is closed up and a note whose headings start at
+`##` is pulled up to `#`; climbing back to a shallower level is a new section
+rather than a mistake, and headings that were siblings stay siblings.
+Nothing inside a code block, a `$$` block or the frontmatter is touched, and an edit that
 would close up the blank line the cursor is sitting in waits for the next save
 instead. It arrives as an ordinary edit, so `⌘Z` steps back over it. **Lint
 current file** in the palette (`⌘P`) runs the same rules on the open file holding
 nothing back, the blank line under the cursor included. For notes written before
 the rules existed, `npm run tidy` applies them to a whole folder from the
 terminal — see `--check` above.
+
+**Export.** **File ▸ Export as PDF…** prints the open note to a file, as the
+reading view would draw it on paper: prose, headings in their palette,
+callouts, tables, math, diagrams, footnotes, pictures — with the app's chrome
+left on the screen where it belongs. A note written under a dark theme still
+exports black on white: print has its own palette, and diagrams are drawn
+again in it for the file. While that happens a curtain covers the window, so
+the colour churn is paperwork, not theatre. A three.js or HTML scene appears
+as whatever it has drawn; a playing video or audio does not.
 
 ## Keys
 
@@ -333,13 +346,12 @@ nothing. Activate the app first.
 
 ## Language learning
 
-Creating a language makes one folder with three portable Markdown files:
-`Vocabulary.language.md` for words and their meanings, `Sounds.language.md` for
-letters or combinations and the sounds they make, and `Grammar.language.md` for
-patterns, examples, and exceptions. The same scaffold is used for every
-language; the selected country flag and name live on the folder.
+Creating a language makes one folder with one portable Markdown file:
+`Vocabulary.language.md`, where learned words, their meanings, examples, and
+notes live together. Existing language-table files remain ordinary, studyable
+tables. The selected country flag and name live on the folder.
 
-**Review.** Any of the three can be studied — `⌃⌘S`, **View ▸ Review Due
+**Review.** The vocabulary table can be studied — `⌃⌘S`, **View ▸ Review Due
 Cards**, or the button on a language table. Each row makes two cards, asked in
 both directions and scheduled apart, because reading a language and speaking it
 are different things to know. A note can say otherwise in its frontmatter:
@@ -359,3 +371,12 @@ append-only log beside it — so it is backed up and synced with the notes it is
 about, and it follows a note that is renamed. Nothing prunes it without saying
 so: a scan that reports no cards at all, or one that would forget more than a
 fifth of the deck, is refused rather than believed.
+
+**When it was learned.** A row receives an added date automatically when its
+first two cells become complete, and its edited date changes whenever any cell
+in that row changes. Hover a cell, or focus it with the keyboard, to see the
+dates. They live in `.tulip/language-history.json`, keyed by stable internal row
+ids, so the visible Markdown gains no tracking columns and moving a row does not
+give it another word's history. Rows that predate this tracking are not falsely
+given the upgrade date: they begin showing an edited date after their next
+change, while rows added from then on receive both dates.

@@ -50,12 +50,12 @@ const inbox = new Map()
 api.on('run:out', ({ id, stream, text }) => {
   const state = live.get(id)
   if (state) {
-    state[stream] += text
+    appendOutput(state, stream, text)
     scheduleRender(state)
     return
   }
   const box = held(id)
-  box[stream] += text
+  appendOutput(box, stream, text)
 })
 
 /* A chatty process can deliver hundreds of chunks between two screen paints.
@@ -87,6 +87,7 @@ api.on('run:done', (payload) => {
   const state = live.get(payload.id)
   if (state) {
     live.delete(payload.id)
+    finishOutput(state)
     Object.assign(state, payload, { status: 'done' })
     renderNow(state)
     return
@@ -96,8 +97,80 @@ api.on('run:done', (payload) => {
 
 function held (id) {
   let box = inbox.get(id)
-  if (!box) inbox.set(id, (box = { stdout: '', stderr: '', done: null }))
+  if (!box) inbox.set(id, (box = outputState({ done: null })))
   return box
+}
+
+/* Streaming ANSI decoder. Output arrives at arbitrary byte boundaries, so an
+   escape can begin in one IPC message and finish in the next. Keeping the tiny
+   parser state lets panels consume only new visible text rather than stripping
+   the complete transcript again on every animation frame. */
+function ansiState () { return { mode: 'text', pending: '' } }
+
+export function stripAnsiChunk (state, chunk, final = false) {
+  let out = ''
+  for (const char of String(chunk || '')) {
+    if (state.mode === 'text') {
+      if (char === '\x1b') { state.mode = 'esc'; state.pending = char } else out += char
+      continue
+    }
+
+    state.pending += char
+    if (state.mode === 'esc') {
+      if (char === '[') { state.mode = 'csi'; continue }
+      if (char === ']') { state.mode = 'osc'; continue }
+      if (/[@-Z\\-_]/.test(char)) { state.mode = 'text'; state.pending = ''; continue }
+      out += state.pending
+      state.mode = 'text'
+      state.pending = ''
+      continue
+    }
+
+    if (state.mode === 'csi') {
+      if (/[@-~]/.test(char)) { state.mode = 'text'; state.pending = '' }
+      continue
+    }
+
+    if (state.mode === 'osc') {
+      if (char === '\x07') { state.mode = 'text'; state.pending = '' }
+      else if (char === '\x1b') state.mode = 'osc-esc'
+      continue
+    }
+
+    if (state.mode === 'osc-esc') {
+      if (char === '\\' || char === '\x07') { state.mode = 'text'; state.pending = '' }
+      else state.mode = char === '\x1b' ? 'osc-esc' : 'osc'
+    }
+  }
+
+  if (final && state.mode !== 'text') {
+    /* Match plain(): an unfinished CSI/lone escape remains literal, while an
+       unterminated OSC title is discarded. */
+    if (state.mode === 'esc' || state.mode === 'csi') out += state.pending
+    state.mode = 'text'
+    state.pending = ''
+  }
+  return out
+}
+
+function outputState (extra = {}) {
+  return {
+    stdout: '',
+    stderr: '',
+    ansi: { stdout: ansiState(), stderr: ansiState() },
+    ...extra
+  }
+}
+
+function appendOutput (state, stream, text) {
+  if (stream !== 'stdout' && stream !== 'stderr') return
+  state[stream] += stripAnsiChunk(state.ansi[stream], text)
+}
+
+function finishOutput (state) {
+  for (const stream of ['stdout', 'stderr']) {
+    state[stream] += stripAnsiChunk(state.ansi[stream], '', true)
+  }
 }
 
 /* Rust and C++ pay most of their first click loading the compiler and having
@@ -122,9 +195,8 @@ function warmRunner (lang) {
  */
 function runState () {
   return {
+    ...outputState(),
     status: 'idle',
-    stdout: '',
-    stderr: '',
     code: null,
     id: null,
     stopRequested: false,
@@ -156,7 +228,9 @@ function adopt (id, state) {
     inbox.delete(id)
     state.stdout += box.stdout
     state.stderr += box.stderr
+    state.ansi = box.ansi
     if (box.done) {
+      finishOutput(state)
       Object.assign(state, box.done, { status: 'done' })
       state.render()
       return
@@ -220,6 +294,7 @@ async function launch (state, start) {
     status: 'running',
     stdout: '',
     stderr: '',
+    ansi: { stdout: ansiState(), stderr: ansiState() },
     code: null,
     id: null,
     stopRequested: false,
@@ -264,12 +339,11 @@ function requestStop (state) {
   state.stopRequested = true
 }
 
-/* Escape sequences a runner prints despite the env saying not to (see
-   startRun's env in main.js): CSI — colours, cursor moves — OSC — titles,
-   hyperlinks — and the lone two-byte escapes. Stripped where text is shown
-   rather than where it arrives, so a sequence split across two chunks is
-   whole again by the time the regex sees it. The state keeps what was really
-   printed. */
+/* Escape sequences a runner may still put in a stored error or diagnostic
+   despite the env saying not to (see startRun's env in main.js): CSI —
+   colours, cursor moves — OSC — titles and hyperlinks — and lone two-byte
+   escapes. Streamed output is already decoded incrementally above; keeping
+   this idempotent cleanup covers non-stream payloads and older saved state. */
 const ANSI = /\x1b(?:\[[0-9;?]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[@-Z\\-_])/g
 
 function plain (text) {
@@ -720,8 +794,8 @@ function drawOutput (panel, state, lang, code) {
   }
   panel.append(bar)
 
-  const out = plain(state.stdout)
-  const err = plain(state.stderr)
+  const out = state.stdout
+  const err = state.stderr
   if (out) panel.append(el('pre', 'run-out-stream', out))
   if (err) panel.append(el('pre', 'run-out-stream is-stderr', err))
   if (!out && !err && state.status === 'done') {
@@ -730,6 +804,52 @@ function drawOutput (panel, state, lang, code) {
   if (state.truncated) {
     panel.append(el('div', 'run-out-note',
       'Output truncated — the block printed more than Tulip will hold.'))
+  }
+}
+
+/* The stable DOM behind a running output panel. Only the newly arrived suffix
+   is appended between frames; the panel is rebuilt once when a run starts and
+   once when its final verdict replaces "Running…". */
+function incrementalOutput (panel, state, lang, code) {
+  let status = null
+  let outAt = 0
+  let errAt = 0
+  let outNode = null
+  let errNode = null
+
+  const rebuild = () => {
+    drawOutput(panel, state, lang, code)
+    status = state.status
+    outAt = state.stdout.length
+    errAt = state.stderr.length
+    const streams = panel.querySelectorAll('.run-out-stream:not(.is-empty)')
+    outNode = [...streams].find((node) => !node.classList.contains('is-stderr')) || null
+    errNode = [...streams].find((node) => node.classList.contains('is-stderr')) || null
+  }
+
+  return () => {
+    if (state.status !== 'running' || status !== 'running') { rebuild(); return }
+
+    const out = state.stdout
+    const err = state.stderr
+    if (out.length < outAt || err.length < errAt) { rebuild(); return }
+
+    if (out.length > outAt) {
+      if (!outNode) {
+        outNode = el('pre', 'run-out-stream')
+        panel.insertBefore(outNode, errNode)
+      }
+      outNode.append(document.createTextNode(out.slice(outAt)))
+      outAt = out.length
+    }
+    if (err.length > errAt) {
+      if (!errNode) {
+        errNode = el('pre', 'run-out-stream is-stderr')
+        panel.append(errNode)
+      }
+      errNode.append(document.createTextNode(err.slice(errAt)))
+      errAt = err.length
+    }
   }
 }
 
@@ -845,8 +965,9 @@ export function drawRunFace (button, running, title) {
 export function runPanelUI (lang, code, className, onDraw) {
   const state = stateFor(lang, code)
   const panel = makePanel(className)
+  const draw = incrementalOutput(panel, state, lang, code)
   painter(state, panel, () => {
-    drawOutput(panel, state, lang, code)
+    draw()
     onDraw?.()
   })()
   return panel

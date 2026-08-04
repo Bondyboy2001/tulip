@@ -34,6 +34,7 @@ import {
   replaceNext, replaceAll, closeSearchPanel
 } from '@codemirror/search'
 import { el } from './blocks.js'
+import { chip, icon, tallyText, wrap } from './find-bar.js'
 
 /* Counting stops here. A note with more matches than this does not need an
    exact number — it needs the readout to stay cheap on every keystroke. */
@@ -135,27 +136,15 @@ class FindPanel {
 
   /* ------------------------------------------------------------ pieces */
 
+  /* Every control here hands the caret back to the query when it is done: the
+     next thing you do after stepping or flipping a switch is almost always type
+     more of what you are looking for. */
   chip (label, title, on) {
-    const b = el('button', 'find-chip', label)
-    b.type = 'button'
-    b.title = title
-    b.setAttribute('aria-label', title)
-    b.setAttribute('aria-pressed', String(!!on))
-    b.onclick = () => {
-      b.setAttribute('aria-pressed', String(b.getAttribute('aria-pressed') !== 'true'))
-      this.commit({ jump: true })
-      this.input.focus()
-    }
-    return b
+    return chip(label, title, on, () => { this.commit({ jump: true }); this.input.focus() })
   }
 
   icon (cls, glyph, title, onclick) {
-    const b = el('button', cls, glyph)
-    b.type = 'button'
-    b.title = title
-    b.setAttribute('aria-label', title)
-    if (onclick) b.onclick = () => { onclick(); this.input.focus() }
-    return b
+    return icon(cls, glyph, title, onclick && (() => { onclick(); this.input.focus() }))
   }
 
   button (label, title, onclick) {
@@ -250,11 +239,7 @@ class FindPanel {
       if (total > LIMIT) break
     }
 
-    this.tally.textContent =
-      total === 0 ? 'none'
-        : total > LIMIT ? `${at || '·'} / ${LIMIT}+`
-          : at ? `${at} / ${total}`
-            : `${total}`
+    this.tally.textContent = tallyText({ at, total, limit: LIMIT })
   }
 
   /* Counting is the one thing here that walks the whole note, so it is held to
@@ -317,13 +302,6 @@ class FindPanel {
   destroy () {
     if (this.frame) cancelAnimationFrame(this.frame)
   }
-}
-
-/** Groups controls that belong together, so the gaps between them can differ. */
-function wrap (className, children) {
-  const box = el('div', className)
-  box.append(...children)
-  return box
 }
 
 /**

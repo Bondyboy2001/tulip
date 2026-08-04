@@ -22,6 +22,7 @@ import { blockReferencePlugin } from './headings.js'
 import { highlightPlugin } from './marks.js'
 import { parseEmbedSuffix } from './assets.js'
 import { columnWidthPlugin } from './table.js'
+import { parseFrontmatter } from '../electron/frontmatter.cjs'
 
 /**
  * @param {object} deps
@@ -55,6 +56,50 @@ export function createMarkdown ({ resolveEmbedSrc }) {
      plugin renders them where every other markdown tool puts them: a rule and a
      numbered list at the foot of the note, each entry linking back to its mark. */
   md.use(footnotePlugin)
+
+  /* ------------------------------------------------------------- properties
+
+     A note's frontmatter. Left to markdown-it's own rules it was a thematic
+     break followed by a run of raw YAML set as a heading — the second `---`
+     is a setext underline to it, because frontmatter is a convention of note
+     editors, not of Markdown. Claimed at the block level, first, and only
+     ever at the very head of the file: a `---` anywhere else stays the
+     divider it always was (the parser's own rule — see frontmatterRange —
+     which is also the linter's and Obsidian's).
+
+     Claimed and then not rendered: the properties are shown and edited in the
+     sidebar's Info pane, which is where a fact about the note belongs. See the
+     renderer rule below for why the block is still claimed at all.
+  */
+
+  md.block.ruler.before('hr', 'frontmatter', (mdState, startLine, _endLine, silent) => {
+    if (startLine !== 0) return false
+    const range = parseFrontmatter(mdState.src).range
+    if (!range) return false
+    if (silent) return true
+
+    // The line the closing fence sits on: the one past every line the head
+    // consumed. bMarks are byte… character offsets, so a straight count works.
+    const head = mdState.src.slice(0, range.end)
+    /* Only count the newline the closing fence sits on if it is there: a note
+       that ends on `---` with nothing after it has one fewer, and a count short
+       by one leaves the parser standing on the fence — which it then reads as
+       the thematic break it would have been anywhere else. */
+    const lines = head.split('\n').length - (head.endsWith('\n') ? 1 : 0)
+    const token = mdState.push('frontmatter', '', 0)
+    token.map = [0, lines]
+    token.content = mdState.src.slice(range.bodyFrom, range.bodyTo)
+    mdState.line = lines
+    return true
+  })
+
+  /* Nothing is drawn for it. The head is metadata about the note, and it is
+     shown as such in the sidebar's Info pane — a table of it at the top of the
+     rendered page was the first thing anyone read on the way to the note, and
+     the one thing on the page that was not the note. Claiming the block is
+     still this rule's job: unclaimed, markdown-it reads it as a thematic break
+     under a setext heading, which is what a `---` pair is anywhere else. */
+  md.renderer.rules.frontmatter = () => ''
 
   /**
    * `[[target|suffix]]` at `pos`, optionally behind a `!`. Both bracket rules

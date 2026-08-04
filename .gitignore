@@ -1,7 +1,12 @@
 node_modules/
 dist/
+.dist-stage-*/
+.dist-previous-*/
 .DS_Store
 *.log
+
+# Local browser profiles, screenshots, and audit reports.
+output/
 
 # The packaged .app that scripts/build-app.sh assembles — ~280MB of copied
 # Electron, rebuildable from source in one command.

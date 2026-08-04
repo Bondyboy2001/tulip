@@ -1,13 +1,22 @@
 /* ================================================================ lint
    The house style for a markdown file, applied rather than complained about.
 
-   Two rules, both about vertical space:
+   Four rules. Three about vertical space:
 
      1. A run of blank lines is a single blank line. None at the top of the
         file, none at the bottom, and the file ends with exactly one newline.
      2. A fenced code block has one blank line above it and one below it.
+     3. A heading has one blank line above it and one below it.
 
-   Neither rule ever reaches inside a code block or a maths block, which is
+   and one about the shape of the outline:
+
+     4. Heading levels descend one at a time. `#` may be followed by `##` and
+        `##` by `###`, but `#` followed by `###` is a level that was skipped,
+        and the note is renumbered until nothing is skipped. Climbing back is
+        free — `###` to `#` is a new section, not a mistake — and the top of a
+        note is `#`, so a note whose headings start at `##` is pulled up.
+
+   No rule ever reaches inside a code block or a maths block, which is
    what most of this file is about: finding those regions is the hard part, and
    the rules themselves are a dozen lines at the bottom.
 
@@ -66,6 +75,34 @@ function mathEnd (lines, i) {
   if (head.endsWith(close) && head.length > 2) return i   // opened and closed on one line
   for (let j = i + 1; j < lines.length; j++) {
     if (lines[j].trim().endsWith(close)) return j
+  }
+  return -1
+}
+
+/**
+ * The heading `line` is, or null.
+ *
+ * The same shape `headings` in headings.js recognises, down to the three-space
+ * cap on the indent and the demand for text after the hashes — so a `#` alone
+ * on a line and a `#tag` are both left out of it here too. The two must agree:
+ * the outline is drawn from that one, and this one renumbers what it lists.
+ */
+function headingAt (line) {
+  const m = /^( {0,3})(#{1,6})[ \t]+\S/.exec(line)
+  return m ? { indent: m[1].length, level: m[2].length } : null
+}
+
+/**
+ * The last line of the note's YAML frontmatter, or -1 when it has none.
+ *
+ * Only ever the very first line of the file, which is the whole of Obsidian's
+ * rule for it. Worth finding for one reason: `# a comment` is a comment in YAML
+ * and a heading nowhere, and renumbering one would corrupt the note's metadata.
+ */
+function frontmatterEnd (lines) {
+  if (!/^---[ \t]*$/.test(lines[0] || '')) return -1
+  for (let i = 1; i < lines.length; i++) {
+    if (/^(---|\.\.\.)[ \t]*$/.test(lines[i])) return i
   }
   return -1
 }
@@ -178,6 +215,24 @@ export function lintEdits (text) {
         !BLANK.test(lines[fence.close + 1])) gaps.add(fence.close + 1)
   }
 
+  /* Every heading the rules may speak for: outside code, outside maths, and
+     outside the frontmatter. Rules 3 and 4 both work from this one list. */
+  const heads = []
+  for (let line = frontmatterEnd(lines) + 1; line < lines.length; line++) {
+    if (held[line]) continue
+    const heading = headingAt(lines[line])
+    if (heading) heads.push({ line, ...heading })
+  }
+
+  /* Rule 3, into the same set of gaps rule 2 fills, so a heading sitting under
+     a code block asks for the one blank line between them rather than two.
+     Nothing is asked for against the edges of the file: rule 1 is about to take
+     the blank lines there away again, and the two would argue forever. */
+  for (const { line } of heads) {
+    if (line > 0 && !BLANK.test(lines[line - 1])) gaps.add(line)
+    if (line < lines.length - 1 && !BLANK.test(lines[line + 1])) gaps.add(line + 1)
+  }
+
   /* Rule 1. Each run of movable blank lines is collapsed to one, or to none
      when it is the top or the bottom of the file. A run against either edge
      cannot also need rule 2's blank line — the fence it would sit against has
@@ -207,6 +262,26 @@ export function lintEdits (text) {
 
   for (const gap of gaps) edits.push({ from: starts[gap], to: starts[gap], insert: '\n' })
 
+  /* Rule 4, as the depth of a stack of the levels still open above each
+     heading. A heading pops every level at or below its own — those sections
+     have ended — pushes its own, and is written at whatever depth it now sits
+     at. That keeps what the levels *say* while fixing what they are: two `###`
+     under a `#` pop each other and both come out `##`, so they stay siblings,
+     where clamping each heading to one more than the last would have made the
+     second a child of the first.
+
+     The stack's levels strictly increase, so its depth is never more than the
+     level of the heading on top — a heading only ever loses hashes, never
+     gains them, and nothing here can push a note past `######`. */
+  const open = []
+  for (const { line, indent, level } of heads) {
+    while (open.length && open[open.length - 1] >= level) open.pop()
+    open.push(level)
+    if (open.length === level) continue
+    const from = starts[line] + indent
+    edits.push({ from, to: from + level, insert: '#'.repeat(open.length) })
+  }
+
   /* One newline at the end of the file. Not while the last line is held: inside
      an unclosed code block that newline is a blank line of code, and the file
      ending without one is the smaller wrong. */
@@ -216,8 +291,13 @@ export function lintEdits (text) {
 
   /* An insertion only ever lands in a gap with no blank line in it, and a
      deletion only ever spans blank ones, so sorting is all that is needed to
-     leave them non-overlapping — which is what a ChangeSet requires. */
-  return edits.sort((a, b) => a.from - b.from)
+     leave them non-overlapping — which is what a ChangeSet requires.
+
+     The tie is between rule 3's blank line above an unindented heading and rule
+     4's rewrite of that heading's hashes, which begin at the same offset. The
+     shorter goes first: the blank line belongs above the heading, not inside
+     the hashes it would otherwise be sorted into the middle of. */
+  return edits.sort((a, b) => (a.from - b.from) || ((a.to - a.from) - (b.to - b.from)))
 }
 
 /** `text`, tidied. */

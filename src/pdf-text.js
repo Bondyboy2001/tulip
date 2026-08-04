@@ -26,12 +26,27 @@
 if (!globalThis.DOMMatrix) globalThis.DOMMatrix = class DOMMatrix {}
 if (!globalThis.Path2D) globalThis.Path2D = class Path2D {}
 
-/* Roughly a short paragraph per page. Under this the document is images of
-   text rather than text — a scan, or a deck of screenshots — and what pdf.js
-   returns is the handful of stray characters its fonts happen to spell. Saying
-   so is worth more than handing back a page of nothing: a copilot given an
-   empty file reports an empty paper, and the reader is left arguing with it. */
-const TEXT_PER_PAGE = 100
+import fs from 'node:fs/promises'
+import path from 'node:path'
+
+import {
+  PDF_TEXT_FORMAT, formatPdfText, mergeOcrPages, sparsePages, textFromItems
+} from './pdf-text-layout.js'
+
+export { PDF_TEXT_FORMAT, formatPdfText, mergeOcrPages }
+
+/* pdf.js's bundled Node factory discovers `fs` through process.getBuiltinModule,
+   which is absent in Electron's utility-process shim. Give it the same narrow
+   local reader directly so standard fonts and CJK maps do not fail silently. */
+class LocalBinaryDataFactory {
+  constructor (sources) { this.sources = sources }
+
+  async fetch ({ kind, filename }) {
+    const base = this.sources[kind]
+    if (!base) throw new Error(`No local PDF data path for ${kind}.`)
+    return new Uint8Array(await fs.readFile(path.join(base, filename)))
+  }
+}
 
 /**
  * @param {Uint8Array} bytes  the PDF itself
@@ -40,9 +55,9 @@ const TEXT_PER_PAGE = 100
  * @param {string} [opts.fonts]  `dist/pdfjs/standard_fonts/`, for documents that
  *   name a standard font rather than embedding one — without it their glyphs
  *   have no character codes to come back as.
- * @returns {Promise<{ text: string, pages: number, scanned: boolean }>}
+ * @returns {Promise<{ text: string, pageTexts: string[], pages: number, sparsePages: number[] }>}
  */
-export async function extract (bytes, { name = 'document.pdf', fonts } = {}) {
+export async function extract (bytes, { name = 'document.pdf', fonts, cmaps, wasm } = {}) {
   /* pdf.js parses in a worker, and out of a browser it makes a fake one by
      importing its worker file by path — which a bundle does not have, and the
      packaged app has nowhere to put. `globalThis.pdfjsWorker` is the door it
@@ -58,6 +73,10 @@ export async function extract (bytes, { name = 'document.pdf', fonts } = {}) {
   const loading = pdfjs.getDocument({
     data: bytes,
     standardFontDataUrl: fonts,
+    cMapUrl: cmaps,
+    cMapPacked: true,
+    wasmUrl: wasm,
+    BinaryDataFactory: LocalBinaryDataFactory,
     // No `eval`, and nothing fetched: this parses files the user did not write,
     // in the process that has the filesystem.
     isEvalSupported: false,
@@ -72,15 +91,7 @@ export async function extract (bytes, { name = 'document.pdf', fonts } = {}) {
       const page = await doc.getPage(n)
       try {
         const content = await page.getTextContent()
-        /* pdf.js hands back positioned runs rather than lines. `hasEOL` is
-           where it believes one ended, and that is the only line structure a
-           PDF has to give — the rest is coordinates. */
-        pages.push(content.items
-          .map((item) => (item.str || '') + (item.hasEOL ? '\n' : ''))
-          .join('')
-          .replace(/[ \t]+\n/g, '\n')
-          .replace(/\n{3,}/g, '\n\n')
-          .trim())
+        pages.push(textFromItems(content.items))
       } finally {
         page.cleanup()
       }
@@ -92,23 +103,10 @@ export async function extract (bytes, { name = 'document.pdf', fonts } = {}) {
     await loading.destroy()
   }
 
-  const total = pages.reduce((sum, page) => sum + page.length, 0)
-  const header = `${name} — ${pages.length} page${pages.length === 1 ? '' : 's'}, text extracted by Tulip.`
-
-  if (total < TEXT_PER_PAGE * pages.length) {
-    return {
-      pages: pages.length,
-      scanned: true,
-      text: `${header}\n\nThis PDF carries no selectable text: it is a scan, or pages of \
-images, and only the app's reader can show it. There is nothing below to quote.\n`
-    }
-  }
-
   return {
     pages: pages.length,
-    scanned: false,
-    text: `${header}\n\n${pages
-      .map((page, i) => `--- page ${i + 1} of ${pages.length} ---\n\n${page}\n`)
-      .join('\n')}`
+    pageTexts: pages,
+    sparsePages: sparsePages(pages),
+    text: formatPdfText(name, pages)
   }
 }

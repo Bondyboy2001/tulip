@@ -154,7 +154,7 @@ export function guestFence ({ tag, label, tips, page }) {
    * the block, so the same block's button in the editing view and in the
    * reading view drive one page between them.
    */
-  function buttonUI (lang, code) {
+  function buttonUI (_lang, code) {
     const state = stateFor(keyFor(code))
     const button = runButton()
 
@@ -177,7 +177,7 @@ export function guestFence ({ tag, label, tips, page }) {
    *
    * `onDraw` is how the editor hears that the panel changed height.
    */
-  function panelUI (lang, code, className, onDraw) {
+  function panelUI (_lang, code, className, onDraw) {
     const state = stateFor(keyFor(code))
     const panel = el('div', `run-out ${panelClass} ${className}`)
     panel.setAttribute('role', 'group')

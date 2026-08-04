@@ -40,6 +40,60 @@ export const codeTokens = [
 
 const staticHighlighter = tagHighlighter(codeTokens)
 
+/* A block that leaves Reading view's extended viewport gives its highlighted
+   DOM back so a long note does not retain thousands of spans. Scrolling back
+   used to parse the identical source again before rebuilding those spans. Keep
+   the parser's small, inert answer instead: text and class names, never DOM.
+
+   The cache is byte-bounded as well as entry-bounded because one 100 kB block
+   is not the same memory promise as one ten-line snippet. Map insertion order
+   is the LRU; a hit is reinserted at the end. */
+const tokenCache = new Map()
+const TOKEN_CACHE_ENTRIES = 96
+const TOKEN_CACHE_BYTES = 2 * 1024 * 1024
+let tokenCacheBytes = 0
+
+function tokenKey (language, code) {
+  return `${language}\0${code}`
+}
+
+function cachedTokens (key) {
+  const hit = tokenCache.get(key)
+  if (!hit) return null
+  tokenCache.delete(key)
+  tokenCache.set(key, hit)
+  return hit.tokens
+}
+
+function rememberTokens (key, code, tokens) {
+  /* UTF-16 strings are two bytes per code unit. Class names are shared literals
+     in practice, but counting them too keeps the bound conservative. */
+  const bytes = 2 * (key.length + code.length +
+    tokens.reduce((sum, token) => sum + token.text.length + token.classes.length, 0))
+  if (bytes > TOKEN_CACHE_BYTES) return
+
+  tokenCache.set(key, { tokens, bytes })
+  tokenCacheBytes += bytes
+  while (tokenCache.size > TOKEN_CACHE_ENTRIES || tokenCacheBytes > TOKEN_CACHE_BYTES) {
+    const oldest = tokenCache.keys().next().value
+    const dropped = tokenCache.get(oldest)
+    tokenCache.delete(oldest)
+    tokenCacheBytes -= dropped.bytes
+  }
+}
+
+/* Exported only as observability for the focused regression/benchmark script.
+   Production callers use highlightInto; exposing counts avoids timing-based
+   correctness tests. */
+export function highlightCacheStats () {
+  return { entries: tokenCache.size, bytes: tokenCacheBytes }
+}
+
+export function clearHighlightCache () {
+  tokenCache.clear()
+  tokenCacheBytes = 0
+}
+
 /* A language pack is a dynamic import; two blocks of the same language in one
    note must not each pay for it, and must not each start their own request. */
 const loading = new Map()
@@ -131,22 +185,33 @@ export async function highlightInto (el, code, token) {
   }
   if (!el.isConnected) return false
 
-  const tree = support_.language.parser.parse(code)
+  const key = tokenKey(desc.name, code)
+  let tokens = cachedTokens(key)
+  if (!tokens) {
+    const tree = support_.language.parser.parse(code)
+    tokens = []
+    highlightCode(
+      code,
+      tree,
+      staticHighlighter,
+      (text, classes) => tokens.push({ text, classes: classes || '' }),
+      () => tokens.push({ text: '\n', classes: '' })
+    )
+    rememberTokens(key, code, tokens)
+  }
+
+  /* Loading a language may have yielded long enough for the note to change.
+     The earlier check protects the parse; this one protects the DOM write. */
+  if (!el.isConnected) return false
   const frag = document.createDocumentFragment()
 
-  highlightCode(
-    code,
-    tree,
-    staticHighlighter,
-    (text, classes) => {
-      if (!classes) { frag.append(document.createTextNode(text)); return }
-      const span = document.createElement('span')
-      span.className = classes
-      span.textContent = text
-      frag.append(span)
-    },
-    () => frag.append(document.createTextNode('\n'))
-  )
+  for (const token of tokens) {
+    if (!token.classes) { frag.append(document.createTextNode(token.text)); continue }
+    const span = document.createElement('span')
+    span.className = token.classes
+    span.textContent = token.text
+    frag.append(span)
+  }
 
   el.replaceChildren(frag)
   return true

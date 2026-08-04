@@ -110,6 +110,28 @@ export function copyButton (text) {
   return button
 }
 
+/** Ask the renderer to open the focused Copilot prompt for one fenced block.
+ * Both Reading and Editing use this button; the renderer owns the popup and
+ * conversation, while the control owns only the code it was drawn for. */
+export function codeCopilotButton (lang, code) {
+  const button = el('button', 'run-btn is-icon code-ai-btn')
+  button.type = 'button'
+  button.title = 'Edit with Copilot'
+  button.setAttribute('aria-label', 'Edit code block with Copilot')
+  button.append(svgIcon(
+    '<path d="M8 1.8c.35 2.5 1.7 3.85 4.2 4.2C9.7 6.35 8.35 7.7 8 10.2 7.65 7.7 6.3 6.35 3.8 6 6.3 5.65 7.65 4.3 8 1.8z"/>' +
+    '<path d="M12.2 9.5c.18 1.3.9 2.02 2.2 2.2-1.3.18-2.02.9-2.2 2.2-.18-1.3-.9-2.02-2.2-2.2 1.3-.18 2.02-.9 2.2-2.2z"/>',
+    { className: 'run-icon', stroke: 1.25 }
+  ))
+  button.addEventListener('click', () => {
+    button.dispatchEvent(new CustomEvent('tulip:code-copilot', {
+      bubbles: true,
+      detail: { lang: String(lang || ''), code: String(code || ''), anchor: button }
+    }))
+  })
+  return button
+}
+
 /* The five characters that stop note text being read as markup. Here rather
    than beside either of the two modules that write untrusted text into an HTML
    string, because a second copy of an escaper is a copy that gets fixed once. */

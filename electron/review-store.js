@@ -32,6 +32,7 @@
 const fs = require('node:fs/promises')
 const fsSync = require('node:fs')
 const path = require('node:path')
+const { makeCoalescedWriter } = require('./atomic-store')
 
 /** Everything Tulip keeps inside a vault that is not a note. */
 const STATE_DIR = '.tulip'
@@ -84,6 +85,7 @@ function makeStore ({ vault }) {
      two readers disagree about what a card's state is. */
   let cards = null
   let loadedFor = null
+  const writer = makeCoalescedWriter()
 
   async function load () {
     if (cards && loadedFor === vault()) return cards
@@ -115,21 +117,11 @@ function makeStore ({ vault }) {
 
   /** The whole deck to disk, atomically and durably. */
   async function flush () {
-    await fs.mkdir(dir(), { recursive: true })
-    const body = JSON.stringify({ version: 1, cards: cards || {} }, null, 1)
-    const tmp = `${stateFile()}.${process.pid}.tmp`
-    /* Written through a temp file and renamed, the way notes are: a review
-       state half-written over by a crash would lose the deck, and the rename
-       makes it either the old file or the new one. Durable, unlike the chat
-       log — this is the reader's work, not a transcript of it. */
-    const handle = await fs.open(tmp, 'w')
-    try {
-      await handle.writeFile(body, 'utf8')
-      await handle.sync()
-    } finally {
-      await handle.close()
-    }
-    await fs.rename(tmp, stateFile())
+    const target = stateFile()
+    const deck = cards || {}
+    /* The lazy serializer is evaluated after same-turn calls have coalesced,
+       so a review burst pays for one stringify, fsync and rename. */
+    await writer.flush(target, () => JSON.stringify({ version: 1, cards: deck }, null, 1))
   }
 
   return {

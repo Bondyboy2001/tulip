@@ -97,46 +97,20 @@ const CLAUDE_TOOLS = {
   read: 'Read,Glob,Grep'
 }
 
-/* The vault's own path is stated rather than left to be inferred. A CLI that
-   finds itself inside a git checkout takes the repository root as the project
-   root, which for a vault stored in one — a notes repo, or Tulip's own sample
-   vault — silently widens the agent's idea of where the notes are, and it
-   starts globbing the wrong tree. */
-/**
- * How a reply is written, as opposed to what it says.
- *
- * Said twice on purpose — once in the briefing, and again on every single turn
- * (see `send`). Once would be the tidier design and it does not work, for two
- * reasons that compound. Codex and opencode have no system-prompt flag, so
- * their briefing rides the first message of a thread and a conversation that
- * resumes has no way to hear a rule that did not exist when it started. And a
- * transcript in which the model has already answered in HTML five times is a
- * stronger instruction than anything at the top of the context: the way to
- * change how it writes is to say so immediately before the question, not once
- * an hour ago.
- *
- * The cost is some tokens a turn, all of them inside the cached prefix.
- */
-const HOUSE_STYLE = `How to write your replies:
-- Mathematics is LaTeX, always: $…$ inline, $$…$$ on its own lines when \
-displayed. The panel typesets it with KaTeX. Even a lone symbol goes in \
-maths — write $A$, $Q_A(0)$, $Z^{[4]}$, $k[[z]]/(z^5)$, $\\cong$. Do not use \
-HTML tags such as <sub>, <sup> or <i>, and do not stand in for maths with \
-*italics* or Unicode look-alikes: all three reach the user as the literal \
-characters you typed. Ordinary prose stays ordinary prose — this is about \
-symbols, variables and formulae, not about numbers in a sentence.
-- When something you say comes from a PDF, cite the page it came from as \
-[p. 12], or [pp. 12–14] for a range; the panel turns those into links that \
-scroll the reader's document to that page. Cite the numbers in the \
-"--- page N of M ---" markers of the extracted text, which count sheets from \
-the front — not any number printed on the page itself, which front matter puts \
-out of step. Add the file name for a document other than the one open: \
-[Paper.pdf p. 12]. Cite the page, not a heading or a section number.
-- Citing a work rather than a page of one is the other bracket: \`[@key]\`, or \
-\`[@key, p. 4]\` for a place in it, resolved against a \`references.bib\` beside \
-the note. Read that file for the keys instead of inventing one: a key with no \
-entry there is still drawn as a citation, marked as missing, and left out of the \
-bibliography the app builds at the foot of the note.`
+/* Kept compact because these rules accompany every turn. Repeating them makes
+   them reach resumed Codex/opencode threads and outweigh older reply patterns. */
+const TURN_RULES = `Writing rules:
+- New notes are plain Markdown. Add YAML frontmatter only when explicitly \
+requested. Tulip displays the filename as the page title, so do not repeat it \
+as a \`#\` heading; start with the body or first useful section.
+- Write mathematical notation as LaTeX (\`$…$\` inline, \`$$…$$\` displayed), \
+not HTML, italics or Unicode look-alikes.
+- For PDF-derived claims, cite extracted page markers as \`[page 12]\` or \
+\`[pages 12–14]\`; for another file use \`[Paper.pdf page 12]\`. For bibliographic \
+citations, read the adjacent \`references.bib\` and use \`[@key]\` or \
+\`[@key, p. 4]\`; never invent keys.
+- Edit existing notes in place rather than rewriting the whole file. Keep the \
+reply short; the user can see the note.`
 
 /* The vocabulary table's columns, read off the template the app actually
    builds those tables from. Named in the briefing below, and a renamed column
@@ -159,66 +133,40 @@ const DRAWN_LANGUAGES = Object.values(RUNNABLE.drawn)
    colour and an icon rather than about refusing the rest. */
 const CALLOUT_KINDS = require('./callout-kinds.json').kinds.map((kind) => kind.id)
 
-const systemPrompt = (dir) => `You are Copilot, the assistant inside Tulip, a markdown \
-notes app. The user's vault is the directory ${dir}, and every .md file under \
-it is a note. Work only inside that directory, and resolve every relative path \
-against it — not against any enclosing project or git repository.
+const systemPrompt = (dir) => `You are Copilot inside Tulip, a Markdown notes app.
 
-Conventions of this vault:
-- Notes link to each other with [[Wikilinks]] — the note's name, without the path or extension.
+Scope:
+- The vault root is ${dir}. Work only inside it and resolve relative paths \
+against it, never an enclosing repository.
+- Every \`.md\` file is a note. Read only files relevant to the request; do not \
+survey the vault for style or conventions.
+- The note named in \`<open-note>\` is merely on screen. Read or edit it only \
+when the request concerns it.
+- Unless told otherwise, create a new note at the vault root and name it for \
+its subject.
+
+Vault conventions:
+- Link notes as \`[[Note]]\`, without path or extension.
 - Files ending in ${VAULT_CONTRACT.languageTableSuffix} are language tables. Their first Markdown table \
 uses the columns ${VOCABULARY_COLUMNS.join(', ')}. Preserve those column names \
-and one vocabulary item per row when editing them; ${VOCABULARY_COLUMNS[0]} and \
-${VOCABULARY_COLUMNS[1]} generate the app's study cards.
-- Attachments live in ${VAULT_CONTRACT.attachmentDirectory}/<Note name>/ and are embedded with ![[name.png]].
-- Fenced code blocks are runnable in the app, so keep their language tags \
-accurate. These run, from a button on the block: ${RUNNABLE_LANGUAGES.join(', ')}. \
-These are drawn rather than run: ${DRAWN_LANGUAGES.join(', ')} — \`three\` is a \
-three.js scene body, \`manim\` and \`tikz\` render to a picture kept in the vault. \
-A fence tagged with anything else is shown as plain code, so prefer one of these \
-when the user asks for a diagram or something they can run.
-- The reading view also draws callouts — \`> [!warning] Mind the gap\`, \
-optionally titled and foldable with \`+\`/\`-\`. The kinds that carry a colour \
-and an icon are: ${CALLOUT_KINDS.join(', ')}.
-- Notes embed one another: \`![[Note]]\` for the whole of one, \
-\`![[Note#Heading]]\` for a section, \`![[Note#^block-id]]\` for a single block. \
-A block earns that anchor by ending its last line with \`^block-id\` (letters, \
-digits and hyphens) — which is how one is made, and worth doing when you write \
-something you expect to be pointed at.
-- A picture may be given a width: \`![[diagram.png|400]]\`, or \
-\`![[diagram.png|400x260]]\` for both dimensions.
-- \`#tag\` marks a tag, and \`==text==\` a highlight. Both are drawn by the app \
-and neither is ordinary Markdown, so write them only when they are wanted.
-- A labelled display equation is numbered and can be pointed at: \`\\label{eq:name}\` \
-inside a \`$$…$$\` block gives it a number, \`\\eqref{eq:name}\` links to it from \
-anywhere in the note, and \`\\tag{...}\` sets what is shown instead of the number. \
-Labels on inline maths do nothing.
-- The vault also holds PDFs, which the user reads and highlights in the app. A \
-.pdf is binary and not worth opening: its text is in \
-${VAULT_CONTRACT.annotationDirectory}/<name>.pdf${VAULT_CONTRACT.pdfTextSuffix}, whole and marked off one section per \
-page, so read that when asked about the document. What the user has marked on \
-<name>.pdf is in ${VAULT_CONTRACT.annotationDirectory}/<name>.pdf.json — each highlight there carries the text it \
-covers and the page it is on, so read that file when the question is about what \
-they highlighted. Never write to ${VAULT_CONTRACT.annotationDirectory}/; the app owns those files.
+and keep one vocabulary item per row; ${VOCABULARY_COLUMNS[0]} and \
+${VOCABULARY_COLUMNS[1]} generate study cards.
+- Put attachments in ${VAULT_CONTRACT.attachmentDirectory}/<Note name>/ and \
+embed them as \`![[name.png]]\`; optional image sizes are \`|400\` or \`|400x260\`.
+- Embed notes as \`![[Note]]\`, sections as \`![[Note#Heading]]\`, and blocks as \
+\`![[Note#^block-id]]\`; define a block id by ending the block with \`^block-id\`.
+- Runnable fence languages: ${RUNNABLE_LANGUAGES.join(', ')}. Drawn fence \
+languages: ${DRAWN_LANGUAGES.join(', ')}. Other fence tags display as code.
+- Callouts use \`> [!kind] Title\`; known kinds: ${CALLOUT_KINDS.join(', ')}.
+- \`#tag\` is a tag and \`==text==\` is a highlight. Use either only when wanted.
+- Label display equations with \`\\label{eq:name}\`, link them with \
+\`\\eqref{eq:name}\`, and override the number with \`\\tag{...}\`.
+- Do not open binary PDFs. Their extracted text is \
+${VAULT_CONTRACT.annotationDirectory}/<name>.pdf${VAULT_CONTRACT.pdfTextSuffix}; \
+highlights are ${VAULT_CONTRACT.annotationDirectory}/<name>.pdf.json. Never write \
+inside ${VAULT_CONTRACT.annotationDirectory}/; Tulip owns it.
 
-Those conventions are the whole of them. This vault has no house style left to \
-discover, so do not survey it before answering — no grepping for how other \
-notes are written, no reading notes that have nothing to do with the question. \
-Open a file when the answer depends on what is inside it, and not otherwise. \
-The note named at the top of a message is only what the user has on screen: \
-read it when the request concerns it, and leave it alone when the request has \
-moved on to something else. A request to write about a subject is a request to \
-write about the subject, not to research the vault first.
-
-Unless the user says where a new note belongs, create it at the top level of \
-the vault, named for its subject.
-
-${HOUSE_STYLE}
-
-Edit notes in place with the Edit tool rather than rewriting them with Write — \
-the user is watching the file change in their editor as you work, and a whole-file \
-rewrite reads as a flash rather than an edit. Keep prose replies short; the user \
-can see the note.`
+${TURN_RULES}`
 
 /**
  * How much of the context window a turn left in play, as one number.
@@ -996,10 +944,58 @@ function parseOpencode (stdout) {
 }
 
 /**
+ * Claude's own answer to what it offers.
+ *
+ * The CLI prints the current lineup as a table (`claude models list`), newest
+ * first — which is the one place the hand-written labels in the fallback list
+ * can go stale: an alias like `opus` follows the newest model of that name
+ * whether this file has heard about it yet or not, so "Opus 5" quietly means
+ * "the label the day it was typed" until someone edits the JSON. Read at
+ * catalogue time and merged over the fallback, which still decides the ids
+ * offered (an alias the app does not recognise is one it cannot offer
+ * sanely) and the efforts each takes (the lineup does not publish them).
+ *
+ * Answers a Map family → row: `claude-opus-5` lands under `opus`, and the
+ * first row of a family is the newest, which is the one an alias means.
+ */
+function parseClaude (stdout) {
+  const newest = new Map()
+  for (const line of String(stdout || '').split('\n')) {
+    const m = /^\|\s*(?:Claude\s+)?([^|`]+?)\s*\|\s*`?claude-([a-z]+)-[0-9][^`|\s]*`?\s*\|\s*([^|]+?)\s*\|/.exec(line.trim())
+    if (!m) continue
+    const family = m[2].toLowerCase()
+    if (newest.has(family)) continue
+    newest.set(family, { label: m[1].trim(), context: contextSize(m[3].trim()) })
+  }
+  return newest
+}
+
+function contextSize (text) {
+  const m = /^(\d+(?:\.\d+)?)\s*([KM])?$/i.exec(String(text || '').replace(/,/g, ''))
+  if (!m) return 0
+  const n = Number(m[1])
+  return m[2] ? (m[2].toUpperCase() === 'M' ? Math.round(n * 1000000) : Math.round(n * 1000)) : Math.round(n)
+}
+
+/** The fallback list with whatever the CLI said written over it. */
+function mergeClaude (fallback, newest) {
+  return fallback.map((model) => {
+    const row = newest.get(model.id)
+    if (!row) return model
+    return {
+      ...model,
+      label: row.label || model.label,
+      context: row.context || model.context
+    }
+  })
+}
+
+/**
  * Every model the three CLIs offer, which is what the settings pane chooses
- * from. Claude publishes no catalogue command, so its aliases are stated here;
- * the other two are asked, in parallel, because opencode's answer takes a
- * second and there is no reason for Codex to wait behind it.
+ * from. Claude publishes no catalogue command that predates its own lineup
+ * table, so its aliases are stated in the fallback and its labels refreshed
+ * from the CLI; the other two are asked, in parallel, because opencode's
+ * answer takes a second and there is no reason for Codex to wait behind it.
  *
  * Held once it has been read. Two callers want this — the panel when it
  * restores, and the settings pane every time it opens — and neither knew about
@@ -1017,11 +1013,14 @@ function models ({ fresh = false } = {}) {
   if (!fresh && held && Date.now() - held.at < CATALOGUE_TTL) return held.promise
 
   const promise = Promise.all([
+    ask('claude', ['models', 'list'], (stdout) => stdout),
     ask('codex', ['debug', 'models'], parseCodex),
     ask('opencode', ['models', '--verbose'], parseOpencode)
-  ]).then(([codex, opencode]) => ({
-    // Claude publishes no catalogue command, so its own list is the answer.
-    claude: MODEL_FALLBACKS.claude,
+  ]).then(([claudeTable, codex, opencode]) => ({
+    /* The CLI's labels written over the fallback's; where a CLI pre-dates the
+       command or answers with something unrecognisable, the map is empty and
+       the fallback stands unchanged. */
+    claude: mergeClaude(MODEL_FALLBACKS.claude, parseClaude(claudeTable || '')),
     codex,
     opencode
   })).catch((error) => {
@@ -1095,6 +1094,38 @@ function opened (context) {
   return `<open-pdf>${context.note}${where}${words}${selection}</open-pdf>`
 }
 
+const isPdfAttachment = (file) => path.extname(String(file || '')).toLowerCase() === '.pdf'
+
+function promptFor (text, context) {
+  /* What the user is looking at, stated once at the top of the turn. The agent
+     can read any note it likes; this only saves it a guess about which one.
+
+     Then the compact writing rules, so resumed conversations receive current
+     behavior and older reply patterns do not outweigh it. */
+  /* Attachments are named, not carried. All three CLIs read a file for
+     themselves, so selected files and pasted pictures are written to the
+     vault and reach the agent as the one thing it can always act on: a path. */
+  const ordinaryAttachments = Array.isArray(context?.attachments)
+    ? context.attachments.filter((file) => !isPdfAttachment(file))
+    : []
+  const attachments = ordinaryAttachments.length
+    ? `The user attached ${ordinaryAttachments.length === 1 ? 'a file' : 'files'}. ` +
+      `Open ${ordinaryAttachments.length === 1 ? 'it' : 'them'} with your file-reading tool:\n` +
+      ordinaryAttachments.map((file) => `- ${file}`).join('\n')
+    : ''
+
+  const pdfs = Array.isArray(context?.pdfDocuments) && context.pdfDocuments.length
+    ? `PDF documents are ready as page-marked text${context.pdfDocuments.some((pdf) => pdf.ocrPages) ? ', with Vision OCR where needed' : ''}:\n` +
+      context.pdfDocuments.map((pdf) => `- ${pdf.path}: ${pdf.textPath}`).join('\n')
+    : ''
+
+  return [
+    context?.note ? opened(context) : '', attachments, pdfs,
+    context?.pdfContext || '', TURN_RULES, text
+  ]
+    .filter(Boolean).join('\n\n')
+}
+
 function send (text, context) {
   // Deliberately not started here: only the panel knows which copilot, which
   // effort and which write mode the user picked, so an implicit start would
@@ -1102,24 +1133,7 @@ function send (text, context) {
   if (!session) return { ok: false, error: 'The copilot is not running.' }
   if (session.busy) return { ok: false, error: 'The copilot is still working.' }
 
-  /* What the user is looking at, stated once at the top of the turn. The agent
-     can read any note it likes; this only saves it a guess about which one.
-
-     Then the house style, last before the question, because that is the only
-     position that beats a transcript of the model's own earlier answers — see
-     HOUSE_STYLE. */
-  /* Images are named, not carried. All three CLIs read a file for themselves and
-     none of them takes an image over a stream-json message, so a pasted picture
-     is written to disk by main and reaches the agent as the one thing it can
-     always act on: an absolute path. */
-  const images = Array.isArray(context?.images) && context.images.length
-    ? `The user attached ${context.images.length === 1 ? 'an image' : 'images'}. ` +
-      `Look at ${context.images.length === 1 ? 'it' : 'them'} with your file-reading tool:\n` +
-      context.images.map((file) => `- ${file}`).join('\n')
-    : ''
-
-  const prompt = [context?.note ? opened(context) : '', images, HOUSE_STYLE, text]
-    .filter(Boolean).join('\n\n')
+  const prompt = promptFor(text, context)
 
   session.busy = true
 
@@ -1178,5 +1192,6 @@ module.exports = {
   start,
   send,
   stop,
-  parsers: { draftFields, detailOf, readLines, parseCodex, parseOpencode, codexTool }
+  parsers: { draftFields, detailOf, readLines, parseCodex, parseOpencode, parseClaude, mergeClaude, codexTool },
+  prompts: { systemPrompt, turnRules: TURN_RULES, promptFor }
 }

@@ -20,36 +20,94 @@ import { snippetCompletion, startCompletion } from '@codemirror/autocomplete'
 import { syntaxTree } from '@codemirror/language'
 import { CALLOUT_KINDS } from './callouts.js'
 import { LANGUAGES } from './languages.js'
+import { insertTable } from './table.js'
 
 /* The groups, in the order the menu shows them; within a group, commands stay
    in the order written here. */
 const BLOCKS = { name: 'Blocks', rank: 0 }
 const EMBEDS = { name: 'Embeds', rank: 1 }
 
-/** One command: what the menu shows, what it answers to, what it inserts. */
-function command (label, detail, aliases, section, template) {
-  const completion = snippetCompletion(template, { label, detail, section, type: 'keyword' })
+/** One command: what the menu shows, what it answers to, what it inserts.
+ *
+ * No detail column. Every row used to carry its own syntax on the right —
+ * ``` beside "Code block", `![[…]]` beside "Image or file" — which is the one
+ * thing a reader of this menu has already said they do not want to remember.
+ * The label is the whole row. */
+function command (label, aliases, section, template) {
+  const completion = snippetCompletion(template, { label, section, type: 'keyword' })
   return { completion, haystack: `${label} ${aliases.join(' ')}`.toLowerCase() }
 }
 
-/* Deliberately short — code, embeds and callouts, the things with syntax
-   worth not remembering. Headings, lists and quotes are quicker to just
-   type than to pick from a menu. */
+/* Deliberately short — blocks with syntax worth not remembering, and the two
+   things that are more than syntax: a table, which is a grid rather than four
+   lines of pipes, and the note's properties, which go at the top of the file
+   however far down the `/` was typed. Headings, lists and quotes are quicker
+   to just type than to pick from a menu. */
 const COMMANDS = [
-  command('Code block', '```', ['fence', 'snippet', 'source', 'run'], BLOCKS,
+  command('Code block', ['fence', 'snippet', 'source', 'run'], BLOCKS,
     '```${language}\n${}\n```'),
+  tableCommand(),
+  calloutCommand(),
 
-  command('Image or file', '![[…]]', ['embed', 'picture', 'attachment', 'img', 'photo'], EMBEDS,
+  command('Image or file', ['embed', 'picture', 'attachment', 'img', 'photo'], EMBEDS,
     '![[${name}]]'),
-  command('PDF', '![[….pdf]]', ['embed', 'document', 'pages'], EMBEDS,
+  command('PDF', ['embed', 'document', 'pages'], EMBEDS,
     '![[${file}.pdf]]'),
-  command('Website', '![[https://…]]', ['embed', 'web', 'page', 'iframe', 'url', 'link'], EMBEDS,
+  command('Website', ['embed', 'web', 'page', 'iframe', 'url', 'link'], EMBEDS,
     '![[https://${example.com}]]'),
-  command('YouTube', '![[watch URL]]', ['embed', 'video', 'player', 'yt'], EMBEDS,
+  command('YouTube', ['embed', 'video', 'player', 'yt'], EMBEDS,
     '![[https://www.youtube.com/watch?v=${id}]]'),
 
-  calloutCommand()
+  tagsCommand()
 ]
+
+/**
+ * A table, made the way ⌘⌥T makes one.
+ *
+ * Not a snippet: a table written as text would be four lines of pipes for the
+ * writer to line up by hand, and the editor draws a grid over them the moment
+ * they are there. `insertTable` writes the same three-by-three the shortcut
+ * does and lands the cursor in the first cell of it, which is where someone
+ * who asked for a table wants to be.
+ */
+function tableCommand () {
+  return {
+    completion: {
+      label: 'Table',
+      section: BLOCKS,
+      type: 'keyword',
+      apply: (view, _completion, from, to) => {
+        // The slash first, so `insertTable` reads a line with nothing on it and
+        // starts the table there rather than two lines below it.
+        view.dispatch({ changes: { from, to, insert: '' }, userEvent: 'input.complete' })
+        insertTable(view)
+      }
+    },
+    haystack: 'table grid rows columns spreadsheet csv'
+  }
+}
+
+/**
+ * Open the note's tag editor. No placeholder YAML is written: the head is
+ * created only once the reader supplies an actual tag.
+ */
+function tagsCommand () {
+  return {
+    completion: {
+      label: 'Tags',
+      section: BLOCKS,
+      type: 'keyword',
+      apply: (view, _completion, from, to) => {
+        view.dispatch({
+          changes: { from, to, insert: '' },
+          userEvent: 'input.complete'
+        })
+        view.dom.dispatchEvent(new CustomEvent('tulip:tags', { bubbles: true }))
+      }
+    },
+    haystack: 'tags labels frontmatter metadata yaml head'
+  }
+}
 
 /**
  * One entry for all thirteen kinds.
@@ -68,7 +126,6 @@ function calloutCommand () {
   return {
     completion: {
       label: 'Callout',
-      detail: '> [!…]',
       section: BLOCKS,
       type: 'keyword',
       apply: (view, _completion, from, to) => {

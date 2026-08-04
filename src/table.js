@@ -16,6 +16,9 @@
 
 import { EditorView, Decoration, ViewPlugin, WidgetType } from '@codemirror/view'
 import { Facet, StateField } from '@codemirror/state'
+import { undo, redo } from '@codemirror/commands'
+import { getSearchQuery, searchPanelOpen } from '@codemirror/search'
+import { escapeHtml } from './blocks.js'
 import { MONEY_SOURCE, moneyNode } from './money.js'
 import { findMath, renderMathInto } from './math.js'
 import {
@@ -145,6 +148,17 @@ function alignments (delimiterRow) {
   })
 }
 
+/** How many columns a token stream's table has, counted off its header row.
+ *  The token stream is the only place the reading view can be asked. */
+function headerCells (tokens, open) {
+  let cells = 0
+  for (let at = open + 1; at < tokens.length; at++) {
+    if (tokens[at].type === 'tr_close') break
+    if (tokens[at].type === 'th_open') cells++
+  }
+  return cells
+}
+
 /**
  * The reading view's half of the same feature: the marker line above a table
  * is read off the token stream, hidden, and turned into the `<colgroup>` the
@@ -167,7 +181,14 @@ export function columnWidthPlugin (md) {
          that never sees the flag. */
       tokens[i].hidden = true
       tokens[i].content = ''
-      tokens[i + 1].meta = { ...(tokens[i + 1].meta || {}), widths }
+      /* Padded to the table's real width, so a marker written when the table
+         was narrower still describes every column — and so the two views agree
+         about which columns are content-sized, which is what decides whether
+         the grid fills its frame. */
+      tokens[i + 1].meta = {
+        ...(tokens[i + 1].meta || {}),
+        widths: padWidths(widths, Math.max(widths.length, headerCells(tokens, i + 1)))
+      }
     }
   })
 
@@ -178,6 +199,7 @@ export function columnWidthPlugin (md) {
     const widths = tokens[i].meta?.widths
     if (!widths?.some(Boolean)) return renderOpen(tokens, i, options, env, self)
     tokens[i].attrJoin('class', 'has-column-widths')
+    if (widths.some((width) => !width)) tokens[i].attrJoin('class', 'has-flexible-column')
     const cols = widths
       .map((w) => (w ? `<col style="width:${columnWidth(w)}">` : '<col>'))
       .join('')
@@ -306,6 +328,10 @@ const decode = (text) => text.replace(/\\\|/g, '|')
    round, and left as plain text it was the one thing in the editing view that
    did not look the way the reading view sets it. */
 const CELL_PATTERN =
+  /* A cell is one line of Markdown, so `<br>` is the only line break it has —
+     it is what Shift+Enter writes, and the reading view already breaks on it.
+     Non-capturing, so the numbered groups below keep their numbers. */
+  '(?:<br\\s*/?>)|' +
   '(\\*\\*|__)(.+?)\\1|(\\*|_)(.+?)\\3|`([^`]+)`|' +
   '\\[\\[([^\\]|]+)(?:\\|([^\\]]+))?\\]\\]|\\[([^\\]]+)\\]\\(([^)]+)\\)|' +
   MONEY_SOURCE
@@ -314,6 +340,9 @@ const CELL_PATTERN =
    and the scan below already drives `lastIndex` by hand, so all a shared
    instance needs is to start from the top. */
 const cellPattern = new RegExp(CELL_PATTERN, 'g')
+
+/** The line break above, recognised again once the scanner has found one. */
+const BREAK = /^<br\s*\/?>$/i
 
 function renderCell (td, text, {
   resolve = () => null,
@@ -432,7 +461,9 @@ function renderCell (td, text, {
     }
     if (match.index > last) td.append(text.slice(last, match.index))
 
-    if (match[2] !== undefined) {
+    if (BREAK.test(match[0])) {
+      td.append(document.createElement('br'))
+    } else if (match[2] !== undefined) {
       const strong = document.createElement('strong')
       strong.textContent = match[2]
       td.append(strong)
@@ -556,10 +587,15 @@ function renderTableCell (view, cell, text) {
 }
 
 function caretToEnd (cell) {
+  selectCellContents(cell)
+  window.getSelection()?.collapseToEnd()
+}
+
+/** Select-all inside a cell means that cell's text, not the note around it. */
+function selectCellContents (cell) {
   const selection = window.getSelection()
   const range = document.createRange()
   range.selectNodeContents(cell)
-  range.collapse(false)
   selection.removeAllRanges()
   selection.addRange(range)
 }
@@ -592,12 +628,97 @@ function selectionOffsets (cell) {
   }
 }
 
+/**
+ * A grid's rows, header first, in the order their `data-row` numbers them.
+ *
+ * The `colgroup` a dragged table carries is skipped for free: it holds `col`
+ * elements and no `tr`.
+ */
+const gridRows = (wrap) => wrap?.querySelectorAll(':scope > table > * > tr') || []
+
+/**
+ * One cell out of that list, by position.
+ *
+ * Indexed rather than matched: rows and cells are already in document order, so
+ * this is two property reads where a `[data-row][data-col]` selector is a walk
+ * of the whole grid. That is the difference between a rectangle costing a few
+ * hundred node visits and costing a million — ⌘A over a vocabulary table asks
+ * this question once per cell.
+ */
+function cellAt (rows, r, c, editableOnly = true) {
+  const cell = rows[r]?.children[c]
+  if (!cell) return null
+  return !editableOnly || cell.getAttribute('contenteditable') === 'plaintext-only'
+    ? cell
+    : null
+}
+
+const cellIn = (wrap, r, c, editableOnly = true) =>
+  cellAt(gridRows(wrap), r, c, editableOnly)
+
 function focusCell (wrap, r, c) {
-  const cell = wrap?.querySelector(`[data-row="${r}"][data-col="${c}"]`)
+  const cell = cellIn(wrap, r, c, false)
   if (!cell) return false
   cell.focus()
   caretToEnd(cell)
   return true
+}
+
+/** Whether the browser's selection already covers the whole cell, which is
+ *  what makes a second ⌘A mean something wider than the first. */
+function cellFullySelected (cell) {
+  const at = selectionOffsets(cell)
+  return Boolean(at) && at.from === 0 && at.to === (cell.textContent || '').length &&
+         at.to > at.from
+}
+
+/**
+ * Where a cell rectangle is being drawn from.
+ *
+ * Kept on the wrap rather than in a variable because the widget is rebuilt on
+ * every keystroke: the element holding a closure would be replaced mid-drag,
+ * and the dataset survives that the way every other piece of grid state does.
+ */
+function setCellAnchor (wrap, { r, c }) {
+  if (!wrap) return
+  wrap.dataset.cellAnchorRow = String(r)
+  wrap.dataset.cellAnchorCol = String(c)
+}
+
+function savedCellAnchor (wrap) {
+  const r = Number(wrap?.dataset.cellAnchorRow)
+  const c = Number(wrap?.dataset.cellAnchorCol)
+  return Number.isInteger(r) && Number.isInteger(c) ? { r, c } : null
+}
+
+/** The four arrows as a step, so every handler that moves by one agrees. */
+const STEPS = {
+  ArrowUp: [-1, 0],
+  ArrowDown: [1, 0],
+  ArrowLeft: [0, -1],
+  ArrowRight: [0, 1]
+}
+
+/**
+ * Type text into a cell at the caret.
+ *
+ * `execCommand` because it is still the only call that inserts into a
+ * `contenteditable` *and* leaves the browser's own caret and undo where they
+ * should be; the manual path behind it is for the day it is finally gone.
+ */
+function insertIntoCell (view, cell, text) {
+  if (document.execCommand?.('insertText', false, text)) return
+  const current = cell.textContent || ''
+  const at = selectionOffsets(cell) || { from: current.length, to: current.length }
+  cell.textContent = current.slice(0, at.from) + text + current.slice(at.to)
+  writeCell(view, cell)
+  const range = document.createRange()
+  const node = cell.firstChild || cell
+  range.setStart(node, Math.min(at.from + text.length, (node.textContent || '').length))
+  range.collapse(true)
+  const selection = window.getSelection()
+  selection.removeAllRanges()
+  selection.addRange(range)
 }
 
 const selectedCells = (wrap) =>
@@ -626,6 +747,11 @@ function watchForPressesAway () {
   if (watchingAway) return
   watchingAway = true
   document.addEventListener('mousedown', (event) => {
+    /* The app's context menu lives outside the grid, but pressing one of its
+       commands is still the gesture that began inside the selected cells.
+       Clearing here, before the button's click handler runs, leaves a
+       multi-cell command with only the right-clicked cell to act on. */
+    if (event.target instanceof Element && event.target.closest('#ctx')) return
     for (const wrap of document.querySelectorAll('.tk-table-wrap')) {
       if (!wrap.contains(event.target)) clearCellSelection(wrap)
     }
@@ -639,11 +765,10 @@ function selectCellRectangle (wrap, from, to) {
   const left = Math.min(from.c, to.c)
   const right = Math.max(from.c, to.c)
 
+  const rows = gridRows(wrap)
   for (let r = top; r <= bottom; r++) {
     for (let c = left; c <= right; c++) {
-      wrap.querySelector(
-        `[data-row="${r}"][data-col="${c}"][contenteditable="plaintext-only"]`
-      )?.classList.add('tk-table-cell-selected')
+      cellAt(rows, r, c)?.classList.add('tk-table-cell-selected')
     }
   }
 }
@@ -700,14 +825,219 @@ function resizeCellImage (view, cell, rendered, width) {
 function clearSelectedCells (view, wrap) {
   replaceCellValues(
     view,
-    selectedCells(wrap).map((cell) => ({ cell, value: '' }))
+    // A language table's header names its columns and is not editable by hand;
+    // a rectangle that happens to cover it must not empty it either.
+    selectedCells(wrap)
+      .filter((cell) => !cell.dataset.locked)
+      .map((cell) => ({ cell, value: '' }))
   )
+}
+
+/** A browser caret at one screen point, but only when it belongs to `cell`. */
+function caretInCellAt (cell, x, y) {
+  const caret = document.caretRangeFromPoint?.(x, y)
+  if (!caret || !cell.contains(caret.startContainer)) return null
+  return { node: caret.startContainer, offset: caret.startOffset }
+}
+
+/**
+ * The grid position under a screen point — or the nearest one, when the point
+ * is off the table.
+ *
+ * A drag that runs past the last visible row still means "down to here", so it
+ * has to keep naming a cell after the pointer has left the grid: over the note
+ * below it, or off the bottom of the window entirely while the page scrolls.
+ */
+function cellPointNear (wrap, x, y) {
+  const under = document.elementFromPoint(x, y)?.closest?.(
+    '.tk-table [data-row][data-col][contenteditable="plaintext-only"]'
+  )
+  if (under && wrap.contains(under)) {
+    return { r: Number(under.dataset.row), c: Number(under.dataset.col) }
+  }
+
+  const rows = gridRows(wrap)
+  if (!rows.length) return null
+  const r = nearestIndex(rows, y, 'top', 'bottom')
+  return { r, c: nearestIndex(rows[r].children, x, 'left', 'right') }
+}
+
+/**
+ * Which of a line of boxes `at` falls in, or the nearest one either side.
+ *
+ * The two ends are asked first, and they are the answer nearly every time this
+ * is asked at all: the point is off the grid because a drag has run past the
+ * last row, and a table of a few hundred words should not have to be measured
+ * from the top to say so.
+ */
+function nearestIndex (boxes, at, low, high) {
+  const last = boxes.length - 1
+  const boxOf = (i) => boxes[i].getBoundingClientRect()
+  if (at <= boxOf(0)[low]) return 0
+  if (at >= boxOf(last)[high]) return last
+
+  let best = 0
+  let gap = Infinity
+  for (let i = 0; i <= last; i++) {
+    const box = boxOf(i)
+    const away = Math.max(box[low] - at, at - box[high], 0)
+    if (away < gap) { gap = away; best = i }
+    if (!away) break
+  }
+  return best
+}
+
+/**
+ * What a drag can pull against, measured once at the press.
+ *
+ * `pane` is the ancestor that scrolls the note up and down, clamped to the
+ * window — a pane taller than the screen must still pull from the edge the
+ * pointer can actually reach. `side` is the grid's own frame, and only when the
+ * table is wider than the note it sits in. Neither of them moves while a button
+ * is held, so asking per frame was a style recalc and a layout read for nothing.
+ */
+function dragBounds (wrap) {
+  let pane = null
+  for (let node = wrap.parentElement; node && !pane; node = node.parentElement) {
+    if (node.scrollHeight <= node.clientHeight + 1) continue
+    const flow = getComputedStyle(node).overflowY
+    if (flow !== 'auto' && flow !== 'scroll' && flow !== 'overlay') continue
+    const box = node.getBoundingClientRect()
+    pane = {
+      el: node,
+      near: Math.max(box.top, 0),
+      far: Math.min(box.bottom, window.innerHeight)
+    }
+  }
+  let side = null
+  if (wrap.scrollWidth > wrap.clientWidth + 1) {
+    const box = wrap.getBoundingClientRect()
+    side = { el: wrap, near: box.left, far: box.right }
+  }
+  return { pane, side }
+}
+
+/* How wide the pull-strip along each edge is, and how far one frame moves when
+   the pointer is buried in it. Ramped rather than fixed so easing into the edge
+   creeps and running past it races. */
+const DRAG_EDGE = 44
+const DRAG_STEP = 20
+
+/**
+ * One axis of the pull, by however much the pointer is into that edge.
+ *
+ * Answers whether the page actually moved: a pane already at its end has
+ * nothing more to give, and the rectangle under a still pointer is then already
+ * as far as it goes.
+ */
+function pullEdge (band, axis, at) {
+  if (!band) return false
+  let speed = 0
+  if (at < band.near + DRAG_EDGE) {
+    speed = -Math.min(1, (band.near + DRAG_EDGE - at) / DRAG_EDGE) * DRAG_STEP
+  } else if (at > band.far - DRAG_EDGE) {
+    speed = Math.min(1, (at - (band.far - DRAG_EDGE)) / DRAG_EDGE) * DRAG_STEP
+  }
+  if (!speed) return false
+
+  const was = band.el[axis]
+  band.el[axis] = was + speed
+  return band.el[axis] !== was
 }
 
 /** Drag rectangles and exchange them with spreadsheet apps as TSV. */
 function wireCellSelection (wrap, view) {
   let drag = null
+  let frame = 0
   watchForPressesAway()
+
+  /* Grow the rectangle to whatever the pointer stands over now. Kept apart
+     from the move handler because the auto-scroll below runs it again on a
+     pointer that has not moved: the page slid underneath it, so a different
+     row is under the same coordinates. */
+  const extendTo = (x, y) => {
+    if (!drag) return
+    const point = cellPointNear(wrap, x, y)
+    if (!point) return
+    if (point.r === drag.point.r && point.c === drag.point.c) return
+    drag.point = point
+    if (!drag.selectingCells) {
+      drag.selectingCells = true
+      wrap.classList.add('is-selecting-cells')
+      /* The native range that began in the first cell must not remain painted
+         underneath the cell rectangle or be copied instead of its TSV. */
+      window.getSelection()?.removeAllRanges()
+    }
+    selectCellRectangle(wrap, drag.anchor, point)
+  }
+
+  /**
+   * Hold the pointer at an edge and the page comes to it.
+   *
+   * A rectangle is drawn against a note that is taller than the window, so the
+   * rows being asked for are usually the ones still below the fold. Without
+   * this the selection simply stopped at the last row that happened to be on
+   * screen, because a still pointer sends no more move events and nothing else
+   * was going to scroll.
+   */
+  const autoScroll = () => {
+    if (!drag) { frame = 0; return }
+    /* A note put away mid-drag takes its grid with it, and a drag that ends on
+       a detached wrap never hears the mouseup that would have stopped this
+       loop. Letting go of it here is what keeps the editor it holds from
+       outliving the note. */
+    if (!wrap.isConnected) { endDrag(); return }
+
+    frame = requestAnimationFrame(autoScroll)
+    if (!drag.selectingCells) return
+
+    const { x, y } = drag.at
+    let slid = pullEdge(drag.bounds.pane, 'scrollTop', y)
+    // A table wider than the note scrolls sideways inside its own frame.
+    if (pullEdge(drag.bounds.side, 'scrollLeft', x)) slid = true
+    if (slid) extendTo(x, y)
+  }
+
+  /** Take the drag down and hand back what it had reached. */
+  const endDrag = () => {
+    document.removeEventListener('mousemove', onMove)
+    if (frame) cancelAnimationFrame(frame)
+    frame = 0
+    const finished = drag
+    drag = null
+    wrap.classList.remove('is-selecting-cells')
+    return finished
+  }
+
+  /* On the document, not the wrap: past the last row the pointer is over the
+     note, the pane, or nothing at all, and a listener on the grid stops
+     hearing about a drag exactly when it leaves the grid. */
+  const onMove = (event) => {
+    if (!drag || !(event.buttons & 1)) return
+    drag.at = { x: event.clientX, y: event.clientY }
+
+    if (!drag.selectingCells) {
+      const point = cellPointNear(wrap, event.clientX, event.clientY)
+      if (point && point.r === drag.anchor.r && point.c === drag.anchor.c) {
+        const anchor = caretInCellAt(drag.cell, drag.down.x, drag.down.y)
+        const head = caretInCellAt(drag.cell, event.clientX, event.clientY)
+        if (!anchor || !head) return
+        event.preventDefault()
+        /* A contenteditable cell is nested through CodeMirror's non-editable
+           block widget. Chromium focuses and edits that cell correctly, but it
+           does not begin a native drag range through the widget boundary. Make
+           the same range explicitly from the browser's hit-tested carets. */
+        window.getSelection()?.setBaseAndExtent(
+          anchor.node, anchor.offset, head.node, head.offset
+        )
+        drag.selectingText = !window.getSelection()?.isCollapsed
+        return
+      }
+    }
+
+    event.preventDefault()
+    extendTo(event.clientX, event.clientY)
+  }
 
   wrap.addEventListener('mousedown', (event) => {
     if (event.button !== 0) return
@@ -727,94 +1057,245 @@ function wireCellSelection (wrap, view) {
       ? saved
       : point
 
-    drag = { anchor, point, cell, moved: false, extended: event.shiftKey }
-    wrap.dataset.cellAnchorRow = String(anchor.r)
-    wrap.dataset.cellAnchorCol = String(anchor.c)
-    wrap.classList.add('is-selecting-cells')
-    selectCellRectangle(wrap, anchor, point)
+    /* A drag that stays inside one cell belongs to the text: make an ordinary
+       character selection so Copy gets exactly the highlighted words. Only
+       once the pointer crosses into a second cell does the gesture become the
+       spreadsheet-style rectangle.
+
+       Shift is the explicit exception. It extends the saved cell rectangle,
+       so it has to claim the press immediately rather than beginning a native
+       text selection that will be discarded a moment later. */
+    const extended = event.shiftKey
+    drag = {
+      anchor,
+      point,
+      cell,
+      down: { x: event.clientX, y: event.clientY },
+      at: { x: event.clientX, y: event.clientY },
+      bounds: dragBounds(wrap),
+      selectingCells: extended,
+      selectingText: false
+    }
+    setCellAnchor(wrap, anchor)
+    if (extended) {
+      event.preventDefault()
+      wrap.classList.add('is-selecting-cells')
+      selectCellRectangle(wrap, anchor, point)
+    } else {
+      clearCellSelection(wrap)
+    }
+
+    document.addEventListener('mousemove', onMove)
+    if (!frame) frame = requestAnimationFrame(autoScroll)
 
     document.addEventListener('mouseup', () => {
-      if (!drag) return
-      const finished = drag
-      drag = null
-      wrap.classList.remove('is-selecting-cells')
-      if (!finished.moved && !finished.extended) {
-        clearCellSelection(wrap)
-      } else {
+      const finished = endDrag()
+      if (!finished) return
+      if (finished.selectingCells) {
         selectCellRectangle(wrap, finished.anchor, finished.point)
+        /* The cell the drag ended on, so Shift+Arrow carries on growing the
+           same rectangle — and without a scroll, because the page is where the
+           drag left it and focusing the far corner would yank it back. */
+        const last = cellIn(wrap, finished.point.r, finished.point.c) || finished.cell
+        last.focus({ preventScroll: true })
+        caretToEnd(last)
+      } else if (!finished.selectingText) {
+        /* A click still enters the cell for editing; a drag leaves its text
+           range intact so the following Copy command can use it. */
+        finished.cell.focus()
+        caretToEnd(finished.cell)
       }
-      finished.cell.focus()
-      caretToEnd(finished.cell)
     }, { once: true })
   })
 
-  wrap.addEventListener('mouseover', (event) => {
-    if (!drag || !(event.buttons & 1)) return
-    const cell = event.target.closest(
-      '.tk-table [data-row][data-col][contenteditable="plaintext-only"]'
-    )
-    if (!cell) return
-    const point = { r: Number(cell.dataset.row), c: Number(cell.dataset.col) }
-    if (point.r === drag.point.r && point.c === drag.point.c) return
-    event.preventDefault()
-    drag.point = point
-    drag.moved = true
-    selectCellRectangle(wrap, drag.anchor, point)
-  })
-
-  wrap.addEventListener('copy', (event) => {
-    const selected = selectedCells(wrap)
-    if (selected.length < 2 || !event.clipboardData) return
-    event.preventDefault()
-    const rows = selected.map((cell) => Number(cell.dataset.row))
-    const cols = selected.map((cell) => Number(cell.dataset.col))
-    const top = Math.min(...rows)
-    const bottom = Math.max(...rows)
-    const left = Math.min(...cols)
-    const right = Math.max(...cols)
-    const lines = []
-    for (let r = top; r <= bottom; r++) {
-      const values = []
-      for (let c = left; c <= right; c++) {
-        values.push(
-          wrap.querySelector(`[data-row="${r}"][data-col="${c}"]`)?.textContent || ''
-        )
-      }
-      lines.push(values.join('\t'))
-    }
-    event.clipboardData.setData('text/plain', lines.join('\n'))
+  /* Cut is copy and then clear, and it has to be said here: the grid is a
+     `contenteditable="false"` widget, so the browser's own cut has nothing to
+     take out of it and a rectangle disappeared into a no-op. */
+  wrap.addEventListener('copy', (event) => copySelection(wrap, event))
+  wrap.addEventListener('cut', (event) => {
+    if (!copySelection(wrap, event)) return
+    clearSelectedCells(view, wrap)
   })
 
   wrap.addEventListener('paste', (event) => {
-    const text = event.clipboardData?.getData('text/plain') || ''
-    if (!text.includes('\t') && !/[\r\n]/.test(text)) return
+    const matrix = clipboardMatrix(event.clipboardData)
+    if (!matrix) return
     const active = event.target.closest('[data-row][data-col]')
     if (!active) return
     event.preventDefault()
+    pasteMatrix(view, wrap, active, matrix)
+  })
+}
 
-    const matrix = text.replace(/\r/g, '').split('\n').map((row) => row.split('\t'))
-    if (matrix.length > 1 && matrix.at(-1).every((value) => !value)) matrix.pop()
-    const start = { r: Number(active.dataset.row), c: Number(active.dataset.col) }
+/* ------------------------------------------------------------ clipboard */
+
+/**
+ * Put the selected rectangle on the clipboard, as tab-separated text and as an
+ * HTML table.
+ *
+ * Both, because the two answer different questions. TSV is what a text editor
+ * and this grid's own paste want; the HTML table is what a spreadsheet or a
+ * document wants, and without it a block of cells arrived in Excel as one long
+ * line of text with tabs in it.
+ */
+function copySelection (wrap, event) {
+  const selected = selectedCells(wrap)
+  if (selected.length < 2 || !event.clipboardData) return false
+  event.preventDefault()
+
+  /* The selection is a rectangle, so its bounds are its extremes — and the
+     cells inside it are the elements already in hand, keyed by where they sit.
+     Asking the DOM for each of them again is a subtree walk per cell. */
+  const held = new Map()
+  let top = Infinity
+  let bottom = -Infinity
+  let left = Infinity
+  let right = -Infinity
+  for (const cell of selected) {
+    const r = Number(cell.dataset.row)
+    const c = Number(cell.dataset.col)
+    held.set(`${r}:${c}`, cell.textContent || '')
+    top = Math.min(top, r)
+    bottom = Math.max(bottom, r)
+    left = Math.min(left, c)
+    right = Math.max(right, c)
+  }
+
+  const grid = []
+  for (let r = top; r <= bottom; r++) {
+    const values = []
+    for (let c = left; c <= right; c++) values.push(held.get(`${r}:${c}`) || '')
+    grid.push(values)
+  }
+
+  event.clipboardData.setData('text/plain', grid.map((row) => row.join('\t')).join('\n'))
+  event.clipboardData.setData(
+    'text/html',
+    '<table>' + grid.map((row) =>
+      '<tr>' + row.map((value) => `<td>${escapeHtml(value)}</td>`).join('') + '</tr>'
+    ).join('') + '</table>'
+  )
+  return true
+}
+
+/** A pasted HTML table as a grid of plain values, or null if there is no table
+ *  in it — which is most HTML, and must fall through to the ordinary paste. */
+function htmlMatrix (html) {
+  if (!/<t[dhr]\b/i.test(html)) return null
+  const table = new DOMParser().parseFromString(html, 'text/html').querySelector('table')
+  const rows = [...(table?.querySelectorAll('tr') || [])]
+    .map((tr) => [...tr.querySelectorAll('th, td')]
+      .map((td) => td.textContent.replace(/\s+/g, ' ').trim()))
+    .filter((row) => row.length)
+  return rows.length ? rows : null
+}
+
+/** A pasted Markdown table as a grid — pasting one into a cell used to land the
+ *  pipes themselves in that cell, one row per line. */
+function markdownMatrix (text) {
+  const lines = text.trim().split(/\r?\n/)
+  if (lines.length < 2 || !DELIMITER.test(lines[1]) || !lines[1].includes('-')) return null
+  if (!lines.every((line) => line.includes('|'))) return null
+  return lines
+    .filter((_, at) => at !== 1)
+    .map((line) => splitRow(line).map(({ text: value }) => decode(value)))
+}
+
+/**
+ * What is on the clipboard, as a grid — or null when it is not a grid at all
+ * and the browser's own paste into the cell should be left alone.
+ *
+ * HTML first: a spreadsheet writes both flavours, and only the HTML one keeps
+ * a cell that contains a line break in one cell.
+ */
+function clipboardMatrix (data) {
+  if (!data) return null
+  const matrix = htmlMatrix(data.getData('text/html') || '')
+  if (matrix) return matrix
+
+  const text = data.getData('text/plain') || ''
+  const markdown = markdownMatrix(text)
+  if (markdown) return markdown
+  if (!text.includes('\t') && !/[\r\n]/.test(text)) return null
+
+  const rows = text.replace(/\r/g, '').split('\n').map((row) => row.split('\t'))
+  if (rows.length > 1 && rows.at(-1).every((value) => !value)) rows.pop()
+  return rows
+}
+
+/**
+ * Paste a grid in at a cell, growing the table if the grid runs past its edge.
+ *
+ * Growing is the whole point: the old paste wrote into the cells that happened
+ * to exist and dropped the rest on the floor, so forty rows of vocabulary
+ * pasted into a five-row table lost thirty-five of them without saying so.
+ *
+ * A paste that fits still goes through `replaceCellValues`, which addresses
+ * each cell's own span and so leaves everyone else's padding and escaped pipes
+ * exactly as they were. Only a paste that changes the shape of the table earns
+ * the whole-grid rewrite.
+ */
+function pasteMatrix (view, wrap, active, matrix) {
+  const table = tableAt(view.state, view.posAtDOM(wrap))
+  if (!table) return
+  const language = wrap.dataset.language === 'true'
+  const start = { r: Number(active.dataset.row), c: Number(active.dataset.col) }
+  const width = Math.max(...matrix.map((row) => row.length))
+  const needRows = start.r + matrix.length
+  const needCols = start.c + width
+
+  /* A language table's columns are its schema — the study surface reads the
+     note by them — so a wide paste fills what is there and says what it left
+     behind rather than growing a column nothing would know how to name. */
+  const cols = language ? table.cols : Math.max(table.cols, needCols)
+  const many = matrix.length > 1 || width > 1
+  if (language && needCols > table.cols) {
+    notify(active, `Pasted into the ${table.cols} columns this table has.`)
+  }
+
+  if (needRows <= table.rows.length && cols === table.cols) {
     const assignments = []
     matrix.forEach((row, dr) => row.forEach((value, dc) => {
-      const cell = wrap.querySelector(
-        `[data-row="${start.r + dr}"][data-col="${start.c + dc}"]` +
-        '[contenteditable="plaintext-only"]'
-      )
+      const cell = cellIn(wrap, start.r + dr, start.c + dc)
       if (cell) assignments.push({ cell, value })
     }))
     replaceCellValues(view, assignments)
-    if (assignments.length > 1) {
+    if (many && assignments.length) {
       const last = assignments.at(-1).cell
       selectCellRectangle(wrap, start, {
         r: Number(last.dataset.row),
         c: Number(last.dataset.col)
       })
     }
+    return
+  }
+
+  const cells = tableMatrix(table)
+  for (const row of cells) while (row.length < cols) row.push('')
+  while (cells.length < needRows) cells.push(Array.from({ length: cols }, () => ''))
+
+  matrix.forEach((row, dr) => row.forEach((value, dc) => {
+    const c = start.c + dc
+    if (c >= cols) return
+    cells[start.r + dr][c] = encode(value)
+  }))
+
+  const index = tablesIn(view.state).indexOf(table)
+  const end = { r: needRows - 1, c: Math.min(needCols, cols) - 1 }
+  writeTable(view, table, cells)
+
+  requestAnimationFrame(() => {
+    const grown = view.dom.querySelectorAll('.tk-table-wrap')[index]
+    if (!grown) return
+    if (many) selectCellRectangle(grown, start, end)
+    focusCell(grown, end.r, end.c)
   })
 }
 
 const rowSource = (cells) => `| ${cells.join(' | ')} |`
+
+/** A row with nothing in it, in the one spelling the whole file uses. */
+const blankRow = (cols) => '|' + ' |'.repeat(cols)
 
 function delimiterSource (align) {
   if (align === 'center') return ':---:'
@@ -940,13 +1421,227 @@ function rewriteColumns (view, table, col, insert) {
   view.dispatch({ changes, userEvent: 'input.table' })
 }
 
-/** Insert an empty body row beside the current one, then land in it. */
-function insertRow (view, cell, after) {
+/* --------------------------------------------------- whole-grid rewrites
+
+   Sorting, moving a row or a column, and growing a table to fit a paste are
+   not edits to a cell: they change which cell a value is in. Spelled as "here
+   is the table now" rather than as a splice per line, they share one writer —
+   which is also the one place that has to remember the delimiter and the width
+   marker move with the grid.
+
+   Padding is normalised in the process, the same trade `rewriteColumns` makes:
+   the alternative is splicing around escaped pipes and ragged rows in three
+   independent lists and hoping they stay in step.
+   ================================================================== */
+
+/** Every cell of a table as encoded source text, padded to the full width. */
+function tableMatrix (table) {
+  return table.rows.map((row) => {
+    const texts = cellText(row.cells)
+    while (texts.length < table.cols) texts.push('')
+    return texts
+  })
+}
+
+/** Alignments as long as the table is wide, for a grid that just grew. */
+const padAligns = (aligns, cols) =>
+  Array.from({ length: cols }, (_, c) => aligns[c] ?? null)
+
+/**
+ * Where a table's widths are written — as changes rather than as a dispatch,
+ * so a rewrite of the grid can carry them in its own transaction.
+ *
+ * The one place that knows the marker line sits above the table and has to be
+ * made when a table that was never dragged acquires a width. `commitColumnWidths`
+ * is a drag's worth of that same question and goes through here too; when the
+ * two were spelled separately they had already drifted over padding.
+ *
+ * No padding of its own: `widthsSource` drops trailing automatic columns, so a
+ * short array and a padded one write the same line.
+ */
+function widthChanges (view, table, widths) {
+  const source = widthsSource(widths || [])
+  if (table.widthsLine != null) {
+    const line = view.state.doc.line(table.widthsLine)
+    return line.text === source ? [] : [widthsChange(view.state, table.widthsLine, source)]
+  }
+  return source ? [{ from: table.from, insert: `${source}\n` }] : []
+}
+
+/**
+ * Replace a whole table with the grid it should now hold, in one transaction.
+ *
+ * One transaction because the alternative is a history the reader has to undo
+ * twice to put a sorted table back, and a frame in between where the delimiter
+ * says one width and the rows say another — which is a table markdown-it will
+ * not parse at all.
+ *
+ * Every caller hands over a rectangular grid — `tableMatrix` pads to the
+ * table's width, and the paste that grows one pads as it grows — so the width
+ * of the new table is the width of its header.
+ */
+function writeTable (view, table, cells, aligns = table.aligns, widths = table.widths) {
+  const cols = cells[0].length
+  const lines = [rowSource(cells[0])]
+  lines.push(rowSource(padAligns(aligns, cols).map(delimiterSource)))
+  for (let r = 1; r < cells.length; r++) lines.push(rowSource(cells[r]))
+
+  view.dispatch({
+    changes: [
+      { from: table.from, to: table.to, insert: lines.join('\n') },
+      ...widthChanges(view, table, widths)
+    ],
+    userEvent: 'input.table'
+  })
+}
+
+/**
+ * Put the caret back in a named cell once a rewrite has redrawn the grid.
+ *
+ * A whole-table rewrite replaces the widget, so the element that had focus is
+ * gone by the time the transaction lands. The table is found again by its
+ * position in the document — index rather than element, for the same reason
+ * `setColumnAlign` and `deleteRow` do it that way.
+ */
+function refocus (view, tableIndex, r, c) {
+  requestAnimationFrame(() => {
+    const wrap = view.dom.querySelectorAll('.tk-table-wrap')[tableIndex]
+    focusCell(wrap, r, c)
+  })
+}
+
+/** Something the reader has to be told. The toast itself belongs to the app —
+ *  what it looks like and where it appears are not this module's business — so
+ *  the message is handed over rather than shown. */
+function notify (cell, message) {
+  cell.dispatchEvent(new CustomEvent('tulip:table-notice', {
+    bubbles: true,
+    detail: { message }
+  }))
+}
+
+/**
+ * Move a body row up or down.
+ *
+ * The header does not move and nothing moves through it: row 0 is the one row
+ * whose position means something to the format.
+ */
+function moveRow (view, cell, delta) {
+  const found = locate(view, cell)
+  if (!found) return
+  const { table } = found
+  const from = Number(cell.dataset.row)
+  const to = from + delta
+  if (from < 1 || to < 1 || to >= table.rows.length) return
+
+  const cells = tableMatrix(table)
+  ;[cells[from], cells[to]] = [cells[to], cells[from]]
+  const index = tablesIn(view.state).indexOf(table)
+  const col = Number(cell.dataset.col)
+  cell.blur()
+  writeTable(view, table, cells)
+  refocus(view, index, to, col)
+}
+
+/**
+ * Move a column left or right — with its alignment and its width, which are
+ * written elsewhere and would otherwise stay behind and land on its neighbour.
+ */
+function moveColumn (view, cell, delta) {
+  const found = locate(view, cell)
+  if (!found || cell.closest('.tk-table-wrap')?.dataset.language === 'true') return
+  const { table } = found
+  const from = Number(cell.dataset.col)
+  const to = from + delta
+  if (to < 0 || to >= table.cols) return
+
+  const cells = tableMatrix(table)
+  for (const row of cells) [row[from], row[to]] = [row[to], row[from]]
+  const aligns = [...table.aligns]
+  ;[aligns[from], aligns[to]] = [aligns[to], aligns[from]]
+  const widths = table.widths ? [...table.widths] : null
+  if (widths) [widths[from], widths[to]] = [widths[to], widths[from]]
+
+  const index = tablesIn(view.state).indexOf(table)
+  const row = Number(cell.dataset.row)
+  cell.blur()
+  writeTable(view, table, cells, aligns, widths)
+  refocus(view, index, row, to)
+}
+
+/* Sorting reads the value a reader sees, not the source behind it: `**dog**`
+   files under D, and a wikilink under the note it names. */
+const sortKey = (text) => decode(text || '')
+  .replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_, target, label) => label || target)
+  .replace(/[*_`]/g, '')
+  .trim()
+
+/** A cell's value as a number, or null when it is not one. Prices and counts
+ *  are what tables hold, so the usual dressing comes off first. */
+function asNumber (text) {
+  if (!/\d/.test(text)) return null
+  const bare = text.replace(/[\s,$£€¥]/g, '')
+  if (!/^[-+]?\d*\.?\d+%?$/.test(bare)) return null
+  return Number(bare.replace('%', ''))
+}
+
+const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
+
+/** One body row cannot be out of order, so there is nothing to offer. The menu
+ *  and the sort itself ask the same question of the same object. */
+const canSort = (table) => table.rows.length > 2
+
+/**
+ * Sort the body rows by one column.
+ *
+ * Numbers sort as numbers when the whole column is numbers — a text sort puts
+ * 10 before 9, and a column of prices is exactly the column someone reaches
+ * for this on. Blank cells go last whichever way the sort runs: they are rows
+ * with nothing to say about this column, not rows that come before everything.
+ * Equal keys keep the order they had, so sorting by one column and then by
+ * another leaves the first sort standing inside the second.
+ */
+function sortRows (view, cell, direction) {
+  const found = locate(view, cell)
+  if (!found || !canSort(found.table)) return
+  const { table } = found
+  const col = Number(cell.dataset.col)
+  const cells = tableMatrix(table)
+
+  const body = cells.slice(1).map((row, at) => ({ row, at, key: sortKey(row[col]) }))
+  const numeric = body.some((entry) => entry.key) &&
+                  body.every((entry) => !entry.key || asNumber(entry.key) !== null)
+
+  const sign = direction === 'desc' ? -1 : 1
+  body.sort((a, b) => {
+    if (Boolean(a.key) !== Boolean(b.key)) return a.key ? -1 : 1
+    const order = numeric
+      ? asNumber(a.key) - asNumber(b.key)
+      : collator.compare(a.key, b.key)
+    return (sign * order) || a.at - b.at
+  })
+
+  const was = Number(cell.dataset.row) - 1
+  const lands = body.findIndex((entry) => entry.at === was)
+  const index = tablesIn(view.state).indexOf(table)
+  cell.blur()
+  writeTable(view, table, [cells[0], ...body.map((entry) => entry.row)])
+  refocus(view, index, lands < 0 ? 1 : lands + 1, col)
+}
+
+/**
+ * Insert an empty body row beside the current one, then land in it.
+ *
+ * `col` is which cell of the new row to land in. The menu items start at the
+ * beginning of the row; Enter keeps the column it was pressed in, so filling a
+ * table down one column stays in that column.
+ */
+function insertRow (view, cell, after, col = 0) {
   const found = locate(view, cell)
   if (!found) return
   const { table } = found
   const current = Number(cell.dataset.row)
-  const blank = '|' + ' |'.repeat(table.cols)
+  const blank = blankRow(table.cols)
   let row
   let changes
 
@@ -970,17 +1665,17 @@ function insertRow (view, cell, after) {
   })
 
   const wrap = cell.closest('.tk-table-wrap')
-  if (!focusCell(wrap, row, 0)) requestAnimationFrame(() => focusCell(wrap, row, 0))
+  if (!focusCell(wrap, row, col)) requestAnimationFrame(() => focusCell(wrap, row, col))
 }
 
 /** Append is what Enter and Tab past the last cell mean. */
-function addRow (view, cell) {
+function addRow (view, cell, col = 0) {
   const found = locate(view, cell)
   if (!found) return
   const last = found.table.rows.length - 1
   const anchor = cell.closest('.tk-table-wrap')
     ?.querySelector(`[data-row="${last}"][data-col="0"]`) || cell
-  insertRow(view, anchor, true)
+  insertRow(view, anchor, true, col)
 }
 
 /** Insert an empty column beside the current one, then land in its header. */
@@ -1093,6 +1788,15 @@ function syncColumnWidths (table, widths) {
   table.dataset.widths = signature
 
   table.classList.toggle('has-column-widths', Boolean(signature))
+  /* Whether anything in this table can still take up slack. A column nobody
+     dragged is written `0` and sized by its content — under fixed layout it is
+     also the one column that can absorb the space between the dragged widths
+     and the frame, which is what keeps a band of empty paper from appearing
+     down the right-hand side. See the stylesheet. */
+  table.classList.toggle(
+    'has-flexible-column',
+    Boolean(signature) && widths.some((width) => !width)
+  )
 
   let group = table.querySelector(':scope > colgroup')
   if (!signature) { group?.remove(); return }
@@ -1128,22 +1832,10 @@ function measuredWidths (wrap) {
 function commitColumnWidths (view, wrap, widths) {
   const table = tableAt(view.state, view.posAtDOM(wrap))
   if (!table) return
-  const source = widthsSource(padWidths(widths, table.cols))
-
-  if (table.widthsLine != null) {
-    const line = view.state.doc.line(table.widthsLine)
-    if (line.text === source) return
-    view.dispatch({
-      changes: widthsChange(view.state, table.widthsLine, source),
-      userEvent: 'input.table'
-    })
-    return
-  }
-  if (!source) return
-  view.dispatch({
-    changes: { from: table.from, insert: `${source}\n` },
-    userEvent: 'input.table'
-  })
+  // Where the marker goes, and whether it has to be made, is `widthChanges`'s
+  // question — a drag is just the caller that has nothing else to write.
+  const changes = widthChanges(view, table, padWidths(widths, table.cols))
+  if (changes.length) view.dispatch({ changes, userEvent: 'input.table' })
 }
 
 /**
@@ -1267,7 +1959,12 @@ function wire (cell, view, source) {
   cell.addEventListener('blur', () => {
     writeCell(view, cell)
     delete cell.dataset.editing
-    renderTableCell(view, cell, decode(cell.textContent || ''))
+    /* Draw from the document we just wrote, not from the editable DOM. A blank
+       Markdown cell owns the padding between its pipes; Chromium preserves
+       that padding when the first word is inserted, so reading the DOM back
+       here made a newly learned word appear indented until it was entered a
+       second time. The document span is the canonical, padding-free value. */
+    renderTableCell(view, cell, decode(currentText(view, cell)))
     // Typing in a header replaced its children with its own source, the grip
     // among them; the redraw above is where it comes back.
     if (cell.dataset.row === '0') ensureColumnGrip(cell, view)
@@ -1324,6 +2021,9 @@ function wire (cell, view, source) {
     const wrap = cell.closest('.tk-table-wrap')
     const language = wrap?.dataset.language === 'true'
     const row = Number(cell.dataset.row)
+    const col = Number(cell.dataset.col)
+    const rows = wrap?.querySelectorAll('tr').length || 1
+    const firstEditableRow = language ? 1 : 0
     if (!cell.classList.contains('tk-table-cell-selected')) clearCellSelection(wrap)
     const selection = selectedCells(wrap)
     const deleteRowCount = deletableRowCount(view, cell)
@@ -1347,11 +2047,36 @@ function wire (cell, view, source) {
           const first = found.table.aligns[cols[0]] || null
           return cols.every((c) => (found.table.aligns[c] || null) === first) ? first : null
         })(),
+        /* What the row and column commands are allowed to do from here. The
+           header neither moves nor moves through, and a language table's
+           columns are fixed, so the menu says so rather than offering an entry
+           that quietly does nothing. */
+        canMoveRowUp: row > 1,
+        canMoveRowDown: row > 0 && row < rows - 1,
+        canMoveColumnLeft: !language && col > 0,
+        canMoveColumnRight: !language && col < found.table.cols - 1,
+        canSort: canSort(found.table),
+        columnName: sortKey(found.table.rows[0]?.cells[col]?.text || '') ||
+                    `column ${col + 1}`,
         clearSelected: () => clearSelectedCells(view, wrap),
+        selectRow: () => {
+          setCellAnchor(wrap, { r: row, c: 0 })
+          selectCellRectangle(wrap, { r: row, c: 0 }, { r: row, c: found.table.cols - 1 })
+        },
+        selectColumn: () => {
+          setCellAnchor(wrap, { r: firstEditableRow, c: col })
+          selectCellRectangle(wrap, { r: firstEditableRow, c: col }, { r: rows - 1, c: col })
+        },
         addRowBefore: () => insertRow(view, cell, false),
         addRowAfter: () => insertRow(view, cell, true),
         addColumnBefore: () => insertColumn(view, cell, false),
         addColumnAfter: () => insertColumn(view, cell, true),
+        moveRowUp: () => moveRow(view, cell, -1),
+        moveRowDown: () => moveRow(view, cell, 1),
+        moveColumnLeft: () => moveColumn(view, cell, -1),
+        moveColumnRight: () => moveColumn(view, cell, 1),
+        sortAscending: () => sortRows(view, cell, 'asc'),
+        sortDescending: () => sortRows(view, cell, 'desc'),
         deleteRow: () => deleteRow(view, cell),
         deleteColumn: () => deleteColumn(view, cell),
         setAlign: (align) => setColumnAlign(view, cell, align)
@@ -1359,49 +2084,149 @@ function wire (cell, view, source) {
     }))
   })
 
-  cell.addEventListener('keydown', (event) => {
-    const wrap = cell.closest('.tk-table-wrap')
+}
+
+const clamp = (value, low, high) => Math.max(low, Math.min(high, value))
+
+/**
+ * The grid's keymap.
+ *
+ * One listener on the wrap rather than one per cell. Keydown bubbles, so a
+ * three-hundred-row table installed twelve hundred copies of this closure and
+ * re-derived the grid's shape from the DOM in each of them; here the shape is
+ * measured once per keystroke, and only by the branches that need it — every
+ * plain character typed into a cell passes through on its way to the browser.
+ */
+function wireGridKeys (wrap, view) {
+  wrap.addEventListener('keydown', (event) => {
+    const cell = event.target.closest?.(
+      '[data-row][data-col][contenteditable="plaintext-only"]'
+    )
+    if (!cell) return
+
     const r = Number(cell.dataset.row)
     const c = Number(cell.dataset.col)
-    const cols = Number(wrap?.dataset.cols || 1)
-    const rows = wrap?.querySelectorAll('tr').length || 1
-    const firstEditableRow = wrap?.dataset.language === 'true' ? 1 : 0
-    const selection = selectedCells(wrap)
+    const cols = Number(wrap.dataset.cols || 1)
+    const firstEditableRow = wrap.dataset.language === 'true' ? 1 : 0
+    const mod = event.metaKey || event.ctrlKey
 
-    if ((event.key === 'Backspace' || event.key === 'Delete') && selection.length > 1) {
+    // Both of these are DOM queries over the whole grid, and most keystrokes
+    // ask for neither.
+    let rowMemo = 0
+    const rowCount = () => rowMemo || (rowMemo = gridRows(wrap).length || 1)
+    let cellMemo = null
+    const selected = () => cellMemo || (cellMemo = selectedCells(wrap))
+
+    if (event.key === 'Backspace' || event.key === 'Delete') {
+      if (selected().length < 2) return
       event.preventDefault()
       clearSelectedCells(view, wrap)
       return
     }
 
-    if (event.key === 'Escape' && selection.length > 1) {
+    /* Escape lets go of one thing at a time: the rectangle if one is lit, and
+       otherwise the grid itself. */
+    if (event.key === 'Escape') {
       event.preventDefault()
+      if (selected().length > 1) { clearCellSelection(wrap); return }
+      const found = locate(view, cell)
+      cell.blur()
+      view.focus()
+      if (found) {
+        view.dispatch({ selection: { anchor: Math.min(found.table.to, view.state.doc.length) } })
+      }
+      return
+    }
+
+    /* Select-all belongs to the cell being edited — left to the editor it takes
+       the whole note, table and all. Pressing it again, once the cell is
+       already taken, widens to the table: the escalation the browser's own
+       select-all has, without ever landing on "the note". */
+    if (mod && event.key.toLowerCase() === 'a' && !event.altKey) {
+      event.preventDefault()
+      event.stopPropagation()
+      if (selected().length < 2 && !cellFullySelected(cell)) {
+        clearCellSelection(wrap)
+        selectCellContents(cell)
+        return
+      }
+      window.getSelection()?.removeAllRanges()
+      const from = { r: firstEditableRow, c: 0 }
+      setCellAnchor(wrap, from)
+      selectCellRectangle(wrap, from, { r: rowCount() - 1, c: cols - 1 })
+      return
+    }
+
+    /* Undo while a cell has focus. Without this the keystroke reaches the
+       browser's own undo for the `contenteditable`, which knows about the
+       characters in this cell and nothing about the document behind them — so
+       it put text back that the note no longer said. */
+    if (mod && event.key.toLowerCase() === 'z' && !event.altKey) {
+      event.preventDefault()
+      event.stopPropagation()
+      const found = locate(view, cell)
+      const index = found ? tablesIn(view.state).indexOf(found.table) : -1
+      cell.blur()
+      ;(event.shiftKey ? redo : undo)(view)
+      if (index >= 0) refocus(view, index, r, c)
+      return
+    }
+
+    /* Excel's own two: the column of the cell you are in, and its row. */
+    if (event.key === ' ' && (event.ctrlKey || event.shiftKey) && !event.altKey && !event.metaKey) {
+      event.preventDefault()
+      const from = event.ctrlKey ? { r: firstEditableRow, c } : { r, c: 0 }
+      const to = event.ctrlKey ? { r: rowCount() - 1, c } : { r, c: cols - 1 }
+      setCellAnchor(wrap, from)
+      selectCellRectangle(wrap, from, to)
+      return
+    }
+
+    const step = STEPS[event.key]
+    if (step) {
+      const [dr, dc] = step
+
+      // Alt is "bring this row or column with you".
+      if (event.altKey && !mod) {
+        event.preventDefault()
+        if (dr) moveRow(view, cell, dr)
+        else moveColumn(view, cell, dc)
+        return
+      }
+
+      /* Vertical arrows always mean the geometrically adjacent cell. Native
+         contenteditable movement otherwise escapes the table and can re-enter
+         at the bottom-left cell. Horizontal arrows keep editing text until the
+         caret reaches an edge, then cross one cell without wrapping rows — but
+         only while they mean the caret at all: with Shift they are drawing a
+         rectangle, and with ⌘ they are crossing the whole table. */
+      if (dc && !event.shiftKey && !mod) {
+        const offset = caretOffset(cell)
+        const atEdge = dc < 0 ? offset === 0 : offset === (cell.textContent || '').length
+        if (!atEdge) return
+      }
+
+      event.preventDefault()
+      // A ⌘-arrow is the same step taken far enough that the clamp below lands
+      // it on the edge, rather than a second set of edge arithmetic.
+      const reach = mod ? Math.max(rowCount(), cols) : 1
+      const target = {
+        r: clamp(r + dr * reach, firstEditableRow, rowCount() - 1),
+        c: clamp(c + dc * reach, 0, cols - 1)
+      }
+
+      if (event.shiftKey) {
+        // The rectangle grows from where it started, so a run of Shift+Down
+        // extends one selection rather than pairing up cells two at a time.
+        const anchor = (selected().length > 1 && savedCellAnchor(wrap)) || { r, c }
+        setCellAnchor(wrap, anchor)
+        selectCellRectangle(wrap, anchor, target)
+        focusCell(wrap, target.r, target.c)
+        return
+      }
+      if (target.r === r && target.c === c) return
       clearCellSelection(wrap)
-      return
-    }
-
-    /* Vertical arrows always mean the geometrically adjacent cell. Native
-       contenteditable movement otherwise escapes the table and can re-enter at
-       the bottom-left cell. Horizontal arrows keep editing text until the
-       caret reaches an edge, then cross one cell without wrapping rows. */
-    if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
-      const nr = r + (event.key === 'ArrowUp' ? -1 : 1)
-      event.preventDefault()
-      if (nr < firstEditableRow || nr >= rows) return
-      focusCell(wrap, nr, c)
-      return
-    }
-
-    if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
-      const offset = caretOffset(cell)
-      const atEdge = event.key === 'ArrowLeft'
-        ? offset === 0
-        : offset === (cell.textContent || '').length
-      if (!atEdge) return
-      const nc = c + (event.key === 'ArrowLeft' ? -1 : 1)
-      event.preventDefault()
-      if (nc < 0 || nc >= cols) return
-      focusCell(wrap, r, nc)
+      focusCell(wrap, target.r, target.c)
       return
     }
 
@@ -1414,26 +2239,21 @@ function wire (cell, view, source) {
       if (nr < firstEditableRow) return
       // Tab off the last cell grows the table, which is the cheapest way to add
       // a row and the one every spreadsheet has trained people to expect.
-      if (nr >= rows) addRow(view, cell)
+      if (nr >= rowCount()) addRow(view, cell)
       else focusCell(wrap, nr, nc)
       return
     }
 
     if (event.key === 'Enter') {
       event.preventDefault()
-      if (r + 1 >= rows) addRow(view, cell)
-      else focusCell(wrap, r + 1, c)
-      return
-    }
-
-    if (event.key === 'Escape') {
-      event.preventDefault()
-      const found = locate(view, cell)
-      cell.blur()
-      view.focus()
-      if (found) {
-        view.dispatch({ selection: { anchor: Math.min(found.table.to, view.state.doc.length) } })
+      /* A Markdown cell is one line, so the only line break it has is the one
+         it can write down. Shift+Enter is where every editor puts that. */
+      if (event.shiftKey) {
+        insertIntoCell(view, cell, '<br>')
+        return
       }
+      if (r + 1 >= rowCount()) addRow(view, cell, c)
+      else focusCell(wrap, r + 1, c)
     }
   })
 }
@@ -1449,11 +2269,9 @@ class TableWidget extends WidgetType {
     // Already padded to the table's width by `findTables`, and null when the
     // note names no widths at all.
     this.widths = table.widths
-    this.cells = table.rows.map((row) => {
-      const texts = cellText(row.cells)
-      while (texts.length < table.cols) texts.push('')   // ragged rows pad out
-      return texts
-    })
+    // Ragged rows pad out — the same grid the rewrites work on, so the widget
+    // and the writer cannot disagree about what the table holds.
+    this.cells = tableMatrix(table)
   }
 
   /* Compared field by field rather than through a serialised key. The widget is
@@ -1496,6 +2314,12 @@ class TableWidget extends WidgetType {
 
     const table = document.createElement('table')
     table.className = 'tk-table'
+    /* A real <table> with real <th scope="col"> cells is most of what a screen
+       reader needs; the counts and indices are the rest, and they are what let
+       it say "row 4 of 300" inside a grid whose cells are contenteditable
+       divs rather than a form control it recognises. */
+    table.setAttribute('aria-rowcount', String(this.cells.length))
+    table.setAttribute('aria-colcount', String(this.cols))
     syncColumnWidths(table, this.widths)
 
     const thead = document.createElement('thead')
@@ -1508,6 +2332,7 @@ class TableWidget extends WidgetType {
 
     wrap.append(table)
     wireCellSelection(wrap, view)
+    wireGridKeys(wrap, view)
 
     /* Nothing hangs off the edges of the table. Growing one is what the right
        button offers — insert row above/below, column left/right — and Tab past
@@ -1527,6 +2352,9 @@ class TableWidget extends WidgetType {
       cell.spellcheck = false
       cell.dataset.row = String(r)
       cell.dataset.col = String(c)
+      if (r === 0) cell.scope = 'col'
+      cell.setAttribute('aria-rowindex', String(r + 1))
+      cell.setAttribute('aria-colindex', String(c + 1))
       if (locked) {
         cell.classList.add('is-locked')
         cell.dataset.locked = 'true'
@@ -1576,12 +2404,28 @@ class TableWidget extends WidgetType {
 
     syncColumnWidths(table, this.widths)
 
+    // The column count cannot have changed — the shape check above returned
+    // false if it had — and the row count changes only when the loop above did
+    // something. Written on change rather than on every keystroke.
+    if (table.getAttribute('aria-rowcount') !== String(this.cells.length)) {
+      table.setAttribute('aria-rowcount', String(this.cells.length))
+    }
+
     const rows = [table.querySelector('thead tr'), ...tbody.children]
     rows.forEach((tr, r) => {
-      tr.dataset.row = String(r)
+      /* Where a row sits only changes when rows were added or taken away just
+         above it, and the bail-out above means a cell never changes column. One
+         string compare per row keeps the numbering — and the aria attributes,
+         which the accessibility tree subscribes to — off the typing path. */
+      const moved = tr.dataset.row !== String(r)
+      if (moved) tr.dataset.row = String(r)
       ;[...tr.children].forEach((cell, c) => {
-        cell.dataset.row = String(r)
-        cell.dataset.col = String(c)
+        if (moved) {
+          cell.dataset.row = String(r)
+          cell.dataset.col = String(c)
+          cell.setAttribute('aria-rowindex', String(r + 1))
+          cell.setAttribute('aria-colindex', String(c + 1))
+        }
         cell.style.textAlign = this.aligns[c] || ''
         /* Typing one character rebuilds the widget, but only the cell that was
            typed in has changed. Redrawing the rest tore down and rebuilt their
@@ -1608,14 +2452,48 @@ class TableWidget extends WidgetType {
 /** The cell's text as it currently stands in the document. */
 function currentText (view, cell) {
   const found = locate(view, cell)
-  return found?.span ? view.state.doc.sliceString(found.span.from, found.span.to) : ''
+  if (!found?.span) return ''
+  /* A blank span covers all whitespace between its pipes so writeCell can
+     replace it in one change. That whitespace is source padding, not content:
+     putting it into contenteditable shifts the first word to the right. */
+  return found.span.blank
+    ? ''
+    : view.state.doc.sliceString(found.span.from, found.span.to)
 }
 
 /* ------------------------------------------------------- the extension */
 
+/**
+ * The lines of a note's opening `---` block, or null.
+ *
+ * Hidden in a language document, where the grid *is* the document: what the
+ * frontmatter holds there is which columns the cards come from and which kinds
+ * of card to make — settings about the table rather than text in it, and three
+ * lines of `study-stages: f` above the letters is scaffolding left on the
+ * building. It is still in the file, still the first thing ⌘↑ reaches, and
+ * still what anything reading the note off disk sees.
+ */
+function frontmatterLines (state) {
+  if (state.doc.lines < 3 || state.doc.line(1).text.trim() !== '---') return null
+  for (let n = 2; n <= state.doc.lines; n++) {
+    const line = state.doc.line(n)
+    if (line.text.trim() !== '---') continue
+    // Never the whole document: a replacement covering every line leaves the
+    // editor with nothing to put a cursor in.
+    return n < state.doc.lines ? { from: 0, to: line.to } : null
+  }
+  return null
+}
+
 function buildTables (state) {
   const ranges = []
   const language = Boolean(state.facet(languageTableMode)())
+
+  if (language) {
+    const head = frontmatterLines(state)
+    if (head) ranges.push(Decoration.replace({ block: true }).range(head.from, head.to))
+  }
+
   for (const [index, table] of tablesIn(state).entries()) {
     ranges.push(
       Decoration.replace({ widget: new TableWidget(table, language && index === 0), block: true })
@@ -1625,6 +2503,187 @@ function buildTables (state) {
     )
   }
   return Decoration.set(ranges, true)
+}
+
+/* --------------------------------------------------- finding in a table
+
+   ⌘F selects its match in the document, and the document behind a table is
+   replaced by a widget — so a match inside a table was found, counted, and
+   scrolled to, with nothing on screen to show for it. The editor cannot paint
+   into a widget, so the widget paints for it: the same query, applied to the
+   text the cells are showing.
+   ================================================================== */
+
+const escapeRegex = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+/** A search query as a pattern, or null when it is not one worth painting. */
+function searchPattern (query) {
+  if (!query?.search || !query.valid) return null
+  const flags = query.caseSensitive ? 'g' : 'gi'
+  const body = query.regexp ? query.search : escapeRegex(query.search)
+  try {
+    return new RegExp(query.wholeWord ? `\\b(?:${body})\\b` : body, flags)
+  } catch {
+    return null
+  }
+}
+
+/** Take the paint off, leaving the cell's own nodes as they were. */
+function unmarkCell (cell) {
+  const marks = cell.querySelectorAll('mark.tk-cell-match')
+  if (!marks.length) return
+  for (const mark of marks) mark.replaceWith(...mark.childNodes)
+  cell.normalize()
+}
+
+/** Whether a cell owns its own DOM at the moment — the one being typed in is
+ *  showing its own source, and nothing else may put elements in it. */
+const cellIsEditing = (cell) =>
+  Boolean(cell.dataset.editing) || cell === document.activeElement
+
+function markCell (cell, pattern) {
+  const walker = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT)
+  const nodes = []
+  while (walker.nextNode()) nodes.push(walker.currentNode)
+
+  for (const node of nodes) {
+    const text = node.nodeValue
+    pattern.lastIndex = 0
+    const pieces = document.createDocumentFragment()
+    let at = 0
+    let found
+
+    while ((found = pattern.exec(text))) {
+      // A pattern that can match nothing would otherwise never leave this loop.
+      if (!found[0]) { pattern.lastIndex++; continue }
+      if (found.index > at) pieces.append(text.slice(at, found.index))
+      const hit = document.createElement('mark')
+      hit.className = 'tk-cell-match'
+      hit.textContent = found[0]
+      pieces.append(hit)
+      at = found.index + found[0].length
+    }
+
+    if (!at) continue
+    if (at < text.length) pieces.append(text.slice(at))
+    node.replaceWith(pieces)
+  }
+}
+
+export const tableSearchHighlight = ViewPlugin.fromClass(class {
+  constructor (view) {
+    this.view = view
+    /* The query object as the state last handed it over. CodeMirror keeps the
+       same one while nothing about the search changes, so an identity compare
+       answers "is this the query I already built a pattern for" without
+       building a second one. */
+    this.query = null
+    this.pattern = null
+    /* Exactly the cells carrying paint. Taking it off is then a walk of what
+       was marked rather than of every cell in the note — on a vocabulary table
+       that is a handful of elements instead of a thousand. */
+    this.marked = new Set()
+    this.paint(view)
+  }
+
+  /** The pattern for a state, rebuilt only when the search itself changed. */
+  patternFor (state) {
+    const query = searchPanelOpen(state) ? getSearchQuery(state) : null
+    if (query !== this.query) {
+      this.query = query
+      this.pattern = query && searchPattern(query)
+    }
+    return this.pattern
+  }
+
+  update (update) {
+    const before = this.pattern
+    const pattern = this.patternFor(update.state)
+
+    /* While nothing is being searched for this is one state read per update and
+       no more: the cells are touched only when there is a query to paint, or
+       paint left over from one that has just been closed. */
+    if (!pattern && !this.marked.size) return
+    if (pattern === before && !update.docChanged && !update.viewportChanged) return
+    this.paint(update.view, pattern)
+  }
+
+  paint (view, pattern = this.patternFor(view.state)) {
+    for (const cell of this.marked) unmarkCell(cell)
+    this.marked.clear()
+    if (!pattern) return
+
+    for (const cell of view.dom.querySelectorAll('.tk-table-wrap [data-row][data-col]')) {
+      /* The text the cell was drawn from answers "is there anything in here to
+         mark" for the price of a regex test — no tree walk and no allocation,
+         and it is already kept up to date for `updateDOM`'s staleness check.
+         The cell being typed in owns its own DOM and is left out of it. */
+      pattern.lastIndex = 0
+      if (cellIsEditing(cell) || !pattern.test(cell.dataset.src || '')) continue
+      markCell(cell, pattern)
+      this.marked.add(cell)
+    }
+  }
+
+  destroy () {
+    this.paint(this.view, null)
+  }
+})
+
+/**
+ * Hand every column in the note back to its content.
+ *
+ * A dragged column is a fixed width written into the note, and a fixed width
+ * does not follow what is typed into it: a vocabulary table that has been
+ * resized once and added to fifty times ends up with words cut off in a column
+ * that was the right size in March. The grip's double-click already says
+ * "fit this one" — this is that, for the whole note at once, and it is the only
+ * way to reach it without hunting down every column that was ever dragged.
+ *
+ * Taking the widths off rather than measuring and writing new ones: a table
+ * with no marker line is laid out by the browser from its contents, so the fit
+ * stays true as the table grows instead of being right once.
+ */
+export function fitAllColumns (view) {
+  const changes = tablesIn(view.state)
+    .filter((table) => table.widthsLine != null)
+    .map((table) => widthsChange(view.state, table.widthsLine, ''))
+  if (!changes.length) return false
+  view.dispatch({ changes, userEvent: 'input.table' })
+  return true
+}
+
+/* ------------------------------------------------------ making a table */
+
+/**
+ * Put a new table where the cursor is, and land in its first cell.
+ *
+ * Typing the pipes and the dashes by hand is how you make a table anywhere
+ * else in Markdown, and it is a poor way to start the one construct in this
+ * editor that is never shown as source.
+ */
+export function insertTable (view, { rows = 3, cols = 3 } = {}) {
+  const line = view.state.doc.lineAt(view.state.selection.main.head)
+  const block = [
+    rowSource(Array.from({ length: cols }, (_, c) => `Column ${c + 1}`)),
+    rowSource(Array.from({ length: cols }, () => delimiterSource(null))),
+    ...Array.from({ length: rows }, () => blankRow(cols))
+  ]
+
+  /* A table has to start its own block: written straight under a line of prose
+     it is read as more of that paragraph, pipes and all. */
+  const lead = line.text.trim() ? '\n\n' : ''
+  const at = line.text.trim() ? line.to : line.from
+
+  view.dispatch({
+    changes: { from: at, insert: `${lead}${block.join('\n')}\n` },
+    selection: { anchor: at + lead.length },
+    userEvent: 'input.table'
+  })
+
+  const index = tablesIn(view.state).findIndex((table) => table.from >= at)
+  if (index >= 0) refocus(view, index, 0, 0)
+  return true
 }
 
 /** A replaced table still owns a source range, so CodeMirror may leave its

@@ -1,15 +1,23 @@
 import * as esbuild from 'esbuild'
-import { cp, mkdir, rm } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
+import { access, cp, mkdir, readFile, readdir, rename, rm } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import { promisify } from 'node:util'
+
+const run = promisify(execFile)
 
 const watch = process.argv.includes('--watch')
+const output = watch ? 'dist' : `.dist-stage-${process.pid}`
 
-await mkdir('dist', { recursive: true })
+if (!watch) await rm(output, { recursive: true, force: true })
+await mkdir(output, { recursive: true })
 /* Chunk names carry a content hash, so a chunk that changes is written under a
    new name and the old one is left behind. Cleared rather than accumulated —
    nothing loads a stale chunk, but a dist that only ever grows makes the size
    of the bundle impossible to read. */
-await rm('dist/chunks', { recursive: true, force: true })
-await cp('src/index.html', 'dist/index.html')
+await rm(path.join(output, 'chunks'), { recursive: true, force: true })
+await cp('src/index.html', path.join(output, 'index.html'))
 
 /* pdf.js reads these at run time rather than having them compiled in: the glyph
    data for a PDF that names a standard font without embedding it, the character
@@ -19,7 +27,7 @@ await cp('src/index.html', 'dist/index.html')
    Together they are about 4 MB — most PDFs touch none of it, but the ones that do
    render as blank pages without it. */
 for (const dir of ['standard_fonts', 'cmaps', 'iccs', 'wasm']) {
-  await cp(`node_modules/pdfjs-dist/${dir}`, `dist/pdfjs/${dir}`, { recursive: true })
+  await cp(`node_modules/pdfjs-dist/${dir}`, path.join(output, 'pdfjs', dir), { recursive: true })
 }
 
 /** @type {import('esbuild').BuildOptions} */
@@ -33,7 +41,7 @@ const options = {
     katex: 'node_modules/katex/dist/katex.min.css'
   },
   bundle: true,
-  outdir: 'dist',
+  outdir: output,
   /* ESM with splitting rather than one IIFE, because several of the heaviest
      things here are already written to be loaded on demand and only the format
      was stopping it: the language packs highlight.js asks for with `desc.load()`,
@@ -71,7 +79,7 @@ const worker = {
   splitting: false,
   outdir: undefined,
   chunkNames: undefined,
-  outfile: 'dist/pdf.worker.js',
+  outfile: path.join(output, 'pdf.worker.js'),
   loader: undefined,
   assetNames: undefined
 }
@@ -88,7 +96,7 @@ const pdfText = {
   platform: 'node',
   format: 'cjs',
   target: ['node20'],
-  outfile: 'dist/pdf-text.cjs',
+  outfile: path.join(output, 'pdf-text.cjs'),
   /* pdf.js reaches for these when it is asked to *draw* — a canvas to draw on,
      and a polyfill for a browser class node lacks. Nothing here draws, and
      leaving them to be resolved would fail the build over packages the app has
@@ -111,7 +119,7 @@ const three = {
   globalName: 'THREE',
   platform: 'browser',
   target: ['chrome130'],
-  outfile: 'dist/three.js',
+  outfile: path.join(output, 'three.js'),
   minify: !watch,
   logLevel: 'info'
 }
@@ -128,7 +136,7 @@ const lint = {
   platform: 'node',
   format: 'cjs',
   target: ['node20'],
-  outfile: 'dist/lint.cjs',
+  outfile: path.join(output, 'lint.cjs'),
   minify: !watch,
   logLevel: 'info'
 }
@@ -137,12 +145,90 @@ const lint = {
    other is a file that either never rebuilds or never builds. */
 const bundles = [options, worker, pdfText, lint, three]
 
+/* Scanned pages have no text layer for pdf.js to return. A tiny native helper
+   uses the Vision and PDFKit frameworks already present on macOS, compiled for
+   the same architecture as Electron and shipped beside the text extractor. */
+async function buildPdfOcr () {
+  const arch = process.arch === 'x64' ? 'x86_64' : 'arm64'
+  const moduleCache = path.join(os.tmpdir(), `tulip-swift-modules-${process.pid}`)
+  await rm(moduleCache, { recursive: true, force: true })
+  try {
+    await run('xcrun', [
+      'swiftc', 'native/pdf-ocr.swift', '-O',
+      '-target', `${arch}-apple-macos11.0`,
+      '-module-cache-path', moduleCache,
+      '-framework', 'AppKit', '-framework', 'PDFKit', '-framework', 'Vision',
+      '-o', path.join(output, 'pdf-ocr')
+    ])
+  } finally {
+    await rm(moduleCache, { recursive: true, force: true })
+  }
+}
+
 if (watch) {
+  await buildPdfOcr()
   for (const config of bundles) {
     const ctx = await esbuild.context(config)
     await ctx.watch()
   }
   console.log('watching…')
 } else {
-  await Promise.all(bundles.map((config) => esbuild.build(config)))
+  try {
+    await Promise.all([...bundles.map((config) => esbuild.build(config)), buildPdfOcr()])
+
+  /** A production tree is complete before it can replace the last known-good
+   *  one. This catches a successful-looking partial build and makes stale maps
+   *  impossible to carry into the packaged app. */
+  const required = [
+    'index.html', 'renderer.js', 'renderer.css', 'katex.css',
+    'pdf.worker.js', 'pdf-text.cjs', 'pdf-ocr', 'lint.cjs', 'three.js',
+    'pdfjs/standard_fonts', 'pdfjs/cmaps', 'pdfjs/iccs', 'pdfjs/wasm'
+  ]
+  for (const item of required) await access(path.join(output, item))
+
+  const files = []
+  const walk = async (dir) => {
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      const abs = path.join(dir, entry.name)
+      if (entry.isDirectory()) await walk(abs)
+      else files.push(abs)
+    }
+  }
+  await walk(output)
+  const maps = files.filter((file) => file.endsWith('.map'))
+  if (maps.length) throw new Error(`production output contains source maps: ${maps.join(', ')}`)
+
+  const imports = /(?:\bfrom\s*|\bimport\s*(?:\(\s*)?)['"](\.[^'"]+)['"]/g
+  for (const file of files.filter((file) => file.endsWith('.js'))) {
+    const source = await readFile(file, 'utf8')
+    for (let match = imports.exec(source); match; match = imports.exec(source)) {
+      const target = path.resolve(path.dirname(file), match[1])
+      await access(target).catch(() => { throw new Error(`missing import ${match[1]} from ${file}`) })
+    }
+    imports.lastIndex = 0
+  }
+
+  if (process.argv.includes('--test-fail-before-swap')) {
+    throw new Error('simulated failure before production output swap')
+  }
+
+  const previous = `.dist-previous-${process.pid}`
+  await rm(previous, { recursive: true, force: true })
+  let held = false
+  try {
+    await rename('dist', previous).then(() => { held = true }, (err) => {
+      if (err.code !== 'ENOENT') throw err
+    })
+    await rename(output, 'dist')
+    await rm(previous, { recursive: true, force: true })
+  } catch (err) {
+    await rm('dist', { recursive: true, force: true }).catch(() => {})
+    if (held) await rename(previous, 'dist').catch(() => {})
+    await rm(output, { recursive: true, force: true }).catch(() => {})
+    throw err
+  }
+  } catch (err) {
+    await rm(output, { recursive: true, force: true }).catch(() => {})
+    throw err
+  }
 }

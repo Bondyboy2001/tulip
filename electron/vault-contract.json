@@ -21,9 +21,7 @@
     "Grammar.md"
   ],
   "languageTableTemplates": {
-    "vocabulary": "| Word | English | Example | Notes |\n| --- | --- | --- | --- |\n|  |  |  |  |\n",
-    "sounds": "| Letter / combination | Sound | Example | Notes |\n| --- | --- | --- | --- |\n|  |  |  |  |\n",
-    "grammar": "| Pattern / rule | Meaning / use | Example | Notes |\n| --- | --- | --- | --- |\n|  |  |  |  |\n"
+    "vocabulary": "| Word | English | Example | Notes |\n| --- | --- | --- | --- |\n|  |  |  |  |\n"
   },
   "attachmentDirectory": ".attachments",
   "chatImageDirectory": "Chat",

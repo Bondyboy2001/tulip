@@ -149,7 +149,7 @@ const cssColor = (value) => (/^[\w#(),.%\s/-]{1,64}$/.test(value) ? value : '#FF
  * @param {string} code   the block's body
  * @param {string} paper  the note's own background colour
  */
-export function scenePage (code, paper) {
+function scenePage (code, paper) {
   return `<!doctype html>
 <html lang="en">
 <head>
