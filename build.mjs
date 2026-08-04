@@ -9,6 +9,7 @@ const run = promisify(execFile)
 
 const watch = process.argv.includes('--watch')
 const output = watch ? 'dist' : `.dist-stage-${process.pid}`
+const buildsNativePdfOcr = process.platform === 'darwin'
 
 if (!watch) await rm(output, { recursive: true, force: true })
 await mkdir(output, { recursive: true })
@@ -149,6 +150,7 @@ const bundles = [options, worker, pdfText, lint, three]
    uses the Vision and PDFKit frameworks already present on macOS, compiled for
    the same architecture as Electron and shipped beside the text extractor. */
 async function buildPdfOcr () {
+  if (!buildsNativePdfOcr) return
   const arch = process.arch === 'x64' ? 'x86_64' : 'arm64'
   const moduleCache = path.join(os.tmpdir(), `tulip-swift-modules-${process.pid}`)
   await rm(moduleCache, { recursive: true, force: true })
@@ -181,9 +183,10 @@ if (watch) {
    *  impossible to carry into the packaged app. */
   const required = [
     'index.html', 'renderer.js', 'renderer.css', 'katex.css',
-    'pdf.worker.js', 'pdf-text.cjs', 'pdf-ocr', 'lint.cjs', 'three.js',
+    'pdf.worker.js', 'pdf-text.cjs', 'lint.cjs', 'three.js',
     'pdfjs/standard_fonts', 'pdfjs/cmaps', 'pdfjs/iccs', 'pdfjs/wasm'
   ]
+  if (buildsNativePdfOcr) required.push('pdf-ocr')
   for (const item of required) await access(path.join(output, item))
 
   const files = []

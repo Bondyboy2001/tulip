@@ -64,8 +64,10 @@ import { mountPanelAccessibility } from './panel-state.js'
 import { mountSavedSearches } from './saved-searches.js'
 import ALPHABETS from '../electron/alphabets.json'
 import { COUNTRIES, countryCode, languageIdentity } from './countries.js'
+import { localizeChrome } from './platform.js'
 
 const api = window.tulip
+localizeChrome(document, api.platform)
 const $ = (id) => document.getElementById(id)
 
 /* ----------------------------------------------------------------- state */

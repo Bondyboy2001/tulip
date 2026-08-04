@@ -19,6 +19,41 @@ npm run app        # launch without rebuilding
 npm run tidy -- ~/Notes [--check]   # run the markdown linter over a vault
 ```
 
+## Desktop builds
+
+Tulip supports macOS and Windows. Packaging runs on the target operating
+system so each release is tested against the Electron runtime it ships.
+
+```bash
+npm run package:mac   # macOS: DMG and ZIP
+npm run package:win   # Windows: NSIS installer and ZIP
+```
+
+Installers are written to `release/`. The Windows installer is per-user by
+default, offers an installation directory, and adds Start Menu and desktop
+shortcuts. Normal PDF text extraction works on both systems. OCR for scanned
+PDF pages currently uses Apple's Vision framework, so it is available on macOS
+only; Windows keeps the selectable text instead of failing the document.
+
+The repository's CI verifies every pull request on native macOS and Windows
+runners. Pushing a version tag such as `v0.2.0` builds both installers and
+creates a GitHub Release. Release artifacts are currently unsigned; configure
+Apple and Windows signing credentials in repository secrets before distributing
+Tulip outside a small test group.
+
+### Release checklist
+
+1. Run `npm run verify` and test the installed application on both platforms.
+2. Update `version` in `package.json` and `package-lock.json`.
+3. Commit the release, then create and push the matching tag: `v<version>`.
+4. Download both artifacts from GitHub Actions and smoke-test them.
+5. Review the generated release notes after confirming signatures and checksums.
+
+The GitHub repository is private. Do not embed a personal GitHub token in the
+application to enable updates. Automatic updates can be enabled safely after
+moving public releases to a public repository or to an authenticated update
+service designed for desktop clients.
+
 ## What it does
 
 **Editing.** Markdown syntax hides itself except on the line the cursor is on,

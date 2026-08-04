@@ -32,6 +32,7 @@ const MODEL_FALLBACKS = CATALOGUE.fallbacks
    from the catalogue rather than written out beside each `spawn`, so there is
    one answer to "what is Codex" and the settings pane reads the same one. */
 const PROVIDERS = Object.fromEntries(CATALOGUE.providers.map((p) => [p.id, p]))
+const IS_WINDOWS = process.platform === 'win32'
 
 /* opencode names its tools in lower case and has a couple the other two do not.
    Mapped here rather than in the renderer, so the panel goes on knowing one
@@ -224,6 +225,10 @@ function launch (provider, args, onMessage, { prompt = null, reportStdinError = 
     // Its own process group, so `stop` can take the CLI's tool subprocesses
     // with it rather than leaving them orphaned.
     detached: true,
+    windowsHide: true,
+    // npm-installed CLIs are .cmd shims on Windows. Node cannot execute those
+    // directly, so let cmd.exe unwrap the fixed provider command and flags.
+    shell: IS_WINDOWS,
     env: { ...process.env, PATH: resolvePath() }
   })
 
@@ -856,6 +861,8 @@ function ask (command, args, parse) {
   return new Promise((resolve) => {
     execFile(command, args, {
       env: { ...process.env, PATH: resolvePath() },
+      windowsHide: true,
+      shell: IS_WINDOWS,
       maxBuffer: 8 * 1024 * 1024
     }, (error, stdout) => {
       if (error) { resolve([]); return }
@@ -1169,6 +1176,17 @@ function stop (signal = 'SIGTERM') {
     proc.ending = true
     proc.stdin?.end()
     const kill = (sig) => {
+      if (IS_WINDOWS) {
+        try {
+          const killer = spawn('taskkill.exe', [
+            '/pid', String(proc.pid), '/t', ...(sig === 'SIGKILL' ? ['/f'] : [])
+          ], { stdio: 'ignore', windowsHide: true, detached: true })
+          killer.unref()
+        } catch {
+          try { proc.kill() } catch { /* already gone */ }
+        }
+        return
+      }
       try { process.kill(-proc.pid, sig) } catch {
         try { proc.kill(sig) } catch { /* already gone */ }
       }

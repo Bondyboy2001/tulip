@@ -8,6 +8,7 @@ const { contextBridge, ipcRenderer, webUtils } = require('electron')
  * stays the only thing that can touch the filesystem.
  */
 contextBridge.exposeInMainWorld('tulip', {
+  platform: process.platform,
   vault: {
     pick: () => ipcRenderer.invoke('vault:pick'),
     current: () => ipcRenderer.invoke('vault:current'),

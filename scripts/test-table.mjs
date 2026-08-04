@@ -9,10 +9,13 @@
 import * as esbuild from 'esbuild'
 import { mkdir, writeFile, copyFile } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
+import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 
 const root = path.dirname(fileURLToPath(new URL('.', import.meta.url)))
+const require = createRequire(import.meta.url)
+const electron = require('electron')
 const cache = path.join(root, 'node_modules/.cache')
 await mkdir(cache, { recursive: true })
 
@@ -74,7 +77,7 @@ app.whenReady().then(async () => {
 })
 `)
 
-const run = spawnSync(path.join(root, 'node_modules/.bin/electron'), [main], {
+const run = spawnSync(electron, [main], {
   encoding: 'utf8',
   env: { ...process.env, ELECTRON_DISABLE_SECURITY_WARNINGS: '1' }
 })
