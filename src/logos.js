@@ -17,7 +17,7 @@ import {
   siZig, siNim, siPerl, siJulia, siOcaml, siGraphql, siDocker, siNixos,
   siSolidity, siPostgresql, siXml, siThreedotjs
 } from 'simple-icons'
-import { svgIcon } from './blocks.js'
+import { svgIcon } from './dom.js'
 
 /** Tulip's language id → the brand mark that belongs to it. */
 const MARKS = {

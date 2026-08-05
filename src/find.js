@@ -33,7 +33,7 @@ import {
   findNext, findPrevious, selectMatches,
   replaceNext, replaceAll, closeSearchPanel
 } from '@codemirror/search'
-import { el } from './blocks.js'
+import { el } from './dom.js'
 import { chip, icon, tallyText, wrap } from './find-bar.js'
 
 /* Counting stops here. A note with more matches than this does not need an

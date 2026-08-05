@@ -10,7 +10,7 @@
  * list reads as the note's chapters rather than its every pause.
  */
 
-import { el as element } from './blocks.js'
+import { el as element } from './dom.js'
 import { fileDiff, withinLines } from './linediff.js'
 import { when } from './time.js'
 import { noteName } from './vault-paths.js'
@@ -109,14 +109,17 @@ export function diffBlock (change) {
   return node
 }
 
-export function mountHistory ({ el, api, confirm, beforeRestore }) {
+export function mountHistory ({ el, api, confirm, beforeRestore, onError }) {
   const state = { path: null, operations: [] }
 
   async function restore (operation, path) {
+    const rejecting = operation.source === 'copilot' && path == null
     const ok = await confirm({
-      title: 'Restore this version?',
-      detail: 'The note as it stands now is kept as a new entry first, so this can be undone.',
-      go: 'Restore'
+      title: rejecting ? 'Reject this Copilot turn?' : 'Restore this version?',
+      detail: rejecting
+        ? 'All files changed by this turn will be put back. If any changed afterwards, Tulip will leave everything untouched.'
+        : 'The note as it stands now is kept as a new entry first, so this can be undone.',
+      go: rejecting ? 'Reject' : 'Restore'
     })
     if (!ok) return
     await beforeRestore?.()
@@ -210,7 +213,11 @@ export function mountHistory ({ el, api, confirm, beforeRestore }) {
     if (expanded) toggle().catch(() => {})
     const back = element('button', 'ghost is-compact is-accent', 'Restore')
     back.type = 'button'
-    back.addEventListener('click', () => restore(operation, state.path))
+    back.addEventListener('click', () => {
+      restore(operation, state.path).catch((err) => {
+        onError?.(err?.message || 'That version could not be restored.')
+      })
+    })
     actions.append(back)
 
     head.append(actions)
@@ -245,9 +252,8 @@ export function mountHistory ({ el, api, confirm, beforeRestore }) {
       operation.changes.some((change) => change.path === state.path)
     )
     /* Through the shared matcher, so this reads the same name the tree does —
-       its own copy of the pattern was missing the `.language` part, and left a
-       language table titled "Spanish.language" here and "Spanish" everywhere
-       else. */
+       a hand-rolled copy of the pattern once drifted and titled a note one way
+       here and another everywhere else. */
     el.subtitle.textContent = noteName(state.path)
     el.subtitle.title = state.path || ''
     /* The newest snapshot opens on its own: it is the one a reader who just

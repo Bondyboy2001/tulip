@@ -9,8 +9,10 @@ function classifyVaultEvent (filename, {
   ignoredDirs,
   attachmentDirs,
   noteExtensions,
+  texExtension,
   pdfExtension,
   siteExtension,
+  whiteboardExtension,
   assetExtensions
 }) {
   if (!filename) {
@@ -33,6 +35,12 @@ function classifyVaultEvent (filename, {
     return { ignore: false, index: false, snapshot: true, notify: true, pdf: null, path: relative }
   }
   if (noteExtensions.has(extension)) {
+    return { ignore: false, index: true, snapshot: true, notify: true, pdf: null, path: relative }
+  }
+  if (extension === texExtension) {
+    return { ignore: false, index: false, snapshot: true, notify: true, pdf: null, path: relative }
+  }
+  if (extension === whiteboardExtension) {
     return { ignore: false, index: true, snapshot: true, notify: true, pdf: null, path: relative }
   }
   if (extension === pdfExtension) {

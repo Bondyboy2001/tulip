@@ -8,12 +8,12 @@ const SPECS = [
   ['ai', 'aiPanel']
 ]
 
-export function syncPanelAccessibility (app, panels) {
+function syncPanelAccessibility (app, panels) {
   for (const [state, key] of SPECS) {
     const panel = panels[key]
     if (!panel) continue
     const open = app.dataset[state] === 'open'
-    if (!open && panel.contains(document.activeElement)) panels.returnFocus?.[key]?.focus?.()
+    if (!open && panel.contains(document.activeElement)) panels.returnFocus?.[key]?.()
     panel.toggleAttribute('inert', !open)
     panel.setAttribute('aria-hidden', String(!open))
   }
@@ -27,5 +27,4 @@ export function mountPanelAccessibility (app, panels) {
     attributeFilter: ['data-sidebar', 'data-side', 'data-ai']
   })
   sync()
-  return { sync, destroy: () => observer.disconnect() }
 }

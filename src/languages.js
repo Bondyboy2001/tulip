@@ -128,12 +128,35 @@ export const languageId = (token) => languageMark(token)?.id || ''
 export const DRAWN = RUNNABLE.drawn
 
 /**
+ * Chips already built, by the id and shape they were built for. A note is
+ * usually written in one or two languages and repeats them on every fence, so
+ * a page of four hundred blocks asks for four hundred copies of the same four
+ * elements. Built once each and cloned thereafter.
+ *
+ * Keyed on the *resolved* id rather than the fence's spelling, so `htm` and
+ * `xhtml` share the copy they would both have produced. Only recognised
+ * languages are held: an unknown token is its own id (see `languageMark`), and
+ * note text must not be able to grow a cache without bound.
+ */
+const chipTemplates = new Map()
+
+/**
  * @param {string} token   the word after the opening fence
  * @param {{label?: boolean}} [opts]  include the spelled-out language name
  */
 export function languageChip (token, { label = true } = {}) {
   const info = languageMark(token)
   if (!info) return null
+
+  /* Identity, not another lookup: `languageMark` hands back the shared entry
+     for a language this list knows and a fresh object for one it does not, so
+     this is the answer it already computed. An unknown token is not cached —
+     it is its own id, and note text must not be able to grow a map. */
+  const key = INDEX.get(info.id) === info ? `${info.id}|${label ? 'L' : ''}` : null
+  if (key) {
+    const cached = chipTemplates.get(key)
+    if (cached) return cached.cloneNode(true)
+  }
 
   const chip = document.createElement('span')
   chip.className = 'lang-chip'
@@ -165,5 +188,9 @@ export function languageChip (token, { label = true } = {}) {
     chip.append(name)
   }
 
+  if (key) {
+    chipTemplates.set(key, chip)
+    return chip.cloneNode(true)
+  }
   return chip
 }

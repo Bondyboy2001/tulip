@@ -3,16 +3,20 @@
 
 export function normalizeSavedSearches (value) {
   const seen = new Set()
-  return (Array.isArray(value) ? value : []).flatMap((item) => {
+  const normalized = []
+  for (const item of Array.isArray(value) ? value : []) {
     const query = String(typeof item === 'string' ? item : item?.query || '').trim()
-    if (!query || seen.has(query.toLowerCase())) return []
-    seen.add(query.toLowerCase())
-    return [{
+    const key = query.toLowerCase()
+    if (!query || seen.has(key)) continue
+    seen.add(key)
+    normalized.push({
       id: String(item?.id || `search-${Date.now()}-${seen.size}`),
       name: String(item?.name || query).trim() || query,
       query
-    }]
-  }).slice(0, 40)
+    })
+    if (normalized.length === 40) break
+  }
+  return normalized
 }
 
 export function mountSavedSearches ({ root, onOpen, onChange }) {
@@ -67,5 +71,5 @@ export function mountSavedSearches ({ root, onOpen, onChange }) {
   }
 
   set([])
-  return { set, save, items: () => items.map((item) => ({ ...item })) }
+  return { set, save }
 }

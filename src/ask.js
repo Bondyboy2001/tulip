@@ -35,8 +35,9 @@ export function mountAsk (el) {
     el.ask.hidden = false
 
     const returnTo = document.activeElement
-    // The safe one takes the focus: return commits nothing you did not aim at.
-    el.askCancel.focus()
+    // The filled action is the dialog's default: Return activates it wherever
+    // focus happens to be, while Escape remains the unambiguous way back.
+    el.askGo.focus()
 
     return new Promise((resolve) => {
       asking = {

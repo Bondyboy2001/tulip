@@ -1,6 +1,7 @@
 import * as esbuild from 'esbuild'
 import { execFile } from 'node:child_process'
-import { access, cp, mkdir, readFile, readdir, rename, rm } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { access, cp, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
@@ -9,6 +10,85 @@ const run = promisify(execFile)
 
 const watch = process.argv.includes('--watch')
 const output = watch ? 'dist' : `.dist-stage-${process.pid}`
+const pdfOcrCache = path.join(os.homedir(), 'Library', 'Caches', 'Tulip', 'native')
+
+/* A production build is a release boundary for the local app. Advance only the
+   patch component — one thousandth in the project's three-part version — after
+   the new dist has safely replaced the old one. Watch mode stays version-neutral
+   so saving a file does not rewrite package manifests on every rebuild. */
+async function bumpPatchVersion () {
+  const packagePath = 'package.json'
+  const lockPath = 'package-lock.json'
+  const packageData = JSON.parse(await readFile(packagePath, 'utf8'))
+  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(packageData.version)
+  if (!match) throw new Error(`cannot advance non-semver version ${packageData.version}`)
+
+  const version = `${match[1]}.${match[2]}.${Number(match[3]) + 1}`
+  packageData.version = version
+  await writeFile(packagePath, `${JSON.stringify(packageData, null, 2)}\n`)
+
+  const lockData = JSON.parse(await readFile(lockPath, 'utf8'))
+  lockData.version = version
+  if (lockData.packages?.['']) lockData.packages[''].version = version
+  await writeFile(lockPath, `${JSON.stringify(lockData, null, 2)}\n`)
+  console.log(`version advanced to ${version}`)
+}
+
+/* Tulip presents Excalidraw in English and does not expose its separate AI
+   text-to-diagram product. The published entry point nevertheless contains a
+   dynamic import for every translation and for Mermaid conversion, which
+   makes esbuild faithfully ship several megabytes that no Tulip control can
+   reach. Rewrite only those optional imports while bundling; fail loudly when
+   an upstream release changes their shape so an upgrade cannot silently ship
+   a broken editor. Markdown Mermaid diagrams remain handled by Tulip's own
+   renderer. */
+const leanExcalidraw = {
+  name: 'lean-excalidraw',
+  setup (build) {
+    build.onLoad({
+      filter: /[\\/]@excalidraw[\\/]excalidraw[\\/]dist[\\/](?:prod|dev)[\\/]index\.js$/
+    }, async ({ path: file }) => {
+      let source = await readFile(file, 'utf8')
+      const localeEntry = /(["']\.\/locales\/[^"']+\.json["']\s*:\s*\(\)\s*=>\s*import\(\s*["'][^"']+["']\s*\)\s*,?)/g
+      let locales = 0
+      source = source.replace(localeEntry, (entry) => {
+        locales++
+        return entry.includes('/en.json') ? entry : ''
+      })
+      const mermaidImport = /import\(\s*["']@excalidraw\/mermaid-to-excalidraw["']\s*\)/g
+      const mermaid = source.match(mermaidImport)?.length || 0
+      source = source.replace(
+        mermaidImport,
+        'Promise.reject(new Error("Mermaid paste is not enabled in Tulip whiteboards."))'
+      )
+      if (locales < 2 || mermaid < 1) {
+        throw new Error('Excalidraw optional-import layout changed; update leanExcalidraw.')
+      }
+      return { contents: source, loader: 'js', resolveDir: path.dirname(file) }
+    })
+  }
+}
+
+/* Chromium 130 understands WOFF2, and KaTeX's stylesheet lists WOFF and TTF
+   fallbacks for browsers old enough to predate it. Keep the runtime's font
+   choices intact while avoiding nearly a megabyte of duplicate font data in
+   the packaged app. Fail loudly if KaTeX changes the declaration shape so a
+   dependency upgrade cannot silently emit a stylesheet with missing fonts. */
+const leanKatex = {
+  name: 'lean-katex',
+  setup (build) {
+    build.onLoad({
+      filter: /[\\/]node_modules[\\/]katex[\\/]dist[\\/]katex\.min\.css$/
+    }, async ({ path: file }) => {
+      let source = await readFile(file, 'utf8')
+      const fallbacks = /,url\(fonts\/[^)]+\.woff\)\s+format\("woff"\),url\(fonts\/[^)]+\.ttf\)\s+format\("truetype"\)/g
+      const count = source.match(fallbacks)?.length || 0
+      source = source.replace(fallbacks, '')
+      if (count < 1) throw new Error('KaTeX font declarations changed; update leanKatex.')
+      return { contents: source, loader: 'css', resolveDir: path.dirname(file) }
+    })
+  }
+}
 
 if (!watch) await rm(output, { recursive: true, force: true })
 await mkdir(output, { recursive: true })
@@ -53,6 +133,10 @@ const options = {
   chunkNames: 'chunks/[name]-[hash]',
   platform: 'browser',
   target: ['chrome130'],
+  /* Excalidraw publishes explicit development/production export conditions
+     for both its module and stylesheet. esbuild does not enable either by
+     default, so choose the one that matches this build. */
+  conditions: [watch ? 'development' : 'production'],
   // KaTeX's stylesheet references its own fonts. Emitting them next to the
   // lazy stylesheet keeps the app offline and satisfies the page's font-src
   // 'self'.
@@ -62,7 +146,8 @@ const options = {
   assetNames: 'fonts/[name]',
   sourcemap: watch,
   minify: !watch,
-  logLevel: 'info'
+  logLevel: 'info',
+  plugins: [leanExcalidraw, leanKatex]
 }
 
 /* pdf.js parses documents in a worker, which has to be a file of its own: the
@@ -150,28 +235,58 @@ const bundles = [options, worker, pdfText, lint, three]
    the same architecture as Electron and shipped beside the text extractor. */
 async function buildPdfOcr () {
   const arch = process.arch === 'x64' ? 'x86_64' : 'arm64'
+  const target = `${arch}-apple-macos11.0`
+  const flags = [
+    '-O', '-target', target,
+    '-framework', 'AppKit', '-framework', 'PDFKit', '-framework', 'Vision'
+  ]
+  const [source, compiler, sdk] = await Promise.all([
+    readFile('native/pdf-ocr.swift'),
+    run('xcrun', ['swiftc', '--version']).then(({ stdout, stderr }) => stdout || stderr),
+    run('xcrun', ['--sdk', 'macosx', '--show-sdk-version'])
+      .then(({ stdout, stderr }) => stdout || stderr)
+  ])
+  const key = createHash('sha256')
+    .update(source)
+    .update('\0').update(compiler)
+    .update('\0').update(sdk)
+    .update('\0').update(flags.join('\0'))
+    .digest('hex').slice(0, 20)
+  /* This artifact belongs to the Mac toolchain, not the npm install. */
+  const cached = path.join(pdfOcrCache, `pdf-ocr-${key}`)
+  const destination = path.join(output, 'pdf-ocr')
+  await mkdir(pdfOcrCache, { recursive: true })
+  try {
+    await access(cached)
+    await cp(cached, destination)
+    return
+  } catch { /* compile below */ }
+
   const moduleCache = path.join(os.tmpdir(), `tulip-swift-modules-${process.pid}`)
+  const candidate = path.join(pdfOcrCache, `.pdf-ocr-${key}-${process.pid}`)
   await rm(moduleCache, { recursive: true, force: true })
   try {
     await run('xcrun', [
-      'swiftc', 'native/pdf-ocr.swift', '-O',
-      '-target', `${arch}-apple-macos11.0`,
+      'swiftc', 'native/pdf-ocr.swift', ...flags,
       '-module-cache-path', moduleCache,
-      '-framework', 'AppKit', '-framework', 'PDFKit', '-framework', 'Vision',
-      '-o', path.join(output, 'pdf-ocr')
+      '-o', candidate
     ])
+    await rename(candidate, cached)
+    await cp(cached, destination)
   } finally {
+    await rm(candidate, { force: true })
     await rm(moduleCache, { recursive: true, force: true })
   }
 }
 
 if (watch) {
-  await buildPdfOcr()
-  for (const config of bundles) {
+  await Promise.all(bundles.map(async (config) => {
     const ctx = await esbuild.context(config)
     await ctx.watch()
-  }
-  console.log('watching…')
+  }))
+  console.log('source watchers ready; preparing PDF OCR…')
+  await buildPdfOcr()
+  console.log('PDF OCR ready')
 } else {
   try {
     await Promise.all([...bundles.map((config) => esbuild.build(config)), buildPdfOcr()])
@@ -231,4 +346,5 @@ if (watch) {
     await rm(output, { recursive: true, force: true }).catch(() => {})
     throw err
   }
+  await bumpPatchVersion()
 }

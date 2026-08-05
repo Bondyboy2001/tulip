@@ -15,6 +15,7 @@ const MAIN_FLOOR = 380
 /* How far an arrow key moves an edge, with and without shift. */
 const NUDGE = 8
 const NUDGE_FAST = 32
+const GRIP_WIDTH = 12
 
 /**
  * @param {object} deps
@@ -50,6 +51,17 @@ export function mountPanels ({
       def: 340, min: 260, max: 680, grow: -1 }
   ]
 
+  /* A grip nested inside an overflow-hidden panel can only occupy the panel's
+     side of its border. Put it on the app shell instead, where its hit target
+     can straddle the divider evenly without allowing panel content to leak. */
+  for (const p of PANELS) el.app.append(p.grip)
+
+  const placeGrip = (p) => {
+    const box = p.host.getBoundingClientRect()
+    const edge = p.grow === 1 ? box.right : box.left
+    p.grip.style.left = `${Math.round(edge - GRIP_WIDTH / 2)}px`
+  }
+
   /**
    * The width asked for, and the width the window can actually spare, held
    * apart: a narrow window squeezes a panel without forgetting how wide it was
@@ -72,13 +84,18 @@ export function mountPanels ({
   }
 
   function refitPanels () {
-    for (const p of PANELS) if (panelOpen(p)) fitPanel(p)
+    for (const p of PANELS) {
+      if (panelOpen(p)) fitPanel(p)
+      placeGrip(p)
+    }
     onResize?.()
   }
 
   /** A closed panel is a zero-wide column, and its handle is hidden with it. */
   function panelOpen (p) {
-    return p.grip.offsetParent !== null
+    // A fixed-position grip deliberately has no offsetParent; client rects
+    // still distinguish it from the display:none rule of a closed panel.
+    return p.grip.getClientRects().length > 0
   }
 
   for (const p of PANELS) {
@@ -112,6 +129,7 @@ export function mountPanels ({
         nextX = null
         const width = setPanelWidth(p, (x - anchor) * p.grow, !deferred)
         if (deferred) onResizePreview?.(p.key, width)
+        placeGrip(p)
       }
       const move = (ev) => {
         nextX = ev.clientX
@@ -152,6 +170,13 @@ export function mountPanels ({
   }
 
   window.addEventListener('resize', refitPanels)
+
+  /* Opening/closing a pane animates the grid edge. Follow the actual host box
+     through those frames instead of guessing where the CSS transition is. */
+  const gripObserver = new ResizeObserver(() => {
+    for (const p of PANELS) placeGrip(p)
+  })
+  for (const p of PANELS) gripObserver.observe(p.host)
 
   /* Opening a panel takes room from the ones already out, so the fit is redone
      whenever one of them opens or closes — wherever in the app that happened. */

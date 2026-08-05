@@ -1,19 +1,26 @@
 import MarkdownIt from 'markdown-it'
 
 import { dropdown } from './dropdown.js'
-import { el as element } from './blocks.js'
+import { el as element } from './dom.js'
 import { diffBlock } from './history.js'
 import { when } from './time.js'
 import { mathPlugin } from './math.js'
 import { citePlugin } from './cite.js'
 import { routeAnchor, revealAnchorTarget } from './links.js'
 import { assetKind, assetUrl } from './assets.js'
+import { isLanguageTablePath } from './language-table.js'
 import {
-  DEFAULT_CATALOGUE, DEFAULT_MODEL,
+  DEFAULT_CATALOGUE,
   asOptions, effortLabel, effortsFor, modelFromConfig, nearestEffort,
-  offeredModels, providerGrant, providerLabel, splitKey
+  offeredModels, providerGrant, providerLabel, splitKey,
+  COPILOT_MODES, COPILOT_MODE_ORDER, copilotModeFromConfig, copilotModeLabel
 } from './models.js'
-import { isChatAttachment, isPdfPath, isSitePath, noteName } from './vault-paths.js'
+import {
+  NOTE_EXT, isChatAttachment, isTexPath, isPdfPath, isSitePath, isWhiteboardPath,
+  noteName
+} from './vault-paths.js'
+import { fileIcon } from './file-icons.js'
+import { newTurnId, ownsTurn } from './copilot-turns.js'
 
 /**
  * The copilot panel.
@@ -89,6 +96,7 @@ const TOOL_VERB = {
   Grep: ['Searching', 'Searched'],
   TodoWrite: ['Planning', 'Planned'],
   Bash: ['Running', 'Ran'],
+  Rename: ['Renaming', 'Renamed'],
   Fetch: ['Fetching', 'Fetched'],
   Task: ['Delegating', 'Delegated']
 }
@@ -124,7 +132,8 @@ const verbFor = (msg) =>
 /* A step that goes somewhere when clicked: a write that landed, which the
    editor can open at the line it changed. */
 const jumps = (msg) =>
-  (msg.name === 'Edit' || msg.name === 'Write') && !!msg.path && !msg.error
+  (msg.name === 'Edit' || msg.name === 'Write' || msg.name === 'Rename') &&
+  !!msg.path && !msg.error
 
 /* A step that opens instead, on what the tool said. Everything that does not
    jump — searches, commands, reads, and writes that failed, which are the ones
@@ -144,20 +153,21 @@ const MAX_NOTES = 60
 const MAX_CHATS = 20   // conversations kept per note; the oldest fall off
 
 export function mountCopilot ({
-  el, api, context, files = () => [], onEditing, onEdited, onTyping, onConfig,
-  onCite, onOpen, onRestore, onAccept, onWarn
+  el, api, context, files = () => [], onEditing, onEdited, onRenamed, onConfig,
+  onCite, onOpen, onRestore, onAccept, onWarn, onPermission, onAutoConfirm
 }) {
   const state = {
     open: false,
     effort: 'high',
     /* One choice, not two: `provider:id` names the CLI and the model together,
-       so the panel has a single control where it used to have a pair. */
-    model: DEFAULT_MODEL,
+       so the panel has a single control where it used to have a pair. Empty
+       until Settings says otherwise — there is no model nobody chose. */
+    model: '',
     catalogue: DEFAULT_CATALOGUE,
     // Which of the catalogue the dropdown offers — chosen in Settings, because
     // opencode alone answers with hundreds.
     enabled: [],
-    write: true,      // may the copilot edit notes, or only read them
+    mode: COPILOT_MODES.READ,
     busy: false,
     started: false,
 
@@ -187,7 +197,10 @@ export function mountCopilot ({
        message is sent. Every event of that turn routes here — never to
        whichever note happens to be on screen when it arrives — so switching
        notes mid-reply cannot misfile the answer. */
-    turn: null          // { path, convo }
+    turn: null,         // { id, path, convo }
+    // Stop clears `turn` before awaiting main so startup cannot continue, but
+    // events produced by that stop still belong to the conversation it ended.
+    stopping: null
   }
   const persistConfig = (patch) =>
     onConfig ? onConfig(patch) : api.config.set(patch)
@@ -283,7 +296,7 @@ export function mountCopilot ({
     thread: null,
     threadOf: null,
     used: 0,
-    // What a turn has cost, added up. Only Claude reports it; a conversation
+    // What a turn has cost, added up. Only some CLIs report it; a conversation
     // with nobody keeping the bill stays at zero and says nothing.
     cost: 0,
     // A digest of the conversation this one continues — see `compactChat`.
@@ -312,8 +325,8 @@ export function mountCopilot ({
   /**
    * The session id to resume with, if this conversation has one worth using.
    *
-   * A thread belongs to the CLI that issued it: handing `claude --resume` an id
-   * opencode opened is an argument it has never seen, and the turn fails — then
+   * A thread belongs to the CLI that issued it: handing `devin --continue` an
+   * id opencode opened is an argument it has never seen, and the turn fails — then
    * fails again on every later message, because the id is still there. So each
    * id is filed with the program that made it and offered back only to that
    * one. An id from before this was recorded has no owner, and is not resumed.
@@ -661,12 +674,44 @@ export function mountCopilot ({
   /** A filename, kept intact for the attachment card rather than shortened to
    *  the extensionless document titles used elsewhere in the panel. */
   const attachmentName = (path) => String(path || '').split('/').pop() || 'Attachment'
+  const attachmentExtension = (path) => {
+    const name = attachmentName(path)
+    const dot = name.lastIndexOf('.')
+    return dot > 0 ? name.slice(dot + 1).toLowerCase() : ''
+  }
+
+  function attachmentKind (path) {
+    if (isLanguageTablePath(path)) return 'language'
+    if (isTexPath(path)) return 'tex'
+    if (isPdfPath(path)) return 'pdf'
+    if (isSitePath(path)) return 'site'
+    if (isWhiteboardPath(path)) return 'whiteboard'
+    if (NOTE_EXT.test(path || '')) return 'note'
+    return assetKind(path)
+  }
+
+  const ATTACHMENT_TYPES = {
+    note: 'Markdown',
+    language: 'Language table',
+    pdf: 'PDF',
+    tex: 'TeX',
+    site: 'Website',
+    whiteboard: 'Whiteboard',
+    video: 'Video',
+    audio: 'Audio'
+  }
+
+  function attachmentType (kind, path) {
+    if (ATTACHMENT_TYPES[kind]) return ATTACHMENT_TYPES[kind]
+    const suffix = attachmentExtension(path)
+    return suffix ? suffix.toUpperCase() : 'File'
+  }
 
   /** The compact visual representation shared by the composer and the sent
    *  message. Images are their own preview; PDFs and other files retain their
    *  useful filename beside a familiar document mark. */
   function attachmentCard (path, removable = false) {
-    const kind = assetKind(path)
+    const kind = attachmentKind(path)
     const card = element('div', `ai-attachment is-${kind}`)
     card.dataset.path = path
 
@@ -681,22 +726,19 @@ export function mountCopilot ({
       thumb.alt = ''
       preview.append(thumb)
     } else {
-      preview.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true">' +
-        '<path d="M6.4 2.6h6.6L19 8.6V20a1.6 1.6 0 0 1-1.6 1.6H6.4A1.6 1.6 0 0 1 4.8 20V4.2a1.6 1.6 0 0 1 1.6-1.6z"/>' +
-        '<path class="ai-attachment-fold" d="M13 2.6 19 8.6h-4.4A1.6 1.6 0 0 1 13 7z"/></svg>'
-      if (kind === 'pdf') preview.append(element('span', 'ai-attachment-kind', 'PDF'))
+      preview.append(fileIcon(kind))
     }
     card.append(preview)
 
     if (kind !== 'image') {
       const copy = element('span', 'ai-attachment-copy')
       copy.append(element('span', 'ai-attachment-name', attachmentName(path)))
-      if (kind === 'pdf') copy.append(element('span', 'ai-attachment-type', 'PDF'))
+      copy.append(element('span', 'ai-attachment-type', attachmentType(kind, path)))
       card.append(copy)
     }
 
     if (removable) {
-      const remove = element('button', 'ai-attachment-remove')
+      const remove = element('button', 'icon-btn ai-attachment-remove')
       remove.type = 'button'
       remove.dataset.removeAttachment = path
       remove.title = `Remove ${attachmentName(path)}`
@@ -754,16 +796,18 @@ export function mountCopilot ({
     const operation = msg.operation
     const node = element('section', classOf(msg))
     const head = element('div', 'ai-review-head')
-    head.append(element(
+    const summary = element(
       'strong', '',
       `${operation.changes.length} file${operation.changes.length === 1 ? '' : 's'} changed`
-    ))
+    )
+    head.append(summary)
     const files = element('div', 'ai-review-files')
     for (const summary of operation.changes) {
       const row = element('div', 'ai-review-file')
       // The changed file is context, not another action. The transcript's
       // `Edited …` row already provides the direct jump to the edit.
       const path = element('span', 'ai-review-path', summary.path)
+      path.title = summary.path
       const diff = element('button', 'ghost is-compact', 'Diff')
       diff.type = 'button'
       diff.addEventListener('click', async () => {
@@ -774,24 +818,22 @@ export function mountCopilot ({
         if (!change) return
         row.append(diffBlock(change))
       })
-      const restore = element('button', 'ghost is-compact is-accent', 'Restore')
-      restore.type = 'button'
-      restore.addEventListener('click', () => onRestore?.(operation, summary.path))
-      row.append(path, diff, restore)
+      row.append(path, diff)
       files.append(row)
     }
     const actions = element('div', 'ai-review-actions')
-    /* The other answer to a turn, in one click. Restoring file by file is the
-       right control for changing your mind about one of them; it is the wrong
-       one for "no, put it back", which is a single decision about the whole
-       turn and was five confirmations in whatever order you happened to click.
-       One operation covers the turn — main snapshots the vault before the
-       message goes out — so this is the same restore with no file named. */
-    const undo = element('button', 'ghost is-compact', 'Undo turn')
-    undo.type = 'button'
-    undo.title = `Put all ${operation.changes.length} back the way they were`
-    undo.addEventListener('click', () => onRestore?.(operation, null))
-    actions.append(undo)
+    /* Reject is the single rollback for the whole turn. Main snapshots the
+       vault before the message goes out, so no per-file restore controls are
+       needed here. */
+    const reject = element('button', 'ghost is-compact', 'Reject')
+    reject.type = 'button'
+    reject.title = `Reject changes to all ${operation.changes.length} files`
+    reject.addEventListener('click', () => {
+      Promise.resolve(onRestore?.(operation, null)).catch((err) => {
+        onWarn?.(err?.message || 'Those changes could not be rejected.')
+      })
+    })
+    actions.append(reject)
     const keep = element('button', 'ai-review-keep', msg.accepted ? 'Accepted' : 'Accept changes')
     keep.type = 'button'
     keep.disabled = !!msg.accepted
@@ -804,7 +846,11 @@ export function mountCopilot ({
       save()
     })
     actions.append(keep)
-    node.append(head, files, actions)
+    /* The decision belongs beside the change count. Keeping it in a separate
+       footer made a one-file review three rows tall and gave empty space more
+       weight than the actual file. */
+    head.append(actions)
+    node.append(head, files)
     msg.node = node
     return node
   }
@@ -870,10 +916,10 @@ export function mountCopilot ({
   /**
    * The thinking block.
    *
-   * Neither CLI hands back the reasoning itself — Claude reports only how much
-   * of it there was, and Codex a short summary. So this shows the shape of the
-   * thinking rather than its content: live while it runs, and afterwards a
-   * single quiet line saying how long it went on for.
+   * The CLIs hand back little of the reasoning itself — opencode a short
+   * summary, devin nothing at all. So this shows the shape of the thinking
+   * rather than its content: live while it runs, and afterwards a single quiet
+   * line saying how long it went on for.
    */
   function thinking (event, to = null) {
     if (!state.think) state.think = push({ t: 'think', tokens: 0, text: '', live: true }, to)
@@ -1114,7 +1160,11 @@ export function mountCopilot ({
        whatever is on screen. Resolved once and in full, so nothing below has to
        spell the fallback out again — it used to be spelled four ways, and two
        of them named the default differently. */
-    const to = state.turn || { path: state.notePath, convo: chat() }
+    const to = state.turn || state.stopping
+    /* Main may hold a terminal event while it snapshots the vault. A queued
+       turn can begin during that wait, so arrival order is not ownership: only
+       the id issued by `deliver` decides which conversation may consume it. */
+    if (!ownsTurn(to, event)) return
     switch (event.k) {
       case 'ready':
       case 'thread':
@@ -1137,24 +1187,11 @@ export function mountCopilot ({
         phase('Preparing PDF')
         break
 
-      case 'answering':
-        settleThinking()
-        break
-
       case 'text':
         settleThinking()
         if (!state.stream) state.stream = push({ t: 'bot', text: '' }, to)
         state.stream.text += event.text
         redraw(state.stream)
-        phase('Writing')
-        break
-
-      /* The copilot is composing a write. Nothing has happened to the file yet
-         — this is the argument of a tool call still being spelled out — so it
-         goes to the editor as a preview and never into the transcript. */
-      case 'typing':
-        settleThinking()
-        onTyping?.(event)
         phase('Writing')
         break
 
@@ -1175,10 +1212,8 @@ export function mountCopilot ({
         phase(phaseOf(event))
         break
 
-      // Nothing was written — a read finishing, or a write that failed. Either
-      // way the preview is now a promise the file did not keep.
+      // Nothing was written — a read finishing, or a write that failed.
       case 'tool-done':
-        onTyping?.(null)
         step({ ...event, done: true }, to)
         break
 
@@ -1193,19 +1228,23 @@ export function mountCopilot ({
         break
       }
 
+      case 'renamed':
+        settleThinking()
+        settleStream()
+        step({ ...event, name: 'Rename', done: true }, to)
+        Promise.resolve(onRenamed?.(event)).catch((err) => {
+          onWarn?.(err?.message || 'The file was renamed but the window could not follow it.')
+        })
+        break
+
+      case 'rename-failed':
+        note(event.message || 'The Copilot rename could not be completed.', 'warn', to)
+        onWarn?.(event.message || 'The Copilot rename could not be completed.')
+        break
+
       case 'review':
         push({ t: 'review', operation: event.operation, accepted: false }, to)
         save()
-        break
-
-      case 'limit':
-        if (event.info?.status && event.info.status !== 'allowed') {
-          note(`Rate limit: ${event.info.status}.`, 'warn', to)
-        }
-        break
-
-      case 'notice':
-        if (event.message) note(event.message, 'note', to)
         break
 
       // The process is gone — it exited, or was never there to begin with.
@@ -1213,19 +1252,17 @@ export function mountCopilot ({
       // instead of talking to a corpse.
       case 'error':
         state.started = false
-        onTyping?.(null)
         failed(event.message || 'Something went wrong.', to)
         announce(to, event.message || 'Something went wrong.')
         setBusy(false)
         break
 
       case 'turn-end':
-        // The backstop. A write that lands clears its own preview by changing
-        // the document; one that never lands would otherwise sit there.
-        onTyping?.(null)
-        if (event.used) to.convo.used = event.used
-        // Claude alone reports what a turn cost; the other two say nothing and
-        // the readout stays away rather than showing a zero as if it were free.
+        if (event.used) {
+          to.convo.used = event.used
+        }
+        // Only some CLIs report what a turn cost; the rest say nothing and the
+        // readout stays away rather than showing a zero as if it were free.
         if (event.cost) to.convo.cost = (to.convo.cost || 0) + event.cost
         if (event.used || event.cost) paintContext()
         if (event.error) failed(event.error, to)
@@ -1240,14 +1277,16 @@ export function mountCopilot ({
 
   /* -------------------------------------------------------------- session */
 
-  const settings = (convo = chat()) => {
+  const settings = (convo = chat(), turnId = state.turn?.id) => {
     const { provider, id } = splitKey(state.model)
     return {
       provider,
       model: id,
       effort: state.effort,
-      write: state.write,
-      resume: resumeFor(convo, provider)
+      mode: state.mode,
+      write: state.mode !== COPILOT_MODES.READ,
+      resume: resumeFor(convo, provider),
+      turnId
     }
   }
 
@@ -1256,7 +1295,7 @@ export function mountCopilot ({
    * the chosen effort, and the note being discussed. Called just before a
    * message goes out, never on the change itself.
    */
-  async function ensureSession (convo = chat()) {
+  async function ensureSession (convo = chat(), turnId = state.turn?.id) {
     /* The panel is not always the way in — a Fix button asks a question with
        the panel still closed — and a turn about to be sent is as good a reason
        to know the real catalogue as a control about to be drawn. */
@@ -1268,7 +1307,7 @@ export function mountCopilot ({
     if (state.sessionConvo !== convo.id) state.stale = true
     if (state.started && !state.stale) return true
     if (state.stale) await api.ai.stop()
-    const result = await api.ai.start(settings(convo))
+    const result = await api.ai.start(settings(convo, turnId))
     state.started = !!result?.ok
     state.stale = false
     state.sessionConvo = state.started ? convo.id : null
@@ -1346,8 +1385,8 @@ export function mountCopilot ({
   /**
    * Start again without starting over.
    *
-   * The context fills and there is nothing the panel can do about it: Claude
-   * compacts itself, and the other two simply fail the turn. So this makes the
+   * The context fills and there is nothing the panel can do about it: some CLIs
+   * compact themselves, and the rest simply fail the turn. So this makes the
    * one move that always works — a fresh session, which is a fresh context —
    * and carries the thread of the conversation across by hand. The digest is
    * built here, out of the transcript, rather than asked of the model: a
@@ -1533,12 +1572,12 @@ export function mountCopilot ({
     showMenu(scored.slice(0, 8).map(({ entry }) => ({
       label: entry.name,
       hint: entry.folder,
-      run: () => replaceTyped(from, entry.insert)
+      run: () => selectMention(from, entry.path)
     })))
   }
 
   /* The vault as the picker reads it: display name, folder, folded name to
-     match against, and the text an insertion puts in the box. Built once per
+     match against, and the path the attachment card carries. Built once per
      file list rather than per keystroke — this runs on every character typed
      after an `@`, and a vault of a few thousand notes was a name strip, a
      lower-casing and a path split apiece each time. Keyed on the array the
@@ -1554,31 +1593,31 @@ export function mountCopilot ({
     mentions = {
       of: list,
       list: list.map((entry) => {
-        const name = noteName(entry.path)
+        // The tree has already stripped the document extension for display.
+        // Keep the fallback for callers that only provide a path.
+        const name = entry.name || noteName(entry.path)
         const cut = entry.path.lastIndexOf('/')
         return {
           name,
           folded: name.toLowerCase(),
           folder: cut === -1 ? 'vault' : entry.path.slice(0, cut),
-          /* A note goes in as a wikilink, which is how the vault refers to
-             itself; a PDF or a website goes in as its path, because a wikilink
-             means a note and neither of those is one. */
-          insert: isPdfPath(entry.path) || isSitePath(entry.path)
-            ? `\`${entry.path}\` `
-            : `[[${name}]] `
+          path: entry.path
         }
       })
     }
     return mentions.list
   }
 
-  /** Swap what was typed at the caret — the `@…` — for what it stood for. */
-  function replaceTyped (from, text) {
+  /** Turn the `@…` selection into the same non-editable card as a paperclip
+   *  attachment. The file path is delivery data, not text the user has to
+   *  keep intact in the message box. */
+  function selectMention (from, path) {
     const box = el.input
     const to = box.selectionStart ?? box.value.length
-    box.value = box.value.slice(0, from) + text + box.value.slice(to)
-    const caret = from + text.length
-    box.setSelectionRange(caret, caret)
+    box.value = box.value.slice(0, from) + box.value.slice(to)
+    box.setSelectionRange(from, from)
+    hideMenu()
+    addAttachments([path], true)
     sizeInput()
     box.focus()
   }
@@ -1619,14 +1658,38 @@ export function mountCopilot ({
     state.queue.push({ text, attachments, msg, path, convo })
   }
 
+  /** Ask once for the write-capable provider mode, before a turn starts. */
+  async function permissionFor (path) {
+    if (state.mode !== COPILOT_MODES.ASK || !state.model) return true
+    try {
+      return await onPermission?.({
+        mode: state.mode,
+        path,
+        provider: provider(),
+        providerLabel: providerLabel(provider()),
+        grant: providerGrant(provider(), true),
+        model: currentModel()?.label || state.model
+      }) !== false
+    } catch (error) {
+      onWarn?.(error?.message || 'The Copilot permission request failed.')
+      return false
+    }
+  }
+
+  function markNotSent (msg) {
+    if (!msg) return
+    delete msg.queued
+    msg.dropped = true
+    redraw(msg)
+    save()
+  }
+
   /** The next queued question, once the copilot is free to hear it. */
   function drain () {
     if (state.busy || !state.queue.length) return
     const next = state.queue.shift()
     // The conversation it was asked in may have been emptied by `/new` since.
     if (!next.convo.messages.includes(next.msg)) { drain(); return }
-    delete next.msg.queued
-    redraw(next.msg)
     deliver(next).catch(() => {})
   }
 
@@ -1641,15 +1704,24 @@ export function mountCopilot ({
 
     /* Selected files and pasted pictures are already in the vault. Their paths
        travel beside the reader's words and never have to appear inside them. */
-    el.input.value = ''
-    clearAttachments()
-    sizeInput()
-    if (state.busy) { enqueue(text, attachments); return }
+    if (state.busy) {
+      el.input.value = ''
+      clearAttachments()
+      sizeInput()
+      enqueue(text, attachments)
+      return
+    }
 
     const path = state.notePath
     const convo = chat(path)
+    /* Ask before clearing the composer, so declining leaves the question and its
+       attachments ready to edit or send after changing the mode. */
+    if (!await permissionFor(path)) return
+    el.input.value = ''
+    clearAttachments()
+    sizeInput()
     const msg = push({ t: 'you', text, attachments }, { path, convo })
-    await deliver({ text, attachments, msg, path, convo })
+    await deliver({ text, attachments, msg, path, convo, approved: true })
   }
 
   /**
@@ -1659,10 +1731,18 @@ export function mountCopilot ({
    * later and possibly with the reader looking at another note — so everything
    * this needs is passed in rather than read off what happens to be on screen.
    */
-  async function deliver ({ text, attachments, path, convo }) {
+  async function deliver ({ text, attachments, path, convo, msg, approved = false }) {
+    if (!approved && !await permissionFor(path)) {
+      markNotSent(msg)
+      return
+    }
+    if (msg?.queued) {
+      delete msg.queued
+      redraw(msg)
+    }
     // The turn is anchored to this conversation before anything can answer,
     // so browsing away while it runs cannot redirect what comes back.
-    state.turn = { path, convo }
+    state.turn = { id: newTurnId(), path, convo }
     const to = state.turn
     setBusy(true)
 
@@ -1688,7 +1768,16 @@ export function mountCopilot ({
 
   /** The body of a turn — everything `deliver` guards. */
   async function sendTurn (to, { text, attachments, convo }) {
-    if (!await ensureSession(convo)) { setBusy(false); return }
+    /* No model — never chosen, or everything unticked in Settings — is not a
+       copilot to start: spawning with an empty provider is a crash in main.
+       Said in the transcript rather than swallowed, so it reads as a refusal
+       with a reason and a retry instead of a question that vanished. */
+    if (!state.model) {
+      failed('No model selected — pick one in Settings, or above the message box.', to)
+      setBusy(false)
+      return
+    }
+    if (!await ensureSession(convo, to.id)) { setBusy(false); return }
     /* Stop may have been pressed while the session was starting — `halt` has
        nothing to signal yet at that point, so it settles the panel and returns,
        and without this the turn it thought it had cancelled would carry on
@@ -1710,7 +1799,12 @@ export function mountCopilot ({
        round trip to be answered with "thank you". */
     const opening = convo.seed ? `${convo.seed}\n\n${text}` : text
 
-    const result = await api.ai.send(opening, { ...context_, attachments })
+    const result = await api.ai.send(opening, { ...context_, attachments }, to.id)
+    /* Stop can be pressed while main is preparing a PDF or taking the turn's
+       safety snapshot. The IPC call still has to return, but its failure then
+       belongs to the cancelled turn and must not add a second warning after
+       the explicit “Stopped.” row. */
+    if (state.turn !== to) return
     // Spent only once it has actually gone out: a send that failed leaves the
     // digest for the message that tries again.
     if (result?.ok) convo.seed = ''
@@ -1768,6 +1862,13 @@ export function mountCopilot ({
   /** Grows with the message, up to a point, then scrolls. */
   function sizeInput () {
     el.input.style.height = 'auto'
+    /* After Send the value is cleared. Measuring `scrollHeight` immediately
+       can still report the height of the long prompt that occupied the field
+       a moment earlier, especially when the composer is a flex item. Writing
+       that stale measurement straight back is what left an empty, maximum-size
+       chat box on screen for the whole turn. Rows=1 supplies the compact height
+       once the inline height is removed. */
+    if (!el.input.value) return
     el.input.style.height = `${Math.min(el.input.scrollHeight, 190)}px`
   }
 
@@ -1825,10 +1926,11 @@ export function mountCopilot ({
     el.attachments.hidden = !pendingAttachments.length
   }
 
-  function addAttachments (paths) {
+  function addAttachments (paths, allowVaultFiles = false) {
     const next = [...pendingAttachments]
     for (const path of paths || []) {
-      if (isChatAttachment(path) && !next.includes(path)) next.push(path)
+      const isVaultFile = allowVaultFiles && files().some((entry) => entry?.path === path)
+      if ((isChatAttachment(path) || isVaultFile) && !next.includes(path)) next.push(path)
     }
     pendingAttachments = next
     paintAttachments()
@@ -1872,6 +1974,7 @@ export function mountCopilot ({
        what makes a Stop pressed during startup actually stop: the send that
        was about to happen sees the turn has moved on and never goes out. */
     state.turn = null
+    state.stopping = to
     /* Stop means stop, follow-ups included — sending them anyway is the one
        thing the button cannot be read as meaning. They stay in the transcript,
        still greyed, so what was asked and never sent is at least visible. */
@@ -1881,7 +1984,8 @@ export function mountCopilot ({
       item.msg.dropped = true
       redraw(item.msg)
     }
-    await api.ai.stop()
+    await api.ai.stop(to?.id)
+    state.stopping = null
     state.started = false
     setBusy(false)   // settles the stream and lets go of the turn
     // Filed where the truncated reply went, so the transcript says why it ends.
@@ -1902,7 +2006,9 @@ export function mountCopilot ({
   const provider = () => splitKey(state.model).provider
 
   /**
-   * How much of the model's context the conversation is carrying.
+   * How much of the model's context the conversation is carrying, when its
+   * CLI reports that measurement. opencode does; devin publishes no accounting
+   * at all, so the ring stays out of view for it.
    *
    * A ring rather than a number, because the question it answers is "how much
    * room is left" — a proportion, which a circle states at a glance and a token
@@ -1958,7 +2064,10 @@ export function mountCopilot ({
   /** The always-visible readout: who is answering, and how hard. */
   function paintConfig () {
     const model = currentModel()
-    el.configModel.textContent = model ? model.label : splitKey(state.model).id
+    /* Nothing chosen — never picked, or everything unticked in Settings — is
+       said rather than answered with a default nobody chose. */
+    el.configModel.textContent = model ? model.label : 'No model selected'
+    el.configModel.classList.toggle('is-none', !model)
     // A model with no such dial says nothing about effort rather than "High".
     const hasEffort = !!levels().length
     el.configEffort.textContent = hasEffort ? effortLabel(state.effort) : ''
@@ -1974,6 +2083,7 @@ export function mountCopilot ({
     label: 'Model',
     className: 'is-wide',
     value: state.model,
+    placeholder: 'No model selected',
     onChange: (key) => chooseModel(key)
   })
   el.model.append(modelMenu.root)
@@ -1982,8 +2092,10 @@ export function mountCopilot ({
     const options = asOptions(currentModels())
     // `set` settles on the first entry when the stored model is not in the
     // list — a catalogue can lose an entry between launches, and unticking a
-    // model in Settings takes it out of this one.
-    state.model = modelMenu.set(options, state.model) || DEFAULT_MODEL
+    // model in Settings takes it out of this one. An empty choice survives
+    // both, and the button keeps its "No model selected" rather than turning
+    // into whichever entry came first.
+    state.model = modelMenu.set(options, state.model) || ''
   }
 
   function chooseModel (key) {
@@ -2037,11 +2149,11 @@ export function mountCopilot ({
   /**
    * Effort, as the levels this model actually takes.
    *
-   * Not a fixed four: Claude states five and applies them to everything, Codex
-   * publishes a different set per model — up to `ultra` — and most of
-   * opencode's catalogue has no such dial at all, in which case the row goes
-   * away rather than offering a control that would be ignored. So the slider's
-   * range and its stops are set here rather than written into index.html.
+   * Not a fixed four: devin publishes a different set per family — the levels
+   * it spells into its model names — and most of opencode's catalogue has no
+   * such dial at all, in which case the row goes away rather than offering a
+   * control that would be ignored. So the slider's range and its stops are set
+   * here rather than written into index.html.
    *
    * Nothing restarts the copilot — the level is a flag on the process,
    * applied when the next message replaces it, which is why picking one is
@@ -2072,7 +2184,8 @@ export function mountCopilot ({
     )
 
     /* One dot per stop, so the slider says how many there are — two for a model
-       with two, five for Claude — rather than pretending to be continuous. */
+       with two, five for most of devin's — rather than pretending to be
+       continuous. */
     el.effortStops.replaceChildren(...offered.map((level, i) => {
       /* Stops the fill has reached are marked so the CSS can sink them into
          it — a dot the height of the track reads as debris once the accent
@@ -2084,15 +2197,19 @@ export function mountCopilot ({
     }))
   }
 
-  function setEffort (at) {
+  function setEffort (at, persist = false) {
     const offered = levels()
     if (!offered.length) return
     const next = offered[Math.max(0, Math.min(offered.length - 1, at))]
-    if (!next || next === state.effort) return
-    state.effort = next
-    state.stale = true
-    repaintControls()
-    persistConfig({ aiEffort: state.effort })
+    if (!next) return
+    if (next !== state.effort) {
+      state.effort = next
+      state.stale = true
+      // Rebuilding the searchable model dropdown here made dragging lag.
+      paintEffort()
+      paintConfig()
+    }
+    if (persist) persistConfig({ aiEffort: state.effort })
   }
 
   /** The chosen level, made to fit the model — see `nearestEffort`. */
@@ -2107,37 +2224,63 @@ export function mountCopilot ({
      capable. `input` rather than `change`, so the track fills under the thumb
      as it is dragged rather than when it is let go. */
   el.effortRange.addEventListener('input', () => setEffort(Number(el.effortRange.value)))
+  el.effortRange.addEventListener('change', () => setEffort(Number(el.effortRange.value), true))
 
+
+  let changingMode = false
+
+  async function chooseMode (next) {
+    if (!COPILOT_MODE_ORDER.includes(next) || next === state.mode || changingMode) return
+    changingMode = true
+    try {
+      if (next === COPILOT_MODES.AUTO) {
+        const allowed = await onAutoConfirm?.({
+          provider: provider(),
+          providerLabel: providerLabel(provider()) || 'Copilot',
+          grant: providerGrant(provider(), true)
+        })
+        if (allowed === false) return
+      }
+      state.mode = next
+      state.stale = true
+      paintWrite()
+      /* Keep the old boolean conservative for older builds: only Auto carries
+         forward as write-enabled, while Ask becomes read-only there. */
+      persistConfig({ aiMode: next, aiWrite: next === COPILOT_MODES.AUTO })
+    } catch (error) {
+      onWarn?.(error?.message || 'The Copilot permission mode could not be changed.')
+    } finally {
+      changingMode = false
+    }
+  }
 
   el.write.addEventListener('click', () => {
-    state.write = !state.write
-    state.stale = true
-    paintWrite()
-    persistConfig({ aiWrite: state.write })
+    const at = COPILOT_MODE_ORDER.indexOf(state.mode)
+    chooseMode(COPILOT_MODE_ORDER[(at + 1) % COPILOT_MODE_ORDER.length])
   })
 
   /**
    * What the toggle is actually handing over.
    *
-   * One switch, three blast radii: Claude takes a tool allowlist and has no
-   * shell at all, while Codex and opencode have no per-tool switch and are
-   * fenced only by a sandbox — which leaves both able to run commands inside
-   * the vault. The toggle used to promise "can edit notes" for all three. It now
-   * names the CLI and says what that CLI may do, which is the difference between
-   * a permission granted and a permission assumed.
+   * One switch, several blast radii: none of these CLIs takes a per-tool
+   * allowlist, so each is fenced only by a mode — which leaves them able to run
+   * commands inside the vault, and opencode to fetch web pages besides. The
+   * toggle used to promise "can edit notes" for all of them. It now names the
+   * CLI and says what that CLI may do, which is the difference between a
+   * permission granted and a permission assumed.
    */
   function paintWrite () {
-    el.write.setAttribute('aria-pressed', state.write ? 'true' : 'false')
-    const label = el.write.querySelector('.ai-write-label')
-    if (label) label.textContent = state.write ? 'Can edit' : 'Read only'
-    const may = providerGrant(provider(), state.write)
-    const said = may ? `${providerLabel(provider())} may ${may}.` : ''
-    el.write.title = state.write
-      ? `${said} Click to make it read-only.`
-      : `${said} Click to let it edit.`
-    el.write.setAttribute('aria-label', state.write
-      ? `${providerLabel(provider())} can edit notes. Click for read only.`
-      : `${providerLabel(provider())} is read only. Click to allow editing.`)
+    const mode = COPILOT_MODE_ORDER.includes(state.mode) ? state.mode : COPILOT_MODES.READ
+    const label = copilotModeLabel(mode)
+    const providerName = providerLabel(provider()) || 'Copilot'
+    const may = providerGrant(provider(), mode !== COPILOT_MODES.READ)
+    const said = may ? `${providerName} may ${may}.` : ''
+    const next = COPILOT_MODE_ORDER[(COPILOT_MODE_ORDER.indexOf(mode) + 1) % COPILOT_MODE_ORDER.length]
+    el.write.dataset.mode = mode
+    el.write.setAttribute('aria-pressed', mode === COPILOT_MODES.READ ? 'false' : 'true')
+    if (el.writeLabel) el.writeLabel.textContent = label
+    el.write.title = `Permission: ${label}. ${said} Click for ${copilotModeLabel(next)}.`
+    el.write.setAttribute('aria-label', `Permission mode: ${label}. ${said} Click for ${copilotModeLabel(next)}.`)
   }
 
   /**
@@ -2275,14 +2418,19 @@ export function mountCopilot ({
    * message, which is the same bargain the popover's own controls make.
    */
   function applyConfig (cfg) {
-    const model = modelFromConfig(cfg, state.model)
+    const model = modelFromConfig(cfg)
     const enabled = Array.isArray(cfg.aiModels) ? cfg.aiModels : state.enabled
     const effort = cfg.aiEffort || state.effort
-    const write = cfg.aiWrite !== false
-    if (model === state.model && effort === state.effort && write === state.write &&
+    const mode = copilotModeFromConfig(cfg)
+    if (!COPILOT_MODE_ORDER.includes(cfg?.aiMode)) {
+      /* Store the normalized value once so future launches do not have to
+         infer it. The legacy boolean remains conservative for older builds. */
+      persistConfig({ aiMode: mode, aiWrite: mode === COPILOT_MODES.AUTO })
+    }
+    if (model === state.model && effort === state.effort && mode === state.mode &&
         enabled.join('\n') === state.enabled.join('\n')) return
 
-    Object.assign(state, { model, enabled, effort, write, stale: true })
+     Object.assign(state, { model, enabled, effort, mode, stale: true })
     repaintControls()
   }
 
@@ -2385,7 +2533,14 @@ export function mountCopilot ({
      * the window open for `app:flush`, so this is the one place a transcript
      * can be written with something waiting for it.
      */
-    flush: () => flush(),
+    flush: async () => {
+      /* Closing the window also closes its agent. Stop it while the renderer is
+         still alive so main can finish the turn-scoped safety snapshot and the
+         review can be filed in the right conversation before transcripts are
+         written. Killing it from `BrowserWindow.closed` is too late for both. */
+      if (state.busy) await halt()
+      await flush()
+    },
 
     /**
      * Settings and stored conversations are applied before the panel is ever
@@ -2411,18 +2566,24 @@ export function mountCopilot ({
 
           const history = saved
             .filter((convo) => Array.isArray(convo?.messages))
-            .map((convo) => ({
-              id: convo.id || newChat().id,
-              thread: convo.thread || null,
-              threadOf: convo.threadOf || null,
-              used: convo.used || 0,
-              cost: convo.cost || 0,
-              seed: convo.seed || '',
-              at: convo.at || 0,
-              // The cap is applied on the way in as well as on the way out: a
-              // file written before it was lowered is trimmed by reading it.
-              messages: convo.messages.slice(-MAX_MESSAGES)
-            }))
+            .map((convo) => {
+              /* Older builds saved a cumulative per-turn total as `used` for
+                 the CLIs that report one. Those copilots are gone; clear the
+                 figure on read so their chats do not retain a false gauge. */
+              const stale = convo.threadOf === 'codex' || convo.threadOf === 'claude'
+              return {
+                id: convo.id || newChat().id,
+                thread: convo.thread || null,
+                threadOf: convo.threadOf || null,
+                used: stale ? 0 : (convo.used || 0),
+                cost: convo.cost || 0,
+                seed: convo.seed || '',
+                at: convo.at || 0,
+                // The cap is applied on the way in as well as on the way out: a
+                // file written before it was lowered is trimmed by reading it.
+                messages: convo.messages.slice(-MAX_MESSAGES)
+              }
+            })
             // Empty chats are launch state, not history. Dropping them here
             // prevents one blank entry accumulating on every app restart.
             .filter((convo) => convo.messages.some((message) => message.t === 'you'))

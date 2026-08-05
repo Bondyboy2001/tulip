@@ -16,13 +16,13 @@ ROOT=$PWD
 BUILD=$ROOT/build
 APP=$BUILD/Tulip.app
 ELECTRON=$ROOT/node_modules/electron/dist/Electron.app
-VERSION=$(node -p "require('./package.json').version")
 IDENTIFIER=com.hb.tulip
 
 [ -d "$ELECTRON" ] || { echo "electron is not installed — run npm install"; exit 1; }
 
 echo "› bundling the renderer"
 npm run build --silent
+VERSION=$(node -p "require('./package.json').version")
 
 echo "› drawing the icon"
 "$ROOT/node_modules/.bin/electron" scripts/make-icon.cjs > /dev/null

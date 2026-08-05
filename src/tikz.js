@@ -20,7 +20,8 @@
 import { WidgetType } from '@codemirror/view'
 import { Facet } from '@codemirror/state'
 import { embedSpec, renderEmbed } from './assets.js'
-import { el, pictureBlocks } from './blocks.js'
+import { pictureBlocks } from './blocks.js'
+import { el } from './dom.js'
 import { artefactRun, attachArtefactBlock } from './runcode.js'
 import { DRAWN } from './languages.js'
 

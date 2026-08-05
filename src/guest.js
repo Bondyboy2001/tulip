@@ -31,7 +31,8 @@
    adapts to it, exactly as it would anywhere else.
    ================================================================== */
 
-import { el, renderedBlock } from './blocks.js'
+import { renderedBlock } from './blocks.js'
+import { el } from './dom.js'
 import { drawRunFace, painter, runButton } from './runcode.js'
 import WEB_PARTITIONS from '../electron/web-partitions.json'
 

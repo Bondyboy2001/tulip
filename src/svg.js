@@ -19,7 +19,8 @@
    ================================================================== */
 
 import { WidgetType } from '@codemirror/view'
-import { el, pictureBlock, pictureBlocks } from './blocks.js'
+import { pictureBlock, pictureBlocks } from './blocks.js'
+import { el } from './dom.js'
 import { DRAWN } from './languages.js'
 
 export function isSvg (lang) {

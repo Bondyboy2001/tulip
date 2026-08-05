@@ -1,33 +1,33 @@
 /* =============================================================== models
-   One list of models, drawn from three CLIs.
+   One list of models, drawn from every CLI the copilot can be.
 
    The panel used to ask two questions — which copilot, then which of its
-   models — which is one question too many: nobody picks Codex and then wonders
-   what Codex has. So a model is named by the pair, `provider:id`, and choosing
-   one chooses both. `claude:opus`, `codex:gpt-5.6-sol`,
+   models — which is one question too many: nobody picks Devin and then wonders
+   what Devin has. So a model is named by the pair, `provider:id`, and choosing
+   one chooses both. `devin:claude-opus-5-{effort}`,
    `opencode:opencode-go/glm-5.2`.
 
    The pair also has to survive opencode's ids, which are themselves
    `provider/model` and contain a slash — hence a colon here, and a split on the
-   first one only.
+   first one only. And devin's, which carry a `{effort}` where the reasoning
+   level goes.
 
    Which models are *offered* is a setting, because opencode alone answers with
    four hundred of them and a dropdown that long is not a choice. The catalogue
    is everything the CLIs will admit to; the enabled list is what the user wants
    to see. This file owns both, so copilot.js and settings.js cannot drift.
 
-   Effort is not one scale, and that is the other thing this file owns. Claude
-   states five levels and applies them to everything it runs; Codex publishes a
-   different set per model, as far as `ultra`; and most of opencode's catalogue
-   has no such dial at all. So the levels are data on the model, read from the
-   CLI that offers it, and every control asks the model rather than knowing any
-   levels of its own.
+   Effort is not one scale, and that is the other thing this file owns. Devin
+   spells the level into the model id, so its ladder is whatever that family was
+   listed at; most of opencode's catalogue has no such dial at all. So the
+   levels are data on the model, read from the CLI that offers it, and every
+   control asks the model rather than knowing any levels of its own.
    ================================================================== */
 
-/* The three CLIs and what they offer before they are asked, shared with the
-   main process — which spawns them — so that "what Claude has" is one fact in
-   one file rather than two that can disagree. Same arrangement as
-   zoom-steps.json and vault-contract.json. */
+/* The CLIs and what they offer before they are asked, shared with the main
+   process — which spawns them — so that "what devin has" is one fact in one
+   file rather than two that can disagree. Same arrangement as zoom-steps.json
+   and vault-contract.json. */
 import CATALOGUE from '../electron/ai-models.json'
 
 /** In the order they are shown. `label` names the CLI; `id` is what the main
@@ -41,11 +41,9 @@ const PROVIDER = Object.fromEntries(PROVIDERS.map((p) => [p.id, p]))
 export const DEFAULT_CATALOGUE = CATALOGUE.fallbacks
 
 /* Ticked for someone who has never opened the settings pane. opencode is the
-   one that is not: its four hundred entries are exactly what the setting exists
-   to keep out of the dropdown. */
+   one that is not: its four hundred-odd entries are exactly what the setting
+   exists to keep out of the dropdown. */
 const offerByDefault = (provider) => !!PROVIDER[provider]?.offerByDefault
-
-export const DEFAULT_MODEL = keyOf('claude', PROVIDER.claude.default)
 
 function keyOf (provider, id) { return `${provider}:${id}` }
 
@@ -83,14 +81,14 @@ export function allModels (catalogue) {
         // What it is called on its own — the composer's chip has room for this
         // and nothing more.
         label: model.label || model.id,
-        /* Who is answering, which is also the shelf it sits on in the settings
-           list. opencode's own sub-providers are the useful grouping there —
-           `glm-5.2` says nothing about whether it is coming from the user's
-           opencode subscription or their own OpenRouter key — and the other two
-           group by CLI. */
+        /* Which shelf inside its copilot this model sits on. opencode's own
+           sub-providers are the useful grouping there — `glm-5.2` says nothing
+           about whether it is coming from the user's opencode subscription or
+           their own OpenRouter key — and devin's families are its. Failing
+           either, the copilot's own name. */
         group: model.group || providerLabel,
         /* How much this model can hold, for drawing how much of it a
-           conversation has spent. Codex and opencode each publish their own;
+           conversation has spent. devin and opencode each publish their own;
            zero means nobody said, and the ring stays away. */
         context: model.context || 0,
         /* The levels this model takes, in the CLI's own words. An empty list
@@ -115,21 +113,51 @@ const defaultModels = (catalogue) =>
 export const defaultEnabled = (catalogue) =>
   defaultModels(catalogue).map((model) => model.key)
 
+/* The real catalogue is loaded after the first paint. A saved model from a
+   provider with no built-in fallback still needs a row during that interval,
+   or the dropdown's stale-selection rule will replace it with the first default
+   model. The real catalogue replaces this lightweight row as soon as it arrives. */
+function placeholderFor (key) {
+  const { provider, id } = splitKey(key)
+  if (!id || !PROVIDER[provider]) return null
+  const group = PROVIDER[provider].label
+  return {
+    key,
+    provider,
+    id,
+    label: id,
+    group,
+    context: 0,
+    efforts: [],
+    effort: '',
+    search: `${group} ${id}`.toLowerCase()
+  }
+}
+
 /** The models the copilot offers: those ticked in settings, plus whichever
- *  one is selected — a dropdown that cannot show its own value is worse than a
- *  long one. Falls back to the defaults rather than ever being empty. */
+ *  one is selected. The selected model leads the list, and remains visible
+ *  while a provider's real catalogue is still loading. */
 export function offeredModels (catalogue, enabled, selected) {
   const fallback = defaultModels(catalogue)
+  const all = allModels(catalogue)
+  const selectedModel = selected
+    ? all.find((model) => model.key === selected) || placeholderFor(selected)
+    : null
   const wanted = new Set(enabled?.length ? enabled : fallback.map((model) => model.key))
   if (selected) wanted.add(selected)
 
-  const offered = allModels(catalogue).filter((model) => wanted.has(model.key))
-  return offered.length ? offered : fallback
+  const offered = all.filter((model) => wanted.has(model.key))
+  if (!selectedModel) return offered.length ? offered : fallback
+  return [selectedModel, ...offered.filter((model) => model.key !== selectedModel.key)]
 }
 
 /** How a model is named in a list: qualified by whoever is answering, because
- *  `GPT-5.6-Sol` and `glm-5.2` side by side say nothing about who that is. */
-const longLabel = (model) => `${model.group} · ${model.label}`
+ *  `GPT-5.6-Sol` and `glm-5.2` side by side say nothing about who that is. The
+ *  qualifier is dropped when the name already carries it — devin's shelves are
+ *  families and its models are named after them, so the plain form would read
+ *  "Claude Opus 5 · Claude Opus 5 High". */
+const longLabel = (model) =>
+  (model.label.startsWith(model.group) ? model.label : `${model.group} · ${model.label}`)
 
 /** A list of models as the dropdown wants them. One spelling, so the settings
  *  pane and the composer cannot label the same model differently. */
@@ -142,36 +170,78 @@ export const providerLabel = (provider) => PROVIDER[provider]?.label || provider
 /**
  * What this CLI may actually do in this mode, in words.
  *
- * One switch, three blast radii: Claude takes a tool allowlist and so has no
- * shell at all, while Codex and opencode have no per-tool switch and are fenced
- * only by a sandbox — which leaves them able to run commands in the vault. The
- * toggle used to promise the same thing for all three. It now says which of the
- * three it is handing over; the words are the catalogue's, beside the command
- * they describe.
+ * One switch, several blast radii: none of these CLIs takes a per-tool
+ * allowlist, so each is fenced only by a mode — which leaves them able to run
+ * commands in the vault, and opencode to fetch web pages besides. The toggle
+ * used to promise the same thing for all of them. It now says which one it is
+ * handing over; the words are the catalogue's, beside the command they
+ * describe.
  */
 export const providerGrant = (provider, write) =>
   PROVIDER[provider]?.grants?.[write ? 'write' : 'read'] || ''
 
+/* Permission is a UI choice with two provider capabilities underneath it:
+   read-only, or write-capable. Ask and Auto differ in when the first one is
+   handed over, not in what the provider can do once a turn starts. */
+export const COPILOT_MODES = Object.freeze({
+  READ: 'read',
+  ASK: 'ask',
+  AUTO: 'auto'
+})
+
+export const COPILOT_MODE_ORDER = [
+  COPILOT_MODES.READ,
+  COPILOT_MODES.ASK,
+  COPILOT_MODES.AUTO
+]
+
+export const copilotModeLabel = (mode) => ({
+  [COPILOT_MODES.READ]: 'Read',
+  [COPILOT_MODES.ASK]: 'Ask',
+  [COPILOT_MODES.AUTO]: 'Auto'
+}[mode] || 'Read')
+
+/**
+ * Read the current setting, migrating the old boolean safely. An old session
+ * that could write becomes Ask rather than Auto, so automatic writes are never
+ * granted merely because the app was upgraded.
+ */
+export function copilotModeFromConfig (cfg) {
+  if (COPILOT_MODE_ORDER.includes(cfg?.aiMode)) return cfg.aiMode
+  return cfg?.aiWrite === true ? COPILOT_MODES.ASK : COPILOT_MODES.READ
+}
+
+/** Whether this key still names a copilot the app has. A config outlives the
+ *  lineup — a model chosen when another CLI was a copilot is a name nothing
+ *  here can spawn — and a dead selection would sit in the panel until the user
+ *  noticed the replies never came. */
+const known = (key) => !!PROVIDER[splitKey(key).provider]
+
 /**
  * The chosen model, out of the config.
  *
- * `aiModel` is the one key now, but an install from before the two questions
- * became one has the answers filed separately — so the old pair is read when
- * the new key is missing. Here rather than in either consumer: both the panel
- * and the settings pane read this fact, and a migration living in one of them
- * is how the two come to disagree about which model is selected.
+ * One key, `aiModel`, and it is taken only when it names a provider that is
+ * still offered; anything else falls back to the first model ticked in
+ * Settings. Here rather than in either consumer: both the panel and the
+ * settings pane read this fact, and a migration living in one of them is how
+ * the two come to disagree about which model is selected.
+ *
+ * When nothing was ever chosen and nothing is ticked, the answer is the empty
+ * string — "no model selected" — rather than a default no one chose. An
+ * explicit choice still wins over the ticks: the default-model control is
+ * deliberately not limited to the list below it.
  */
-export function modelFromConfig (cfg, fallback = DEFAULT_MODEL) {
-  if (typeof cfg?.aiModel === 'string' && cfg.aiModel.includes(':')) return cfg.aiModel
-  const was = cfg?.aiProvider || ''
-  const id = was === 'codex' ? cfg?.aiCodexModel : cfg?.aiClaudeModel
-  return was && id ? keyOf(was, id) : fallback
+export function modelFromConfig (cfg) {
+  const chosen = typeof cfg?.aiModel === 'string' ? cfg.aiModel : ''
+  if (chosen.includes(':') && known(chosen)) return chosen
+  const ticked = Array.isArray(cfg?.aiModels) ? cfg.aiModels : []
+  return ticked.find((key) => String(key).includes(':') && known(key)) || ''
 }
 
 /* -------------------------------------------------------------- effort */
 
 /* Named rather than numbered, and the names are the CLIs' own — opencode's
-   `none` and `thinking` and Codex's `ultra` among them. Ordered weakest to
+   `none` and `thinking` and devin's `max` among them. Ordered weakest to
    strongest, which is the one thing a shared scale is needed for: mapping a
    level a model does not take onto the nearest it does. A level no one here has
    heard of is shown as it came, which beats hiding one the CLI has started

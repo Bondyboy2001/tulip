@@ -24,6 +24,10 @@ export const FONTS = [
   { id: 'hoefler', label: 'Hoefler Text', kind: 'Serif', stack: '"Hoefler Text", Baskerville, Georgia, serif' },
   { id: 'georgia', label: 'Georgia', kind: 'Serif', stack: 'Georgia, Charter, serif' },
   { id: 'times', label: 'Times New Roman', kind: 'Serif', stack: '"Times New Roman", Times, serif' },
+  /* The one exception to "already on the machine": bundled with the app (see
+     the @font-face at the top of styles.css), because TeX's face ships with
+     no Mac and a vault full of maths reads most at home in it. */
+  { id: 'computer-modern', label: 'Computer Modern', kind: 'Serif', stack: '"Computer Modern", "CMU Serif", "Latin Modern Roman", Georgia, serif' },
 
   /* ----------------------------------------------------------- sans */
   { id: 'system-sans', label: 'System Sans', kind: 'Sans', stack: '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif' },
@@ -33,6 +37,10 @@ export const FONTS = [
   { id: 'futura', label: 'Futura', kind: 'Sans', stack: 'Futura, "Century Gothic", "Segoe UI", sans-serif' },
   { id: 'gill-sans', label: 'Gill Sans', kind: 'Sans', stack: '"Gill Sans", "Gill Sans MT", Calibri, sans-serif' },
   { id: 'verdana', label: 'Verdana', kind: 'Sans', stack: 'Verdana, Geneva, sans-serif' },
+  /* Not a macOS face, but a common install (and free): the Braille Institute's
+     low-vision typeface. Named with its newer cut first, falling back to the
+     classic, then to the system sans for a machine without either. */
+  { id: 'atkinson', label: 'Atkinson Hyperlegible', kind: 'Sans', stack: '"Atkinson Hyperlegible Next", "Atkinson Hyperlegible", -apple-system, "Segoe UI", sans-serif' },
 
   /* ----------------------------------------------------------- mono */
   { id: 'sf-mono', label: 'SF Mono', kind: 'Mono', stack: '"SF Mono", ui-monospace, Menlo, monospace' },

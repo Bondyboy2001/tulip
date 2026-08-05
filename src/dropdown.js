@@ -16,7 +16,7 @@
    what the scroll and resize listeners below are for.
    ================================================================== */
 
-import { el as node, svgIcon } from './blocks.js'
+import { el as node, svgIcon } from './dom.js'
 
 const CARET = 'm4.6 6.3 3.4 3.4 3.4-3.4'
 const TICK = 'm3.5 8.3 3 3 6-6.4'
@@ -82,6 +82,10 @@ const icon = (path, size) => svgIcon(`<path d="${path}"/>`, { size, stroke: 1.6 
  * @param className extra classes for the button, for callers that size it
  * @param search    force the filter box on or off; by default it appears once
  *                  the list is longer than a screenful is worth scanning
+ * @param placeholder what the button says while nothing is chosen — and the
+ *                  caller may hand `''` back as a choice, so a selection that
+ *                  disappears can stay gone rather than turning into the first
+ *                  entry. The empty string is the only value treated this way.
  *
  * @returns { root, set, value } — `set` replaces the options and the choice at
  *          once, which is what a catalogue arriving late needs.
@@ -107,7 +111,7 @@ export function matcher (query) {
   }
 }
 
-export function dropdown ({ options = [], value, onChange, label, className = '', search = false }) {
+export function dropdown ({ options = [], value, onChange, label, className = '', search = false, placeholder = '' }) {
   let items = options
   /* What the menu is actually showing — `items` until something is typed. Every
      index below is into this, not into `items`, or picking the third row of a
@@ -158,7 +162,11 @@ export function dropdown ({ options = [], value, onChange, label, className = ''
   const filtering = () => search || items.length > FILTER_FROM
 
   const labelOf = (v) => items.find((item) => item.value === v)?.label
-  const paintButton = () => { text.textContent = labelOf(chosen) ?? '' }
+  const paintButton = () => {
+    const label = labelOf(chosen)
+    text.textContent = label ?? placeholder
+    button.classList.toggle('is-empty', !label)
+  }
 
   function refilter () {
     at = Math.max(0, shown().findIndex((item) => item.value === chosen))
@@ -325,7 +333,10 @@ export function dropdown ({ options = [], value, onChange, label, className = ''
       // contents — identity alone would not tell the memo above anything moved.
       filtered = { query: null, items: null, list: null }
       if (arguments.length > 1) chosen = selected
-      if (!items.some((item) => item.value === chosen)) chosen = items[0]?.value
+      /* A selection that has become stale settles on the first entry — but an
+         empty one stays empty. `''` is the caller's "nothing chosen" and a
+         value to be painted as the placeholder, not a gap to paper over. */
+      if (chosen !== '' && !items.some((item) => item.value === chosen)) chosen = items[0]?.value
       paintButton()
       // Whatever was typed still applies to the new list, so it is re-run
       // rather than dropped — a catalogue arriving mid-search must not clear it.

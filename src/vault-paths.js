@@ -18,14 +18,15 @@ const noteExtAlternation = VAULT_CONTRACT.noteExtensions
   .map((ext) => escapeRe(ext.replace(/^\./, '')))
   .join('|')
 
-/* A language table is `Name.language.md` — the `.language` is part of the
-   extension for the purpose of stripping it, so the tree shows "Spanish" and
-   not "Spanish.language". */
+/* A language table is `Name.lang` — `.lang` is one of the contract's note
+   extensions, so stripping it here is what makes the tree show "Spanish". */
 export const NOTE_EXT =
-  new RegExp(`(?:\\.language)?\\.(${noteExtAlternation})$`, 'i')
+  new RegExp(`\\.(${noteExtAlternation})$`, 'i')
 
+export const TEX_EXT = new RegExp(`${escapeRe(VAULT_CONTRACT.texExtension)}$`, 'i')
 export const PDF_EXT = new RegExp(`${escapeRe(VAULT_CONTRACT.pdfExtension)}$`, 'i')
 export const SITE_EXT = new RegExp(`${escapeRe(VAULT_CONTRACT.siteExtension)}$`, 'i')
+export const WHITEBOARD_EXT = new RegExp(`${escapeRe(VAULT_CONTRACT.whiteboardExtension)}$`, 'i')
 
 /* Regional-indicator pairs — the two codepoints a flag emoji is made of, and
    the prefix a language folder carries its country in. A source string in the
@@ -33,8 +34,10 @@ export const SITE_EXT = new RegExp(`${escapeRe(VAULT_CONTRACT.siteExtension)}$`,
    \u{...} escapes mean codepoints rather than literal text. */
 export const LANGUAGE_FLAG = new RegExp(VAULT_CONTRACT.languageFlagPattern, 'u')
 
+export const isTexPath = (path) => TEX_EXT.test(path || '')
 export const isPdfPath = (path) => PDF_EXT.test(path || '')
 export const isSitePath = (path) => SITE_EXT.test(path || '')
+export const isWhiteboardPath = (path) => WHITEBOARD_EXT.test(path || '')
 
 /* A file attached in the copilot's message box lives under the attachments
    folder but belongs to a conversation rather than to a note. Named here

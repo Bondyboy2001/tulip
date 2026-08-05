@@ -16,54 +16,7 @@
 import { EditorView, Decoration } from '@codemirror/view'
 import { StateField } from '@codemirror/state'
 import { syntaxTree } from '@codemirror/language'
-
-/** An element, with its class and its text — the shape all of this is built from. */
-export function el (tag, className, text) {
-  const node = document.createElement(tag)
-  if (className) node.className = className
-  if (text != null) node.textContent = text
-  return node
-}
-
-const SVG_NS = 'http://www.w3.org/2000/svg'
-
-/**
- * An inline icon.
- *
- * Six places drew one before this, and each spelled out the namespace, the
- * viewBox, the aria-hidden and — for the outlined ones — the same five stroke
- * attributes. `stroke` asks for the outlined preset at a given width; `fill`
- * for the solid one. `markup` is trusted: every caller's paths are constants in
- * this repo, never note text.
- */
-export function svgIcon (markup, {
-  viewBox = '0 0 16 16',
-  className = '',
-  size = null,
-  stroke = null,
-  fill = null
-} = {}) {
-  const svg = document.createElementNS(SVG_NS, 'svg')
-  svg.setAttribute('viewBox', viewBox)
-  svg.setAttribute('aria-hidden', 'true')
-  svg.setAttribute('focusable', 'false')
-  if (className) svg.setAttribute('class', className)
-  if (size != null) {
-    svg.setAttribute('width', String(size))
-    svg.setAttribute('height', String(size))
-  }
-  if (stroke != null) {
-    svg.setAttribute('fill', 'none')
-    svg.setAttribute('stroke', 'currentColor')
-    svg.setAttribute('stroke-width', String(stroke))
-    svg.setAttribute('stroke-linecap', 'round')
-    svg.setAttribute('stroke-linejoin', 'round')
-  } else if (fill) {
-    svg.setAttribute('fill', fill)
-  }
-  svg.innerHTML = markup
-  return svg
-}
+import { el, svgIcon } from './dom.js'
 
 /**
  * The control that puts a block's source on the clipboard, for both views'
@@ -130,16 +83,6 @@ export function codeCopilotButton (lang, code) {
     }))
   })
   return button
-}
-
-/* The five characters that stop note text being read as markup. Here rather
-   than beside either of the two modules that write untrusted text into an HTML
-   string, because a second copy of an escaper is a copy that gets fixed once. */
-const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }
-
-/** Note text, safe to put in either an element body or a quoted attribute. */
-export function escapeHtml (s) {
-  return String(s).replace(/[&<>"']/g, (c) => ESCAPES[c])
 }
 
 /* What the parser calls the three ways a document can hold code: a span between

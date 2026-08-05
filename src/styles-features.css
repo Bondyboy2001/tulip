@@ -1,0 +1,89 @@
+/* Feature-owned surfaces extracted from the shell stylesheet. New modules put
+ * their layout here so styles.css remains the shared frame, not every feature. */
+
+.saved-searches {
+  flex: none;
+  padding: 5px 8px 7px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.saved-searches.is-pane-hidden { display: none; }
+.saved-searches-head {
+  padding: 3px 7px 5px;
+  color: var(--faint);
+  font: 600 10.5px/1 var(--font-ui);
+  letter-spacing: .055em;
+  text-transform: uppercase;
+}
+.saved-search-row { display: flex; align-items: center; gap: 2px; }
+.saved-search-open {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 7px;
+  border-radius: 5px;
+  color: var(--ink-soft);
+  font: 12px/1.2 var(--font-ui);
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.saved-search-open::before { content: '⌕'; margin-right: 7px; color: var(--accent); }
+.saved-search-open:hover { background: var(--hover); color: var(--ink); }
+.saved-search-remove {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  color: var(--faint);
+  opacity: 0;
+}
+.saved-search-row:is(:hover, :focus-within) .saved-search-remove { opacity: 1; }
+.saved-search-remove:hover { background: var(--hover); color: var(--ink); }
+
+.ai-doctor { display: grid; gap: 10px; }
+.ai-doctor-results { display: grid; gap: 4px; }
+.ai-doctor-provider {
+  display: grid;
+  grid-template-columns: 82px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 30px;
+  padding: 4px 8px 4px 22px;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  font: 11.5px/1.2 var(--font-ui);
+  position: relative;
+}
+.ai-doctor-provider::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--strong);
+  position: absolute;
+}
+.ai-doctor-provider.is-ready::before { background: var(--stem); }
+.ai-doctor-name { font-weight: 650; color: var(--ink); }
+.ai-doctor-version { overflow: hidden; color: var(--faint); text-overflow: ellipsis; white-space: nowrap; }
+.ai-doctor-status { color: var(--muted); }
+
+/* The Copilot settings belong to the compact model readout that opens them.
+   On a wide panel the old full-width card became a mostly empty slab; cap it
+   to the size its two controls actually need and anchor it to that readout. */
+.ai-compose .ai-pop {
+  left: auto;
+  right: 0;
+  width: min(320px, calc(100% - 10px));
+  padding: 10px 11px 11px;
+  gap: 6px 11px;
+  border-radius: 10px;
+  box-shadow: 0 12px 30px rgb(0 0 0 / 18%), 0 2px 7px rgb(0 0 0 / 10%);
+}
+.ai-compose .ai-model-control .dd-button {
+  border: 1px solid var(--line-soft);
+  background: color-mix(in srgb, var(--sunk) 72%, var(--surface));
+}
+.ai-compose .ai-model-control .dd-button:hover {
+  border-color: var(--line);
+  background: var(--hover);
+}

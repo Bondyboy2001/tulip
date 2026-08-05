@@ -13,9 +13,12 @@
 import {
   RECOGNISE, PRODUCE, DICTATE, CLOZE, UNLOCK_STABILITY, NEW_PER_DAY,
   languageCards, buildQueue, unlocked, clozeOf, studyColumns, dueCount,
+  sessionGrade, studyFeedback, recordFirstTry,
   normalizeLanguageTable, isLanguageTablePath
 } from '../src/language-table.js'
-import { DAY, newCard } from '../src/srs.js'
+import { AGAIN, GOOD, DAY, newCard } from '../src/srs.js'
+import { EXACT, CLOSE, WRONG } from '../src/study-match.js'
+import VAULT_CONTRACT from '../electron/vault-contract.json'
 
 let failures = 0
 const check = (name, ok, detail = '') => {
@@ -24,7 +27,7 @@ const check = (name, ok, detail = '') => {
   console.error(`FAIL  ${name}${detail ? ` — ${detail}` : ''}`)
 }
 
-const PATH = 'languages/🇬🇷 Greece/Vocabulary.language.md'
+const PATH = 'languages/🇬🇷 Greece/Words.lang'
 const T0 = 1_700_000_000_000
 
 const TABLE = `| Word | English | Example | Notes |
@@ -39,36 +42,45 @@ const TABLE = `| Word | English | Example | Notes |
 
 check('path: the suffix names a language table', isLanguageTablePath(PATH))
 check('path: an ordinary note is not one', !isLanguageTablePath('notes/Greek.md'))
-check('normalize: a note is exactly its first table',
-  normalizeLanguageTable(`# Words\n\n${TABLE}\nafter`).startsWith('| Word |'))
+check('new table: starts with generic editable column names',
+  VAULT_CONTRACT.languageTableTemplates.custom.startsWith('| COL1 | COL2 | COL3 |'))
+/* A language table is a Markdown file with a Markdown table in it. The
+   normaliser's whole job is the missing table; everything else in the note is
+   the note's own business and is left exactly as written. */
+check('normalize: a note that already has a table is left alone',
+  normalizeLanguageTable(`# Words\n\n${TABLE}\nafter`) === `# Words\n\n${TABLE}\nafter`)
 check('normalize: a note with no table gets the template',
   normalizeLanguageTable('nothing here').includes('| Word |'))
+check('normalize: and what the note already said is kept above it',
+  normalizeLanguageTable('nothing here').startsWith('nothing here\n\n'))
 
-/* Every setting this file documents lives in the frontmatter, and the
-   normaliser runs over the note each time it is opened — so a normaliser that
-   dropped the frontmatter (which it did) meant none of them could survive
-   being read once. */
 const WITH_FRONTMATTER = `---\nstudy-stages: f\nlang: el\n---\n${TABLE}`
 check('normalize: the frontmatter survives',
-  normalizeLanguageTable(WITH_FRONTMATTER).startsWith('---\nstudy-stages: f\nlang: el\n---\n'))
-check('normalize: and the table still follows it',
-  normalizeLanguageTable(WITH_FRONTMATTER).includes('\n| Word |'))
-check('normalize: prose after the frontmatter still goes',
-  !normalizeLanguageTable(`---\nlang: el\n---\n# Words\n\n${TABLE}\nafter`).includes('# Words'))
-check('normalize: a note that is only frontmatter gets the template',
-  normalizeLanguageTable('---\nlang: el\n---\n').includes('| Word |'))
+  normalizeLanguageTable(WITH_FRONTMATTER) === WITH_FRONTMATTER)
+check('normalize: prose after the frontmatter survives too',
+  normalizeLanguageTable(`---\nlang: el\n---\n# Words\n\n${TABLE}\nafter`).includes('# Words'))
+check('normalize: a note that is only frontmatter gets the template under it',
+  normalizeLanguageTable('---\nlang: el\n---\n')
+    === '---\nlang: el\n---\n' + VAULT_CONTRACT.languageTableTemplates.vocabulary)
 check('normalize: an unclosed --- block is not frontmatter',
-  normalizeLanguageTable(`---\nlang: el\n${TABLE}`).startsWith('| Word |'))
+  normalizeLanguageTable('---\nlang: el\n').startsWith('---\nlang: el\n\n'))
 check('normalize: it is idempotent',
-  normalizeLanguageTable(normalizeLanguageTable(WITH_FRONTMATTER)) ===
-  normalizeLanguageTable(WITH_FRONTMATTER))
+  normalizeLanguageTable(normalizeLanguageTable('nothing here')) ===
+  normalizeLanguageTable('nothing here'))
+
+/* Vocabulary used to have its columns rewritten into a fixed schema on every
+   open, which undid any rename or drag. Its table is now its own. */
+check('normalize: Vocabulary keeps the columns it has',
+  normalizeLanguageTable(TABLE) === TABLE)
+check('normalize: Study finds the prompt and answer columns wherever they sit',
+  JSON.stringify(studyColumns(TABLE)) === JSON.stringify({ front: 'Word', back: 'English' }))
 
 /* An alphabet table is an ordinary language table, which is the whole point of
    seeding one — but recognition-only, because a script has many letters to a
    sound (Greek ι and η are both `i`) and the reverse card would have an answer
    the grader cannot accept. */
 const ALPHABET = `---\nstudy-stages: f\n---\n| Letter | Sound | Notes |\n| --- | --- | --- |\n| α | a |  |\n| η | i |  |\n| ι | i |  |\n`
-const alphabetCards = languageCards(ALPHABET, 'languages/🇬🇷 Greece/Alphabet.language.md',
+const alphabetCards = languageCards(ALPHABET, 'languages/🇬🇷 Greece/Alphabet.lang',
   { speaks: true })
 
 check('alphabet: one card per letter', alphabetCards.length === 3,
@@ -125,8 +137,22 @@ check('cards: production is the other way round',
   produce.prompt === 'carrot' && produce.answer === 'καρότο')
 check('cards: the cloze asks the sentence and answers the word',
   cloze.prompt.includes('____') && cloze.answer === 'καρότο')
-check('cards: recognition is revealed, the rest are typed',
-  !recognise.typed && produce.typed && cloze.typed)
+check('cards: every kind says what it is asking for',
+  !!recognise.label && !!produce.label && !!cloze.label)
+check('session: only an exact answer leaves the retry queue',
+  sessionGrade(EXACT) === GOOD &&
+  sessionGrade(CLOSE) === AGAIN &&
+  sessionGrade(WRONG) === AGAIN)
+check('session: feedback clearly distinguishes right from wrong',
+  studyFeedback(EXACT).text === '✓ Correct' &&
+  studyFeedback(WRONG).text === '✕ Incorrect' &&
+  studyFeedback(CLOSE).result === 'wrong')
+const firstTry = { firstTrySeen: new Set(), firstTryCorrect: 0, firstTryWrong: 0 }
+recordFirstTry(firstTry, 'water', true)
+recordFirstTry(firstTry, 'bread', false)
+recordFirstTry(firstTry, 'bread', true)
+check('session: retries do not change first-attempt totals',
+  firstTry.firstTryCorrect === 1 && firstTry.firstTryWrong === 1)
 check('cards: the aside travels with every card of the row',
   of('καρότο').every((card) => card.aside === 'neuter noun'))
 check('cards: an id names the note, the word and the kind',

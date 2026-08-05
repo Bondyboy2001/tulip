@@ -10,18 +10,16 @@
     "regular expression is not a JSON type; both readers build it with the `u`",
     "flag, which is what makes the \\u{...} escapes mean codepoints."
   ],
-  "noteExtensions": [".md", ".markdown", ".mdown"],
+  "noteExtensions": [".md", ".markdown", ".mdown", ".lang"],
+  "texExtension": ".tex",
   "pdfExtension": ".pdf",
   "siteExtension": ".website",
-  "languageTableSuffix": ".language.md",
+  "whiteboardExtension": ".excalidraw",
+  "languageTableSuffix": ".lang",
   "languageFlagPattern": "^([\\u{1F1E6}-\\u{1F1FF}]{2})\\s*",
-  "legacyLanguageTableNames": [
-    "Vocabulary.md",
-    "Sounds.md",
-    "Grammar.md"
-  ],
   "languageTableTemplates": {
-    "vocabulary": "| Word | English | Example | Notes |\n| --- | --- | --- | --- |\n|  |  |  |  |\n"
+    "vocabulary": "| English | Word | Sound | Example | Notes |\n| --- | --- | --- | --- | --- |\n|  |  |  |  |  |\n",
+    "custom": "| COL1 | COL2 | COL3 |\n| --- | --- | --- |\n|  |  |  |\n|  |  |  |\n|  |  |  |\n"
   },
   "attachmentDirectory": ".attachments",
   "chatImageDirectory": "Chat",

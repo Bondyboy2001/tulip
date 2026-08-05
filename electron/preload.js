@@ -20,13 +20,17 @@ contextBridge.exposeInMainWorld('tulip', {
     read: (p) => ipcRenderer.invoke('file:read', p),
     // Size and dates, for the Info pane.
     info: (p) => ipcRenderer.invoke('file:info', p),
-    write: (p, content) => ipcRenderer.invoke('file:write', p, content),
+    write: (p, content, metadata) => ipcRenderer.invoke('file:write', p, content, metadata),
     create: (dir, name) => ipcRenderer.invoke('file:create', dir, name),
     rename: (p, name) => ipcRenderer.invoke('file:rename', p, name),
     remove: (p) => ipcRenderer.invoke('file:delete', p),
     move: (p, destDir) => ipcRenderer.invoke('file:move', p, destDir),
     reveal: (p) => ipcRenderer.invoke('file:reveal', p),
     import: (destDir, sources) => ipcRenderer.invoke('file:import', destDir, sources)
+  },
+  fileTags: {
+    get: (p) => ipcRenderer.invoke('file-tags:get', p),
+    set: (p, tags) => ipcRenderer.invoke('file-tags:set', p, tags)
   },
   /**
    * The on-disk path of a dragged-in File. Electron stopped putting `.path` on
@@ -46,9 +50,12 @@ contextBridge.exposeInMainWorld('tulip', {
   site: {
     create: (dir) => ipcRenderer.invoke('site:create', dir)
   },
-  /* A note that starts as an empty Markdown table — an ordinary note, so the
-     grid it opens in is the ordinary one: headers typed, columns added and
-     removed like any other table in any other note. */
+  whiteboard: {
+    create: (dir) => ipcRenderer.invoke('whiteboard:create', dir),
+    export: (name, ext, bytes, to) =>
+      ipcRenderer.invoke('whiteboard:export', name, ext, bytes, to)
+  },
+  /* A focused table document with editable generic headers. */
   table: {
     create: (dir, name) => ipcRenderer.invoke('table:create', dir, name)
   },
@@ -76,6 +83,10 @@ contextBridge.exposeInMainWorld('tulip', {
       load: (p) => ipcRenderer.invoke('pdf:marks:load', p),
       save: (p, highlights) => ipcRenderer.invoke('pdf:marks:save', p, highlights)
     }
+  },
+  tex: {
+    create: (dir) => ipcRenderer.invoke('tex:create', dir),
+    compile: (p) => ipcRenderer.invoke('tex:compile', p)
   },
 
   /* The open note as a PDF file. `to` is the scripted seam — the save dialog
@@ -117,8 +128,9 @@ contextBridge.exposeInMainWorld('tulip', {
        is holding — what the Refresh button in Settings is for, after installing
        a model or signing into a provider mid-session. */
     models: (opts) => ipcRenderer.invoke('ai:models', opts),
-    send: (text, context) => ipcRenderer.invoke('ai:send', text, context),
-    stop: () => ipcRenderer.invoke('ai:stop'),
+    doctor: () => ipcRenderer.invoke('ai:doctor'),
+    send: (text, context, turnId) => ipcRenderer.invoke('ai:send', text, context, turnId),
+    stop: (turnId) => ipcRenderer.invoke('ai:stop', turnId),
     /* A picture pasted into the message box, filed in the vault so the agent —
        which reads files and takes no images over its message stream — can be
        pointed at it. `bytes` is a Uint8Array; the answer is a vault path. */
@@ -191,6 +203,15 @@ contextBridge.exposeInMainWorld('tulip', {
     get: () => ipcRenderer.invoke('config:get'),
     set: (patch) => ipcRenderer.invoke('config:set', patch)
   },
+  /* The spellchecker's custom dictionary. Adding mostly happens from the
+     native context menu over a misspelling, which main owns outright; these
+     are for the Settings pane, which shows the list, takes words back out of
+     it, and offers a way to type one in. */
+  dictionary: {
+    words: () => ipcRenderer.invoke('dictionary:words'),
+    add: (word) => ipcRenderer.invoke('dictionary:add', word),
+    remove: (word) => ipcRenderer.invoke('dictionary:remove', word)
+  },
   durability: {
     flush: () => ipcRenderer.invoke('durability:flush')
   },
@@ -212,7 +233,7 @@ contextBridge.exposeInMainWorld('tulip', {
        underneath it at the same time — see the zoom-changed handler in main. */
     claim: (on) => ipcRenderer.invoke('zoom:claim', on)
   },
-  systemTheme: () => ipcRenderer.invoke('theme:system'),
+  version: () => ipcRenderer.invoke('app:version'),
 
   // The answer to `app:flush`: the renderer has written what it had to write,
   // and the window may close. See the close handler in main.
@@ -220,7 +241,7 @@ contextBridge.exposeInMainWorld('tulip', {
 
   on: (channel, fn) => {
     const allowed = [
-      'vault:changed', 'vault:opened', 'menu', 'theme:system', 'zoom',
+      'vault:changed', 'vault:opened', 'menu', 'zoom',
       'run:out', 'run:done', 'ai:event', 'app:flush'
     ]
     if (!allowed.includes(channel)) return () => {}

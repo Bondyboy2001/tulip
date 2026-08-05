@@ -24,27 +24,35 @@ async function evaluate (expression) {
     ws.addEventListener('error', reject, { once: true })
   })
 
-  const result = await new Promise((resolve, reject) => {
-    const id = 1
-    ws.addEventListener('message', (event) => {
-      const msg = JSON.parse(event.data)
-      if (msg.id !== id) return
-      if (msg.result?.exceptionDetails) {
-        reject(new Error(msg.result.exceptionDetails.exception?.description || 'threw'))
-      } else {
-        resolve(msg.result?.result?.value)
+  try {
+    return await new Promise((resolve, reject) => {
+      const id = 1
+      let timer = null
+      const finish = (done, value) => {
+        clearTimeout(timer)
+        ws.removeEventListener('message', onMessage)
+        done(value)
       }
+      const onMessage = (event) => {
+        const msg = JSON.parse(event.data)
+        if (msg.id !== id) return
+        if (msg.result?.exceptionDetails) {
+          finish(reject, new Error(msg.result.exceptionDetails.exception?.description || 'threw'))
+        } else {
+          finish(resolve, msg.result?.result?.value)
+        }
+      }
+      ws.addEventListener('message', onMessage)
+      ws.send(JSON.stringify({
+        id,
+        method: 'Runtime.evaluate',
+        params: { expression, awaitPromise: true, returnByValue: true }
+      }))
+      timer = setTimeout(() => finish(reject, new Error('timed out')), 10000)
     })
-    ws.send(JSON.stringify({
-      id,
-      method: 'Runtime.evaluate',
-      params: { expression, awaitPromise: true, returnByValue: true }
-    }))
-    setTimeout(() => reject(new Error('timed out')), 10000)
-  })
-
-  ws.close()
-  return result
+  } finally {
+    ws.close()
+  }
 }
 
 /** A real mouse click, which goes through hit-testing rather than posAtCoords. */

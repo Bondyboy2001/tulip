@@ -28,7 +28,7 @@
 
 /* The same escaper the reading view writes its own markup with. A sanitiser
    holding a private copy of one is a copy that misses the fix. */
-import { escapeHtml as escapeAttr } from './blocks.js'
+import { escapeHtml as escapeAttr } from './dom.js'
 /* And the same schemes the click router will act on — see below. */
 import { EXTERNAL_SCHEME as SAFE_SCHEME } from './links.js'
 

@@ -1,4 +1,4 @@
-/* Country flags are stored as Unicode prefixes in `.language.md` filenames.
+/* Country flags are stored as Unicode prefixes in `.lang` filenames.
    That keeps the choice portable without frontmatter or sidecar files. */
 
 import { LANGUAGE_FLAG } from './vault-paths.js'

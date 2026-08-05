@@ -181,11 +181,13 @@ const uid = () => `h${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).
  * @param {(message:string)=>void} o.onError  something failed that the reader
  *                                            would otherwise learn from a lost
  *                                            highlight much later
+ * @param {boolean} o.selectionMenu  whether selecting text offers PDF actions
  */
 export function mountPdf ({
   host, api,
   onDoc = () => {}, onPage = () => {}, onMarks = () => {}, onZoom = () => {},
-  onStuck = () => {}, onAsk = () => {}, onTool = () => {}, onError = () => {}
+  onStuck = () => {}, onAsk = () => {}, onTool = () => {}, onError = () => {},
+  selectionMenu = true
 }) {
   const state = {
     path: '',
@@ -1248,7 +1250,7 @@ export function mountPdf ({
   /* ------------------------------------------------------------- gestures */
 
   host.addEventListener('mouseup', (event) => {
-    if (!state.doc || event.button !== 0) return
+    if (!state.doc || event.button !== 0 || !selectionMenu) return
     // A click that lands in the popup is the popup's own business.
     if (pop.contains(event.target)) return
 

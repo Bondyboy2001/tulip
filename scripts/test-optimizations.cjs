@@ -40,7 +40,7 @@ async function atomicStores () {
     const languageVault = path.join(root, 'language-vault')
     const language = makeLanguageStore({ vault: () => languageVault })
     await Promise.all(Array.from({ length: 50 }, (_, index) =>
-      language.sync(`Language/${index}.language.md`, table(`word-${index}`, `meaning-${index}`))))
+      language.sync(`Language/${index}.lang`, table(`word-${index}`, `meaning-${index}`))))
     const languageState = JSON.parse(await fs.readFile(
       path.join(languageVault, '.tulip', 'language-history.json'), 'utf8'))
     assert.equal(Object.keys(languageState.notes).length, 50)
@@ -130,8 +130,10 @@ function vaultEvents () {
     ignoredDirs: new Set(['.git', '.obsidian', '.tulip', 'node_modules', '.trash']),
     attachmentDirs: new Set(['.attachments', '.images']),
     noteExtensions: new Set(['.md', '.markdown']),
+    texExtension: '.tex',
     pdfExtension: '.pdf',
     siteExtension: '.website',
+    whiteboardExtension: '.excalidraw',
     assetExtensions: new Set(['.png', '.jpg', '.mp4'])
   }
   assert.equal(classifyVaultEvent('.git/index', options).ignore, true)
@@ -141,6 +143,14 @@ function vaultEvents () {
     { ignore: false, index: true, snapshot: true, notify: true, pdf: null, path: 'Notes/Changed.md' }
   )
   assert.equal(classifyVaultEvent('Papers/book.pdf', options).pdf, 'Papers/book.pdf')
+  assert.deepEqual(
+    classifyVaultEvent('Papers/main.tex', options),
+    { ignore: false, index: false, snapshot: true, notify: true, pdf: null, path: 'Papers/main.tex' }
+  )
+  assert.deepEqual(
+    classifyVaultEvent('Boards/Research.excalidraw', options),
+    { ignore: false, index: true, snapshot: true, notify: true, pdf: null, path: 'Boards/Research.excalidraw' }
+  )
   assert.equal(classifyVaultEvent('.attachments/Note/image.png', options).index, false)
   assert.equal(classifyVaultEvent('Renamed folder', options).pdf, 'sweep')
   assert.equal(classifyVaultEvent(null, options).snapshot, true)

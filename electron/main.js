@@ -12,14 +12,23 @@ const crypto = require('node:crypto')
 const { spawn } = require('node:child_process')
 const { pathToFileURL } = require('node:url')
 const ai = require('./ai')
+const { TurnLedger, turnId } = require('./ai-turns')
+const { restoreConflicts } = require('./copilot-restore')
+const { createTexCompiler } = require('./tex-compile')
 const { TrustStore } = require('./trust-store')
 const { makeStore: makeReviewStore } = require('./review-store')
+const {
+  REQUEST_PATH: AI_RENAME_REQUEST,
+  isRequestPath: isAiRenameRequest,
+  parseRequest: parseAiRenameRequest
+} = require('./copilot-rename')
 const { makeStore: makeLanguageHistoryStore } = require('./language-history-store')
 const { classifyVaultEvent } = require('./vault-events')
 const { narrowsFrom } = require('./search-narrow')
 const { parseByteRange, streamFileRange } = require('./range-response')
 const { ocrPagesOf, parsePages, relevantPdfContext } = require('./pdf-context')
 const { parseFrontmatter, propsOf, propValues } = require('./frontmatter.cjs')
+const { emptyWhiteboard, whiteboardText } = require('./whiteboard-data')
 const PDF_TEXT_FORMAT = require('./pdf-text-format.json').version
 const VAULT_CONTRACT = require('./vault-contract.json')
 const WEB_PARTITIONS = require('./web-partitions.json')
@@ -41,43 +50,45 @@ const MD_EXT = new Set(VAULT_CONTRACT.noteExtensions)
    name, and a link resolves by comparing those names — so the two spellings
    drifting apart is a wikilink that points at a note the tree is showing. */
 const NOTE_EXT = new RegExp(
-  `(?:\\.language)?\\.(${VAULT_CONTRACT.noteExtensions
+  `\\.(${VAULT_CONTRACT.noteExtensions
     .map((ext) => escapeRe(ext.replace(/^\./, ''))).join('|')})$`,
   'i'
 )
 
-/* The other two kinds a vault holds. Only `file:rename` needs them together —
+/* The other document kinds a vault holds. Only `file:rename` needs them together —
    it strips whatever extension the typed name carries, whichever kind was
    renamed — and stating them as one expression is what keeps that list from
    being the place a newly supported kind is forgotten. */
 const DOCUMENT_EXT = new RegExp(
-  `(${[VAULT_CONTRACT.pdfExtension, VAULT_CONTRACT.siteExtension]
+  `(${[
+    VAULT_CONTRACT.texExtension,
+    VAULT_CONTRACT.pdfExtension,
+    VAULT_CONTRACT.siteExtension,
+    VAULT_CONTRACT.whiteboardExtension
+  ]
     .map(escapeRe).join('|')})$`,
   'i'
 )
+const TEX_EXT = VAULT_CONTRACT.texExtension
+const isTex = (p) => path.extname(String(p || '')).toLowerCase() === TEX_EXT
 const LANGUAGE_TABLE_SUFFIX = VAULT_CONTRACT.languageTableSuffix
 const LANGUAGE_FLAG = new RegExp(VAULT_CONTRACT.languageFlagPattern, 'u')
-const LEGACY_LANGUAGE_TABLES = new Set(
-  VAULT_CONTRACT.legacyLanguageTableNames.map((name) => name.toLowerCase())
-)
-const isLanguageTable = (p) => {
-  const value = String(p || '')
-  if (value.toLowerCase().endsWith(LANGUAGE_TABLE_SUFFIX)) return true
-  return LEGACY_LANGUAGE_TABLES.has(path.basename(value).toLowerCase()) &&
-    LANGUAGE_FLAG.test(path.basename(path.dirname(value)))
-}
+const isLanguageTable = (p) =>
+  String(p || '').toLowerCase().endsWith(LANGUAGE_TABLE_SUFFIX)
 const languageTableStem = (p) => {
   const name = path.basename(String(p || ''))
-  return name.toLowerCase().endsWith(LANGUAGE_TABLE_SUFFIX)
-    ? name.slice(0, -LANGUAGE_TABLE_SUFFIX.length)
-    : path.basename(name, path.extname(name))
+  return path.basename(name, path.extname(name))
 }
-const { vocabulary: LANGUAGE_TABLE_TEMPLATE } = VAULT_CONTRACT.languageTableTemplates
+const {
+  vocabulary: LANGUAGE_TABLE_TEMPLATE,
+  custom: CUSTOM_TABLE_TEMPLATE
+} = VAULT_CONTRACT.languageTableTemplates
 const languageName = (value) => {
   const text = String(value || '')
   const match = LANGUAGE_FLAG.exec(text)
   return { flag: match?.[1] || '', name: match ? text.slice(match[0].length) : text }
 }
+const languageTableLabel = (name) => /^vocabulary$/i.test(name) ? 'Words' : name
 
 /* A PDF is the second thing the vault opens in a tab. It is not a note — it is
    never written to, never indexed for search, and has no links — so everything
@@ -92,6 +103,11 @@ const isPdf = (p) => path.extname(p).toLowerCase() === PDF_EXT
    parse it, which is why the format is a URL on a line and not a record. */
 const SITE_EXT = VAULT_CONTRACT.siteExtension
 const isSite = (p) => path.extname(p).toLowerCase() === SITE_EXT
+
+/* Portable Excalidraw JSON. Tulip owns the vault integration; the scene stays
+   in the upstream format so it can be opened by other whiteboard editors. */
+const WHITEBOARD_EXT = VAULT_CONTRACT.whiteboardExtension
+const isWhiteboard = (p) => path.extname(p).toLowerCase() === WHITEBOARD_EXT
 
 /* Highlights drawn on a PDF, mirroring the vault's own shape:
    `Papers/thesis.pdf` is annotated in `.annotations/Papers/thesis.pdf.json`.
@@ -117,6 +133,16 @@ const ASSET_EXT = new Set(
     .filter(([kind]) => !kind.startsWith('_'))
     .flatMap(([, exts]) => exts.map((ext) => `.${ext}`))
 )
+
+/* The snapshot's file list feeds only these consumers. Do not retain every
+   regular file in a vault just to filter it into four arrays after the walk —
+   attachment folders often contain thumbnails, exports, and other unrelated
+   data. */
+const isSnapshotFile = (p) => {
+  const extension = path.extname(String(p || '')).toLowerCase()
+  return MD_EXT.has(extension) || ASSET_EXT.has(extension) ||
+    isTex(p) || isPdf(p) || isWhiteboard(p)
+}
 
 /* What each of those is served as. Only the range replies need this — see
    `_mime_comment` in the JSON — and anything not named there is a download
@@ -165,6 +191,60 @@ protocol.registerSchemesAsPrivileged([{
 
 let mainWindow = null
 let vaultPath = null
+let fileTagsCache = null
+
+const fileTagsPath = () => path.join(vaultPath, '.tulip', 'file-tags.json')
+
+async function loadFileTags () {
+  if (fileTagsCache) return fileTagsCache
+  try {
+    const parsed = JSON.parse(await fs.readFile(fileTagsPath(), 'utf8'))
+    fileTagsCache = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+  } catch { fileTagsCache = {} }
+  return fileTagsCache
+}
+
+const cleanFileTags = (values) => [...new Set((Array.isArray(values) ? values : [])
+  .map((value) => String(value || '').trim().replace(/^#+/, '').toLowerCase())
+  .filter(Boolean))]
+
+async function saveFileTags () {
+  const target = fileTagsPath()
+  await fs.mkdir(path.dirname(target), { recursive: true })
+  await writeAtomic(target, JSON.stringify(fileTagsCache || {}, null, 2) + '\n')
+  indexGeneration++
+}
+
+async function relocateFileTags (from, to, isDir) {
+  const tags = await loadFileTags()
+  let changed = false
+  if (isDir) {
+    const prefix = `${from}/`
+    for (const key of Object.keys(tags)) {
+      if (key !== from && !key.startsWith(prefix)) continue
+      tags[`${to}${key.slice(from.length)}`] = tags[key]
+      delete tags[key]
+      changed = true
+    }
+  } else if (tags[from]) {
+    tags[to] = tags[from]
+    delete tags[from]
+    changed = true
+  }
+  if (changed) await saveFileTags()
+}
+
+async function forgetFileTags (target, isDir) {
+  const tags = await loadFileTags()
+  const prefix = `${target}/`
+  let changed = false
+  for (const key of Object.keys(tags)) {
+    if (key !== target && !(isDir && key.startsWith(prefix))) continue
+    delete tags[key]
+    changed = true
+  }
+  if (changed) await saveFileTags()
+}
 let watcher = null
 let trust = null
 
@@ -421,11 +501,13 @@ async function mapLimit (items, limit, fn) {
  * when a rename has to be chased through the rest of the vault.
  */
 const index = new Map()   // rel path -> { name, text, mtime, size }
+const whiteboardIndex = new Map() // rel path -> extracted text, never image data
 
 /* A note big enough to be a paste of a log file would cost more to hold than
    the search is worth; it is indexed as empty rather than skipped, so it still
    disappears from the index when it is deleted. */
 const MAX_INDEX_BYTES = 4 * 1024 * 1024
+const MAX_WHITEBOARD_INDEX_BYTES = 32 * 1024 * 1024
 
 let indexDirty = true
 let syncing = null
@@ -445,10 +527,10 @@ let indexGeneration = 0
  */
 async function syncIndex () {
   indexGeneration++
-  if (!vaultPath) { index.clear(); forgetLinkTables(); return }
+  if (!vaultPath) { index.clear(); whiteboardIndex.clear(); forgetLinkTables(); return }
   indexDirty = false
 
-  const { notes } = await getVaultSnapshot()
+  const { notes, whiteboards = [] } = await getVaultSnapshot()
 
   const seen = new Set()
   await mapLimit(notes, WALK_LIMIT, async (abs) => {
@@ -475,6 +557,31 @@ async function syncIndex () {
 
   for (const key of [...index.keys()]) if (!seen.has(key)) index.delete(key)
 
+  const seenWhiteboards = new Set()
+  await mapLimit(whiteboards, WALK_LIMIT, async (abs) => {
+    const key = rel(abs)
+    seenWhiteboards.add(key)
+    let stat
+    try { stat = await fs.stat(abs) } catch { return }
+    const cached = whiteboardIndex.get(key)
+    if (cached && cached.mtime === stat.mtimeMs && cached.size === stat.size) return
+    let text = ''
+    if (stat.size <= MAX_WHITEBOARD_INDEX_BYTES) {
+      const source = await fs.readFile(abs, 'utf8').catch(() => '')
+      text = whiteboardText(source)
+    }
+    whiteboardIndex.set(key, {
+      name: path.basename(abs, path.extname(abs)),
+      text,
+      mtime: stat.mtimeMs,
+      size: stat.size,
+      kind: 'whiteboard'
+    })
+  })
+  for (const key of [...whiteboardIndex.keys()]) {
+    if (!seenWhiteboards.has(key)) whiteboardIndex.delete(key)
+  }
+
   // Which notes exist may have changed, and that is the whole of what the link
   // tables are built from.
   forgetLinkTables()
@@ -488,9 +595,40 @@ function ensureIndex () {
   return syncing
 }
 
+/* TeX text by rel path, keyed on mtime/size — the same shape as
+   `whiteboardIndex`. Snapshots run twice per Copilot turn, and without this
+   each one re-reads every TeX document in the vault. */
+const texSnapshotCache = new Map() // rel path -> { mtime, size, text }
+
 async function snapshotNotes () {
   await ensureIndex()
-  return new Map([...index].map(([key, entry]) => [key, entry.text]))
+  const snapshot = new Map([...index].map(([key, entry]) => [key, entry.text]))
+  /* TeX is edited in the same CodeMirror surface and by the same Copilot, but
+     it deliberately is not part of the Markdown search/link index. Read it
+     here so a TeX-only turn still has a before/after operation to review and
+     reject. The vault walk is shared with the index; only the document bytes
+     are additional. */
+  const { tex = [] } = await getVaultSnapshot()
+  const seen = new Set()
+  const documents = await mapLimit(tex, WALK_LIMIT, async (abs) => {
+    try {
+      const key = rel(abs)
+      seen.add(key)
+      const stat = await fs.stat(abs)
+      const cached = texSnapshotCache.get(key)
+      if (cached && cached.mtime === stat.mtimeMs && cached.size === stat.size) {
+        return [key, cached.text]
+      }
+      const text = await fs.readFile(abs, 'utf8')
+      texSnapshotCache.set(key, { mtime: stat.mtimeMs, size: stat.size, text })
+      return [key, text]
+    } catch { return null }
+  })
+  for (const key of [...texSnapshotCache.keys()]) {
+    if (!seen.has(key)) texSnapshotCache.delete(key)
+  }
+  for (const document of documents) if (document) snapshot.set(...document)
+  return snapshot
 }
 
 function changedNotes (before, after) {
@@ -521,6 +659,24 @@ function touchIndex (absPath, text, stamp) {
       text,
       mtime: stat.mtimeMs,
       size: stat.size
+    })
+  } catch {
+    indexDirty = true
+  }
+}
+
+function touchWhiteboardIndex (absPath, source, stamp, extractedText = null) {
+  try {
+    const stat = stamp || fsSync.statSync(absPath)
+    indexGeneration++
+    whiteboardIndex.set(rel(absPath), {
+      name: path.basename(absPath, path.extname(absPath)),
+      text: stat.size <= MAX_WHITEBOARD_INDEX_BYTES
+        ? (typeof extractedText === 'string' ? extractedText : whiteboardText(source))
+        : '',
+      mtime: stat.mtimeMs,
+      size: stat.size,
+      kind: 'whiteboard'
     })
   } catch {
     indexDirty = true
@@ -598,9 +754,14 @@ async function scanVaultDirectory (dir, includeInTree = true) {
       node = {
         type: 'file',
         kind: language ? 'language' : 'note',
-        name: identity?.name || stripExt(entry.name),
+        name: languageTableLabel(identity?.name || stripExt(entry.name)),
         flag: identity?.flag || folderIdentity?.flag || '',
         path: rel(abs)
+      }
+    } else if (includeInTree && isTex(entry.name)) {
+      node = {
+        type: 'file', kind: 'tex',
+        name: path.basename(entry.name, path.extname(entry.name)), path: rel(abs)
       }
     } else if (includeInTree && isPdf(entry.name)) {
       node = {
@@ -612,8 +773,13 @@ async function scanVaultDirectory (dir, includeInTree = true) {
         type: 'file', kind: 'site',
         name: path.basename(entry.name, path.extname(entry.name)), path: rel(abs)
       }
+    } else if (includeInTree && isWhiteboard(entry.name)) {
+      node = {
+        type: 'file', kind: 'whiteboard',
+        name: path.basename(entry.name, path.extname(entry.name)), path: rel(abs)
+      }
     }
-    return { files: [abs], evicted: 0, node }
+    return { files: isSnapshotFile(entry.name) ? [abs] : [], evicted: 0, node }
   })
 
   const tree = parts.map((part) => part.node).filter(Boolean)
@@ -707,7 +873,9 @@ async function getVaultSnapshot ({ fresh = false } = {}) {
       evicted,
       assets: files.filter((abs) => ASSET_EXT.has(path.extname(abs).toLowerCase())).map(rel),
       notes: files.filter((abs) => MD_EXT.has(path.extname(abs).toLowerCase())),
-      pdfs: files.filter(isPdf).map(rel)
+      tex: files.filter(isTex),
+      pdfs: files.filter(isPdf).map(rel),
+      whiteboards: files.filter(isWhiteboard)
     }
     snapshot.revision = snapshotRevision(snapshot)
     // Something changed while we were reading; the answer is already behind.
@@ -879,12 +1047,15 @@ async function followMoves (moves) {
  */
 async function relocate (srcAbs, targetAbs) {
   const isDir = fsSync.statSync(srcAbs).isDirectory()
+  const fromPath = rel(srcAbs)
+  const toPath = rel(targetAbs)
   await ensureIndex()
   const moves = notesMovedBy(rel(srcAbs), rel(targetAbs), isDir)
 
   noteSelfWrite(srcAbs)
   noteSelfWrite(targetAbs)
   await fs.rename(srcAbs, targetAbs)
+  await relocateFileTags(fromPath, toPath, isDir)
   await carryAnnotations(rel(srcAbs), rel(targetAbs))
   /* A card's identity begins with the path of the note it came from, so a
      rename that did not carry the review state would silently reset every word
@@ -892,7 +1063,10 @@ async function relocate (srcAbs, targetAbs) {
      and harder to notice, because all the words are still there. */
   await review.relocate(rel(srcAbs), rel(targetAbs)).catch(() => {})
   await languageHistory.relocate(rel(srcAbs), rel(targetAbs)).catch(() => {})
-  trust?.relocateCreations(moves)
+  /* TeX/PDF/site files are not in the Markdown link index, but their own
+     identity still moves. In particular TeX creation dates must not reset
+     merely because Copilot renamed the document. */
+  trust?.relocateCreations(isDir ? moves : [{ from: rel(srcAbs), to: rel(targetAbs) }])
   const rewritten = await followMoves(moves)
   return { path: rel(targetAbs), links: rewritten.length, rewritten }
 }
@@ -1078,8 +1252,10 @@ function watchVault () {
         ignoredDirs: IGNORED_DIRS,
         attachmentDirs: ATTACHMENT_DIRS,
         noteExtensions: MD_EXT,
+        texExtension: TEX_EXT,
         pdfExtension: PDF_EXT,
         siteExtension: SITE_EXT,
+        whiteboardExtension: WHITEBOARD_EXT,
         assetExtensions: ASSET_EXT
       })
       if (change.ignore) return
@@ -1206,24 +1382,25 @@ async function migrateAttachments (dir) {
 
 async function openVault (dir) {
   vaultPath = dir
+  fileTagsCache = null
   trust?.setVault(dir, readConfig().historyInVault === true)
-  /* An explicitly chosen vault is the user's home vault, not merely the
-     folder open for this process. Keep the old key during the migration so
-     older packaged renderers and configs remain harmlessly compatible. */
-  writeConfig({ vaultPath: dir, defaultVaultPath: dir })
+  /* The vault open is the vault remembered — there is no second, separately
+     chosen "default" any more, so connecting a folder here is the whole of
+     saying which one Tulip starts in. `defaultVaultPath` was that second key;
+     it is dropped on the way past so a config carrying it cannot later be
+     mistaken for a newer answer than this one. */
+  writeConfig({ vaultPath: dir, defaultVaultPath: undefined })
   await migrateAttachments(dir).catch(() => {})
   index.clear()
+  whiteboardIndex.clear()
+  texSnapshotCache.clear()
+  forgetLinkTables()
   indexDirty = true
   invalidateVaultSnapshot()
   watchVault()
-  // Warmed in the background so the first search does not pay for the walk.
-  ensureIndex().catch(() => {})
   // Whatever a killed write left beside a note in this vault. Background work
   // like the two sweeps around it; nothing waits on the tidying.
   sweepTemporaryFiles(dir, { recursive: true }).catch(() => {})
-  // Likewise the PDFs, so the copilot can be asked about one that has not
-  // been opened. Only documents without a current sidecar cost anything.
-  sweepPdfText().catch(() => {})
   if (mainWindow) {
     mainWindow.setTitle(path.basename(dir))
     mainWindow.webContents.send('vault:opened', { path: dir, name: path.basename(dir), sync: syncProviderFor(dir) })
@@ -1241,6 +1418,7 @@ async function openVault (dir) {
 let quitting = false
 let flushReply = null
 let flushAsked = null
+ipcMain.handle('app:version', () => app.getVersion())
 ipcMain.handle('app:flushed', async () => {
   await flushPendingDurability()
   flushReply?.()
@@ -1306,6 +1484,34 @@ function createWindow () {
      app never navigates its own top frame (views swap in-page), so refusing
      all of it costs nothing. In-page #anchors don't raise this event. */
   mainWindow.webContents.on('will-navigate', (event) => event.preventDefault())
+
+  /* The native context menu, and it only ever shows up over text you can
+     type in. Right-clicks elsewhere are the renderer's to draw — the tree,
+     tables and images all build their menus in-page and call preventDefault,
+     which keeps this event from firing. What is native is what only the
+     platform knows: spelling. Over a word the checker has underlined this is
+     its suggestions and the way to teach it the word — unlearnable again from
+     Settings → Markdown — and over any other editable text it is the standard
+     cut, copy and paste. */
+  mainWindow.webContents.on('context-menu', (_event, params) => {
+    const word = params.misspelledWord
+    const spelling = []
+    if (word) {
+      for (const to of params.dictionarySuggestions.slice(0, 5)) {
+        spelling.push({ label: to, click: () => mainWindow.webContents.replaceMisspelling(to) })
+      }
+      if (!spelling.length) spelling.push({ label: 'No suggestions', enabled: false })
+      spelling.push({ type: 'separator' }, {
+        label: `Add “${word}” to Dictionary`,
+        click: () => mainWindow.webContents.session.addWordToSpellCheckerDictionary(word)
+      })
+    }
+    const edit = params.isEditable ? [{ role: 'cut' }, { role: 'copy' }, { role: 'paste' }] : []
+    const template = spelling.length && edit.length
+      ? [...spelling, { type: 'separator' }, ...edit]
+      : [...spelling, ...edit]
+    if (template.length) Menu.buildFromTemplate(template).popup()
+  })
 
   /* The fence a note's embeds attach behind. Registered here, per window, so
      that a window built by the Dock's `activate` gets one too — see the
@@ -1448,6 +1654,7 @@ function buildMenu () {
       label: 'File',
       submenu: [
         { label: 'New Note', accelerator: 'Cmd+N', click: () => send('menu', 'new-note') },
+        { label: 'New Whiteboard', click: () => send('menu', 'new-whiteboard') },
         { label: 'New Website', click: () => send('menu', 'new-website') },
         { label: 'New Language', click: () => send('menu', 'new-language') },
         { label: 'New Folder', accelerator: 'Cmd+Shift+N', click: () => send('menu', 'new-folder') },
@@ -1459,7 +1666,9 @@ function buildMenu () {
         { label: 'Reveal in Finder', click: () => send('menu', 'reveal') },
         { type: 'separator' },
         { label: 'Save', accelerator: 'Cmd+S', click: () => send('menu', 'save') },
-        { label: 'Export as PDF…', click: () => send('menu', 'export-pdf') }
+        { label: 'Export as PDF…', click: () => send('menu', 'export-pdf') },
+        { label: 'Export Whiteboard as PNG…', click: () => send('menu', 'export-whiteboard-png') },
+        { label: 'Export Whiteboard as SVG…', click: () => send('menu', 'export-whiteboard-svg') }
       ]
     },
     {
@@ -1653,7 +1862,7 @@ ipcMain.handle('file:info', async (_e, p) => {
     const abs = await realSafePath(p)
     const stat = await fs.stat(abs)
     const filesystemCreated = stat.birthtimeMs || 0
-    const created = MD_EXT.has(path.extname(abs).toLowerCase())
+    const created = (MD_EXT.has(path.extname(abs).toLowerCase()) || isTex(abs))
       ? trust?.creationTime(rel(abs), filesystemCreated) || filesystemCreated
       : filesystemCreated
     return {
@@ -1701,7 +1910,7 @@ ipcMain.handle('pdf:source', async (_e, p) => {
   return `tulip-file://vault/${rel(abs).split(path.sep).map(encodeURIComponent).join('/')}`
 })
 
-ipcMain.handle('file:write', async (_e, p, content) => {
+ipcMain.handle('file:write', async (_e, p, content, metadata = null) => {
   /* Fully resolved, exactly as `file:read` resolves it: content flows through
      the last component here, so a link standing where the note should be would
      put the note's text wherever it points. The two handlers agreeing also
@@ -1713,12 +1922,14 @@ ipcMain.handle('file:write', async (_e, p, content) => {
      autosave path — the one write that happens constantly and unattended — so
      it is the last one that should be able to leave a half-written note behind
      if the power goes. */
-  const isNote = MD_EXT.has(path.extname(abs).toLowerCase())
+  const isMarkdown = MD_EXT.has(path.extname(abs).toLowerCase())
+  const isTextDocument = isMarkdown || isTex(abs)
+  const whiteboard = isWhiteboard(abs)
   /* The note as it stood before this write, read first: the snapshot has to be
      the same text the write is about to replace, and reading after would hand
      the history store the text being written. Read even when the file is new,
      so the note's first save is recorded as the thing it replaced — nothing. */
-  const [before, oldStat] = isNote
+  const [before, oldStat] = isTextDocument
     ? await Promise.all([
         fs.readFile(abs, 'utf8').catch(() => null),
         fs.stat(abs).catch(() => null)
@@ -1734,7 +1945,7 @@ ipcMain.handle('file:write', async (_e, p, content) => {
   /* A copy of what the save replaced, so any version of the note can be put
      back from History. Only notes: the store is for writing, and a website
      file holds an address rather than prose. */
-  if (isNote && String(before ?? '') !== String(content)) {
+  if (isTextDocument && String(before ?? '') !== String(content)) {
     trust?.record({ source: 'save', changes: [{ path: rel(abs), before, after: String(content) }] })
   }
   /* The text is already here, so the next sync can skip re-reading it. Without
@@ -1744,7 +1955,8 @@ ipcMain.handle('file:write', async (_e, p, content) => {
      from, and a website file put into it would answer a search for the site's
      own name with a row that is not a note — until the next walk of the vault
      quietly dropped it again, which is the worse half of the bug. */
-  if (isNote) touchIndex(abs, content, stamp)
+  if (isMarkdown) touchIndex(abs, content, stamp)
+  if (whiteboard) touchWhiteboardIndex(abs, content, stamp, metadata?.whiteboardText)
   if (isLanguageTable(abs)) {
     await languageHistory.sync(rel(abs), content).catch((err) => {
       console.error('language history sync failed', err)
@@ -1768,6 +1980,23 @@ ipcMain.handle('file:create', async (_e, dir, name) => {
   return rel(target)
 })
 
+const EMPTY_TEX_DOCUMENT = `\\documentclass{article}
+
+\\begin{document}
+
+\\end{document}
+`
+
+ipcMain.handle('tex:create', async (_e, dir, name) => {
+  const target = freeName(await realSafePath(dir || ''), name || 'Untitled', TEX_EXT)
+  await fs.mkdir(path.dirname(target), { recursive: true })
+  noteSelfWrite(target)
+  await fs.writeFile(target, EMPTY_TEX_DOCUMENT, 'utf8')
+  trust?.creationTime(rel(target), Date.now())
+  invalidateVaultSnapshot()
+  return rel(target)
+})
+
 /* A website file, empty. Created without an address rather than asking for one
    first: the tab it opens into has an address bar, and typing into that is a
    better way to say where it points than a modal that has to be answered
@@ -1781,6 +2010,19 @@ ipcMain.handle('site:create', async (_e, dir, name) => {
   return rel(target)
 })
 
+ipcMain.handle('whiteboard:create', async (_e, dir, name) => {
+  const target = freeName(
+    await realSafePath(dir || ''),
+    name || 'Untitled',
+    WHITEBOARD_EXT
+  )
+  await fs.mkdir(path.dirname(target), { recursive: true })
+  noteSelfWrite(target)
+  await fs.writeFile(target, emptyWhiteboard(), 'utf8')
+  invalidateVaultSnapshot()
+  return rel(target)
+})
+
 /* A language is one portable Markdown table of words the reader has learned.
    Nothing else is created with it: an alphabet, a table of sounds or a page of
    grammar are all the reader's own content, and seeding them would be guessing
@@ -1790,7 +2032,7 @@ ipcMain.handle('language:create', async (_e, dir, name) => {
   noteSelfWrite(folder)
   await fs.mkdir(folder, { recursive: true })
 
-  const vocabulary = path.join(folder, `Vocabulary${LANGUAGE_TABLE_SUFFIX}`)
+  const vocabulary = path.join(folder, `Words${LANGUAGE_TABLE_SUFFIX}`)
   noteSelfWrite(vocabulary)
   await fs.writeFile(vocabulary, LANGUAGE_TABLE_TEMPLATE, 'utf8')
   trust?.creationTime(rel(vocabulary), Date.now())
@@ -1800,30 +2042,18 @@ ipcMain.handle('language:create', async (_e, dir, name) => {
   return { folder: rel(folder), vocabulary: rel(vocabulary) }
 })
 
-/* An ordinary note that starts as an empty Markdown table.
-   Deliberately a plain `.md` and not a `.language.md`: this is a table for
-   anything — the alphabet, a set of verb endings, a packing list — so it gets
-   the ordinary grid, where the header row is typed like any other cell and
-   columns can be added, removed and moved. A language deck's header is its
-   schema and locked for that reason, which is exactly what is not wanted here.
-
-   Three columns and three rows, and the same shape the editor's own "insert
-   table" makes, so a table created from the tree and one created inside a note
-   are the same thing. Every cell of it, the header included, is typed over. */
-const TABLE_TEMPLATE = [
-  '| Column 1 | Column 2 | Column 3 |',
-  '| --- | --- | --- |',
-  '| | | |',
-  '| | | |',
-  '| | | |',
-  ''
-].join('\n')
-
+/* A new table uses the same focused, table-only document and file icon as
+   Vocabulary, but starts neutral: editable COL1/COL2/COL3 headings and enough
+   blank rows for its row add/delete controls to be useful immediately. */
 ipcMain.handle('table:create', async (_e, dir, name) => {
-  const target = freeName(await realSafePath(dir || ''), name || 'Untitled', '.md')
+  const target = freeName(
+    await realSafePath(dir || ''),
+    name || 'Untitled',
+    LANGUAGE_TABLE_SUFFIX
+  )
   await fs.mkdir(path.dirname(target), { recursive: true })
   noteSelfWrite(target)
-  await fs.writeFile(target, TABLE_TEMPLATE, 'utf8')
+  await fs.writeFile(target, CUSTOM_TABLE_TEMPLATE, 'utf8')
   trust?.creationTime(rel(target), Date.now())
   indexDirty = true
   invalidateVaultSnapshot()
@@ -1839,18 +2069,19 @@ ipcMain.handle('folder:create', async (_e, dir, name) => {
 })
 
 /* Both of these answer with `{ path, links }` — where the thing ended up, and
-   how many *other* notes had to be edited to keep pointing at it. */
-
-ipcMain.handle('file:rename', async (_e, p, nextName) => {
+   how many *other* notes had to be edited to keep pointing at it. Copilot uses
+   this function too: its request must take the same route as a title or tree
+   rename so links, study state and history follow the file. */
+async function renameDocument (p, nextName) {
   const abs = await realSafeTargetPath(p)
   const language = isLanguageTable(abs)
   const ext = fsSync.statSync(abs).isDirectory()
     ? ''
-    : (language ? LANGUAGE_TABLE_SUFFIX : path.extname(abs))
+    : path.extname(abs)
   /* The extension is the file's, not the name's: the tree shows a document
      without one, so a name typed back with `.pdf` or `.md` on it would other-
      wise be filed as `Paper.pdf.pdf`. */
-  let clean = nextName.replace(/[/\\]/g, '-')
+  let clean = String(nextName || '').replace(/[/\\]/g, '-')
     .replace(NOTE_EXT, '')
     .replace(DOCUMENT_EXT, '')
   if (language) {
@@ -1880,7 +2111,9 @@ ipcMain.handle('file:rename', async (_e, p, nextName) => {
   indexDirty = true
   invalidateVaultSnapshot()
   return result
-})
+}
+
+ipcMain.handle('file:rename', (_e, p, nextName) => renameDocument(p, nextName))
 
 ipcMain.handle('file:move', async (_e, from, destDir) => {
   const src = await realSafeTargetPath(from)
@@ -1895,7 +2128,7 @@ ipcMain.handle('file:move', async (_e, from, destDir) => {
   }
   if (path.dirname(src) === dir) return { path: rel(src), links: 0 }
 
-  const ext = isLanguageTable(src) ? LANGUAGE_TABLE_SUFFIX : path.extname(src)
+  const ext = path.extname(src)
   const result = await relocate(src, freeName(dir, path.basename(src, ext), ext))
   indexDirty = true
   invalidateVaultSnapshot()
@@ -1904,9 +2137,11 @@ ipcMain.handle('file:move', async (_e, from, destDir) => {
 
 ipcMain.handle('file:delete', async (_e, p) => {
   const abs = await realSafeTargetPath(p)
+  const deletingDirectory = fsSync.statSync(abs).isDirectory()
   // Goes to the system Trash, not an unlink — deletes should be recoverable.
   noteSelfWrite(abs)
   await shell.trashItem(abs)
+  await forgetFileTags(rel(abs), deletingDirectory)
   trust?.forgetCreations(rel(abs))
   /* Attachment removal is followed immediately by a renderer refresh. The
      watcher invalidates these caches too, but only after its debounce; without
@@ -1941,8 +2176,24 @@ ipcMain.handle('file:delete', async (_e, p) => {
   return true
 })
 
+ipcMain.handle('file-tags:get', async (_e, p) => {
+  const abs = await realSafePath(p)
+  return cleanFileTags((await loadFileTags())[rel(abs)])
+})
+
+ipcMain.handle('file-tags:set', async (_e, p, values) => {
+  const abs = await realSafePath(p)
+  const key = rel(abs)
+  const next = cleanFileTags(values)
+  const tags = await loadFileTags()
+  if (next.length) tags[key] = next
+  else delete tags[key]
+  await saveFileTags()
+  return next
+})
+
 /**
- * Copies notes and PDFs dragged in from Finder into the vault.
+ * Copies notes, PDFs and whiteboards dragged in from Finder into the vault.
  *
  * Copies rather than moves: what was dropped is somebody else's file until the
  * user says otherwise, and a drag that silently emptied a Finder window would
@@ -1976,14 +2227,16 @@ ipcMain.handle('file:import', async (_e, destDir, sources) => {
       return
     }
 
-    /* Notes and PDFs, because those are the two things the vault opens. The
+    /* Notes, PDFs and whiteboards, because those are the portable documents
+       the vault can safely validate by extension. The
        filter is what stops a drag from being a way to read arbitrary files in. */
-    if (!MD_EXT.has(path.extname(source).toLowerCase()) && !isPdf(source)) { skipped++; return }
+    if (!MD_EXT.has(path.extname(source).toLowerCase()) && !isTex(source) &&
+        !isPdf(source) && !isWhiteboard(source)) { skipped++; return }
     const ext = path.extname(source)
     const target = freeName(dir, path.basename(source, ext), ext)
     noteSelfWrite(target)
     await fs.copyFile(source, target)
-    if (MD_EXT.has(path.extname(target).toLowerCase())) {
+    if (MD_EXT.has(path.extname(target).toLowerCase()) || isTex(target)) {
       trust?.creationTime(rel(target), Date.now())
     }
     imported++
@@ -2007,6 +2260,46 @@ ipcMain.handle('file:reveal', async (_e, p) => {
   shell.showItemInFolder(await realSafePath(p))
 })
 
+/* ----------------------------------------------------------- TeX preview */
+
+const TEX_PREVIEW_DIR = () => path.join(app.getPath('userData'), 'tex-preview')
+let texCompiler = null
+let texCompilerVault = ''
+
+ipcMain.handle('tex:compile', async (_e, p) => {
+  if (!vaultPath) return { ok: false, error: 'Open a vault first.' }
+  let abs
+  try { abs = await realSafePath(p) } catch (err) {
+    return { ok: false, error: err.message || 'That TeX file is not available.' }
+  }
+  if (!isTex(abs)) return { ok: false, error: 'Only TeX files can be compiled.' }
+
+  if (!texCompiler || texCompilerVault !== vaultPath) {
+    texCompiler?.stop()
+    texCompilerVault = vaultPath
+    texCompiler = createTexCompiler({
+      vault: vaultPath,
+      cacheRoot: TEX_PREVIEW_DIR(),
+      // Read per compile, not captured here: the compiler outlives a trip to
+      // the settings pane, and the engine chosen there has to take effect on
+      // the next compile rather than the next vault.
+      engine: () => readConfig().texEngine || 'pdflatex'
+    })
+  }
+  try {
+    const result = await texCompiler.compile(abs)
+    return {
+      ok: true,
+      url: `tulip-file://tex-preview/${result.artifact}?v=${Date.now()}`,
+      root: result.root,
+      compiler: result.compiler,
+      log: result.log
+    }
+  } catch (err) {
+    return { ok: false, error: err.message || 'LaTeX could not compile this document.', log: err.log || '' }
+  }
+})
+
 ipcMain.handle('shell:open', async (_e, url) => {
   if (/^(?:https?|mailto):/i.test(url)) await shell.openExternal(url)
 })
@@ -2019,6 +2312,23 @@ ipcMain.handle('shell:open', async (_e, url) => {
 ipcMain.handle('clipboard:write', (_e, text) => {
   clipboard.writeText(String(text ?? ''))
   return true
+})
+
+/* The words the spellchecker has been told to leave alone. They usually go in
+   from the context menu over a red underline (see the context-menu handler in
+   createWindow); Settings is where the list can be read, added to by hand, and
+   pruned — removing a word puts it back under the checker's eye. */
+ipcMain.handle('dictionary:words', async () => {
+  const words = await session.defaultSession.listWordsInSpellCheckerDictionary()
+  return words.sort((a, b) => a.localeCompare(b))
+})
+ipcMain.handle('dictionary:add', (_e, word) => {
+  const w = String(word ?? '').trim()
+  return w ? session.defaultSession.addWordToSpellCheckerDictionary(w) : false
+})
+ipcMain.handle('dictionary:remove', (_e, word) => {
+  const w = String(word ?? '').trim()
+  return w ? session.defaultSession.removeWordFromSpellCheckerDictionary(w) : false
 })
 
 /* ------------------------------------------------------------- searching
@@ -2169,7 +2479,10 @@ function passesFilters (key, entry, filters) {
     if (!filters.file.every((f) => named.includes(f))) return false
   }
   if (filters.tag.length) {
-    if (!filters.tag.every((t) => hasTag(entry.text, t))) return false
+    const assigned = entry.fileTags || []
+    if (!filters.tag.every((wanted) =>
+      assigned.some((tag) => tag === wanted || tag.startsWith(`${wanted}/`)) ||
+      hasTag(entry.text, wanted))) return false
   }
   if (filters.prop.length) {
     const props = entryProps(entry)
@@ -2200,12 +2513,16 @@ async function pdfMarksForSearch (pdfPath) {
  * keystroke path; the background PDF sweep is responsible for preparation. */
 async function searchPdfDocuments (q) {
   const { pdfs } = await getVaultSnapshot()
+  const assignedTags = await loadFileTags()
   const results = []
   const unsearchedPaths = []
 
   await Promise.all(pdfs.map(async (pdfPath) => {
     const name = path.basename(pdfPath)
-    const base = { name, text: '', kind: 'pdf', props: [] }
+    const base = {
+      name, text: '', kind: 'pdf', props: [],
+      fileTags: assignedTags[pdfPath] || []
+    }
     const wantsPdf = !q.filters.type.length || q.filters.type.includes('pdf')
     const wantsHighlights = !q.filters.type.length || q.filters.type.includes('highlight')
     const pathPasses = (kind) => passesFilters(pdfPath, { ...base, kind }, q.filters)
@@ -2384,6 +2701,7 @@ ipcMain.handle('search:vault', async (_e, raw, opts = {}) => {
   if (q.error) return { ...nothing, error: q.error }
   if (!q.usable) return nothing
   await ensureIndex()
+  const assignedTags = await loadFileTags()
 
   const results = []
 
@@ -2406,12 +2724,18 @@ ipcMain.handle('search:vault', async (_e, raw, opts = {}) => {
   const looking = narrowed
     ? lastSearch.keys.map((key) => [key, index.get(key)]).filter(([, entry]) => entry)
     : index
+  const whiteboardsLooking = narrowed
+    ? (lastSearch.whiteboardKeys || [])
+        .map((key) => [key, whiteboardIndex.get(key)]).filter(([, entry]) => entry)
+    : whiteboardIndex
 
   // What this answer will be narrowed from next, gathered as it is built.
   const keys = []
+  const whiteboardKeys = []
 
   for (const [key, entry] of looking) {
     entry.kind = 'note'
+    entry.fileTags = assignedTags[key] || []
     if (!narrowed && !passesFilters(key, entry, q.filters)) continue
 
     /* A filter on its own is a query: `tag:book` asks for the notes carrying
@@ -2448,6 +2772,37 @@ ipcMain.handle('search:vault', async (_e, raw, opts = {}) => {
     results.push({ path: key, name: entry.name, kind: 'note', hits, total: found.total, score })
   }
 
+  /* Whiteboards are indexed from text elements only. Their JSON may contain
+     megabytes of pasted-image data, which is neither useful search text nor a
+     string the search path should scan on every keystroke. */
+  for (const [key, entry] of whiteboardsLooking) {
+    entry.fileTags = assignedTags[key] || []
+    if (!narrowed && !passesFilters(key, entry, q.filters)) continue
+    if (!q.terms.length) {
+      whiteboardKeys.push(key)
+      results.push({
+        path: key, name: entry.name, kind: 'whiteboard',
+        hits: hitLines(entry.text, [0], 1), total: 0, score: 0
+      })
+      continue
+    }
+    if (entry.size > MAX_WHITEBOARD_INDEX_BYTES) {
+      unsearched++
+      if (unsearchedPaths.length < 20) unsearchedPaths.push(key)
+      whiteboardKeys.push(key)
+      continue
+    }
+    const found = findSpots(entry.text, q.terms)
+    if (!found) continue
+    const hits = hitLines(entry.text, found.spots)
+    const named = q.terms.filter((term) => term.has.test(entry.name)).length
+    whiteboardKeys.push(key)
+    results.push({
+      path: key, name: entry.name, kind: 'whiteboard', hits,
+      total: found.total, score: found.total + named * 8
+    })
+  }
+
   const pdfAnswer = await searchPdfDocuments(q)
   results.push(...pdfAnswer.results)
   for (const pdfPath of pdfAnswer.unsearchedPaths) {
@@ -2455,12 +2810,38 @@ ipcMain.handle('search:vault', async (_e, raw, opts = {}) => {
     if (unsearchedPaths.length < 20) unsearchedPaths.push(pdfPath)
   }
 
+  /* Assigned file tags are metadata, so they also make non-Markdown documents
+     (TeX and websites) searchable without putting syntax into their content.
+     A plain tag name is accepted as well as `tag:name`: tagging a file should
+     make finding it require no special grammar. */
+  const already = new Set(results.map((result) => result.path))
+  for (const [taggedPath, tags] of Object.entries(assignedTags)) {
+    if (already.has(taggedPath)) continue
+    const normalized = cleanFileTags(tags)
+    if (q.filters.tag.length && !q.filters.tag.every((wanted) =>
+      normalized.some((tag) => tag === wanted || tag.startsWith(`${wanted}/`)))) continue
+    if (q.filters.path.length && !q.filters.path.every((part) => taggedPath.toLowerCase().includes(part))) continue
+    const name = path.basename(taggedPath, path.extname(taggedPath))
+    if (q.filters.file.length && !q.filters.file.every((part) => name.toLowerCase().includes(part))) continue
+    if (q.filters.type.length) continue
+    const label = normalized.join(' ')
+    if (q.terms.length && !q.terms.every((term) => term.has.test(label))) continue
+    if (!q.terms.length && !q.filters.tag.length) continue
+    const kind = isPdf(taggedPath) ? 'pdf' : isWhiteboard(taggedPath) ? 'whiteboard' : 'note'
+    results.push({
+      path: taggedPath, name, kind,
+      hits: [{ line: 1, col: 0, page: 1, text: normalized.map((tag) => `#${tag}`).join(' ') }],
+      total: 0, score: 12
+    })
+  }
+
   lastSearch = {
     generation: indexGeneration,
     words: q.words,
     filters: q.filters,
     opts: { regex: !!opts.regex, word: !!opts.word, caseSensitive: !!opts.caseSensitive },
-    keys
+    keys,
+    whiteboardKeys
   }
 
   /* Sorted before the cap, not after. Ranking the first 200 notes the index
@@ -2493,9 +2874,13 @@ ipcMain.handle('tags:vault', async () => {
   await ensureIndex()
 
   const counts = new Map()
-  for (const entry of index.values()) {
+  const assigned = await loadFileTags()
+  for (const tags of Object.values(assigned)) {
+    for (const tag of cleanFileTags(tags)) counts.set(tag, (counts.get(tag) || 0) + 1)
+  }
+  for (const [key, entry] of index) {
     if (!entry.text) continue
-    const seenHere = new Set()
+    const seenHere = new Set(cleanFileTags(assigned[key]))
     HASHTAG.lastIndex = 0
     for (let m = HASHTAG.exec(entry.text); m; m = HASHTAG.exec(entry.text)) {
       const tag = m[2].toLowerCase()
@@ -3050,17 +3435,43 @@ ipcMain.handle('pdf:export', async (_e, name, to) => {
   }
 })
 
+/* A rendered whiteboard leaves the canvas as PNG or SVG bytes. The renderer
+   owns rendering because that is where Excalidraw and its fonts live; main
+   owns the native destination picker and the filesystem write. */
+ipcMain.handle('whiteboard:export', async (_e, name, ext, bytes, to) => {
+  const suffix = ext === 'svg' ? 'svg' : 'png'
+  const safe = String(name || 'whiteboard')
+    .replace(/[\\/:*?"<>|]/g, '-').trim().slice(0, 120) || 'whiteboard'
+  let filePath = typeof to === 'string' && to.toLowerCase().endsWith(`.${suffix}`)
+    ? to
+    : null
+  if (!filePath) {
+    const chosen = await dialog.showSaveDialog(mainWindow, {
+      title: `Export whiteboard as ${suffix.toUpperCase()}`,
+      defaultPath: path.join(app.getPath('documents'), `${safe}.${suffix}`),
+      filters: [{ name: suffix.toUpperCase(), extensions: [suffix] }]
+    })
+    if (chosen.canceled || !chosen.filePath) return { ok: false, canceled: true }
+    filePath = chosen.filePath
+  }
+  try {
+    await fs.writeFile(filePath, Buffer.from(bytes))
+    return { ok: true, path: filePath, bytes: bytes?.length || 0 }
+  } catch (err) {
+    return { ok: false, error: err.message }
+  }
+})
+
 /* ---------------------------------------------------------- pdf text
 
    A PDF's words, in a file beside its highlights: `Papers/thesis.pdf` reads out
    into `.annotations/Papers/thesis.pdf.txt`, one marked section per page.
 
-   For the copilot. Of the three CLIs it can be, only Claude's own tool hands
-   a PDF to the model as a document — codex and opencode read files as text and
-   answer "I can't read PDFs directly", which is the same paper being readable
-   or not depending on a dropdown. Extracting it once here makes the answer the
-   same for all three, and cheaper for the one that could already do it: text is
-   a fraction of the tokens the pages cost as images.
+   For the copilot. None of the CLIs it can be reads a PDF as a document — they
+   read files as text and answer "I can't read PDFs directly", which is a paper
+   left unreadable for want of a step nobody can take from the chat. Extracting
+   it once here makes the answer the same for all of them, and cheaper than the
+   pages would be as images either way.
 
    Written rather than made on demand because the agent has no way to ask for
    it — it gets a directory and its own tools, and a file either is there when
@@ -3256,7 +3667,18 @@ async function pdfPagesOf (sidecar) {
  */
 function ensurePdfText (relPath, { onWork } = {}) {
   if (!isPdf(relPath)) return Promise.resolve({ ok: false, error: 'Only PDFs can be prepared.' })
-  const running = pdfTextQueued.get(relPath)
+  /* Turned off in settings (PDF › Read PDFs out for the copilot), which is a
+     decision about what may be written into the vault — so it is answered here,
+     where the writing is asked for, rather than at each of the five call sites
+     that ask. What is already extracted stays; this only stops more. */
+  if (readConfig().pdfText === false) {
+    return Promise.resolve({ ok: false, error: 'Reading PDFs out is turned off in settings.' })
+  }
+  /* Relative paths are meaningful only inside the current vault. Including the
+     root prevents a queued extraction from one vault being joined by a same-
+     named PDF after the user switches folders. */
+  const queueKey = `${vaultPath || ''}\0${relPath}`
+  const running = pdfTextQueued.get(queueKey)
   if (running) {
     if (onWork) {
       running.urgent = true
@@ -3320,10 +3742,10 @@ function ensurePdfText (relPath, { onWork } = {}) {
     return done
   }
 
-  pdfTextQueued.set(relPath, record)
+  pdfTextQueued.set(queueKey, record)
   pdfTextWaiting.push(record)
   record.job.finally(() => {
-    if (pdfTextQueued.get(relPath) === record) pdfTextQueued.delete(relPath)
+    if (pdfTextQueued.get(queueKey) === record) pdfTextQueued.delete(queueKey)
   }).catch(() => {})
   pumpPdfText()
 
@@ -3331,12 +3753,10 @@ function ensurePdfText (relPath, { onWork } = {}) {
 }
 
 /**
- * Every PDF in the vault, read out if it has not been already.
- *
- * On open and after every change, because the copilot may be asked about a
- * document the reader has never opened — a paper dropped into the folder this
- * morning is a fair question to ask about this afternoon. The walk costs a stat
- * per PDF; only a document without a current sidecar costs anything more.
+ * Refresh every PDF after a broad filesystem event. Ordinary startup and
+ * opening a PDF stay on-demand: the copilot prepares the document it actually
+ * needs, while a directory rename or watcher event still has a conservative
+ * way to refresh all sidecars.
  */
 async function sweepPdfText () {
   if (!vaultPath) return
@@ -3355,7 +3775,7 @@ function turnPdfs (context) {
   return [...new Set(paths)]
 }
 
-async function preparePdfTurn (question, context) {
+async function preparePdfTurn (question, context, turnId = null) {
   const paths = turnPdfs(context)
   if (!paths.length) return { context: context || null, failures: [] }
 
@@ -3366,7 +3786,7 @@ async function preparePdfTurn (question, context) {
   const onWork = () => {
     if (announced) return
     announced = true
-    send('ai:event', { k: 'preparing-pdf' })
+    send('ai:event', { k: 'preparing-pdf', turnId })
   }
 
   const prepared = await Promise.all(paths.map(async (pdfPath) => {
@@ -4391,19 +4811,65 @@ ipcMain.handle('tikz:render', async (_e, noteName, code) => {
    deltas are joined and sent on a short timer. Anything that is not prose
    flushes what is held first, so nothing is ever reordered around it. */
 let aiText = ''
+let aiTextTurn = ''
 let aiTimer = null
-let aiBaseline = null
 
-async function finishAiHistory () {
-  if (!aiBaseline) return null
-  const before = aiBaseline
-  aiBaseline = null
+const aiTurns = new TurnLedger({
+  snapshot: snapshotNotes,
+  complete: (before, after) => {
+    const changes = changedNotes(before, after)
+    return trust?.record({ source: 'copilot', changes }) || null
+  }
+})
+const aiReviewsSent = new Set()
+let aiRenameWork = Promise.resolve()
+
+/** Consume the provider-neutral rename request written by Copilot. */
+async function consumeAiRename (event) {
+  let requestFile
+  try {
+    requestFile = await realSafePath(AI_RENAME_REQUEST)
+    const request = parseAiRenameRequest(await fs.readFile(requestFile, 'utf8'))
+    const source = await realSafeTargetPath(request.path)
+    const stat = await fs.stat(source)
+    if (!stat.isFile() || !(MD_EXT.has(path.extname(source).toLowerCase()) ||
+        isTex(source) || isPdf(source) || isSite(source) || isWhiteboard(source))) {
+      throw new Error('Copilot can rename Tulip documents, not folders or app state.')
+    }
+    const result = await renameDocument(request.path, request.name)
+    send('ai:event', {
+      k: 'renamed', id: event.id, name: 'Rename', from: request.path,
+      ...result, turnId: event.turnId
+    })
+  } catch (err) {
+    send('ai:event', {
+      k: 'rename-failed',
+      message: err?.message || 'The Copilot rename could not be completed.',
+      turnId: event.turnId
+    })
+  } finally {
+    if (requestFile) {
+      noteSelfWrite(requestFile)
+      await fs.unlink(requestFile).catch(() => {})
+    }
+  }
+}
+
+function sendAiReview (id, operation) {
+  if (!operation || aiReviewsSent.has(id)) return
+  aiReviewsSent.add(id)
+  send('ai:event', { k: 'review', operation, turnId: id })
+  /* Duplicate terminal signals are intentionally coalesced, but the ids only
+     need to outlive their queued IPC events. Do not retain every turn for the
+     lifetime of a long-running app. */
+  setTimeout(() => aiReviewsSent.delete(id), 60000).unref?.()
+}
+
+async function finishAiHistory (id) {
+  if (!turnId(id)) return null
   indexDirty = true
   invalidateVaultSnapshot()
-  const after = await snapshotNotes()
-  const changes = changedNotes(before, after)
-  const operation = trust?.record({ source: 'copilot', changes }) || null
-  return operation
+  return aiTurns.finish(id)
 }
 
 function flushAiText () {
@@ -4411,22 +4877,44 @@ function flushAiText () {
   aiTimer = null
   if (!aiText) return
   const text = aiText
+  const id = aiTextTurn
   aiText = ''
-  send('ai:event', { k: 'text', text })
+  aiTextTurn = ''
+  send('ai:event', { k: 'text', text, turnId: id })
 }
 
 ai.attach(
   (event) => {
+    /* The hidden request is an implementation detail, not a note the reader
+       edited. Suppress its tool/draft rows; once its Write succeeds, replace
+       them with the real Tulip rename operation. */
+    if (isAiRenameRequest(event?.path)) {
+      if (event?.k === 'edited') {
+        aiRenameWork = aiRenameWork.then(() => consumeAiRename(event)).catch(() => {})
+      } else if (event?.k === 'tool-done' && event.error) {
+        send('ai:event', {
+          k: 'rename-failed', message: 'The Copilot could not write its rename request.',
+          turnId: event.turnId
+        })
+      }
+      return
+    }
     if (event?.k === 'text') {
+      if (aiText && aiTextTurn !== event.turnId) flushAiText()
+      aiTextTurn = turnId(event.turnId)
       aiText += event.text || ''
       if (!aiTimer) aiTimer = setTimeout(flushAiText, 32)
       return
     }
     flushAiText()
-    if (event?.k === 'turn-end') {
-      finishAiHistory()
+    if (event?.k === 'turn-end' || event?.k === 'error') {
+      const id = turnId(event.turnId)
+      /* A provider reports its Write before the request has crossed main's
+         rename path. Wait for that small operation or the after-snapshot can
+         race it and produce no review card. */
+      aiRenameWork.then(() => finishAiHistory(id))
         .then((operation) => {
-          if (operation) send('ai:event', { k: 'review', operation })
+          sendAiReview(id, operation)
           send('ai:event', event)
         })
         .catch(() => send('ai:event', event))
@@ -4439,22 +4927,27 @@ ai.attach(
 
 ipcMain.handle('ai:start', (_e, opts) => {
   ai.setVault(vaultPath)
-  return ai.start(opts || {})
+  const id = turnId(opts?.turnId)
+  if (!id) return { ok: false, error: 'The Copilot turn could not be identified.' }
+  return ai.start({ ...(opts || {}), turnId: id })
 })
 ipcMain.handle('ai:models', (_e, opts) => ai.models({ fresh: !!opts?.fresh }))
-ipcMain.handle('ai:send', async (_e, text, context) => {
+ipcMain.handle('ai:doctor', () => ai.doctor())
+ipcMain.handle('ai:send', async (_e, text, context, requestedTurnId) => {
   ai.setVault(vaultPath)
+  const id = turnId(requestedTurnId)
+  if (!id) return { ok: false, error: 'The Copilot turn could not be identified.' }
   const words = String(text || '')
-  const prepared = await preparePdfTurn(words, context || null)
+  const prepared = await preparePdfTurn(words, context || null, id)
   if (prepared.failures.length) {
     const names = prepared.failures.map((failure) => failure.path).join(', ')
     return { ok: false, error: `Tulip could not prepare ${names} for the copilot.` }
   }
-  aiBaseline = await snapshotNotes()
-  const result = await ai.send(words, prepared.context)
+  await aiTurns.begin(id)
+  const result = await ai.send(words, prepared.context, id)
   if (!result?.ok) {
-    const operation = await finishAiHistory().catch(() => null)
-    if (operation) send('ai:event', { k: 'review', operation })
+    const operation = await finishAiHistory(id).catch(() => null)
+    sendAiReview(id, operation)
   }
   return result
 })
@@ -4488,10 +4981,11 @@ ipcMain.handle('ai:announce', (_e, info) => {
   return { ok: true }
 })
 
-ipcMain.handle('ai:stop', async () => {
+ipcMain.handle('ai:stop', async (_e, requestedTurnId) => {
+  const id = turnId(requestedTurnId)
   const stopped = ai.stop()
-  const operation = await finishAiHistory().catch(() => null)
-  if (operation) send('ai:event', { k: 'review', operation })
+  const operation = await finishAiHistory(id).catch(() => null)
+  sendAiReview(id, operation)
   return stopped
 })
 
@@ -4507,13 +5001,36 @@ ipcMain.handle('trust:restore', async (_e, id, onlyPath = null) => {
   )
   if (!selected.length) throw new Error('That file is not in this history entry.')
 
+  /* Preflight every target before changing any of them. Reject is safe while
+     the files still equal what Copilot left behind; after a user or sync edit,
+     writing the older snapshots back would erase that newer work. All-or-none
+     also avoids half-rejecting a multi-file turn before discovering a conflict
+     in the last file. */
+  const currentByPath = new Map()
+  for (const change of selected) {
+    const abs = safeTargetPath(change.path)
+    await assertReal(abs)
+    try {
+      currentByPath.set(change.path, await fs.readFile(abs, 'utf8'))
+    } catch (err) {
+      if (err?.code !== 'ENOENT') throw err
+      currentByPath.set(change.path, null)
+    }
+  }
+  const conflicts = restoreConflicts({ ...operation, changes: selected }, currentByPath)
+  if (conflicts.length) {
+    const names = conflicts.slice(0, 3).join(', ')
+    const more = conflicts.length > 3 ? ` and ${conflicts.length - 3} more` : ''
+    throw new Error(`Could not reject this turn because ${names}${more} changed afterwards. Your newer edits were left untouched.`)
+  }
+
   const inverse = []
   for (const change of selected) {
     /* Both halves of the guard: a recorded change is never the vault itself,
        and restoring one writes content through the last component. */
     const abs = safeTargetPath(change.path)
     await assertReal(abs)
-    const current = await fs.readFile(abs, 'utf8').catch(() => null)
+    const current = currentByPath.get(change.path)
     inverse.push({ path: change.path, before: current, after: change.before })
     if (change.before == null) {
       if (fsSync.existsSync(abs)) {
@@ -4792,7 +5309,6 @@ ipcMain.handle('config:set', (_e, patch) => {
 })
 
 ipcMain.handle('durability:flush', () => flushPendingDurability())
-ipcMain.handle('theme:system', () => (nativeTheme.shouldUseDarkColors ? 'dark' : 'light'))
 
 /* ----------------------------------------------------------- lifecycle */
 
@@ -5063,14 +5579,6 @@ app.whenReady().then(async () => {
   sweepTemporaryFiles(path.join(app.getPath('userData'), 'trust'), { suffix: '.tmp' })
     .catch(() => {})
 
-  /* Once for the app, not once per window. On macOS closing the last window
-     does not quit, and reopening from the Dock builds another — so registering
-     this inside createWindow left a listener behind on every cycle, each one
-     sending the same message to the same window. */
-  nativeTheme.on('updated', () => {
-    send('theme:system', nativeTheme.shouldUseDarkColors ? 'dark' : 'light')
-  })
-
   /**
    * The terms every vault file is served on, set in one place because there
    * are two replies — the whole file, and a range of it — and a policy written
@@ -5111,7 +5619,17 @@ app.whenReady().then(async () => {
        fails, and the document renders forever. */
     let abs
     try {
-      abs = url.host === 'app' ? appAsset(wanted) : await realSafePath(wanted)
+      if (url.host === 'app') {
+        abs = appAsset(wanted)
+      } else if (url.host === 'tex-preview') {
+        const root = await fs.realpath(TEX_PREVIEW_DIR())
+        const candidate = path.resolve(root, wanted)
+        if (candidate !== root && !candidate.startsWith(root + path.sep)) throw new Error('outside preview cache')
+        abs = await fs.realpath(candidate)
+        if (abs !== root && !abs.startsWith(root + path.sep)) throw new Error('outside preview cache')
+      } else {
+        abs = await realSafePath(wanted)
+      }
     } catch {
       return new Response('Forbidden', { status: 403 })
     }
@@ -5174,19 +5692,19 @@ app.whenReady().then(async () => {
   readLoginPath().then((value) => { loginPath = value }).catch(() => {})
   pruneRunCache().catch(() => {})
 
-  buildMenu()
-  createWindow()
-  guardGuests()
-
   const cfg = readConfig()
-  /* `vaultPath` was the persisted home before default vaults had their own
-     name. Prefer the explicit setting, and promote an existing old config on
-     its first launch after the upgrade. */
-  const savedVault = cfg.defaultVaultPath || cfg.vaultPath
+  /* One vault, under one key: the folder last connected is the folder Tulip
+     opens. `defaultVaultPath` was a second name for it while the settings pane
+     offered a separately chosen default; a config still carrying that key is
+     promoted once, here, and the key retired. This must happen before
+     createWindow: the renderer asks for the current vault as soon as it loads,
+     and a window created first can briefly receive `null` and paint the
+     landing page over a vault that is in fact open. */
+  const savedVault = cfg.vaultPath || cfg.defaultVaultPath
   if (savedVault && fsSync.existsSync(savedVault)) {
     vaultPath = savedVault
-    if (cfg.defaultVaultPath !== savedVault) {
-      writeConfig({ defaultVaultPath: savedVault, vaultPath: savedVault })
+    if (cfg.vaultPath !== savedVault || cfg.defaultVaultPath !== undefined) {
+      writeConfig({ vaultPath: savedVault, defaultVaultPath: undefined })
     }
     trust.setVault(vaultPath, cfg.historyInVault === true)
     /* The same tidy-up `openVault` does, for the vault that is simply still
@@ -5194,10 +5712,12 @@ app.whenReady().then(async () => {
        so the path the migration actually runs on. */
     migrateAttachments(vaultPath).catch(() => {})
     watchVault()
-    ensureIndex().catch(() => {})
-    sweepPdfText().catch(() => {})
-    mainWindow.setTitle(path.basename(vaultPath))
   }
+
+  buildMenu()
+  createWindow()
+  guardGuests()
+  if (vaultPath) mainWindow.setTitle(path.basename(vaultPath))
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

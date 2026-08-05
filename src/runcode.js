@@ -10,7 +10,8 @@
    printed the last time you ran it.
    ================================================================== */
 
-import { el, renderedBlock, svgIcon } from './blocks.js'
+import { renderedBlock } from './blocks.js'
+import { el, svgIcon } from './dom.js'
 import { runners as RUNNERS } from '../electron/runnable-languages.json'
 
 const api = window.tulip

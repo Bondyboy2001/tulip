@@ -12,7 +12,7 @@
 
 import MarkdownIt from 'markdown-it'
 import footnotePlugin from 'markdown-it-footnote'
-import { escapeHtml } from './blocks.js'
+import { escapeHtml } from './dom.js'
 import { mathPlugin } from './math.js'
 import { moneyPlugin } from './money.js'
 import { citationPlugin } from './citations.js'
@@ -203,6 +203,47 @@ export function createMarkdown ({ resolveEmbedSrc }) {
     }
   })
 
+  /* CSS counters are attractive here, but style containment makes their value
+     depend on which part of a long reading page has been laid out. Give each
+     ordered item the number it already has in the Markdown token stream instead.
+     The small continuation case below mirrors the renderer's old counter-reset
+     workaround for a list resumed after a fenced block. */
+  md.core.ruler.after('task_lists', 'ordered_list_numbers', (mdState) => {
+    const tokens = mdState.tokens
+    const lists = []
+
+    const startFor = (index) => {
+      const token = tokens[index]
+      let start = Number(token.attrGet('start')) || 1
+      if (start !== 1 || tokens[index - 1]?.type !== 'fence') return start
+
+      const close = index - 2
+      if (tokens[close]?.type !== 'ordered_list_close') return start
+      let open = close - 1
+      while (open >= 0 && tokens[open].type !== 'ordered_list_open') open--
+      if (open < 0) return start
+
+      const level = tokens[open].level + 1
+      const count = tokens.slice(open + 1, close)
+        .filter((item) => item.type === 'list_item_open' && item.level === level).length
+      return count > 0 ? count + 1 : start
+    }
+
+    for (let i = 0; i < tokens.length; i++) {
+      const token = tokens[i]
+      if (token.type === 'ordered_list_open' || token.type === 'bullet_list_open') {
+        lists.push({ ordered: token.type === 'ordered_list_open', next: startFor(i) })
+      } else if (token.type === 'ordered_list_close' || token.type === 'bullet_list_close') {
+        lists.pop()
+      } else if (token.type === 'list_item_open') {
+        const list = lists.at(-1)
+        if (list?.ordered) {
+          token.meta = { ...token.meta, orderedNumber: list.next++ }
+        }
+      }
+    }
+  })
+
   /* Every block carries the line of the file it started on. Switching views has
      to land you in the same place in the note, and a pixel offset cannot say
      where that is — the two views are different scroll containers laying the
@@ -212,7 +253,16 @@ export function createMarkdown ({ resolveEmbedSrc }) {
   md.renderer.renderToken = (tokens, i, options) => {
     const token = tokens[i]
     if (token.map && token.nesting !== -1) token.attrSet('data-line', String(token.map[0]))
+    if (token.type === 'ordered_list_open') token.attrJoin('class', 'tk-ordered-list')
     return renderToken(tokens, i, options)
+  }
+
+  md.renderer.rules.list_item_open = (tokens, i, options) => {
+    const token = tokens[i]
+    const opening = md.renderer.renderToken(tokens, i, options)
+    const number = token.meta?.orderedNumber
+    if (number === undefined) return opening
+    return `${opening}<span class="tk-olnum" aria-hidden="true">${number}</span>`
   }
 
   md.renderer.rules.taskbox = (tokens, i) => {

@@ -6,7 +6,7 @@
    the note cannot be written at all.
    ================================================================== */
 
-import { el as element } from './blocks.js'
+import { el as element } from './dom.js'
 import { resolveMerge } from './merge.js'
 import { noteName } from './vault-paths.js'
 
