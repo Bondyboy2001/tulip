@@ -4,7 +4,6 @@ import { createMarkdown } from './markdown.js'
 import { mountPanels } from './panels.js'
 import { mountTexSplit } from './tex-split.js'
 import { mountAsk } from './ask.js'
-import { createEditor, openSearchPanel } from './editor.js'
 import { languageChip } from './languages.js'
 import {
   NOTE_EXT, TEX_EXT, PDF_EXT, SITE_EXT, WHITEBOARD_EXT,
@@ -40,7 +39,7 @@ import { htmlFence, isHtmlRun } from './htmlrun.js'
 import { isThree, threeFence } from './threejs.js'
 import { attachManim, isManim } from './manim.js'
 import { attachTikz, isTikz } from './tikz.js'
-import { attachMermaid, isMermaid, refreshDiagrams } from './mermaid.js'
+import { attachMermaid, isMermaid } from './mermaid.js'
 import { attachSvg, isSvg } from './svg.js'
 import {
   headings, headingsFor, splitAnchor, findHeading, findBlock, installHeadingFolds
@@ -353,7 +352,7 @@ const md = createMarkdown({
 
 /* ---------------------------------------------------------------- editor */
 
-const editor = createEditor({
+const editorDeps = {
   parent: el.editorHost,
   onChange: () => {
     // An edit the copilot made is already on disk — the buffer is catching
@@ -415,7 +414,105 @@ const editor = createEditor({
       .filter((f) => NOTE_EXT.test(f.path))
       .map((f) => ({ label: f.name, name: f.name }))
   ]
-})
+}
+
+/* ------------------------------------------------------ editor, on demand
+
+   CodeMirror and its grammars are half of everything the renderer compiles
+   before it can draw — around 570KB of real code, which is parsed and compiled
+   on every launch because Chromium keeps no code cache for a file:// page. A
+   note is *read* far more often than it is edited, and reading needs
+   markdown-it, not an editor. So the editing stack is fetched the first time
+   something needs to edit, and the app opens into the reading view.
+
+   Everything that used to say `editor` still does. What changed is that it
+   starts as null, so the rule is:
+
+   - code that only runs with the editing view up may use `editor` directly;
+     the view cannot be up without it.
+   - anything reachable from the reading view either awaits `ensureEditor()`
+     (a deliberate action — switching view, opening find, editing a table) or
+     reads the note through `noteText()`, which answers from the buffer below
+     until there is an editor to ask.
+
+   The buffer is the second half of that. A note is opened by `openNote`
+   whether or not an editor exists, so the text has to live somewhere the
+   reading view can reach — and when the editor does arrive it is handed the
+   note, the source mode and the raw flag it missed. */
+let editor = null
+let editorArriving = null
+let openSearchPanel = null
+
+/* What the editor would be showing, for as long as there is no editor. Kept in
+   step by `openNote` and the patch paths, and handed over on arrival. */
+const buffer = { text: '', source: 'markdown', raw: false }
+
+/** The note as text, from the editor when there is one and the buffer when not. */
+function noteText () {
+  return editor ? docText(editor.state.doc) : buffer.text
+}
+
+/**
+ * Replace the note's text with a version that arrived from outside — a sync
+ * client rewriting the file, or the copilot editing it — and say whether it
+ * actually changed anything.
+ *
+ * A note can be read while it is being rewritten, and reading does not build an
+ * editor, so there is not always one to patch. The buffer takes the text
+ * instead and hands it over when the editor arrives.
+ */
+function setDocEmpty () {
+  buffer.text = ''
+  editor?.setDoc('')
+}
+
+function patchDoc (text) {
+  if (editor) return editor.patch(text)
+  if (buffer.text === text) return false
+  buffer.text = text
+  return true
+}
+
+/** The equations of the note on screen, by the cheapest route available. */
+function noteEquations () {
+  return editor ? equationsFor(editor.state.doc) : equationIndex(buffer.text)
+}
+
+/**
+ * Build the editor, once.
+ *
+ * Awaited by every deliberate act that needs one. Boot also starts it as soon
+ * as the first note is on screen, so by the time anybody reaches for it the
+ * work is usually already done and this resolves on the spot.
+ */
+function ensureEditor () {
+  if (editor) return Promise.resolve(editor)
+  editorArriving ||= import('./editor.js').then((mod) => {
+    openSearchPanel = mod.openSearchPanel
+    const built = mod.createEditor(editorDeps)
+    editor = built
+    /* Everything it missed while it did not exist. The order matches
+       `openNote`: the source mode decides how the text is parsed, so it is
+       set before the text. */
+    built.setSourceMode(buffer.source)
+    built.setDoc(buffer.text)
+    built.setRaw(buffer.raw)
+    watchLanguageHistoryFocus()
+    watchEditorScroll()
+    /* Every setting the editor is normally told about at boot — spellcheck,
+       line numbers, readable width — was told to nobody. Re-applied here, so a
+       lazily built editor is dressed exactly like an eager one. */
+    applySettings(state.cfg)
+    /* The note may be a language table whose dates were asked for while there
+       was no widget to put them on. */
+    if (state.current?.path && isLanguageTablePath(state.current.path)) {
+      refreshLanguageHistory(state.current.path).catch(() => {})
+    }
+    return built
+  })
+  return editorArriving
+}
+
 
 /* ----------------------------------------------------- language timestamps
 
@@ -435,6 +532,10 @@ function languageHistoryLabel ({ addedAt, editedAt }) {
 }
 
 function paintLanguageHistory (rows) {
+  /* The dates are painted onto the editing view's table widget. Reading a
+     language note builds no editor and no widget, so there is nothing to
+     decorate — and the rows are re-asked for when one is built. */
+  if (!editor) return
   for (const cell of editor.dom.querySelectorAll('[data-language-history]')) {
     delete cell.dataset.languageHistory
     cell.removeAttribute('title')
@@ -463,10 +564,14 @@ async function refreshLanguageHistory (path = state.current?.path) {
   paintLanguageHistory(rows)
 }
 
-editor.dom.addEventListener('focusin', (event) => {
-  const cell = event.target.closest?.('[data-language-history]')
-  if (cell?.dataset.languageHistory) setStatusRight(cell.dataset.languageHistory)
-})
+/* Attached when the editor is built rather than at load — see ensureEditor.
+   There is no `editor.dom` to listen to until then. */
+function watchLanguageHistoryFocus () {
+  editor.dom.addEventListener('focusin', (event) => {
+    const cell = event.target.closest?.('[data-language-history]')
+    if (cell?.dataset.languageHistory) setStatusRight(cell.dataset.languageHistory)
+  })
+}
 
 /* ------------------------------------------------------------------- pdf */
 
@@ -906,7 +1011,7 @@ function lintBuffer () {
     (edit) => !selection.ranges.some((range) => edit.from <= range.to && edit.to >= range.from))
   if (!changes.length) return
 
-  editor.dispatch({ changes, userEvent: 'input.lint' })
+  editor?.dispatch({ changes, userEvent: 'input.lint' })
 }
 
 async function saveNow () {
@@ -977,7 +1082,7 @@ function lintFile () {
   if (!state.current || viewingTex() || viewingPdf() || viewingSite() || viewingWhiteboard()) return
   const changes = lintEdits(editor.state.doc.toString())
   if (!changes.length) { setStatusRight('Already tidy'); return }
-  editor.dispatch({ changes, userEvent: 'input.lint' })
+  editor?.dispatch({ changes, userEvent: 'input.lint' })
   saveNow()
 }
 
@@ -1045,7 +1150,7 @@ async function loadTree () {
     /* A note created or renamed may have turned a missing `![[Note]]` into a
        transclusion, or the reverse — the note resolver just changed its
        answer. The same move applyAssets makes when an attachment lands. */
-    editor.refresh()
+    editor?.refresh()
     if (reading()) rerenderReading()
   }
 
@@ -1072,7 +1177,7 @@ function applyAssets (next, revision) {
   state.resolveAsset = assetIndex(next)
 
   // A new attachment may have made an embed resolvable that was not before.
-  editor.refresh()
+  editor?.refresh()
   if (reading()) renderReading()
 }
 
@@ -1990,11 +2095,21 @@ async function openText (path, { focus = true, history = true, place = null, new
     }
   }
 
+  /* The buffer is set before anything is torn down or drawn, and deliberately
+     before `enterDoc`: entering a document paints the view, the reading view
+     renders from this buffer, and a buffer still holding the last note — or
+     nothing at all — is a blank page. Worse than blank: an editor built from an
+     empty buffer will happily autosave that emptiness over the file. */
+  buffer.source = tex ? 'tex' : 'markdown'
+  buffer.text = text
+
   await leaveDoc()
 
   enterDoc(path, { history, newTab })
-  editor.setSourceMode(tex ? 'tex' : 'markdown')
-  editor.setDoc(text)
+  if (editor) {
+    editor.setSourceMode(buffer.source)
+    editor.setDoc(text)
+  }
   if (isLanguageTablePath(path)) await refreshLanguageHistory(path)
   // The buffer and the disk agree from here: this is the version the edits to
   // come are measured against, if a sync client rewrites the note meanwhile.
@@ -2002,7 +2117,7 @@ async function openText (path, { focus = true, history = true, place = null, new
   if (opened) opened.base = text
   // Boot establishes the saved view before the note is opened, so the fresh
   // editor state starts in that view instead of always building preview first.
-  editor.setRaw(state.view === 'raw')
+  editor?.setRaw(state.view === 'raw')
   applyPanes()
 
   // Returning to a file with an unaccepted Copilot review restores both its
@@ -2010,17 +2125,17 @@ async function openText (path, { focus = true, history = true, place = null, new
   const pendingReview = pendingAgentDiffs.get(path)
   if (pendingReview) {
     if (reading()) setView('edit')
-    editor.showAgentDiff(pendingReview.before, pendingReview.after)
+    editor?.showAgentDiff(pendingReview.before, pendingReview.after)
   }
 
   if (place) {
-    editor.dispatch({ selection: { anchor: Math.min(place.at || 0, text.length) } })
+    editor?.dispatch({ selection: { anchor: Math.min(place.at || 0, text.length) } })
     editor.scrollDOM.scrollTop = place.top || 0
   }
 
   updateStatus()
   if (reading()) renderReading()
-  if (focus && !reading()) editor.focus()
+  if (focus && !reading()) editor?.focus()
 
   settleDoc(path, { chat })
   if (tex) scheduleTexCompile(0)
@@ -2056,7 +2171,7 @@ async function openViewed (path, { focus = true, history = true, place = null, n
   const opened = state.tabs.length > tabsBefore ? activeTab() : null
   // Emptied so the editor is not holding a note that is no longer open — the
   // outline, the word count and the copilot all read from it.
-  editor.setDoc('')
+  setDocEmpty()
   applyPanes()
   settleDoc(path, { chat })
 
@@ -2135,7 +2250,7 @@ let heldView = null
 const showView = (view) => {
   state.view = view
   el.app.dataset.view = view
-  editor.setRaw(view === 'raw')
+  editor?.setRaw(view === 'raw')
 }
 
 /**
@@ -2653,6 +2768,7 @@ function markPlace () {
     entry.zoom = where.zoom
     return
   }
+  if (!editor) return
   entry.at = editor.state.selection.main.head
   entry.top = editor.scrollDOM.scrollTop
 }
@@ -2789,7 +2905,7 @@ async function reloadCurrent () {
     // belong to the person at the keyboard and should outlive it. That holds
     // in reading view too, where the buffer sits behind the page: the page is
     // redrawn around the patched buffer rather than a fresh one.
-    if (editor.patch(text) && reading()) rerenderReading()
+    if (patchDoc(text) && reading()) rerenderReading()
   } finally {
     state.patching = false
   }
@@ -2851,7 +2967,7 @@ function rememberAgentBefore (relPath, needle = '', tool = 'Edit') {
       : tool === 'Write'
         ? 0
         : editor.state.selection.main.head
-    editor.revealAgentEdit(at)
+    editor?.revealAgentEdit(at)
   }
 }
 
@@ -2895,7 +3011,7 @@ async function absorbAgentEdit (relPath) {
         // A live diff belongs in the editor: Reading view has no place to keep
         // deleted source that is deliberately absent from the rendered note.
         if (reading()) setView('edit')
-        editor.showAgentDiff(reviewBefore, after)
+        editor?.showAgentDiff(reviewBefore, after)
       }
       return agentEditSummary(before, after)
     }
@@ -2946,7 +3062,7 @@ async function absorbAgentEdit (relPath) {
     }
     state.patching = true
     try {
-      if (editor.patch(result.text) && reading()) rerenderReading()
+      if (patchDoc(result.text) && reading()) rerenderReading()
     } finally {
       state.patching = false
     }
@@ -2968,7 +3084,9 @@ async function absorbAgentEdit (relPath) {
     /* The one document change happens before patchAnimated yields. Keep the
        global guard around that transaction only, so a real keystroke made as
        the letters appear is still treated as the user's edit. */
-    animation = editor.patchAnimated(text, { before: reviewBefore })
+    animation = editor
+      ? editor.patchAnimated(text, { before: reviewBefore })
+      : (patchDoc(text), null)
   } finally {
     state.patching = false
   }
@@ -2991,7 +3109,7 @@ async function showAgentReview (path, operationId = null) {
   }
   if (!change || state.current?.path !== path || viewingPdf() || viewingSite() || viewingWhiteboard()) return
   if (reading()) setView('edit')
-  editor.showAgentDiff(change.before ?? '', change.after ?? editor.state.doc.toString())
+  editor?.showAgentDiff(change.before ?? '', change.after ?? editor.state.doc.toString())
 }
 
 /** Accepting is the only action that dismisses the editor-side review. */
@@ -3006,7 +3124,7 @@ async function acceptAgentChanges (operation) {
       cleared.add(summary.path)
     }
   }
-  if (cleared.has(state.current?.path)) editor.clearAgentDiff()
+  if (cleared.has(state.current?.path)) editor?.clearAgentDiff()
 }
 
 /** Follow a rename Copilot asked main to perform through the open UI state. */
@@ -3022,7 +3140,7 @@ async function absorbAgentRename ({ from, path, links = 0, rewritten = [] }) {
   retraceHistory(from, path)
   if (followed) {
     state.current = noteRef(path)
-    editor.refresh()
+    editor?.refresh()
     if (reading()) renderReading()
     settleDoc(path)
   }
@@ -3068,7 +3186,7 @@ const mergePanel = mountMergePanel({
     /* The one save the merge owns: the buffer becomes the settled text and is
        written, so the note on disk is the note both sides chose. */
     mergeOpen = false
-    if (editor.patch(text) && reading()) rerenderReading()
+    if (patchDoc(text) && reading()) rerenderReading()
     setStatusRight('Merged')
     saveNow()
   },
@@ -3112,7 +3230,7 @@ async function handleDiskConflict (path) {
     /* Nothing the disk did touched anything the buffer did — the two fold
        together. Apply and save, and the note is whole again. */
     const merged = result.text !== buffer
-    if (merged && editor.patch(result.text) && reading()) rerenderReading()
+    if (merged && patchDoc(result.text) && reading()) rerenderReading()
     mergeOpen = false
     await saveNow()
     if (merged && !state.dirty) setStatusRight('Merged changes from disk')
@@ -3911,8 +4029,8 @@ function bestLinkTarget (matches) {
 function goToLine (n, col = 0) {
   if (!reading()) {
     const line = editor.state.doc.line(n)
-    editor.dispatch({ selection: { anchor: Math.min(line.from + col, line.to) } })
-    editor.focus()
+    editor?.dispatch({ selection: { anchor: Math.min(line.from + col, line.to) } })
+    editor?.focus()
   }
   scrollToLine(n)
   markOutlinePlace()
@@ -4465,7 +4583,11 @@ function queueOutlineMark () {
 }
 
 el.reading.addEventListener('scroll', queueOutlineMark, { passive: true })
-editor.scrollDOM.addEventListener('scroll', queueOutlineMark, { passive: true })
+/* The editing view's scroller does not exist until the editor does — attached
+   in ensureEditor, beside the other listeners that need one. */
+function watchEditorScroll () {
+  editor.scrollDOM.addEventListener('scroll', queueOutlineMark, { passive: true })
+}
 
 /* ------------------------------------------------------------- backlinks
 
@@ -4711,12 +4833,17 @@ function textFacts (text) {
 
    The words the dictionary does not know, and where each of them is.
 
-   The editor already underlines them in red — but Chromium draws those
-   underlines itself and will not say what it drew them under, so this panel
-   cannot read them off the page. It asks main instead (see the spelling
-   section of electron/main.js), which keeps a dictionary of its own and the
-   custom words Chromium was taught, so a word accepted in one place is
-   accepted in both.
+   One pass answers two questions: which words to list in the pane, and which
+   ranges the editor should underline. They used to be answered separately —
+   the pane from here, the underline by Chromium — and the two disagreed, since
+   Chromium knows nothing of code fences or wikilinks and, in a CodeMirror
+   document whose lines are rebuilt as you type, mostly never marked anything
+   at all. So the underline is drawn from this answer too (editor.setMisspellings),
+   and the pass runs whether or not the pane is open.
+
+   The checking itself is main's, over a Hunspell dictionary of its own plus
+   the custom words Chromium was taught — see the spelling section of
+   electron/main.js — so a word accepted in one place is accepted in both.
 
    Which words are even asked about is the interesting half, and it lives in
    src/spelling.js: a note is prose with code, maths, links and filenames mixed
@@ -4752,21 +4879,32 @@ function goToSpelling (key) {
   /* Selected rather than merely scrolled to: the next thing after finding a
      typo is typing over it. The scroll is left to scrollToLine for the reason
      goToLine explains — two alignments in one gesture fight each other. */
-  editor.dispatch({ selection: { anchor: at.from, head: at.to } })
-  editor.focus()
+  editor?.dispatch({ selection: { anchor: at.from, head: at.to } })
+  editor?.focus()
   scrollToLine(editor.state.doc.lineAt(at.from).number)
 }
 
-async function renderSpelling () {
-  if (!paneOpen('spelling')) return
+/**
+ * Nothing to say about this document: no underlines, and the pane's reason for
+ * having no rows — which is only worth writing if anyone is looking at it.
+ */
+function spellingBlank (why) {
+  editor?.setMisspellings([])
+  if (paneOpen('spelling')) spellingMessage(why)
+}
 
-  if (!state.current) { spellingMessage('No note is open.'); return }
+/**
+ * One pass of the dictionary over the open note. Draws the underlines always,
+ * and the pane's rows when the pane is open.
+ */
+async function renderSpelling () {
+  if (!state.current) { spellingBlank('No note is open.'); return }
   if (viewingPdf() || viewingSite() || viewingWhiteboard()) {
-    spellingMessage('Spelling is checked in notes.')
+    spellingBlank('Spelling is checked in notes.')
     return
   }
   if (state.cfg?.spellcheck === false) {
-    spellingMessage('Spellcheck is off — turn it on in Settings.')
+    spellingBlank('Spellcheck is off — turn it on in Settings.')
     return
   }
 
@@ -4777,25 +4915,36 @@ async function renderSpelling () {
   spellingGroups = groups
 
   const asked = [...groups.values()].map((group) => group.word)
-  if (!asked.length) { spellingMessage('Nothing to check in this note.'); return }
+  if (!asked.length) { spellingBlank('Nothing to check in this note.'); return }
 
   const token = ++spellingToken
+  const measured = editor.state.doc.length
   let flagged
   try {
     flagged = new Set(await api.spell.check(asked))
   } catch {
-    spellingMessage('The dictionary could not be read.')
+    spellingBlank('The dictionary could not be read.')
     return
   }
-  // A newer pass has started, or the pane was closed while the dictionary
-  // loaded — its answer is about a note that may no longer be open.
-  if (token !== spellingToken || !paneOpen('spelling')) return
+  // A newer pass has started while the dictionary was answering — this one is
+  // about a document that may no longer be open.
+  if (token !== spellingToken) return
   spellingGroups = groups
 
   const rows = [...groups.entries()]
     .filter(([, group]) => flagged.has(group.word))
     .sort((a, b) => a[1].at[0].from - b[1].at[0].from)
 
+  /* The underlines, which are the half of this that shows whether the pane is
+     open or shut. Every place of every flagged word, at the positions this pass
+     measured — so if the document moved under it while main was answering they
+     are left alone, and the pass queued by that edit draws them a moment later
+     against the text it is actually looking at. */
+  if (editor.state.doc.length === measured) {
+    editor?.setMisspellings(rows.flatMap(([, group]) => group.at))
+  }
+
+  if (!paneOpen('spelling')) return
   if (!rows.length) { spellingMessage('No spelling mistakes in this note.'); return }
 
   /* The rows stand while the set of flagged words stands. Rebuilding them on
@@ -4853,7 +5002,12 @@ async function renderSpelling () {
 let spellingTimer = null
 
 function queueSpelling () {
-  if (!paneOpen('spelling')) return
+  /* Not gated on the pane any more: the underlines are wanted in the editor
+     whether or not anything is listing them. Switching spellcheck off is the
+     one thing that stops the pass, and it clears the marks on its way out
+     (editor.setSpellcheck) rather than leaving them for a pass that will not
+     run. */
+  if (state.cfg?.spellcheck === false) return
   clearTimeout(spellingTimer)
   /* Slower than the outline's quarter second: this crosses to another process
      and back, and a word half-typed is a misspelling of nothing. */
@@ -5086,7 +5240,7 @@ function renderReading ({ reuse = false } = {}) {
   /* The cached string for this document: `equationsFor` below reads the same
      entry, and the money layer keeps it warm. Unchanged text is the same string
      rather than an equal one, so the comparison is a pointer test. */
-  const body = docText(editor.state.doc)
+  const body = noteText()
   const stamp = readingStamp()
   if (reuse && shown && shown.body === body && shown.stamp === stamp &&
       el.reading.firstChild) {
@@ -5123,7 +5277,7 @@ function renderReading ({ reuse = false } = {}) {
      it by string would scan the whole note a second time, which is the mistake
      src/math.js documents beside that cache. (Transclusion still goes in by
      string: the note it renders is not the one in the editor.) */
-  rendered.innerHTML = md.render(body, { equations: equationsFor(editor.state.doc) })
+  rendered.innerHTML = md.render(body, { equations: noteEquations() })
   installHeadingFolds(rendered)
   col.append(rendered)
 
@@ -5457,7 +5611,7 @@ function readingNodeAt (line) {
 
 function scrollToLine (line) {
   if (!state.current || viewingPdf() || viewingSite() || viewingWhiteboard()) return
-  if (!reading()) { editor.scrollToLine(line); return }
+  if (!reading()) { editor?.scrollToLine(line); return }
 
   // A folded block has no position; readingNodeAt walks back to the visible
   // heading or callout that owns it instead of sending the pane to the top.
@@ -5491,6 +5645,16 @@ function updateViewControl () {
    active button — so it must not shortcut when nothing is changing. */
 function setView (view) {
   if (viewingLanguageTable() && view === 'raw') view = 'edit'
+  /* Editing and Raw are the editor, and on a launch that opened into Reading it
+     may not have arrived yet. Deferred whole rather than half-applied: the
+     switch reads the scroll position out of one view and restores it into the
+     other, and doing that around an editor that does not exist would land the
+     reader at the top of the note. Called again — not continued — so every
+     branch below sees a complete editor. */
+  if (view !== 'read' && !editor && !viewingPdf() && !viewingSite() && !viewingWhiteboard()) {
+    ensureEditor().then(() => setView(view)).catch(() => {})
+    return
+  }
   if (viewingPdf() || viewingSite() || viewingWhiteboard()) {
     state.view = view
     el.app.dataset.view = view
@@ -5510,7 +5674,7 @@ function setView (view) {
   /* A PDF is showing, so the chosen view is remembered rather than applied —
      it is what the next note opened will be shown in. */
   applyPanes()
-  editor.setRaw(view === 'raw')
+  editor?.setRaw(view === 'raw')
 
   // Icon only: which view you are in is the icon, and the title says what a
   // click does next.
@@ -5523,7 +5687,7 @@ function setView (view) {
   if (view === 'read') renderReading({ reuse: true })
   else {
     stopReadingHighlights({ reset: true })
-    if (state.current) editor.focus()
+    if (state.current) editor?.focus()
   }
 
   scrollToLine(line)
@@ -5551,7 +5715,7 @@ function toggleTaskAtLine (lineIndex, box) {
 
   const wasChecked = match[1] !== ' '
   const at = line.from + match.index + 1
-  editor.dispatch({ changes: { from: at, to: at + 1, insert: wasChecked ? ' ' : 'x' } })
+  editor?.dispatch({ changes: { from: at, to: at + 1, insert: wasChecked ? ' ' : 'x' } })
 
   box.closest('li')?.classList.toggle('is-done', !wasChecked)
   return true
@@ -5768,13 +5932,13 @@ async function insertTemplate (path) {
     : ''
   const filled = fillTemplate(text, title)
   const at = editor.state.selection.main
-  editor.dispatch({
+  editor?.dispatch({
     changes: { from: at.from, to: at.to, insert: filled },
     // The caret lands after what was inserted, where writing continues.
     selection: { anchor: at.from + filled.length },
     scrollIntoView: true
   })
-  editor.focus()
+  editor?.focus()
 }
 
 function openOverlay (mode, meta = {}) {
@@ -5841,7 +6005,7 @@ function closeOverlay () {
   el.overlay.hidden = true
   el.panel.classList.remove('is-search')
   if (viewingWhiteboard()) whiteboardInstance?.focus()
-  else if (!reading() && state.current) editor.focus()
+  else if (!reading() && state.current) editor?.focus()
 }
 
 /* ------------------------------------------------------------ search opts
@@ -6543,7 +6707,7 @@ async function removeEmbeddedImage (path) {
   }
 
   if (matches.length) {
-    editor.dispatch({
+    editor?.dispatch({
       changes: matches.map(({ from, to }) => ({ from, to, insert: '' })),
       userEvent: viewingLanguageTable() ? 'input.table' : 'input'
     })
@@ -6711,7 +6875,7 @@ async function createTable (dir = '') {
   revealInTree(path)
   // A table starts as Untitled. Put the new document's filename in the
   // reader's hands immediately, in the title field they will use later too.
-  editor.focusTitle()
+  editor?.focusTitle()
 }
 
 async function createLanguageFor (dir = '', country) {
@@ -6759,7 +6923,7 @@ async function renameNote (node, next) {
       state.current = noteRef(path)
       // The inline title is the note's name, so a rename has to reach both
       // the editor's widget and the rendered page.
-      editor.refresh()
+      editor?.refresh()
       if (reading()) renderReading()
       /* The rest is what every other way of putting a document on screen does,
          and a renamed note is a document arriving under a new path: the tab,
@@ -6781,7 +6945,7 @@ async function renameNote (node, next) {
     // The title field is showing a name the vault refused; put the real one
     // back. The caller puts the tree row back, which is the only other place
     // the refused name is on screen.
-    editor.refresh()
+    editor?.refresh()
     return false
   }
 }
@@ -6848,7 +7012,7 @@ function closeCurrentNote () {
   state.current = null
   state.dirty = false
   applyPanes()
-  editor.setDoc('')
+  setDocEmpty()
   el.stage.classList.remove('has-doc')
   el.empty.hidden = false
   renderTabs()
@@ -6924,11 +7088,11 @@ function runCommand (id, dir = state.current?.dir || '') {
       runOverlayQuery('#')
       break
     case 'fold-all-headings':
-      editor.foldAllHeadings()
+      editor?.foldAllHeadings()
       if (reading()) setReadingHeadingFolds(true)
       break
     case 'unfold-all-headings':
-      editor.unfoldAllHeadings()
+      editor?.unfoldAllHeadings()
       if (reading()) setReadingHeadingFolds(false)
       break
     /* The same switch the Markdown settings tab carries, so the palette and
@@ -6940,7 +7104,7 @@ function runCommand (id, dir = state.current?.dir || '') {
       break
     }
     case 'fit-columns':
-      toast(editor.fitAllColumns()
+      toast(editor?.fitAllColumns()
         ? 'Columns fit their content again.'
         : 'These columns already fit their content.')
       break
@@ -6995,7 +7159,7 @@ function runCommand (id, dir = state.current?.dir || '') {
       // Asking to find something is asking to be taken to it, and that is a
       // stronger claim on the screen than the view the reader happened to be in.
       if (reading()) setView('edit')
-      editor.focus()
+      editor?.focus()
       openSearchPanel(editor)
       break
     case 'reveal':
@@ -7148,10 +7312,10 @@ function stepHistory (redo) {
      inside the editor, and its edits are the editor's transactions. */
   if (!editor.dom.contains(document.activeElement)) {
     if (reading()) setView('edit')
-    editor.focus()
+    editor?.focus()
   }
-  if (redo) editor.redo()
-  else editor.undo()
+  if (redo) editor?.redo()
+  else editor?.undo()
 }
 
 /* --------------------------------------------------------------- settings
@@ -7195,7 +7359,10 @@ function applySettings (cfg) {
   if (!wrapsCode) {
     for (const pre of el.reading.querySelectorAll('pre.code-text')) pre.scrollLeft = 0
   }
-  editor.setSpellcheck(cfg.spellcheck !== false)
+  /* Switching it off takes the underlines with it inside the editor; switching
+     it on can only ask for a fresh pass, since the words come from main. */
+  editor?.setSpellcheck(cfg.spellcheck !== false)
+  if (cfg.spellcheck !== false) queueSpelling()
   savedSearches?.set(cfg.savedSearches)
 
   /* `outline` was a boolean when there were two panes to choose between. It is
@@ -7458,7 +7625,7 @@ async function commitFont (role, id) {
      was taken in the old face. Without this the note keeps the previous
      font's metrics — wrong wrapping, and a caret that sits beside the letter
      it is supposed to be in. */
-  editor.requestMeasure()
+  editor?.requestMeasure()
   if (reading()) rerenderReading()
   toast(`${FONT_ROLES[role].label}: ${fontLabel(state.fonts[role])}`)
   await api.config.set({ [key]: state.fonts[role] })
@@ -7491,7 +7658,16 @@ function redrawForTheme () {
     themeRedraw = requestAnimationFrame(() => {
       if (viewingWhiteboard()) whiteboardInstance?.theme()
       else if (reading()) rerenderReading()
-      else editor.dispatch({ effects: refreshDiagrams.of(null) })
+      /* The editing view is up, so the editor — and with it the module holding
+         this effect — is already built. Imported here rather than at the top of
+         the file because `refreshDiagrams` is a CodeMirror StateEffect, and
+         naming it up there would put the whole editing stack back on the
+         startup path. The import resolves from cache. */
+      else if (editor) {
+        import('./mermaid-editor.js')
+          .then(({ refreshDiagrams }) => editor?.dispatch({ effects: refreshDiagrams.of(null) }))
+          .catch(() => {})
+      }
     })
   })
 }
@@ -7572,13 +7748,13 @@ async function attachFiles (files, insertIntoTable = null) {
   const lead = line.from === from || !line.text.trim() ? '' : '\n'
   const insert = `${lead}${inserts.join('\n')}\n`
 
-  editor.dispatch({
+  editor?.dispatch({
     changes: { from, to, insert },
     selection: { anchor: from + insert.length },
     scrollIntoView: true,
     userEvent: 'input'
   })
-  editor.focus()
+  editor?.focus()
   toast(inserts.length === 1 ? 'Image added' : `${inserts.length} images added`)
 }
 
@@ -7918,6 +8094,47 @@ function showImageContextMenu (path, event) {
   ], event)
 }
 
+/**
+ * The menu over a word the app has underlined: what it might have been, and
+ * the way to say it was right all along.
+ *
+ * The app's menu rather than the platform's, because the underline is the
+ * app's — Chromium has no suggestions for a word it never marked. The word is
+ * replaced through a normal transaction, so ⌘Z takes the correction back.
+ */
+async function showSpellingMenu (at, event) {
+  // The menu is opened where the click was; the click is over by the time the
+  // suggestions arrive, so the position is kept rather than the event.
+  const where = { clientX: event.clientX, clientY: event.clientY }
+  const suggestions = await api.spell.suggest(at.word).catch(() => [])
+  // The document moved while the dictionary was thinking — a menu offering to
+  // rewrite a range that has shifted would rewrite the wrong words.
+  if (editor.state.sliceDoc(at.from, at.to) !== at.word) return
+
+  const items = suggestions.length
+    ? suggestions.map((to) => ({
+        label: to,
+        run: () => {
+          editor?.dispatch({
+            changes: { from: at.from, to: at.to, insert: to },
+            selection: { anchor: at.from + to.length },
+            userEvent: 'input.spelling'
+          })
+          editor?.focus()
+        }
+      }))
+    : [{ label: 'No suggestions', disabled: true, run: () => {} }]
+
+  items.push({ sep: true }, {
+    label: `Add “${at.word}” to Dictionary`,
+    // Main tells everyone the dictionary changed, and the note is read again
+    // — so this word's underline goes here and its row leaves the pane.
+    run: () => api.dictionary.add(at.word)
+  })
+
+  renderContextMenu(items, where)
+}
+
 /* The note's own menu. Right-clicking the page is where a reader reaches for
    how the page is set, so the measure is offered here rather than only in
    settings — the one setting you change while looking at the thing it changes.
@@ -7928,6 +8145,19 @@ el.stage.addEventListener('contextmenu', (e) => {
     e.preventDefault()
     showImageContextMenu(image.dataset.vaultImage, e)
     return
+  }
+
+  /* A word the app has underlined, before the native menu is left to it below:
+     the platform's checker is off over the note (see setSpellcheck in
+     src/editor.js), so its menu would offer nothing here. */
+  if (e.target.closest?.('.cm-misspelled')) {
+    const pos = editor.posAtCoords({ x: e.clientX, y: e.clientY })
+    const at = pos == null ? null : editor.misspellingAt(pos)
+    if (at) {
+      e.preventDefault()
+      showSpellingMenu(at, e)
+      return
+    }
   }
 
   // Inside anything that takes typing, the native menu is the right one: the
@@ -8117,6 +8347,13 @@ el.sidepaneClose.addEventListener('click', () => closeSidePane())
 
 api.on('menu', runCommand)
 api.on('zoom', showZoom)
+/* A word was taught from the editor's own context menu, or taken back out in
+   Settings. Either way the note in front of you is underlined by a dictionary
+   that has just changed its mind, so it is read again. */
+api.on('dictionary:changed', () => {
+  spellingKeys = ''
+  renderSpelling()
+})
 el.zoom?.addEventListener('click', () => api.resetZoom())
 api.on('vault:changed', async ({ paths = [] } = {}) => {
   const open = state.current?.path
@@ -8433,12 +8670,20 @@ async function boot () {
 
   const opening = state.tabs[state.tabIndex].path
 
-  // Establish the saved view before opening the note. Opening used to render
-  // the default Reading view first and then set the saved view, which rendered
-  // Reading twice on a normal launch and rendered it needlessly before an
-  // Editing or Raw launch. setView also paints the view control when no note is
-  // open, so no second call is needed after the document arrives.
-  setView(cfg.view || 'read')
+  /* Establish the saved view before opening the note. Opening used to render
+     the default Reading view first and then set the saved view, which rendered
+     Reading twice on a normal launch and rendered it needlessly before an
+     Editing or Raw launch. setView also paints the view control when no note is
+     open, so no second call is needed after the document arrives.
+
+     The view decides whether this launch pays for CodeMirror before it can show
+     anything. Reading does not need an editor, so the note is drawn and the
+     window revealed first and the editing stack fetched afterwards — see
+     ensureEditor. A launch straight into Editing or Raw has no such choice and
+     waits, which is the right way round: it is the view that was asked for. */
+  const bootView = cfg.view || 'read'
+  setView(bootView)
+  if (bootView !== 'read') await ensureEditor()
 
   if (opening) {
     await openNote(opening, { focus: false, history: false })
@@ -8452,6 +8697,12 @@ async function boot () {
   }
 
   paintBootReady()
+
+  /* The window is up and the note is readable. Now fetch the editing stack, so
+     that switching view — or typing — does not wait on a download. Deliberately
+     after the paint and off the critical path: awaited here it would simply be
+     the eager import again, wearing a different spelling. */
+  requestIdleCallback(() => { ensureEditor().catch(() => {}) }, { timeout: 500 })
 
   // Last, and only if the previous session ended badly: see below. The app is
   // visible before this can ask its recovery question.

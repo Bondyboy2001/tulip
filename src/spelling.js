@@ -14,7 +14,21 @@
    maths, wikilinks and the frontmatter block are Tulip's, not Markdown's.
    ================================================================== */
 
-import { syntaxTree } from '@codemirror/language'
+/* `syntaxTree` is handed over by the editor as it loads rather than imported
+   here. It comes from @codemirror/language, which reaches @codemirror/view, and
+   naming it in an import would put the whole editing stack on the startup path
+   for the sake of a call that only happens when there is an editor to ask —
+   see the same arrangement in highlight.js.
+
+   Unprimed, `proseRanges` skips nothing and every word in the document is
+   checked, code included. That is the honest degradation: more to look at,
+   never less. */
+let syntaxTree = null
+
+/** Called by editor.js at load, with the function it already has to hand. */
+export function primeSyntaxTree (fn) {
+  syntaxTree ||= fn
+}
 
 /* Node names that are not prose. Markdown's parser names these; a name it does
    not produce simply never matches, which is why the list can be generous. */
@@ -68,7 +82,7 @@ function merge (ranges) {
 export function proseRanges (text, state) {
   const skip = []
 
-  if (state) {
+  if (state && syntaxTree) {
     syntaxTree(state).iterate({
       enter (node) {
         if (!SKIP_NODES.has(node.name)) return true

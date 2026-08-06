@@ -12,7 +12,8 @@
    ================================================================== */
 
 import { Decoration, WidgetType } from '@codemirror/view'
-import { codeCopilotButton, copyButton, eachFence, fenceField } from './blocks.js'
+import { codeCopilotButton, copyButton } from './blocks.js'
+import { eachFence, fenceField } from './blocks-editor.js'
 import { isRunnable, retirePainters, runButtonUI, runPanelUI } from './runcode.js'
 import { htmlFence, isHtmlRun } from './htmlrun.js'
 import { isThree, threeFence } from './threejs.js'

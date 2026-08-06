@@ -1683,9 +1683,9 @@ function createWindow () {
       if (!spelling.length) spelling.push({ label: 'No suggestions', enabled: false })
       spelling.push({ type: 'separator' }, {
         label: `Add “${word}” to Dictionary`,
-        click: () => {
-          if (live()) mainWindow.webContents.session.addWordToSpellCheckerDictionary(word)
-        }
+        // Through teachWord rather than straight at the session: the app's own
+        // dictionary has to hear about it too, or the word keeps its underline.
+        click: () => { if (live()) teachWord(word) }
       })
     }
     const edit = params.isEditable ? [{ role: 'cut' }, { role: 'copy' }, { role: 'paste' }] : []
@@ -2512,21 +2512,35 @@ ipcMain.handle('dictionary:words', async () => {
   const words = await session.defaultSession.listWordsInSpellCheckerDictionary()
   return words.sort((a, b) => a.localeCompare(b))
 })
-ipcMain.handle('dictionary:add', (_e, word) => {
+/**
+ * Teach the checkers a word, wherever the asking came from — this handler, or
+ * the native context menu over an underlined word.
+ *
+ * Both checkers, or the note keeps its underline under a word the app has been
+ * told to accept: Chromium's list is the one Settings shows and the one that
+ * survives a restart, and the Hunspell copy is the one the underlines and the
+ * pane are actually drawn from.
+ */
+function teachWord (word) {
   const w = String(word ?? '').trim()
   if (!w) return false
-  // Both checkers, or the sidebar keeps listing a word the red underlines have
-  // already stopped marking.
   speller?.add(w)
-  return session.defaultSession.addWordToSpellCheckerDictionary(w)
-})
+  const done = session.defaultSession.addWordToSpellCheckerDictionary(w)
+  // The renderer is holding a pass that is now out of date by one word.
+  send('dictionary:changed')
+  return done
+}
+
+ipcMain.handle('dictionary:add', (_e, word) => teachWord(word))
 ipcMain.handle('dictionary:remove', (_e, word) => {
   const w = String(word ?? '').trim()
   if (!w) return false
   // nspell has no way to take a word back out, so the checker is thrown away
   // and rebuilt without it on the next question.
   speller = null
-  return session.defaultSession.removeWordFromSpellCheckerDictionary(w)
+  const done = session.defaultSession.removeWordFromSpellCheckerDictionary(w)
+  send('dictionary:changed')
+  return done
 })
 
 /* ---------------------------------------------------------- spelling

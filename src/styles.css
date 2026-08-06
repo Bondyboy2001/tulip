@@ -2841,6 +2841,27 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
    layer (src/editor.js) — rules here lose to CodeMirror's own base theme. */
 .cm-content ::selection { background: var(--sel); }
 
+/* drawSelection paints the selection as rectangles in .cm-selectionLayer, a
+   sibling of .cm-content that the library parks at z-index -1 — behind the
+   text, which is right for prose because a prose line has no background of its
+   own. A code line does: .tk-code-block fills it with an opaque --sunk, and an
+   in-flow background paints over any negative-z-index layer in the same
+   stacking context. So every selection rectangle inside a fence was drawn and
+   then buried, and selecting a whole block showed a highlight only on the
+   lines that were not code.
+
+   Lifting the layer over the content fixes it for every themed line at once —
+   the active line and the diff washes included. The selection colours are all
+   translucent, so text reads through the band exactly as before; --z-raised
+   keeps it under the affordances that sit on top of a line. The z-index is set
+   inline by the layer plugin, hence !important, and the rectangles must not
+   take the pointer or a drag inside a code block would land on them instead of
+   on the text. */
+.cm-editor .cm-selectionLayer {
+  z-index: var(--z-raised) !important;
+  pointer-events: none;
+}
+
 /* The completion tooltip is styled in the CodeMirror theme layer
    (src/editor.js) — plain rules here lose to the library's base theme, which
    is what once painted the menu as a light-grey monospace card. */
@@ -4941,7 +4962,15 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
   padding-right: 16px;
   position: sticky;
   left: 0;
-  z-index: var(--z-raised);
+  /* Over the selection band as well as over the code. A multi-line selection is
+     drawn as one rectangle spanning the whole column — CodeMirror has no notion
+     of a gutter inside a line — so at --z-raised, which the selection layer now
+     also sits at, the band tied with the number and won on tree order: the
+     figures came out washed as though they were part of the selection. They are
+     chrome, and already user-select: none; --z-sticky says the same thing about
+     their place in the stack that `position: sticky` says about their place on
+     the line. */
+  z-index: var(--z-sticky);
   background: var(--sunk);
   /* The number sticks at the frame's padding edge, which leaves a strip of
      frame to its left for the code to slide through. The shadow extends the

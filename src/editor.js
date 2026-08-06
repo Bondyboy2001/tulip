@@ -4,12 +4,24 @@ import { EditorState, EditorSelection, Prec, StateEffect, StateField,
          Compartment, Facet, Transaction } from '@codemirror/state'
 import { syntaxTree, HighlightStyle, syntaxHighlighting, indentOnInput,
          bracketMatching, indentUnit, foldService, codeFolding, foldEffect,
-         unfoldEffect, foldedRanges, foldKeymap, StreamLanguage } from '@codemirror/language'
+         unfoldEffect, foldedRanges, foldKeymap, StreamLanguage,
+         LanguageDescription } from '@codemirror/language'
 import { stex } from '@codemirror/legacy-modes/mode/stex'
-import { codeTokens, languageFor } from './highlight.js'
+import { codeTokens, languageFor, primeLanguageDescription } from './highlight.js'
 import { languageChip } from './languages.js'
+import { primeSyntaxTree } from './spelling.js'
 
 export { openSearchPanel }
+
+/* The reading view colours code through highlight.js, which cannot name
+   `LanguageDescription` in an import of its own without putting CodeMirror on
+   the startup path — see the account there. This module has it anyway, and the
+   parser configured below calls `languageFor` synchronously, so it is handed
+   over here rather than fetched again. */
+primeLanguageDescription(LanguageDescription)
+/* Same arrangement for the spell checker's prose scan, which skips code by
+   asking the syntax tree — see the note in spelling.js. */
+primeSyntaxTree(syntaxTree)
 import { defaultKeymap, history, historyKeymap, indentWithTab, undo, redo } from '@codemirror/commands'
 import { search, searchKeymap, openSearchPanel } from '@codemirror/search'
 import { findConfig } from './find.js'
@@ -18,8 +30,9 @@ import { autocompletion, closeBrackets, closeBracketsKeymap,
          completionKeymap, startCompletion } from '@codemirror/autocomplete'
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
 import { tags as t } from '@lezer/highlight'
-import { mathPreview, equationsFor } from './math.js'
-import { moneyPreview } from './money.js'
+import { equationsFor } from './math.js'
+import { mathPreview } from './math-editor.js'
+import { moneyPreview } from './money-editor.js'
 import { codeBlockKeymap, proseBrackets, codeBlockView } from './codeblock.js'
 import { runBlocks } from './runblocks.js'
 import { propertiesPreview } from './properties.js'
@@ -36,9 +49,9 @@ import {
   slashEmbed, openEmbedPicker, fenceLanguages, calloutKinds,
   embedChoices as embedChoicesFacet
 } from './slash.js'
-import { mermaidBlocks } from './mermaid.js'
-import { tikzBlocks, tikzNote } from './tikz.js'
-import { svgBlocks } from './svg.js'
+import { mermaidBlocks } from './mermaid-editor.js'
+import { tikzBlocks, tikzNote } from './tikz-editor.js'
+import { svgBlocks } from './svg-editor.js'
 import { headingsFor, blockReferences, blockReferenceOnLine } from './headings.js'
 import { findInlineHighlights } from './marks.js'
 import { findCitations } from './citations.js'
@@ -128,6 +141,20 @@ const tulipTheme = EditorView.theme({
     outline: 'none'
   },
   '.cm-placeholder': { color: 'var(--faint)', fontStyle: 'italic' },
+  /* A word the dictionary did not know. Drawn as an underline rather than a
+     wash so it reads as the platform's own mark and nothing else in the note
+     shifts; `skip-ink: none` because a wavy line broken around every descender
+     in "misspelling" stops looking like one. The colour is the theme's own red
+     — every theme has one for a removed line — so this does not become the one
+     hard-coded crimson in an otherwise soft palette. */
+  '.cm-misspelled': {
+    textDecoration: 'underline',
+    textDecorationStyle: 'wavy',
+    textDecorationColor: 'color-mix(in srgb, var(--code-removed) 78%, transparent)',
+    textDecorationSkipInk: 'none',
+    textDecorationThickness: '1px',
+    textUnderlineOffset: '2px'
+  },
   // Where the copilot just wrote. It fades rather than clears, so a run of
   // edits reads as a hand moving down the page.
   '.cm-agentEdit': {
@@ -1886,6 +1913,46 @@ const agentTyping = StateField.define({
   provide: (field) => EditorView.decorations.from(field)
 })
 
+/* ------------------------------------------------------------- spelling */
+
+/* The words the dictionary did not know, as the editor draws them.
+
+   Chromium underlines misspellings in a contenteditable of its own accord, and
+   for a plain text box that would be the whole feature. It is not enough here:
+   CodeMirror rebuilds the DOM of a line on every edit and only renders the
+   lines in view, and the platform's markers do not survive that — text that was
+   loaded rather than typed is usually never marked at all. The underline is
+   therefore drawn from the same answer the Spelling pane is drawn from, which
+   has the second, larger benefit of the two agreeing: what the pane skips as
+   code, maths, a wikilink or a tag is not underlined either.
+
+   Positions come from outside, so the field maps them through edits and keeps
+   them until the next pass — otherwise every keystroke would blink every
+   underline in the note off and on again while the dictionary was asked. */
+const misspellingEffect = StateEffect.define() // [{ from, to }]
+
+const misspellings = StateField.define({
+  create: () => Decoration.none,
+  update (deco, tr) {
+    for (const effect of tr.effects) {
+      if (!effect.is(misspellingEffect)) continue
+      const marks = []
+      const end = tr.state.doc.length
+      for (const { from, to } of effect.value || []) {
+        /* The pass ran against the document as it was when it started. A word
+           whose end has since fallen off the document is dropped rather than
+           clamped: a mark stretched to the end of the note is worse than a
+           missing one, and the next pass is 500ms away. */
+        if (!(to > from) || to > end) continue
+        marks.push(Decoration.mark({ class: 'cm-misspelled' }).range(from, to))
+      }
+      return Decoration.set(marks, true)
+    }
+    return deco.map(tr.changes)
+  },
+  provide: (field) => EditorView.decorations.from(field)
+})
+
 /**
  * The smallest single change that turns `a` into `b` — everything between the
  * first and last character they disagree on.
@@ -2100,6 +2167,7 @@ export function createEditor ({
         agentDiff,
         agentWorking,
         agentTyping,
+        misspellings,
         tableAssetResolver.of(resolveEmbed || (() => null)),
         embedNoteResolver.of(resolveNoteEmbed || (() => null)),
         embedChoicesFacet.of(embedChoices || (() => [])),
@@ -2269,7 +2337,6 @@ export function createEditor ({
     // CodeMirror rebuilds its root classes with the state. This one is ours,
     // and the Copilot review marks depend on it surviving the note.
     markSourceMode()
-    view.contentDOM.spellcheck = sourceMode !== 'tex' && spellcheck
   }
 
   /** Raw view: the file as it is on disk, monospaced, nothing hidden. */
@@ -2287,7 +2354,9 @@ export function createEditor ({
     sourceMode = next
     view.dispatch({ effects: sourceEffects() })
     markSourceMode()
-    view.contentDOM.spellcheck = sourceMode !== 'tex' && spellcheck
+    // TeX is symbols, and the marks from the last Markdown note are not about
+    // it. The renderer's next pass will decline to check it at all.
+    if (sourceMode === 'tex') view.setMisspellings([])
   }
 
   /** Redraw the parts that read from outside the document — the inline title. */
@@ -2302,13 +2371,60 @@ export function createEditor ({
     return true
   }
 
-  /* Spelling is checked by the platform, not by us, so this is a property of
-     the editable element rather than an extension. Re-applied after setDoc,
-     which builds a fresh state — and therefore a fresh contentDOM. */
+  /* Spelling over the note is the app's own — the underlines come from the
+     `misspellings` field above, drawn from the same dictionary pass the
+     Spelling pane is drawn from. Chromium's own check is deliberately left off
+     here (CodeMirror sets `spellcheck=false` on the content element and this
+     no longer overrides it): it knows nothing of code fences, wikilinks or
+     `$x_i$` and marks all three, and its markers do not survive a document
+     whose lines are rebuilt as they are typed. Everywhere else in the app —
+     the chat box, a table cell, the search fields — the platform's checker is
+     still the one running.
+
+     So this switch now only decides whether the app draws anything. */
   let spellcheck = true
   view.setSpellcheck = (on) => {
     spellcheck = on !== false
-    view.contentDOM.spellcheck = sourceMode !== 'tex' && spellcheck
+    // Turning it off has to take the underlines with it. Turning it on cannot
+    // put them back from here — the words come from the dictionary, and the
+    // renderer asks for a fresh pass.
+    if (!spellcheck) view.setMisspellings([])
+  }
+
+  /**
+   * Underline these ranges as misspellings. The whole set, every time: this is
+   * the answer for the current document, not an addition to the last one.
+   *
+   * @param {{from: number, to: number}[]} ranges
+   */
+  view.setMisspellings = (ranges) => {
+    const wanted = (spellcheck && sourceMode !== 'tex' && ranges) || []
+    // A pass that found nothing, over a note that was already clean, is not a
+    // transaction — and this runs every half second while you type.
+    if (!wanted.length && view.state.field(misspellings, false)?.size === 0) return
+    view.dispatch({ effects: misspellingEffect.of(wanted) })
+  }
+
+  /**
+   * The underlined word under a document position, if there is one — what the
+   * right-click menu needs to know before it can offer to correct it.
+   *
+   * @returns {{ from: number, to: number, word: string } | null}
+   */
+  view.misspellingAt = (pos) => {
+    const set = view.state.field(misspellings, false)
+    if (!set) return null
+    let hit = null
+    /* Both edges count. A click lands on one side or the other of the first
+       letter depending on which half of it was hit, and "not quite on the word"
+       is not a distinction anyone is drawing with a right-click. Two marks can
+       never share an edge — there is always a space or a hyphen between two
+       words — so this cannot be ambiguous. */
+    set.between(pos, pos, (from, to) => {
+      hit = { from, to, word: view.state.sliceDoc(from, to) }
+      return false
+    })
+    return hit
   }
 
   /**

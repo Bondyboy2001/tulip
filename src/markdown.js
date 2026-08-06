@@ -21,7 +21,7 @@ import { rawHtmlPlugin } from './rawhtml.js'
 import { blockReferencePlugin } from './headings.js'
 import { highlightPlugin } from './marks.js'
 import { parseEmbedSuffix } from './assets.js'
-import { columnWidthPlugin } from './table.js'
+import { columnWidthPlugin } from './table-widths.js'
 import { parseFrontmatter } from '../electron/frontmatter.cjs'
 
 /**

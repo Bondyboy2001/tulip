@@ -260,7 +260,10 @@ contextBridge.exposeInMainWorld('tulip', {
   on: (channel, fn) => {
     const allowed = [
       'vault:changed', 'vault:opened', 'menu', 'zoom',
-      'run:out', 'run:done', 'ai:event', 'app:flush'
+      'run:out', 'run:done', 'ai:event', 'app:flush',
+      // A word was taught or untaught — the open note's spelling is one word
+      // out of date, wherever the asking happened.
+      'dictionary:changed'
     ]
     if (!allowed.includes(channel)) return () => {}
     const listener = (_e, payload) => fn(payload)

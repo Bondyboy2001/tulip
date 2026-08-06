@@ -6,7 +6,6 @@
    ================================================================== */
 
 import { tags as t, tagHighlighter, highlightCode } from '@lezer/highlight'
-import { LanguageDescription } from '@codemirror/language'
 import { languageId } from './languages.js'
 
 export const codeTokens = [
@@ -132,6 +131,42 @@ const MAX_HIGHLIGHT = 120_000
 const FENCE_ALIAS = { manim: 'python', tikz: 'latex', svg: 'xml', three: 'javascript', cuda: 'cpp' }
 const descriptions = new Map()
 
+/* ------------------------------------------------- the language registry
+
+   `LanguageDescription` comes from @codemirror/language, which imports
+   @codemirror/view: naming it in an import at the top of this file put the
+   whole editing stack — half of everything the app compiles at launch — behind
+   the reading view, which needs this module to colour a code block.
+
+   So it arrives one of two ways, and never at startup:
+
+   - the editor primes it as it loads (`primeLanguageDescription`), because it
+     holds the real import anyway and its parser calls `languageFor`
+     synchronously, with no await to hide a fetch behind;
+   - the reading view awaits `languageSupport()` before colouring, which is a
+     no-op once the editor has been anywhere near.
+
+   Both settle on the same class. Fetching it twice would be worse than a
+   wasted request: two `LanguageDescription`s are two different types, and the
+   matcher would stop recognising its own descriptions. */
+let LanguageDescription = null
+let arriving = null
+
+/** Called by editor.js at load, with the class it already has to hand. */
+export function primeLanguageDescription (cls) {
+  LanguageDescription ||= cls
+}
+
+/** The class, fetched if the editor has not already supplied it. */
+async function languageSupport () {
+  if (LanguageDescription) return LanguageDescription
+  arriving ||= import('@codemirror/language').then((mod) => {
+    LanguageDescription ||= mod.LanguageDescription
+    return LanguageDescription
+  })
+  return arriving
+}
+
 /**
  * The parser for a fence's language word, aliases resolved. Both views ask
  * through here, so a word that colours in one of them colours in the other.
@@ -178,6 +213,8 @@ export function languageFor (token) {
 export async function highlightInto (el, code, token) {
   if (!token || code.length > MAX_HIGHLIGHT) return false
 
+  // Before `languageFor`, which cannot build a description without it.
+  await languageSupport()
   const desc = languageFor(token)
   if (!desc) return false
 

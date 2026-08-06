@@ -10,9 +10,7 @@
    keeps a note full of diagrams from re-laying-out on every keystroke.
    ================================================================== */
 
-import { WidgetType } from '@codemirror/view'
-import { StateEffect } from '@codemirror/state'
-import { pictureBlock, pictureBlocks } from './blocks.js'
+import { pictureBlock } from './blocks.js'
 import { el } from './dom.js'
 import { DRAWN } from './languages.js'
 
@@ -41,7 +39,8 @@ function palette () {
 /* One theme per palette, so a diagram drawn under Ink is not reused under
    Paper. The name of the current theme is the cheapest thing that changes
    whenever the colours do. */
-const themeName = () => document.documentElement.dataset.theme || 'light'
+/* Exported for the editing half next door, not for general use. */
+export const themeName = () => document.documentElement.dataset.theme || 'light'
 
 /* Mermaid and its grammar are the better part of a megabyte, and a vault can
    go a long time without a diagram in it — so it is fetched when the first one
@@ -163,19 +162,14 @@ function renderDiagram (code) {
   return queue
 }
 
-/* Dispatched when the palette moves. Nothing in the document has changed, so
-   no ordinary update would tell the field to redraw — and a diagram left in
-   the old theme's colours on a repainted page is the one thing that would
-   give the whole arrangement away. */
-export const refreshDiagrams = StateEffect.define()
-
 /**
  * Fills a host element with the diagram, or with why there isn't one.
  * Shared by both views so a broken diagram reads the same in each.
  *
  * @returns {Promise<boolean>} whether there is a diagram to look at
  */
-async function drawInto (host, code) {
+/* Exported for the editing half next door, not for general use. */
+export async function drawInto (host, code) {
   /* A source never seen before is, most of the time, a source still being
      typed — and every keystroke in a fence makes a new widget. So an unknown
      source waits a beat, and if the keystroke after it has already replaced
@@ -222,46 +216,3 @@ export function attachMermaid (wrap, code) {
 }
 
 /* ------------------------------------------------------- editing view */
-
-/**
- * The same diagram, under the fence you are typing into.
- *
- * A StateField rather than a ViewPlugin: block widgets change line geometry,
- * and a plugin cannot be consulted before the viewport it would change has
- * been measured. Same rule the run controls and the title widget follow.
- */
-class DiagramWidget extends WidgetType {
-  constructor (code, theme) { super(); this.code = code; this.theme = theme }
-
-  // Equal while the source and the palette are unchanged, so typing elsewhere
-  // in the note maps the widget across rather than redrawing every diagram.
-  eq (other) { return other.code === this.code && other.theme === this.theme }
-
-  toDOM (view) {
-    const host = document.createElement('div')
-    host.className = 'cm-diagram'
-    // Held at the last size until the new drawing lands, so the page does not
-    // jump on every keystroke inside the block.
-    //
-    // The drawing arrives after the editor has measured the widget, and a
-    // height it does not know about puts every line below the diagram out of
-    // step with where it is drawn — so it is asked to measure again once the
-    // picture is in. Same rule the embeds follow.
-    drawInto(host, this.code)
-      .then(() => view.requestMeasure())
-      .catch(() => {})
-    return host
-  }
-
-  ignoreEvent () { return true }
-}
-
-export const mermaidBlocks = pictureBlocks(
-  isMermaid,
-  (code) => new DiagramWidget(code, themeName()),
-  // The palette moving changes nothing in the document, so no ordinary update
-  // would tell the field to redraw — and a diagram left in the old theme's
-  // colours on a repainted page is the one thing that would give the whole
-  // arrangement away.
-  { also: (tr) => tr.effects.some((e) => e.is(refreshDiagrams)) }
-)
