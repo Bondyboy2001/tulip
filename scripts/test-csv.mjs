@@ -13,11 +13,15 @@ import {
   parseSeparated,
   formatSeparated,
   numericValue,
+  resolutionValue,
   compareCells,
   sortedOrder,
   filterOrder,
-  selectionStats,
   normalRect,
+  sniffDelimiter,
+  delimiterName,
+  selectionStats,
+  formatStat,
   gridToClipboard,
   parseClipboardGrid
 } from '../src/csv.js'
@@ -146,6 +150,33 @@ ok('what is not a number is not one', () => {
   }
 })
 
+ok('a separator only groups digits if it groups them in threes', () => {
+  /* The failure this exists to prevent: every comma stripped wherever it fell,
+     which read a list as one long number. */
+  assert.ok(Number.isNaN(numericValue('1,2,3')), 'a list is not a number')
+  assert.ok(Number.isNaN(numericValue('1.234.567')), 'dots that group nothing here')
+  assert.equal(numericValue('1,234,567'), 1234567)
+  assert.equal(numericValue('1 234 567'), 1234567)   // the space family groups too
+  assert.ok(Number.isNaN(numericValue('--5')), 'one sign, not two')
+})
+
+ok('a comma reads as a decimal mark where it cannot be a separator', () => {
+  // `1,23` has too few digits after the comma to be a thousands group.
+  assert.equal(numericValue('1,23'), 1.23)
+  assert.equal(numericValue('1.234,56'), 1234.56)    // the European spelling
+  assert.equal(numericValue('1234,56'), 1234.56)
+  assert.equal(numericValue('1 234,56'), 1234.56)
+})
+
+ok('the ambiguous spelling reads as thousands', () => {
+  /* `1,500` is fifteen hundred to one reader and one and a half to another,
+     and nothing in the cell settles it. Thousands is the reading that keeps
+     more real files right — a comma decimal cannot appear unquoted in a
+     comma-delimited file at all. */
+  assert.equal(numericValue('1,500'), 1500)
+  assert.equal(numericValue('$1,200'), 1200)
+})
+
 ok('numbers compare as quantities, not as spellings', () => {
   // The failure this exists to prevent: 10 sorting between 1 and 2.
   assert.ok(compareCells('2', '10') < 0)
@@ -199,6 +230,51 @@ ok('sorting reads the numbers in a numeric column', () => {
   assert.deepEqual(sortedOrder(rows, [0, 1, 2], 0, 'asc'), [2, 0, 1])
 })
 
+/* ------------------------------------------------------- the resolutions */
+
+ok('a resolution reads as the lines it means', () => {
+  assert.equal(resolutionValue('1080p'), 1080)
+  assert.equal(resolutionValue('720P'), 720)
+  assert.equal(resolutionValue('1080i'), 1080)
+  // Named for the width, ordered by the height: 4K is 2160 lines and 2K 1080.
+  assert.equal(resolutionValue('4K'), 2160)
+  assert.equal(resolutionValue('8k'), 4320)
+  assert.equal(resolutionValue('2k'), 1080)
+  assert.equal(resolutionValue('QHD'), 1440)
+  assert.equal(Math.round(resolutionValue('1920x1080')), 1080)
+})
+
+ok('and everything else is left to be a number or a word', () => {
+  assert.equal(resolutionValue('20k'), null, 'twenty thousand is not a screen')
+  assert.equal(resolutionValue('1080'), null)
+  assert.equal(resolutionValue('sku-4p'), null)
+  assert.equal(resolutionValue(''), null)
+  // The stats line still refuses to add resolutions up, because they are not
+  // numbers however they sort.
+  assert.ok(Number.isNaN(numericValue('1080p')))
+})
+
+ok('a resolution column sorts by resolution, not by spelling', () => {
+  const rows = [['1080p'], ['4K'], ['720p'], ['1440p']]
+  // Descending is the way this column is read: the best screen first.
+  assert.deepEqual(sortedOrder(rows, [0, 1, 2, 3], 0, 'desc').map((i) => rows[i][0]),
+    ['4K', '1440p', '1080p', '720p'])
+  assert.deepEqual(sortedOrder(rows, [0, 1, 2, 3], 0, 'asc').map((i) => rows[i][0]),
+    ['720p', '1080p', '1440p', '4K'])
+})
+
+ok('a bare number sits with the resolution it equals', () => {
+  const rows = [['4K'], ['1080'], ['720p']]
+  assert.deepEqual(sortedOrder(rows, [0, 1, 2], 0, 'asc').map((i) => rows[i][0]),
+    ['720p', '1080', '4K'])
+})
+
+ok('two screens of a height sort by how wide they are', () => {
+  const rows = [['2560x1080'], ['1920x1080'], ['3840x2160']]
+  assert.deepEqual(sortedOrder(rows, [0, 1, 2], 0, 'desc').map((i) => rows[i][0]),
+    ['3840x2160', '2560x1080', '1920x1080'])
+})
+
 ok('a sort is a permutation of what it was given, no more', () => {
   const some = [3, 1, 4]
   assert.deepEqual(sortedOrder(COLUMN, some, 0, 'asc').slice().sort(), [1, 3, 4])
@@ -224,29 +300,130 @@ ok('the filter narrows what it is given rather than the whole file', () => {
 
 /* ---------------------------------------------------------- the selection */
 
-ok('the selection totals only what is a number', () => {
-  const stats = selectionStats(['1', '2', 'n/a', '', '$3'])
-  assert.equal(stats.count, 5)
-  assert.equal(stats.empty, 1)
-  assert.equal(stats.numbers, 3)
-  assert.equal(stats.sum, 6)
-  assert.equal(stats.average, 2)
-  assert.equal(stats.min, 1)
-  assert.equal(stats.max, 3)
-})
-
-ok('a selection with no numbers in it claims none', () => {
-  const stats = selectionStats(['a', ''])
-  assert.equal(stats.numbers, 0)
-  assert.equal(stats.sum, 0)
-  assert.equal(stats.average, 0)
-})
-
 ok('two corners make the rectangle between them', () => {
   assert.deepEqual(normalRect({ r: 4, c: 1 }, { r: 2, c: 3 }), { r0: 2, r1: 4, c0: 1, c1: 3 })
   // The heading is row -1, which is what makes a whole-column selection
   // include the column's name.
   assert.deepEqual(normalRect({ r: -1, c: 2 }, { r: 9, c: 2 }), { r0: -1, r1: 9, c0: 2, c1: 2 })
+})
+
+/* --------------------------------------------------------- the delimiter */
+
+ok('a comma file is read with commas', () => {
+  assert.equal(sniffDelimiter('id,name,city\n1,Ada,London\n2,Grace,Baltimore\n'), ',')
+})
+
+ok('a semicolon file is not read as one long column', () => {
+  /* The failure this exists to prevent. Everywhere that writes decimals with a
+     comma exports `.csv` separated by semicolons, and read with a comma the
+     whole file is one column of unsplit lines — every row intact, entirely
+     unusable, and nothing on screen saying why. */
+  const text = 'id;name;price\n1;Ada;1,50\n2;Grace;2,75\n'
+  assert.equal(sniffDelimiter(text), ';')
+  assert.deepEqual(parseSeparated(text, sniffDelimiter(text))[1], ['1', 'Ada', '1,50'])
+})
+
+ok('tabs and pipes are read as what they are', () => {
+  assert.equal(sniffDelimiter('a\tb\tc\n1\t2\t3\n'), '\t')
+  assert.equal(sniffDelimiter('a|b|c\n1|2|3\n'), '|')
+})
+
+ok('the extension wins where the file does not settle it', () => {
+  /* A two-column file could be read as two columns of several things when the
+     other candidates simply do not appear in it. The extension's delimiter is
+     the file's declared shape, so it takes the tie. */
+  assert.equal(sniffDelimiter('a,b\n1,2\n', ','), ',')
+  assert.equal(sniffDelimiter('a\tb\n1\t2\n', '\t'), '\t')
+  // And a file with no delimiter in it at all is left as it was declared.
+  assert.equal(sniffDelimiter('alpha\nbeta\ngamma\n', ','), ',')
+  assert.equal(sniffDelimiter('', ';'), ';')
+})
+
+ok('a delimiter inside quotes does not win the file', () => {
+  /* Semicolons appear on every line here, but only inside a quoted field, so
+     splitting on them gives rows that disagree about their own width. The
+     comma gives a rectangle, and a rectangle is what a table is. */
+  const text = 'id,tags\n1,"a;b;c"\n2,"d;e;f"\n3,"g;h;i"\n'
+  assert.equal(sniffDelimiter(text), ',')
+})
+
+ok('the rows have to agree, not merely split', () => {
+  // Commas split this into a consistent three; semicolons into a ragged mess.
+  assert.equal(sniffDelimiter('a,b,c\n1,2,3\n4;5,6,7\n8,9,10\n'), ',')
+})
+
+ok('a delimiter has a name to show', () => {
+  assert.equal(delimiterName(';'), 'Semicolon')
+  assert.equal(delimiterName('\t'), 'Tab')
+  assert.equal(delimiterName('|'), 'Pipe')
+  assert.equal(delimiterName(','), 'Comma')
+})
+
+/* --------------------------------------------------------- the arithmetic */
+
+ok('a selection adds up', () => {
+  const stats = selectionStats(['1', '2', '3', '4'])
+  assert.equal(stats.sum, 10)
+  assert.equal(stats.average, 2.5)
+  assert.equal(stats.min, 1)
+  assert.equal(stats.max, 4)
+  assert.equal(stats.cells, 4)
+})
+
+ok('the punctuation an export wears adds up as the number it means', () => {
+  const stats = selectionStats(['$1,200', '(300)', '50%'])
+  assert.equal(stats.sum, 950)
+  assert.equal(stats.numbers, 3)
+})
+
+ok('what is not a number is skipped rather than counted as zero', () => {
+  /* The case that decides it: one `n/a` in a column of prices must not drag
+     the average down, and a blank caught in the drag must not either. */
+  const stats = selectionStats(['10', 'n/a', '', '  ', '20'])
+  assert.equal(stats.cells, 5)
+  assert.equal(stats.filled, 3, 'the two blanks are not filled cells')
+  assert.equal(stats.numbers, 2)
+  assert.equal(stats.sum, 30)
+  assert.equal(stats.average, 15, 'the average is over the numbers, not the selection')
+})
+
+ok('nothing numeric is a selection with no total', () => {
+  const stats = selectionStats(['Ada', 'Grace'])
+  assert.equal(stats.numbers, 0)
+  assert.equal(stats.sum, 0)
+  assert.equal(stats.average, 0)
+})
+
+ok('a column of screens has no sum', () => {
+  // They sort as heights because that is what the column means, but adding
+  // two resolutions together would be inventing a quantity.
+  const stats = selectionStats(['1080p', '4K', '720p'])
+  assert.equal(stats.numbers, 0)
+})
+
+ok('a column of prices totals to the price it should', () => {
+  /* Summed naively in binary floating point this comes to 0.9999999999999999,
+     and a total ending in a run of nines reads as a bug in the file. */
+  const stats = selectionStats(['0.1', '0.2', '0.3', '0.4'])
+  assert.equal(stats.sum, 1)
+  assert.equal(formatStat(stats.sum), '1')
+})
+
+ok('a total is written the way a person reads one', () => {
+  assert.equal(formatStat(1234567), '1,234,567')
+  assert.equal(formatStat(1234.5), '1,234.5')
+  assert.equal(formatStat(0), '0')
+  assert.equal(formatStat(-40.25), '-40.25')
+  // Past what grouping helps with, and below what four places can show.
+  assert.equal(formatStat(1e16), '1.0000e+16')
+  assert.equal(formatStat(0.000001), '1.0000e-6')
+  assert.equal(formatStat(Infinity), '—')
+})
+
+ok('the selection walks an iterable rather than needing an array', () => {
+  // Which is what lets the grid total a rectangle without collecting it first.
+  function * cells () { yield '5'; yield '7' }
+  assert.equal(selectionStats(cells()).sum, 12)
 })
 
 /* --------------------------------------------------------- the clipboard */

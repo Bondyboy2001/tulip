@@ -198,8 +198,13 @@ const TAG = /<!--[\s\S]*?(?:-->|$)|<[!?][^>]*>|<\/\s*([a-zA-Z][a-zA-Z0-9:-]*)\s*
 /**
  * @param {string} html   what the note wrote
  * @param {(src: string) => string|null} resolve  vault asset -> URL
+ *
+ * Exported for the notebook viewer, which faces the same problem from the
+ * other side: a `text/html` output was written by whatever code the notebook
+ * ran, and lands in this document exactly as a note's own markup does. One
+ * allowlist for both, so a tag ruled out here cannot arrive through there.
  */
-function sanitizeHtml (html, resolve) {
+export function sanitizeHtml (html, resolve) {
   return html.replace(CODE_ELEMENTS, '').replace(TAG, (_whole, closing, opening, attrs) => {
     if (closing) return ALLOWED.has(closing.toLowerCase()) ? `</${closing.toLowerCase()}>` : ''
     if (!opening) return ''                                   // comment, doctype, PI

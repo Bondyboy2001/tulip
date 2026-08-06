@@ -44,6 +44,12 @@ export const PDF_EXT = new RegExp(`${escapeRe(VAULT_CONTRACT.pdfExtension)}$`, '
 export const SITE_EXT = new RegExp(`${escapeRe(VAULT_CONTRACT.siteExtension)}$`, 'i')
 export const WHITEBOARD_EXT = new RegExp(`${escapeRe(VAULT_CONTRACT.whiteboardExtension)}$`, 'i')
 
+/* A Jupyter notebook. JSON on disk like a whiteboard is, and for the same
+   reason not a source file: the editor would show the encoding — escaped
+   newlines, base64 images — rather than the document, and the document is the
+   cells. See src/notebook.js. */
+export const NOTEBOOK_EXT = new RegExp(`${escapeRe(VAULT_CONTRACT.notebookExtension)}$`, 'i')
+
 /* Regional-indicator pairs — the two codepoints a flag emoji is made of, and
    the prefix a language folder carries its country in. A source string in the
    contract because JSON has no regular expressions; `u` is what makes the
@@ -73,6 +79,33 @@ export const isTexPath = (path) => TEX_EXT.test(path || '')
 export const isPdfPath = (path) => PDF_EXT.test(path || '')
 export const isSitePath = (path) => SITE_EXT.test(path || '')
 export const isWhiteboardPath = (path) => WHITEBOARD_EXT.test(path || '')
+export const isNotebookPath = (path) => NOTEBOOK_EXT.test(path || '')
+
+/** Whether the last segment carries an extension at all. A wikilink names a
+ *  note without one — `[[Reading list]]` — and that is the difference between
+ *  "a file of a kind nothing here handles" and "a note that may not exist
+ *  yet". */
+const HAS_EXT = /\.[^./]+$/
+
+/**
+ * A file the vault holds but has no view of its own for: a photograph, a
+ * recording, a `.docx`, an archive.
+ *
+ * The vault is a folder on disk and people put things in folders. Everything
+ * above this line is a kind Tulip knows how to *be* — a note, a paper, a board
+ * — and everything else used to be simply absent: not in the tree, not in the
+ * switcher, invisible in its own vault. It is listed now, and what opening one
+ * means is decided at the door in renderer.js: text is text whatever it is
+ * called, a picture gets a picture viewer, and what is left is described rather
+ * than pretended at.
+ */
+export const isViewedFilePath = (path) => {
+  const name = String(path || '').split('/').pop()
+  if (!HAS_EXT.test(name)) return false
+  return !NOTE_EXT.test(name) && !isTexPath(name) && !isPdfPath(name) &&
+    !isSitePath(name) && !isWhiteboardPath(name) && !isDataPath(name) &&
+    !isNotebookPath(name) && !isCodePath(name)
+}
 
 /* A file attached in the copilot's message box lives under the attachments
    folder but belongs to a conversation rather than to a note. Named here

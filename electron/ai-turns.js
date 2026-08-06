@@ -26,6 +26,15 @@ class TurnLedger {
     return key
   }
 
+  /** Whether this turn took a baseline — which is the same question as whether
+   *  finishing it can produce anything. A read-only turn never begins one, and
+   *  the caches main drops on the way into `finish` are only worth dropping for
+   *  a turn that is going to look at them. */
+  has (id) {
+    const key = turnId(id)
+    return !!key && (this.baselines.has(key) || this.finishing.has(key))
+  }
+
   finish (id) {
     const key = turnId(id)
     if (!key) return Promise.resolve(null)

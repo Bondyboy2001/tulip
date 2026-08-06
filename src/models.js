@@ -1,33 +1,31 @@
 /* =============================================================== models
-   One list of models, drawn from every CLI the copilot can be.
+   One list of models, drawn from the CLI the copilot runs.
 
-   The panel used to ask two questions — which copilot, then which of its
-   models — which is one question too many: nobody picks Devin and then wonders
-   what Devin has. So a model is named by the pair, `provider:id`, and choosing
-   one chooses both. `devin:claude-opus-5-{effort}`,
-   `opencode:opencode-go/glm-5.2`.
+   A model is named by the pair, `provider:id`, and choosing one chooses both —
+   `opencode:opencode-go/glm-5.2`. The provider half is not a question the panel
+   asks any more, but it stays in the name: opencode reaches every vendor, and a
+   second CLI has been added here before and taken away again.
 
    The pair also has to survive opencode's ids, which are themselves
    `provider/model` and contain a slash — hence a colon here, and a split on the
-   first one only. And devin's, which carry a `{effort}` where the reasoning
-   level goes.
+   first one only.
 
-   Which models are *offered* is a setting, because opencode alone answers with
-   four hundred of them and a dropdown that long is not a choice. The catalogue
-   is everything the CLIs will admit to; the enabled list is what the user wants
-   to see. This file owns both, so copilot.js and settings.js cannot drift.
+   Which models are *offered* is a setting, because opencode answers with four
+   hundred of them and a dropdown that long is not a choice. The catalogue is
+   everything the CLI will admit to; the enabled list is what the user wants to
+   see. This file owns both, so copilot.js and settings.js cannot drift.
 
-   Effort is not one scale, and that is the other thing this file owns. Devin
-   spells the level into the model id, so its ladder is whatever that family was
-   listed at; most of opencode's catalogue has no such dial at all. So the
-   levels are data on the model, read from the CLI that offers it, and every
-   control asks the model rather than knowing any levels of its own.
+   Effort is not one scale, and that is the other thing this file owns: most of
+   the catalogue has no such dial at all, and the models that do offer their own
+   ladder of variants. So the levels are data on the model, read from the CLI
+   that offers it, and every control asks the model rather than knowing any
+   levels of its own.
    ================================================================== */
 
-/* The CLIs and what they offer before they are asked, shared with the main
-   process — which spawns them — so that "what devin has" is one fact in one
-   file rather than two that can disagree. Same arrangement as zoom-steps.json
-   and vault-contract.json. */
+/* The CLI and what it offers before it is asked, shared with the main process —
+   which spawns it — so that "what opencode has" is one fact in one file rather
+   than two that can disagree. Same arrangement as zoom-steps.json and
+   vault-contract.json. */
 import CATALOGUE from '../electron/ai-models.json'
 
 /** In the order they are shown. `label` names the CLI; `id` is what the main
@@ -82,14 +80,13 @@ export function allModels (catalogue) {
         // and nothing more.
         label: model.label || model.id,
         /* Which shelf inside its copilot this model sits on. opencode's own
-           sub-providers are the useful grouping there — `glm-5.2` says nothing
-           about whether it is coming from the user's opencode subscription or
-           their own OpenRouter key — and devin's families are its. Failing
-           either, the copilot's own name. */
+           sub-providers are the useful grouping — `glm-5.2` says nothing about
+           whether it is coming from the user's opencode subscription or their
+           own OpenRouter key. Failing that, the copilot's own name. */
         group: model.group || providerLabel,
         /* How much this model can hold, for drawing how much of it a
-           conversation has spent. devin and opencode each publish their own;
-           zero means nobody said, and the ring stays away. */
+           conversation has spent. Zero means nobody said, and the ring stays
+           away. */
         context: model.context || 0,
         /* The levels this model takes, in the CLI's own words. An empty list
            means the model has no such dial, which is most of opencode's. */
@@ -134,10 +131,43 @@ function placeholderFor (key) {
   }
 }
 
+/* The last answer `offeredModels` gave, and what was asked for.
+ *
+ * `allModels` is memoised and this was not, which left the expensive half
+ * shared and the rest repeated: `repaintControls` reaches this five times over
+ * — through `paintModel`, `settleEffort`, `paintEffort`, `paintWrite` and
+ * `paintConfig` — and each pass built a Set of the enabled keys and filtered
+ * four hundred-odd models against it. The question is the same one every time,
+ * so the answer is kept until it changes.
+ *
+ * One slot, because the callers ask in bursts about a single selection rather
+ * than alternating between several. The enabled list is compared by its
+ * contents, since Settings hands over a new array for the same ticks. */
+let offered = null   // { catalogue, enabled, selected, list }
+
+const sameKeys = (a, b) => {
+  if (a === b) return true
+  if (!a || !b || a.length !== b.length) return false
+  return a.every((key, at) => key === b[at])
+}
+
 /** The models the copilot offers: those ticked in settings, plus whichever
  *  one is selected. The selected model leads the list, and remains visible
  *  while a provider's real catalogue is still loading. */
 export function offeredModels (catalogue, enabled, selected) {
+  if (offered && offered.catalogue === catalogue && offered.selected === selected &&
+      sameKeys(offered.enabled, enabled)) {
+    return offered.list
+  }
+  const list = computeOffered(catalogue, enabled, selected)
+  /* The enabled list is copied rather than held: the caller keeps its own
+     array, and a later mutation of it would make this cache agree with a
+     question nobody asked. */
+  offered = { catalogue, enabled: enabled ? [...enabled] : enabled, selected, list }
+  return list
+}
+
+function computeOffered (catalogue, enabled, selected) {
   const fallback = defaultModels(catalogue)
   const all = allModels(catalogue)
   const selectedModel = selected
@@ -153,9 +183,8 @@ export function offeredModels (catalogue, enabled, selected) {
 
 /** How a model is named in a list: qualified by whoever is answering, because
  *  `GPT-5.6-Sol` and `glm-5.2` side by side say nothing about who that is. The
- *  qualifier is dropped when the name already carries it — devin's shelves are
- *  families and its models are named after them, so the plain form would read
- *  "Claude Opus 5 · Claude Opus 5 High". */
+ *  qualifier is dropped when the name already carries it, so that a shelf whose
+ *  models are named after it does not read "Claude · Claude Opus 5". */
 const longLabel = (model) =>
   (model.label.startsWith(model.group) ? model.label : `${model.group} · ${model.label}`)
 
@@ -240,8 +269,8 @@ export function modelFromConfig (cfg) {
 
 /* -------------------------------------------------------------- effort */
 
-/* Named rather than numbered, and the names are the CLIs' own — opencode's
-   `none` and `thinking` and devin's `max` among them. Ordered weakest to
+/* Named rather than numbered, and the names are the CLI's own — `none`,
+   `thinking` and `max` among them. Ordered weakest to
    strongest, which is the one thing a shared scale is needed for: mapping a
    level a model does not take onto the nearest it does. A level no one here has
    heard of is shown as it came, which beats hiding one the CLI has started

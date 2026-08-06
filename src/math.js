@@ -26,13 +26,26 @@ function loadStyles () {
 
   const link = document.createElement('link')
   link.rel = 'stylesheet'
-  link.href = new URL('katex.css', import.meta.url).href
+  /* Resolved against the document, not against this module.
+     build.mjs emits the stylesheet as a named entry point beside index.html,
+     so `dist/katex.css` is where it always is — but `import.meta.url` is
+     wherever esbuild's splitting last happened to put *this file*, and the day
+     math.js landed in a shared chunk that became `dist/chunks/katex.css`. The
+     link 404ed, `loadKatex` never resolved, and every `$…$` in the app
+     rendered as its own source in a `.math-pending` span, silently: nothing
+     throws, the promise is simply never fulfilled. The document is the one
+     base that cannot move out from under this. */
+  link.href = new URL('katex.css', document.baseURI).href
   link.dataset.tulipKatex = ''
 
   loadingStyles = new Promise((resolve, reject) => {
     link.addEventListener('load', resolve, { once: true })
     link.addEventListener('error', () => {
       loadingStyles = null
+      // Taken back out, because the next expression will try again: a
+      // stylesheet that will not load once left one dead <link> in the head
+      // per equation rendered.
+      link.remove()
       reject(new Error('KaTeX styles could not be loaded.'))
     }, { once: true })
   })

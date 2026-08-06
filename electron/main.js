@@ -13,6 +13,7 @@ const { spawn } = require('node:child_process')
 const { pathToFileURL } = require('node:url')
 const ai = require('./ai')
 const { TurnLedger, turnId } = require('./ai-turns')
+const { mergeChatHistory } = require('./chat-history')
 const { restoreConflicts } = require('./copilot-restore')
 const { createTexCompiler } = require('./tex-compile')
 const { TrustStore } = require('./trust-store')
@@ -29,6 +30,9 @@ const { narrowsFrom } = require('./search-narrow')
 const { parseByteRange, streamFileRange } = require('./range-response')
 const { ocrPagesOf, parsePages, relevantPdfContext } = require('./pdf-context')
 const { sanitizeConfigPatch } = require('./config-keys')
+/* Per-path sidecars — tags, table layouts — and the two calls that keep every
+   one of them following a rename and forgotten on a delete. */
+const { makePathStore, relocateAll, forgetAll, resetAll } = require('./path-store')
 const { safeFileName } = require('./safe-name')
 const { parseFrontmatter, propsOf, propValues } = require('./frontmatter.cjs')
 const { emptyWhiteboard, whiteboardText } = require('./whiteboard-data')
@@ -110,6 +114,7 @@ const DOCUMENT_EXT = new RegExp(
     VAULT_CONTRACT.pdfExtension,
     VAULT_CONTRACT.siteExtension,
     VAULT_CONTRACT.whiteboardExtension,
+    VAULT_CONTRACT.notebookExtension,
     ...VAULT_CONTRACT.codeExtensions,
     ...Object.keys(VAULT_CONTRACT.dataExtensions)
   ]
@@ -156,6 +161,13 @@ const isSite = (p) => path.extname(p).toLowerCase() === SITE_EXT
 const WHITEBOARD_EXT = VAULT_CONTRACT.whiteboardExtension
 const isWhiteboard = (p) => path.extname(p).toLowerCase() === WHITEBOARD_EXT
 
+/* A Jupyter notebook. Text on disk — nbformat is JSON — so it is written,
+   versioned and imported exactly as a note is; what it is *not* is a source
+   file, because the editor would show the encoding rather than the cells. The
+   renderer gives it a viewer of its own; see src/notebook.js. */
+const NOTEBOOK_EXT = VAULT_CONTRACT.notebookExtension
+const isNotebook = (p) => path.extname(String(p || '')).toLowerCase() === NOTEBOOK_EXT
+
 /* Source files and data files. Neither is a note — a `.py` is text the vault
    edits but never reads as prose, and a `.csv` is a table rather than a
    document at all — but both are text on disk that the vault owns, so unlike a
@@ -194,6 +206,21 @@ const ASSET_EXT = new Set(
     .filter(([kind]) => !kind.startsWith('_'))
     .flatMap(([, exts]) => exts.map((ext) => `.${ext}`))
 )
+
+/* Which viewer a file of no particular kind wants, by extension alone. The
+   same four words src/assets.js uses for an embed — a picture is a picture
+   whether a note points at it or the tree does — and `file` for everything
+   with nothing to show, which the renderer describes rather than draws. */
+const ASSET_KIND_BY_EXT = new Map(
+  Object.entries(ASSET_KINDS)
+    .filter(([kind]) => !kind.startsWith('_'))
+    .flatMap(([kind, exts]) => exts.map((ext) => [`.${ext}`, kind]))
+)
+
+const showAs = (name) => {
+  const kind = ASSET_KIND_BY_EXT.get(path.extname(name).toLowerCase())
+  return kind === 'image' || kind === 'video' || kind === 'audio' ? kind : 'file'
+}
 
 /* The snapshot's file list feeds only these consumers. Do not retain every
    regular file in a vault just to filter it into four arrays after the walk —
@@ -261,62 +288,120 @@ protocol.registerSchemesAsPrivileged([{
   }
 }])
 
-let mainWindow = null
+/* ==================================================================== windows
+   Every window Tulip has open, and the two questions the rest of the file asks
+   about them: send this to all of them, or send it to the one being used?
+
+   There used to be a single `mainWindow`, and the difference did not arise. It
+   arises everywhere now, and getting it wrong is not a crash — it is a ⌘S that
+   saves the note in a window you are not looking at. So the choice is made at
+   every call, by the name of the function called: `broadcast` for facts about
+   the vault, which are true in every window at once, and `toFocused` for
+   commands, which mean "here".
+
+   ONE OF THEM IS THE PRIMARY WINDOW: the first one opened, and the one whose
+   tab strip is the session that comes back at launch. Two windows writing
+   `tabs` to a single config file would each overwrite the other's; rather than
+   invent a merge for a shallow config, the second window keeps its strip for as
+   long as it is open and writes none of it down. The copilot is the primary
+   window's too — see `copilotWindow`. */
+const windows = new Set()
+let primaryWindow = null
+
+/** The windows that still exist — a closed one lingers in the set until its
+ *  own `closed` handler runs, and a destroyed one throws when written to. */
+const liveWindows = () => [...windows].filter((w) => !w.isDestroyed() && !w.webContents.isDestroyed())
+
+/**
+ * The window a command is about.
+ *
+ * The focused one, and the primary as the fallback for the moment when nothing
+ * of ours has the focus — a menu picked from the dock, or a shortcut arriving
+ * while a native dialog holds the keyboard. Doing nothing there would make the
+ * menu look broken; doing it in every window would be worse than that.
+ */
+function focusedWindow () {
+  const focused = BrowserWindow.getFocusedWindow()
+  if (focused && windows.has(focused)) return focused
+  const live = liveWindows()
+  return live.includes(primaryWindow) ? primaryWindow : live[0] || null
+}
+
+/** The window that owns the copilot: the primary one, always. */
+const copilotWindow = () => (primaryWindow && !primaryWindow.isDestroyed() ? primaryWindow : null)
+
+/** A fact about the vault or the app — true in every window, so said to each. */
+function broadcast (channel, payload) {
+  for (const win of liveWindows()) win.webContents.send(channel, payload)
+}
+
+/** A command, to the window it is a command about. */
+function toFocused (channel, payload) {
+  sendTo(focusedWindow(), channel, payload)
+}
+
+/** The window an IPC call came from — for the handlers that answer a window
+ *  rather than the app: a save dialog belongs over the page that opened it. */
+const windowOf = (event) => BrowserWindow.fromWebContents(event.sender)
+
+/** To one named window, if it is still there to hear it. */
+function sendTo (win, channel, payload) {
+  if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) {
+    win.webContents.send(channel, payload)
+  }
+}
+
 let vaultPath = null
-let fileTagsCache = null
 
-const fileTagsPath = () => path.join(vaultPath, '.tulip', 'file-tags.json')
-
-async function loadFileTags () {
-  if (fileTagsCache) return fileTagsCache
-  try {
-    const parsed = JSON.parse(await fs.readFile(fileTagsPath(), 'utf8'))
-    fileTagsCache = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
-  } catch { fileTagsCache = {} }
-  return fileTagsCache
+const cleanFileTags = (values) => {
+  const tags = [...new Set((Array.isArray(values) ? values : [])
+    .map((value) => String(value || '').trim().replace(/^#+/, '').toLowerCase())
+    .filter(Boolean))]
+  // Falsy for the store, which is how "no tags" becomes no entry at all.
+  return tags.length ? tags : null
 }
 
-const cleanFileTags = (values) => [...new Set((Array.isArray(values) ? values : [])
-  .map((value) => String(value || '').trim().replace(/^#+/, '').toLowerCase())
-  .filter(Boolean))]
+/* Tags a reader put on a file from outside its text. The index is built partly
+   from these, so a write invalidates it. */
+const fileTags = makePathStore({
+  name: 'file-tags',
+  vault: () => vaultPath,
+  clean: cleanFileTags,
+  onSave: () => { indexGeneration++ }
+})
 
-async function saveFileTags () {
-  const target = fileTagsPath()
-  await fs.mkdir(path.dirname(target), { recursive: true })
-  await writeAtomic(target, JSON.stringify(fileTagsCache || {}, null, 2) + '\n')
-  indexGeneration++
-}
+/* How wide the columns of a table were left. A `.csv` has nowhere inside it to
+   record that — the file is the data and nothing else — so fitting the columns
+   of a big export used to be undone by closing the tab. A width below the
+   minimum, or a list that is not one, is not a layout and is not kept. */
+const MIN_STORED_COLUMN = 40
+const MAX_STORED_COLUMN = 4000
 
-async function relocateFileTags (from, to, isDir) {
-  const tags = await loadFileTags()
-  let changed = false
-  if (isDir) {
-    const prefix = `${from}/`
-    for (const key of Object.keys(tags)) {
-      if (key !== from && !key.startsWith(prefix)) continue
-      tags[`${to}${key.slice(from.length)}`] = tags[key]
-      delete tags[key]
-      changed = true
-    }
-  } else if (tags[from]) {
-    tags[to] = tags[from]
-    delete tags[from]
-    changed = true
+/* What a table may be separated by. The grid offers exactly these, and a
+   stored value that is not one of them is not a delimiter — it is something
+   that got into the file some other way, and is dropped rather than used to
+   split somebody's data. */
+const STORED_DELIMITERS = new Set([',', ';', '\t', '|'])
+
+const tableWidths = makePathStore({
+  name: 'table-widths',
+  vault: () => vaultPath,
+  /* Two shapes, because this store predates the second half of what it holds.
+     A bare array is a layout written before delimiters were kept and still
+     means what it always did; `{ widths, delimiter }` is the current shape. An
+     old sidecar therefore keeps working untouched, and is rewritten into the
+     new shape the next time a column is dragged. */
+  clean: (value) => {
+    const list = Array.isArray(value) ? value : value?.widths
+    const delimiter = Array.isArray(value) ? null : value?.delimiter
+    if (!Array.isArray(list) || !list.length || list.length > 2000) return null
+    const widths = list.map((width) => Math.round(Number(width)))
+    const usable = widths.every((width) =>
+      Number.isFinite(width) && width >= MIN_STORED_COLUMN && width <= MAX_STORED_COLUMN)
+    if (!usable) return null
+    return STORED_DELIMITERS.has(delimiter) ? { widths, delimiter } : { widths }
   }
-  if (changed) await saveFileTags()
-}
-
-async function forgetFileTags (target, isDir) {
-  const tags = await loadFileTags()
-  const prefix = `${target}/`
-  let changed = false
-  for (const key of Object.keys(tags)) {
-    if (key !== target && !(isDir && key.startsWith(prefix))) continue
-    delete tags[key]
-    changed = true
-  }
-  if (changed) await saveFileTags()
-}
+})
 let watcher = null
 let trust = null
 
@@ -578,6 +663,28 @@ const whiteboardIndex = new Map() // rel path -> extracted text, never image dat
 /* A note big enough to be a paste of a log file would cost more to hold than
    the search is worth; it is indexed as empty rather than skipped, so it still
    disappears from the index when it is deleted. */
+/* How large a text document may be and still have every version of it kept.
+ *
+ * History holds each save whole — the text before and the text after — inside
+ * one 4 MB budget shared by the entire vault, and evicts the oldest saves when
+ * it overflows. That arrangement suits notes, which are prose and small. It
+ * does not suit a data file: a 50 MB export autosaves the whole of itself
+ * about a second after each pause in typing, and one such save would carry
+ * 100 MB into a 4 MB store, evicting the recoverable history of every note in
+ * the vault to make room for a version it cannot keep either. The same save
+ * also has to read the previous 50 MB back off the disk to have something to
+ * record, which is the cost paid whether or not the entry survives.
+ *
+ * This is the argument the comment beside `isTextDocument` already makes for
+ * leaving notebooks out, applied by size rather than by extension — a large
+ * `.md` is the same problem, and a small `.csv` is not a problem at all.
+ *
+ * Past this, the file is still written, still written atomically, and still
+ * the vault's own text. It simply has no version history, the way a PDF or an
+ * image does not.
+ */
+const MAX_VERSIONED_BYTES = 256 * 1024
+
 const MAX_INDEX_BYTES = 4 * 1024 * 1024
 const MAX_WHITEBOARD_INDEX_BYTES = 32 * 1024 * 1024
 
@@ -718,7 +825,40 @@ function ensureIndex () {
    each one re-reads every TeX document in the vault. */
 const texSnapshotCache = new Map() // rel path -> { mtime, size, text }
 
+/**
+ * A counter that moves whenever any document in the vault might have.
+ *
+ * `indexGeneration` is not that fact: a TeX document is deliberately outside
+ * the Markdown index, so saving one from the editor moves neither it nor the
+ * vault snapshot's own generation. This is bumped from the three places a
+ * document's bytes can change — the editor's own save, the index being told
+ * about a write, and any watched change the classifier did not ignore — which
+ * is what makes it sound to reuse a snapshot taken while it stood still.
+ */
+let documentsGeneration = 0
+const documentsChanged = () => { documentsGeneration++ }
+
+/* The last snapshot, and the generation it was taken at.
+ *
+ * A turn ends by snapshotting the vault, and the next one begins by
+ * snapshotting it again — usually with nothing but a pause for thought in
+ * between. Held, that second walk is free; and because the baseline is only
+ * ever compared, never written into, the same Map can safely be handed to
+ * both. */
+let heldSnapshot = null   // { at, notes }
+
 async function snapshotNotes () {
+  if (heldSnapshot && heldSnapshot.at === documentsGeneration) return heldSnapshot.notes
+  const taken = documentsGeneration
+  const notes = await readDocumentSnapshot()
+  /* Only if nothing moved while we were reading. A change that landed mid-walk
+     leaves the answer already behind, and holding it would hand the next turn a
+     baseline that never existed. */
+  if (documentsGeneration === taken) heldSnapshot = { at: taken, notes }
+  return notes
+}
+
+async function readDocumentSnapshot () {
   await ensureIndex()
   const snapshot = new Map([...index].map(([key, entry]) => [key, entry.text]))
   /* TeX is edited in the same CodeMirror surface and by the same Copilot, but
@@ -770,6 +910,7 @@ function touchIndex (absPath, text, stamp) {
   try {
     const stat = stamp || fsSync.statSync(absPath)
     indexGeneration++
+    documentsChanged()
     // A note this index has not seen before is a key the link tables lack.
     if (!index.has(rel(absPath))) forgetLinkTables()
     index.set(rel(absPath), {
@@ -832,6 +973,10 @@ let vaultSnapshottingFor = -1
 const invalidateVaultSnapshot = () => {
   vaultSnapshotCache = null
   vaultSnapshotGeneration++
+  /* Every create, rename, delete and restore in the app already says so here,
+     which makes this the one place a held document snapshot has to be told
+     about all of them. */
+  documentsChanged()
 }
 
 async function scanVaultDirectory (dir, includeInTree = true) {
@@ -896,6 +1041,11 @@ async function scanVaultDirectory (dir, includeInTree = true) {
         type: 'file', kind: 'whiteboard',
         name: path.basename(entry.name, path.extname(entry.name)), path: rel(abs)
       }
+    } else if (includeInTree && isNotebook(entry.name)) {
+      node = {
+        type: 'file', kind: 'notebook',
+        name: path.basename(entry.name, path.extname(entry.name)), path: rel(abs)
+      }
     } else if (includeInTree && (isCode(entry.name) || isData(entry.name))) {
       /* The one kind whose extension stays in the label. Every other document
          is named without one because its kind is already said by the icon
@@ -905,6 +1055,26 @@ async function scanVaultDirectory (dir, includeInTree = true) {
       node = {
         type: 'file',
         kind: isData(entry.name) ? 'data' : 'code',
+        name: entry.name,
+        path: rel(abs)
+      }
+    } else if (includeInTree && !entry.name.endsWith('.icloud')) {
+      /* Everything else the folder holds. A vault is a folder on disk and
+         people keep things in folders — a photograph beside the notes about
+         it, a recording, a spreadsheet somebody sent — and every one of them
+         used to be missing from its own vault: not in the tree, not in the
+         switcher, not openable. The kind here is only how it wants to be
+         *shown*, taken from the extension; what opening one means is decided in
+         the renderer, which can afford to look inside it.
+
+         A `.icloud` placeholder is the exception, and stays counted rather than
+         listed: it is not the file, it is iCloud saying the file is elsewhere,
+         and the sync readout is where that belongs. */
+      node = {
+        type: 'file',
+        kind: showAs(entry.name),
+        // With the extension, like source files: `photo.png` and `photo.heic`
+        // are two files, and the icon says "picture" for both of them.
         name: entry.name,
         path: rel(abs)
       }
@@ -1200,7 +1370,9 @@ async function relocate (srcAbs, targetAbs) {
   noteSelfWrite(srcAbs)
   noteSelfWrite(targetAbs)
   await fs.rename(srcAbs, targetAbs)
-  await relocateFileTags(fromPath, toPath, isDir)
+  /* Everything filed against a path rather than inside the file — tags, the
+     table's column widths, and whatever is registered next — moves with it. */
+  await relocateAll(fromPath, toPath, isDir)
   await carryAnnotations(rel(srcAbs), rel(targetAbs))
   /* A card's identity begins with the path of the note it came from, so a
      rename that did not carry the review state would silently reset every word
@@ -1443,9 +1615,15 @@ function watchVault () {
         pdfExtension: PDF_EXT,
         siteExtension: SITE_EXT,
         whiteboardExtension: WHITEBOARD_EXT,
+        notebookExtension: NOTEBOOK_EXT,
         assetExtensions: ASSET_EXT
       })
       if (change.ignore) return
+      /* Immediately, not on the debounce, and for every kind rather than only
+         the indexed ones: a Copilot turn ending inside the quiet window must
+         not be handed a snapshot taken before the write it is about to be
+         asked to review. */
+      documentsChanged()
       // Marked immediately, not on the debounce: a search that lands inside the
       // quiet window must still see that something moved.
       if (change.index) indexDirty = true
@@ -1519,11 +1697,9 @@ function scheduleWatchRetry () {
   }, watchRetryDelay)
 }
 
-/** Tell the renderer the vault may have moved under it. */
+/** Tell every renderer the vault may have moved under it. */
 function notifyVaultChanged (paths = []) {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('vault:changed', { paths })
-  }
+  broadcast('vault:changed', { paths })
 }
 
 /**
@@ -1608,14 +1784,15 @@ ipcMain.handle('vault:open', async (_event, dir) => {
   /* The same handshake `pickVault` uses, and for the same reason: the buffer
      has to reach disk while `vaultPath` still points at the vault it belongs
      to. See the account there. */
-  await askRendererToFlush(mainWindow)
+  await flushAllWindows()
   await openVault(dir)
   return { ok: true }
 })
 
 async function openVault (dir) {
   vaultPath = dir
-  fileTagsCache = null
+  // The next read of each is of the new vault's own file.
+  resetAll()
   rememberVault(dir)
   trust?.setVault(dir, readConfig().historyInVault === true)
   /* The vault open is the vault remembered — there is no second, separately
@@ -1638,9 +1815,14 @@ async function openVault (dir) {
   // Whatever a killed write left beside a note in this vault. Background work
   // like the two sweeps around it; nothing waits on the tidying.
   sweepTemporaryFiles(dir, { recursive: true }).catch(() => {})
-  if (mainWindow) {
-    mainWindow.setTitle(path.basename(dir))
-    mainWindow.webContents.send('vault:opened', { path: dir, name: path.basename(dir), sync: syncProviderFor(dir) })
+  /* Every window shows the same vault — there is one `vaultPath` and every
+     path in the app is resolved against it — so opening another one is an
+     event all of them have to hear. A window that missed it would keep a strip
+     of tabs naming notes in the vault that has just been left, and its next
+     autosave would write one of them into the new vault's root. */
+  for (const win of liveWindows()) {
+    win.setTitle(path.basename(dir))
+    sendTo(win, 'vault:opened', { path: dir, name: path.basename(dir), sync: syncProviderFor(dir) })
   }
 }
 
@@ -1653,8 +1835,6 @@ async function openVault (dir) {
  * not hold the door.
  */
 let quitting = false
-let flushReply = null
-let flushAsked = null
 ipcMain.handle('app:version', () => app.getVersion())
 
 /* ------------------------------------------------------------- updates
@@ -1748,27 +1928,52 @@ ipcMain.on('app:error', (_event, kind, detail) => {
    `app:painted` — see the account there. A no-op before there is a window and
    after the first show, so a second announcement (a boot retried after an
    error) costs nothing. */
-let revealMainWindow = () => {}
-ipcMain.on('app:painted', () => revealMainWindow())
-ipcMain.handle('app:flushed', async () => {
+/* Keyed by the webContents that will announce itself, because every window
+   paints once and each has to be revealed by its own announcement. A single
+   `revealMainWindow` here showed whichever window was built last — so opening
+   a second one left the first hidden until its 4-second backstop fired. */
+const reveals = new Map()
+ipcMain.on('app:painted', (event) => reveals.get(event.sender.id)?.())
+
+ipcMain.handle('app:flushed', async (event) => {
   await flushPendingDurability()
-  flushReply?.()
+  flushWaits.get(event.sender.id)?.reply()
 })
 
+/* One entry per window with a flush in flight. Per window rather than one
+   global pair: two windows closing together each send their own `app:flushed`,
+   and a single `flushReply` would have the first answer resolve the second
+   window's promise as well — releasing a close before that window had written
+   anything down. */
+const flushWaits = new Map()
+
+/**
+ * Ask one window's renderer to write what it is holding, and wait for it.
+ *
+ * A page that is wedged, or one whose renderer died, must not hold the door:
+ * the timer resolves the promise whatever happens. Asking twice for the same
+ * window is the same ask — ⌘⇧W pressed twice, or ⌘Q arriving while a close is
+ * already waiting, must not leave the first promise stranded on its timer.
+ */
 function askRendererToFlush (win) {
-  /* One request at a time. ⌘⇧W pressed twice, or ⌘Q arriving while a close is
-     still waiting, used to overwrite `flushReply` — the renderer sends one
-     `app:flushed`, so the first promise was left stranded on its timer and the
-     quit stalled the full 1.5 s before closing a second time. */
-  if (flushAsked) return flushAsked
-  flushAsked = new Promise((resolve) => {
-    if (!win || win.webContents.isDestroyed()) return resolve()
+  if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return Promise.resolve()
+  const key = win.webContents.id
+  const already = flushWaits.get(key)
+  if (already) return already.promise
+
+  const entry = {}
+  entry.promise = new Promise((resolve) => {
     const timer = setTimeout(resolve, 1500)
-    flushReply = () => { clearTimeout(timer); resolve() }
-    win.webContents.send('app:flush')
-  }).finally(() => { flushReply = null; flushAsked = null })
-  return flushAsked
+    entry.reply = () => { clearTimeout(timer); resolve() }
+  }).finally(() => flushWaits.delete(key))
+
+  flushWaits.set(key, entry)
+  win.webContents.send('app:flush')
+  return entry.promise
 }
+
+/** Every window's unsaved work on its way to disk — what a quit waits for. */
+const flushAllWindows = () => Promise.all(liveWindows().map(askRendererToFlush))
 
 /* The app draws its own title bar (see `.titlebar` in styles.css — a 38px drag
    strip the document scrolls under), so the system one is hidden. What replaces
@@ -1809,17 +2014,46 @@ function windowChrome () {
    until the next launch. */
 if (process.platform === 'win32') {
   nativeTheme.on('updated', () => {
-    if (!mainWindow || mainWindow.isDestroyed()) return
-    try { mainWindow.setTitleBarOverlay(overlayColors()) } catch { /* window went */ }
+    for (const win of liveWindows()) {
+      try { win.setTitleBarOverlay(overlayColors()) } catch { /* window went */ }
+    }
   })
 }
 
-function createWindow () {
-  mainWindow = new BrowserWindow({
+/* Each new window steps down and right from the last, the way every document
+   app opens its second window: exactly on top of the first is the one place it
+   cannot be told apart from the window it was opened from. */
+const CASCADE = 28
+
+function cascadeFrom (win) {
+  if (!win || win.isDestroyed()) return {}
+  const [x, y] = win.getPosition()
+  const [width, height] = win.getSize()
+  return { x: x + CASCADE, y: y + CASCADE, width, height }
+}
+
+/**
+ * A window on the vault.
+ *
+ * The first one is the primary — the session's own window, the one that
+ * restores the tab strip that was left behind and the one the copilot belongs
+ * to. Every window after it is an ordinary one: same vault, same everything it
+ * can do to the vault, but its strip lives only as long as it does.
+ *
+ * @param {object} [opts]
+ * @param {string|null} [opts.open]  a vault-relative path to open in it
+ */
+function createWindow ({ open = null } = {}) {
+  /* The first window keeps the size it always had, and takes the whole screen;
+     a second one is sized and placed from the window it was opened out of, so
+     it lands somewhere the reader is already looking. */
+  const parent = windows.size ? focusedWindow() : null
+  const win = new BrowserWindow({
     width: 1180,
     height: 780,
     minWidth: 680,
     minHeight: 460,
+    ...cascadeFrom(parent),
     ...windowChrome(),
     backgroundColor: nativeTheme.shouldUseDarkColors ? '#141317' : '#FBFAF8',
     show: false,
@@ -1837,10 +2071,23 @@ function createWindow () {
     }
   })
 
-  /* Opened filling the screen. The width and height above stay what they are —
-     they are the size the window returns to when it is un-maximised, and a
-     restore size equal to the screen would make the green button do nothing. */
-  mainWindow.maximize()
+  windows.add(win)
+  // Claimed by `window:role` during boot, and gone once it has been read.
+  if (open) pendingOpens.set(win.webContents.id, open)
+  /* The first window to exist is the primary one for as long as it does. It is
+     not handed on when that window closes: the strip a later window is holding
+     was never the session's, and promoting it would write it over the session
+     that is on disk — a window opened for one look at one note would become
+     what the next launch comes back to. */
+  if (!primaryWindow) primaryWindow = win
+  const primary = primaryWindow === win
+
+  /* The first window opens filling the screen. The width and height above stay
+     what they are — they are the size it returns to when it is un-maximised,
+     and a restore size equal to the screen would make the green button do
+     nothing. A second window keeps the size it was cascaded at: it was opened
+     to be looked at beside something, which a maximise would undo. */
+  if (primary) win.maximize()
 
   /* Shown when there is something to read, not when there is a frame to fill.
      `ready-to-show` fires as soon as the document has painted once — about
@@ -1857,21 +2104,24 @@ function createWindow () {
   let shown = false
   let revealBackstop = null
   const reveal = () => {
-    if (shown || !mainWindow || mainWindow.isDestroyed()) return
+    if (shown || win.isDestroyed()) return
     shown = true
     clearTimeout(revealBackstop)
-    mainWindow.show()
+    win.show()
+    /* A window opened while another one has the screen has to come forward as
+       well as appear, or the reader's ⌘⌥N looks like it did nothing. */
+    if (!primary) win.focus()
   }
-  revealMainWindow = reveal
-  mainWindow.once('ready-to-show', () => { revealBackstop = setTimeout(reveal, 4000) })
-  mainWindow.webContents.on('render-process-gone', reveal)
-  mainWindow.webContents.on('did-fail-load', reveal)
-  mainWindow.on('closed', () => clearTimeout(revealBackstop))
+  reveals.set(win.webContents.id, reveal)
+  win.once('ready-to-show', () => { revealBackstop = setTimeout(reveal, 4000) })
+  win.webContents.on('render-process-gone', reveal)
+  win.webContents.on('did-fail-load', reveal)
+  win.on('closed', () => clearTimeout(revealBackstop))
 
-  mainWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'))
+  win.loadFile(path.join(__dirname, '..', 'dist', 'index.html'))
 
   // External links open in the browser; the vault never navigates away.
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+  win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:/.test(url)) shell.openExternal(url)
     return { action: 'deny' }
   })
@@ -1882,7 +2132,7 @@ function createWindow () {
      same preload, so `window.tulip` and every filesystem call with it. The
      app never navigates its own top frame (views swap in-page), so refusing
      all of it costs nothing. In-page #anchors don't raise this event. */
-  mainWindow.webContents.on('will-navigate', (event) => event.preventDefault())
+  win.webContents.on("will-navigate", (event) => event.preventDefault())
 
   /* The native context menu, and it only ever shows up over text you can
      type in. Right-clicks elsewhere are the renderer's to draw — the tree,
@@ -1892,16 +2142,16 @@ function createWindow () {
      its suggestions and the way to teach it the word — unlearnable again from
      Settings → Markdown — and over any other editable text it is the standard
      cut, copy and paste. */
-  mainWindow.webContents.on('context-menu', (_event, params) => {
+  win.webContents.on("context-menu", (_event, params) => {
     const word = params.misspelledWord
     const spelling = []
     /* A menu outlives the click that opened it: the window can be closed while
        it is still up, and calling into a destroyed webContents throws from a
        place with no caller to catch it. */
-    const live = () => !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()
+    const live = () => !win.isDestroyed() && !win.webContents.isDestroyed()
     if (word) {
       for (const to of params.dictionarySuggestions.slice(0, 5)) {
-        spelling.push({ label: to, click: () => { if (live()) mainWindow.webContents.replaceMisspelling(to) } })
+        spelling.push({ label: to, click: () => { if (live()) win.webContents.replaceMisspelling(to) } })
       }
       if (!spelling.length) spelling.push({ label: 'No suggestions', enabled: false })
       spelling.push({ type: 'separator' }, {
@@ -1921,43 +2171,52 @@ function createWindow () {
   /* The fence a note's embeds attach behind. Registered here, per window, so
      that a window built by the Dock's `activate` gets one too — see the
      account above `fenceWebviewAttach`. */
-  fenceWebviewAttach(mainWindow)
+  fenceWebviewAttach(win)
 
-  /* Nothing a note started outlives the window that started it. The copilot's
-     process is included: it is one CLI per conversation, running with the vault
-     as its working directory and holding tools that write notes. Left alive by
-     ⌘W it kept editing the vault with no window to show for it, and every
-     event it sent was dropped on the floor — including the one that records
-     what it changed, so the edits landed with no way to review or undo them. */
-  mainWindow.on('closed', () => {
-    mainWindow = null
-    stopAllRuns()
-    try { ai.stop('SIGKILL') } catch { /* nothing running */ }
+  /* Nothing a note started outlives the window that started it — the runs that
+     window asked for, and, when it is the window the copilot belongs to, the
+     CLI behind it. That process runs with the vault as its working directory
+     and holds tools that write notes: left alive by ⌘W it kept editing the
+     vault with no window to show for it, and every event it sent was dropped
+     on the floor, including the one that records what it changed — so the
+     edits landed with no way to review or undo them. */
+  win.on('closed', () => {
+    windows.delete(win)
+    reveals.delete(win.webContents.id)
+    documentZoomClaims.delete(win.webContents.id)
+    stopRunsOwnedBy(win)
+    if (primary) {
+      primaryWindow = null
+      try { ai.stop('SIGKILL') } catch { /* nothing running */ }
+    }
   })
 
   // Held open until unsaved edits reach the disk — see askRendererToFlush.
   let flushed = false
   let flushing = false
-  mainWindow.on('close', (event) => {
+  win.on('close', (event) => {
     if (flushed) return
     event.preventDefault()
     // A second close attempt while the first is still waiting is the same
     // close, not another one.
     if (flushing) return
     flushing = true
-    askRendererToFlush(mainWindow).then(() => {
+    askRendererToFlush(win).then(() => {
       flushed = true
+      /* A quit is every window's business and closing one is its own: `close`
+         here is this window going, and the quit that provoked it will come
+         round to the rest of them on their own `close` events. */
       if (quitting) app.quit()
-      else mainWindow?.close()
+      else if (!win.isDestroyed()) win.close()
     })
   })
 
   // Restore the saved zoom once the page exists, and report it so the status
   // bar agrees with reality from the first frame.
-  mainWindow.webContents.on('did-finish-load', () => {
+  win.webContents.on('did-finish-load', () => {
     const saved = readConfig().zoom || DEFAULT_ZOOM
-    if (saved !== 1) mainWindow.webContents.setZoomFactor(saved)
-    send('zoom', Math.round(saved * 100))
+    if (saved !== 1) win.webContents.setZoomFactor(saved)
+    sendTo(win, 'zoom', Math.round(saved * 100))
   })
 
   /* No `zoom-changed` listener: the window is not pinched. Ctrl+scroll and
@@ -1965,10 +2224,82 @@ function createWindow () {
      fingers there mean nothing, over a PDF or a website because the document
      resizes itself — so the only sizes the window ever takes are the ones the
      menu, the keys and the settings stepper ask for. */
+  return win
 }
 
-function send (channel, payload) {
-  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload)
+/**
+ * Another window on the same vault, optionally showing a particular note.
+ *
+ * The path is not resolved here and nothing is read with it: it is handed to
+ * the new window, which opens it the way it opens anything the reader clicks —
+ * through `file:read`, which is realpath-contained like every other path that
+ * arrives from a renderer. So this adds no reach; it is a string being passed
+ * between two windows that could each already ask for it.
+ */
+/* What a window was opened to show, held between its creation and the moment
+   its renderer is far enough along to ask. Keyed by webContents rather than by
+   window because that is what an IPC event carries back. */
+const pendingOpens = new Map()
+
+/**
+ * What kind of window this is, asked for rather than announced.
+ *
+ * Asked, because the answer is needed at a particular point in boot and a
+ * message pushed from main would race the renderer's own startup — arriving
+ * either before there was a listener for it or after the strip it decides had
+ * already been drawn.
+ */
+ipcMain.handle('window:role', (event) => {
+  const win = windowOf(event)
+  const key = event.sender.id
+  const open = pendingOpens.get(key) || null
+  // Read once: a reload of the page is a fresh start, not a second delivery of
+  // a note somebody asked for a window of some time ago.
+  pendingOpens.delete(key)
+  return { primary: !!win && win === primaryWindow, open }
+})
+
+ipcMain.handle('window:new', (_e, open) => {
+  const wanted = typeof open === 'string' && open.length <= 1024 ? open : null
+  createWindow({ open: wanted })
+  return { ok: true }
+})
+
+/**
+ * The copilot belongs to the primary window, and answers only to it.
+ *
+ * One CLI session, and one chat file per vault written whole on every save: a
+ * second window holding a conversation would overwrite the first window's
+ * transcripts with its own copy of them. Rather than invent a merge, the
+ * copilot is offered in one window — the second window hides the panel, and
+ * this is the fence behind that, because a hidden control is a decision the
+ * renderer could change its mind about and this one is not the renderer's.
+ */
+function assertCopilotWindow (event) {
+  if (windowOf(event) !== copilotWindow()) {
+    throw new Error('The copilot runs in the main window.')
+  }
+}
+
+/** The copilot's events, to the one window that is allowed to hold it. */
+function toCopilot (channel, payload) {
+  sendTo(copilotWindow(), channel, payload)
+}
+
+/**
+ * A run's output, to the window that started it.
+ *
+ * Broadcasting instead would put one window's program output into the code
+ * block of every other window showing the same note — the renderer keys these
+ * by run id, and a second window opening the same note has its own block with
+ * its own id, so the text would land in a block that did not ask for it.
+ */
+function toRun (channel, payload) {
+  sendTo(runOwners.get(payload?.id), channel, payload)
+  /* `run:done` is the last thing ever said about a run, so the entry goes with
+     it. Without this the map holds a reference to every window that has ever
+     run a block, and closing one would not be the end of it. */
+  if (channel === 'run:done') runOwners.delete(payload?.id)
 }
 
 /* ---------------------------------------------------------------- zoom */
@@ -1985,19 +2316,29 @@ const { steps: ZOOM_STEPS, start: DEFAULT_ZOOM } = require('./zoom-steps.json')
 
 /* Set by the renderer whenever what is on screen zooms itself: a PDF, a
    website. While one of those is open, ⌘+ is a question about the document. */
-let documentOwnsZoom = false
+/* Per window, because a PDF open in one of them says nothing about what ⌘+
+   means in another: a global flag here had a document in the second window
+   quietly swallowing the first window's zoom keys. */
+const documentZoomClaims = new Set()
+const documentOwnsZoom = (win) => !!win && documentZoomClaims.has(win.webContents.id)
 
+/* Zoom is per window — it is the size of the text in front of you, and a
+   second window opened to read something beside the first has every reason to
+   be at a different one. What is written to the config is the last size asked
+   for anywhere, which is what a new window starts at. */
 function zoomFactor () {
-  if (!mainWindow || mainWindow.isDestroyed()) return 1
-  return mainWindow.webContents.getZoomFactor()
+  const win = focusedWindow()
+  if (!win) return 1
+  return win.webContents.getZoomFactor()
 }
 
 function applyZoom (factor) {
-  if (!mainWindow || mainWindow.isDestroyed()) return
+  const win = focusedWindow()
+  if (!win) return
   const clamped = Math.min(ZOOM_STEPS.at(-1), Math.max(ZOOM_STEPS[0], factor))
-  mainWindow.webContents.setZoomFactor(clamped)
+  win.webContents.setZoomFactor(clamped)
   writeConfig({ zoom: clamped })
-  send('zoom', Math.round(clamped * 100))
+  sendTo(win, 'zoom', Math.round(clamped * 100))
 }
 
 /**
@@ -2011,8 +2352,8 @@ function applyZoom (factor) {
  * @param {1|-1|0} direction  in, out, or back to the default size
  */
 function zoomCommand (direction) {
-  if (documentOwnsZoom) {
-    send('menu', direction === 0 ? 'zoom-reset' : direction > 0 ? 'zoom-in' : 'zoom-out')
+  if (documentOwnsZoom(focusedWindow())) {
+    toFocused('menu', direction === 0 ? 'zoom-reset' : direction > 0 ? 'zoom-in' : 'zoom-out')
     return
   }
   if (direction === 0) applyZoom(DEFAULT_ZOOM)
@@ -2048,7 +2389,7 @@ function buildMenu () {
            thought to look. */
         { label: 'Open Vault…', accelerator: 'Cmd+Shift+O', click: () => pickVault() },
         { type: 'separator' },
-        { label: 'Settings…', accelerator: 'Cmd+,', click: () => send('menu', 'settings') },
+        { label: 'Settings…', accelerator: 'Cmd+,', click: () => toFocused('menu', 'settings') },
         { type: 'separator' },
         { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' },
         { type: 'separator' },
@@ -2058,22 +2399,22 @@ function buildMenu () {
     {
       label: 'File',
       submenu: [
-        { label: 'New Note', accelerator: 'Cmd+N', click: () => send('menu', 'new-note') },
-        { label: 'New Whiteboard', click: () => send('menu', 'new-whiteboard') },
-        { label: 'New Website', click: () => send('menu', 'new-website') },
-        { label: 'New Language', click: () => send('menu', 'new-language') },
-        { label: 'New Folder', accelerator: 'Cmd+Shift+N', click: () => send('menu', 'new-folder') },
+        { label: 'New Note', accelerator: 'Cmd+N', click: () => toFocused('menu', 'new-note') },
+        { label: 'New Whiteboard', click: () => toFocused('menu', 'new-whiteboard') },
+        { label: 'New Website', click: () => toFocused('menu', 'new-website') },
+        { label: 'New Language', click: () => toFocused('menu', 'new-language') },
+        { label: 'New Folder', accelerator: 'Cmd+Shift+N', click: () => toFocused('menu', 'new-folder') },
         { type: 'separator' },
-        { label: 'New Tab', accelerator: 'Cmd+T', click: () => send('menu', 'new-tab') },
-        { label: 'Close Tab', accelerator: 'Cmd+W', click: () => send('menu', 'close-tab') },
-        { label: 'Reopen Closed Tab', accelerator: 'Cmd+Shift+T', click: () => send('menu', 'reopen-tab') },
+        { label: 'New Tab', accelerator: 'Cmd+T', click: () => toFocused('menu', 'new-tab') },
+        { label: 'Close Tab', accelerator: 'Cmd+W', click: () => toFocused('menu', 'close-tab') },
+        { label: 'Reopen Closed Tab', accelerator: 'Cmd+Shift+T', click: () => toFocused('menu', 'reopen-tab') },
         { type: 'separator' },
-        { label: 'Reveal in Finder', click: () => send('menu', 'reveal') },
+        { label: 'Reveal in Finder', click: () => toFocused('menu', 'reveal') },
         { type: 'separator' },
-        { label: 'Save', accelerator: 'Cmd+S', click: () => send('menu', 'save') },
-        { label: 'Export as PDF…', click: () => send('menu', 'export-pdf') },
-        { label: 'Export Whiteboard as PNG…', click: () => send('menu', 'export-whiteboard-png') },
-        { label: 'Export Whiteboard as SVG…', click: () => send('menu', 'export-whiteboard-svg') }
+        { label: 'Save', accelerator: 'Cmd+S', click: () => toFocused('menu', 'save') },
+        { label: 'Export as PDF…', click: () => toFocused('menu', 'export-pdf') },
+        { label: 'Export Whiteboard as PNG…', click: () => toFocused('menu', 'export-whiteboard-png') },
+        { label: 'Export Whiteboard as SVG…', click: () => toFocused('menu', 'export-whiteboard-svg') }
       ]
     },
     {
@@ -2083,42 +2424,42 @@ function buildMenu () {
            means depends on what is on screen: a note undoes an edit, a PDF
            undoes a highlight, and a plain text field wants the browser's own
            history — which the renderer asks for back through `edit:undo`. */
-        { label: 'Undo', accelerator: 'Cmd+Z', click: () => send('menu', 'undo') },
-        { label: 'Redo', accelerator: 'Shift+Cmd+Z', click: () => send('menu', 'redo') },
+        { label: 'Undo', accelerator: 'Cmd+Z', click: () => toFocused('menu', 'undo') },
+        { label: 'Redo', accelerator: 'Shift+Cmd+Z', click: () => toFocused('menu', 'redo') },
         { type: 'separator' },
         { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' },
         { type: 'separator' },
-        { label: 'Find in Note', accelerator: 'Cmd+F', click: () => send('menu', 'find') },
-        { label: 'Search Vault', accelerator: 'Cmd+Shift+F', click: () => send('menu', 'search') }
+        { label: 'Find in Note', accelerator: 'Cmd+F', click: () => toFocused('menu', 'find') },
+        { label: 'Search Vault', accelerator: 'Cmd+Shift+F', click: () => toFocused('menu', 'search') }
       ]
     },
     {
       label: 'View',
       submenu: [
-        { label: 'Back', accelerator: 'Cmd+[', click: () => send('menu', 'back') },
-        { label: 'Forward', accelerator: 'Cmd+]', click: () => send('menu', 'forward') },
+        { label: 'Back', accelerator: 'Cmd+[', click: () => toFocused('menu', 'back') },
+        { label: 'Forward', accelerator: 'Cmd+]', click: () => toFocused('menu', 'forward') },
         { type: 'separator' },
-        { label: 'Previous Tab', accelerator: 'Alt+Cmd+Left', click: () => send('menu', 'prev-tab') },
-        { label: 'Next Tab', accelerator: 'Alt+Cmd+Right', click: () => send('menu', 'next-tab') },
+        { label: 'Previous Tab', accelerator: 'Alt+Cmd+Left', click: () => toFocused('menu', 'prev-tab') },
+        { label: 'Next Tab', accelerator: 'Alt+Cmd+Right', click: () => toFocused('menu', 'next-tab') },
         { type: 'separator' },
-        { label: 'Quick Switcher', accelerator: 'Cmd+O', click: () => send('menu', 'switcher') },
-        { label: 'Jump to Heading', click: () => send('menu', 'headings') },
-        { label: 'Command Palette', accelerator: 'Cmd+P', click: () => send('menu', 'commands') },
+        { label: 'Quick Switcher', accelerator: 'Cmd+O', click: () => toFocused('menu', 'switcher') },
+        { label: 'Jump to Heading', click: () => toFocused('menu', 'headings') },
+        { label: 'Command Palette', accelerator: 'Cmd+P', click: () => toFocused('menu', 'commands') },
         { type: 'separator' },
-        { label: 'Toggle Sidebar', accelerator: 'Cmd+B', click: () => send('menu', 'sidebar') },
+        { label: 'Toggle Sidebar', accelerator: 'Cmd+B', click: () => toFocused('menu', 'sidebar') },
         // The old key still works. A menu item carries one accelerator, so the
         // second one needs a twin of its own, kept out of the menu.
-        { label: 'Toggle Sidebar', accelerator: 'Cmd+\\', visible: false, click: () => send('menu', 'sidebar') },
-        { label: 'Toggle Outline', accelerator: 'Cmd+Shift+E', click: () => send('menu', 'outline') },
-        { label: 'Toggle Backlinks', accelerator: 'Cmd+Shift+K', click: () => send('menu', 'links') },
-        { label: 'Toggle Info', accelerator: 'Cmd+Shift+I', click: () => send('menu', 'info') },
-        { label: 'Toggle Copilot', accelerator: 'Cmd+Shift+A', click: () => send('menu', 'copilot') },
-        { label: 'Reading View', accelerator: 'Cmd+1', click: () => send('menu', 'view-read') },
-        { label: 'Editing View', accelerator: 'Cmd+2', click: () => send('menu', 'view-edit') },
-        { label: 'Raw View', accelerator: 'Cmd+3', click: () => send('menu', 'view-raw') },
-        { label: 'Toggle Reading View', accelerator: 'Cmd+E', click: () => send('menu', 'reading') },
-        { label: 'Toggle Theme', accelerator: 'Cmd+Shift+L', click: () => send('menu', 'theme') },
-        { label: 'Change Theme…', click: () => send('menu', 'themes') },
+        { label: 'Toggle Sidebar', accelerator: 'Cmd+\\', visible: false, click: () => toFocused('menu', 'sidebar') },
+        { label: 'Toggle Outline', accelerator: 'Cmd+Shift+E', click: () => toFocused('menu', 'outline') },
+        { label: 'Toggle Backlinks', accelerator: 'Cmd+Shift+K', click: () => toFocused('menu', 'links') },
+        { label: 'Toggle Info', accelerator: 'Cmd+Shift+I', click: () => toFocused('menu', 'info') },
+        { label: 'Toggle Copilot', accelerator: 'Cmd+Shift+A', click: () => toFocused('menu', 'copilot') },
+        { label: 'Reading View', accelerator: 'Cmd+1', click: () => toFocused('menu', 'view-read') },
+        { label: 'Editing View', accelerator: 'Cmd+2', click: () => toFocused('menu', 'view-edit') },
+        { label: 'Raw View', accelerator: 'Cmd+3', click: () => toFocused('menu', 'view-raw') },
+        { label: 'Toggle Reading View', accelerator: 'Cmd+E', click: () => toFocused('menu', 'reading') },
+        { label: 'Toggle Theme', accelerator: 'Cmd+Shift+L', click: () => toFocused('menu', 'theme') },
+        { label: 'Change Theme…', click: () => toFocused('menu', 'themes') },
         { type: 'separator' },
         { label: 'Default Size', accelerator: 'CmdOrCtrl+0', click: () => zoomCommand(0) },
         { label: 'Zoom In', accelerator: 'CmdOrCtrl+Plus', click: () => zoomCommand(1) },
@@ -2136,6 +2477,10 @@ function buildMenu () {
          not vanish because you meant to shut one of them. */
       label: 'Window',
       submenu: [
+        /* Not ⌘N: that has been New Note since Tulip had one window, and a
+           note is what people press it for far more often than a window. */
+        { label: 'New Window', accelerator: 'Cmd+Alt+N', click: () => createWindow() },
+        { type: 'separator' },
         { role: 'minimize' },
         { role: 'zoom' },
         { type: 'separator' },
@@ -2149,7 +2494,7 @@ function buildMenu () {
 }
 
 async function pickVault () {
-  const res = await dialog.showOpenDialog(mainWindow, {
+  const res = await dialog.showOpenDialog(focusedWindow(), {
     title: 'Open Vault',
     message: 'Choose a folder of markdown files.',
     properties: ['openDirectory', 'createDirectory'],
@@ -2163,7 +2508,7 @@ async function pickVault () {
      copy of a note from the old vault into the new one. The same handshake the
      window close uses; the renderer closes its tabs when `vault:opened`
      arrives, which is after this. */
-  await askRendererToFlush(mainWindow)
+  await flushAllWindows()
   await openVault(res.filePaths[0])
   return res.filePaths[0]
 }
@@ -2281,6 +2626,69 @@ ipcMain.handle('file:info', async (_e, p) => {
   }
 })
 
+/* How much of a file is looked at to decide whether it is text. A binary
+   announces itself in the first few bytes — a magic number, then a NUL — and a
+   text file that begins with 8KB of clean UTF-8 is a text file. */
+const SNIFF_BYTES = 8192
+
+/**
+ * Whether a file of no known kind is text, and how big it is.
+ *
+ * Asked at the door in the renderer, for the files the vault has no view of its
+ * own for. An extension is a claim rather than a fact — a `.log`, a `.env`, a
+ * `.rtf`, a file with no extension at all — so the bytes are what decides. A
+ * NUL byte is the giveaway no text encoding produces; a decoder set to be
+ * fussy catches what is left.
+ *
+ * A file that will not even be opened is not text, and is described rather than
+ * shown — which is what the viewer does with a picture-less, playerless file
+ * anyway, so the error needs no separate path.
+ */
+ipcMain.handle('file:probe', async (_e, p) => {
+  try {
+    const abs = await realSafePath(p)
+    const stat = await fs.stat(abs)
+    if (!stat.isFile()) return { ok: false, error: 'That is not a file.' }
+
+    const handle = await fs.open(abs, 'r')
+    let head
+    try {
+      const buffer = Buffer.alloc(Math.min(SNIFF_BYTES, stat.size))
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0)
+      head = buffer.subarray(0, bytesRead)
+    } finally {
+      await handle.close()
+    }
+
+    let text = !head.includes(0)
+    if (text && head.length) {
+      /* `fatal` is the whole point: the lenient decoder turns any byte into
+         U+FFFD and would call a JPEG text. A multi-byte character cut in half
+         by the sniff boundary would fail the same way, so the last few bytes
+         are dropped before the check — four is the longest UTF-8 sequence. */
+      const whole = head.length < stat.size ? head.subarray(0, Math.max(0, head.length - 4)) : head
+      try { new TextDecoder('utf8', { fatal: true }).decode(whole) } catch { text = false }
+    }
+
+    return { ok: true, text, size: stat.size, modified: stat.mtimeMs }
+  } catch (err) {
+    return { ok: false, error: err.message }
+  }
+})
+
+/** A file handed to whatever the desktop opens it with. The one honest answer
+ *  for a `.docx`: Tulip cannot show it, and the machine already has something
+ *  that can. Returns the reason when the OS refuses, which is what the viewer
+ *  puts on screen. */
+ipcMain.handle('file:open-default', async (_e, p) => {
+  try {
+    const problem = await shell.openPath(await realSafePath(p))
+    return problem ? { ok: false, error: problem } : { ok: true }
+  } catch (err) {
+    return { ok: false, error: err.message }
+  }
+})
+
 /**
  * Every note's text, in one message.
  *
@@ -2333,18 +2741,25 @@ ipcMain.handle('file:write', async (_e, p, content, metadata = null) => {
      exactly the argument for keeping the copy that History restores from. A
      `.py` overwritten by a stray keystroke is no more recoverable from the
      filesystem than a note is. */
+  /* A notebook is deliberately not on this list. It is text on disk, but most
+     of that text is output — a single plot is a megabyte of base64 — and the
+     history store keeps every version whole inside one 4 MB budget shared by
+     the entire vault. Versioning notebooks here would mean one save of one
+     notebook evicting the history of every note in it. */
   const isTextDocument = isMarkdown || isTex(abs) || isCode(abs) || isData(abs)
   const whiteboard = isWhiteboard(abs)
+  /* The size of the file decides whether it gets a version, so it is asked for
+     before the old text is read rather than alongside it. A stat is cheap; the
+     read this can now skip is not. */
+  const oldStat = isTextDocument ? await fs.stat(abs).catch(() => null) : null
+  const versioned = isTextDocument &&
+    (oldStat?.size ?? 0) <= MAX_VERSIONED_BYTES &&
+    Buffer.byteLength(String(content), 'utf8') <= MAX_VERSIONED_BYTES
   /* The note as it stood before this write, read first: the snapshot has to be
      the same text the write is about to replace, and reading after would hand
      the history store the text being written. Read even when the file is new,
      so the note's first save is recorded as the thing it replaced — nothing. */
-  const [before, oldStat] = isTextDocument
-    ? await Promise.all([
-        fs.readFile(abs, 'utf8').catch(() => null),
-        fs.stat(abs).catch(() => null)
-      ])
-    : [null, null]
+  const before = versioned ? await fs.readFile(abs, 'utf8').catch(() => null) : null
   /* Capture the old inode's birthtime before the atomic rename replaces it.
      Info can then keep saying when the note was created rather than when its
      newest crash-safe save landed. */
@@ -2352,10 +2767,15 @@ ipcMain.handle('file:write', async (_e, p, content, metadata = null) => {
   const stamp = await writeAtomic(abs, content, {
     durable: readConfig().durability === 'full'
   })
+  /* The bytes on disk have moved. Said here as well as in `touchIndex` below,
+     which only hears about Markdown: a TeX document saved from the editor is
+     deliberately outside the index and outside the vault snapshot's own
+     generation, so this is the only place its save is announced. */
+  documentsChanged()
   /* A copy of what the save replaced, so any version of the note can be put
      back from History. Only notes: the store is for writing, and a website
      file holds an address rather than prose. */
-  if (isTextDocument && String(before ?? '') !== String(content)) {
+  if (versioned && String(before ?? '') !== String(content)) {
     trust?.record({ source: 'save', changes: [{ path: rel(abs), before, after: String(content) }] })
   }
   /* The text is already here, so the next sync can skip re-reading it. Without
@@ -2485,7 +2905,7 @@ ipcMain.handle('table:create', async (_e, dir, name) => {
  * than the feature needs. */
 ipcMain.handle('source:create', async (_e, dir, name, ext) => {
   const wanted = String(ext || '').toLowerCase()
-  if (!CODE_EXT.has(wanted) && !DATA_EXT.has(wanted)) {
+  if (!CODE_EXT.has(wanted) && !DATA_EXT.has(wanted) && wanted !== NOTEBOOK_EXT) {
     throw new Error('That is not a file type Tulip creates.')
   }
   const target = freeName(await realSafePath(dir || ''), name || 'Untitled', wanted)
@@ -2495,9 +2915,31 @@ ipcMain.handle('source:create', async (_e, dir, name, ext) => {
      column, and the first thing anyone does is name the columns — so it starts
      with a row to name them in. A source file starts genuinely empty: there is
      no line that belongs in every Python file. */
+  /* A notebook has no empty form: nbformat requires the version fields, and a
+     file without them is one every other Jupyter tool refuses to open. It
+     starts with a single empty code cell for the same reason the CSV starts
+     with a header row — that is the first thing anyone types into. The
+     language is Python because that is what an unqualified "notebook" means;
+     the file says so in metadata and any kernel can be named there later. */
   const seed = DATA_EXT.has(wanted)
     ? `column 1${VAULT_CONTRACT.dataExtensions[wanted]}column 2\n`
-    : ''
+    : wanted === NOTEBOOK_EXT
+      ? `${JSON.stringify({
+          cells: [{
+            cell_type: 'code',
+            execution_count: null,
+            metadata: {},
+            outputs: [],
+            source: []
+          }],
+          metadata: {
+            kernelspec: { display_name: 'Python 3', language: 'python', name: 'python3' },
+            language_info: { name: 'python' }
+          },
+          nbformat: 4,
+          nbformat_minor: 5
+        }, null, 1)}\n`
+      : ''
   await fs.writeFile(target, seed, 'utf8')
   trust?.creationTime(rel(target), Date.now())
   invalidateVaultSnapshot()
@@ -2598,7 +3040,7 @@ ipcMain.handle('file:delete', async (_e, p) => {
   // Goes to the system Trash, not an unlink — deletes should be recoverable.
   noteSelfWrite(abs)
   await shell.trashItem(abs)
-  await forgetFileTags(rel(abs), deletingDirectory)
+  await forgetAll(rel(abs), deletingDirectory)
   trust?.forgetCreations(rel(abs))
   /* Attachment removal is followed immediately by a renderer refresh. The
      watcher invalidates these caches too, but only after its debounce; without
@@ -2635,18 +3077,33 @@ ipcMain.handle('file:delete', async (_e, p) => {
 
 ipcMain.handle('file-tags:get', async (_e, p) => {
   const abs = await realSafePath(p)
-  return cleanFileTags((await loadFileTags())[rel(abs)])
+  // Always a list: "no tags" is no entry in the store, and the renderer draws
+  // a row of them either way.
+  return (await fileTags.get(rel(abs))) || []
 })
 
 ipcMain.handle('file-tags:set', async (_e, p, values) => {
   const abs = await realSafePath(p)
-  const key = rel(abs)
-  const next = cleanFileTags(values)
-  const tags = await loadFileTags()
-  if (next.length) tags[key] = next
-  else delete tags[key]
-  await saveFileTags()
-  return next
+  return (await fileTags.set(rel(abs), values)) || []
+})
+
+/**
+ * The column widths a table was left at, and where they are put back.
+ *
+ * A `.csv` is its data and nothing else — there is no line in it that could
+ * say how wide a column should be — so this is the only place the answer can
+ * live. Bounded by the store's own cleaning: a layout for a file that has
+ * since gained or lost columns is simply not applied, which csv.js decides,
+ * because a width list of the wrong length says nothing about this file.
+ */
+ipcMain.handle('table-widths:get', async (_e, p) => {
+  const abs = await realSafePath(p)
+  return (await tableWidths.get(rel(abs))) || null
+})
+
+ipcMain.handle('table-widths:set', async (_e, p, widths) => {
+  const abs = await realSafePath(p)
+  return (await tableWidths.set(rel(abs), widths)) || null
 })
 
 /**
@@ -2695,7 +3152,7 @@ ipcMain.handle('file:import', async (_e, destDir, sources) => {
        still skipped and still counted, which is what the "n skipped" in the
        import's report is for. */
     if (!MD_EXT.has(path.extname(source).toLowerCase()) && !isTex(source) &&
-        !isPdf(source) && !isWhiteboard(source) &&
+        !isPdf(source) && !isWhiteboard(source) && !isNotebook(source) &&
         !isCode(source) && !isData(source)) { skipped++; return }
     const ext = path.extname(source)
     const target = freeName(dir, path.basename(source, ext), ext)
@@ -2806,7 +3263,7 @@ function teachWord (word) {
   speller?.add(w)
   const done = session.defaultSession.addWordToSpellCheckerDictionary(w)
   // The renderer is holding a pass that is now out of date by one word.
-  send('dictionary:changed')
+  broadcast('dictionary:changed')
   return done
 }
 
@@ -2818,7 +3275,7 @@ ipcMain.handle('dictionary:remove', (_e, word) => {
   // and rebuilt without it on the next question.
   speller = null
   const done = session.defaultSession.removeWordFromSpellCheckerDictionary(w)
-  send('dictionary:changed')
+  broadcast('dictionary:changed')
   return done
 })
 
@@ -3092,7 +3549,7 @@ async function pdfMarksForSearch (pdfPath) {
  * keystroke path; the background PDF sweep is responsible for preparation. */
 async function searchPdfDocuments (q) {
   const { pdfs } = await getVaultSnapshot()
-  const assignedTags = await loadFileTags()
+  const assignedTags = await fileTags.all()
   const results = []
   const unsearchedPaths = []
 
@@ -3285,7 +3742,7 @@ ipcMain.handle('search:vault', async (_e, raw, opts = {}) => {
   if (q.error) return { ...nothing, error: q.error }
   if (!q.usable) return nothing
   await ensureIndex()
-  const assignedTags = await loadFileTags()
+  const assignedTags = await fileTags.all()
 
   const results = []
 
@@ -3458,9 +3915,9 @@ ipcMain.handle('tags:vault', async () => {
   await ensureIndex()
 
   const counts = new Map()
-  const assigned = await loadFileTags()
+  const assigned = await fileTags.all()
   for (const tags of Object.values(assigned)) {
-    for (const tag of cleanFileTags(tags)) counts.set(tag, (counts.get(tag) || 0) + 1)
+    for (const tag of cleanFileTags(tags) || []) counts.set(tag, (counts.get(tag) || 0) + 1)
   }
   for (const [key, entry] of index) {
     if (!entry.text) continue
@@ -3918,7 +4375,8 @@ ipcMain.handle('asset:write', async (_e, noteName, ext, bytes) => {
  * resolve everything against, and it keeps a screenshot readable by a CLI whose
  * idea of what it may open stops at the vault.
  */
-ipcMain.handle('ai:attach', async (_e, ext, bytes) => {
+ipcMain.handle('ai:attach', async (event, ext, bytes) => {
+  assertCopilotWindow(event)
   if (!vaultPath) throw new Error('Open a vault first.')
   const suffix = pastedExtension(ext)
   const buffer = Buffer.from(bytes)
@@ -3947,7 +4405,7 @@ ipcMain.handle('ai:attach', async (_e, ext, bytes) => {
  */
 ipcMain.handle('ai:pick-attachments', async () => {
   if (!vaultPath) throw new Error('Open a vault first.')
-  const picked = await dialog.showOpenDialog(mainWindow, {
+  const picked = await dialog.showOpenDialog(focusedWindow(), {
     title: 'Attach files or images',
     properties: ['openFile', 'multiSelections'],
     buttonLabel: 'Attach'
@@ -4026,13 +4484,17 @@ ipcMain.handle('pdf:marks:save', async (_e, p, highlights) => {
    `to` skips the save dialog: the scripted probes cannot click it, and a
    probe is how an export is verified. Nobody else hands a path. */
 
-ipcMain.handle('pdf:export', async (_e, name, to) => {
-  if (!mainWindow) return { ok: false, error: 'There is no window to print from.' }
+ipcMain.handle('pdf:export', async (event, name, to) => {
+  /* The window that asked, not whichever one is frontmost: an export is a
+     picture of a particular note, and the ask came from the window showing it
+     — which the save dialog it opens is about to take the focus away from. */
+  const win = windowOf(event)
+  if (!win) return { ok: false, error: 'There is no window to print from.' }
 
   const safe = String(name || 'note').replace(/[\\/:*?"<>|]/g, '-').trim().slice(0, 120) || 'note'
   let filePath = typeof to === 'string' && to.endsWith('.pdf') ? to : null
   if (!filePath) {
-    const chosen = await dialog.showSaveDialog(mainWindow, {
+    const chosen = await dialog.showSaveDialog(win, {
       title: 'Export as PDF',
       defaultPath: path.join(app.getPath('documents'), `${safe}.pdf`),
       filters: [{ name: 'PDF', extensions: ['pdf'] }]
@@ -4042,7 +4504,7 @@ ipcMain.handle('pdf:export', async (_e, name, to) => {
   }
 
   try {
-    const bytes = await mainWindow.webContents.printToPDF({
+    const bytes = await win.webContents.printToPDF({
       printBackground: true,
       pageSize: 'Letter',
       preferCSSPageSize: true
@@ -4057,7 +4519,7 @@ ipcMain.handle('pdf:export', async (_e, name, to) => {
 /* A rendered whiteboard leaves the canvas as PNG or SVG bytes. The renderer
    owns rendering because that is where Excalidraw and its fonts live; main
    owns the native destination picker and the filesystem write. */
-ipcMain.handle('whiteboard:export', async (_e, name, ext, bytes, to) => {
+ipcMain.handle('whiteboard:export', async (event, name, ext, bytes, to) => {
   const suffix = ext === 'svg' ? 'svg' : 'png'
   const safe = String(name || 'whiteboard')
     .replace(/[\\/:*?"<>|]/g, '-').trim().slice(0, 120) || 'whiteboard'
@@ -4065,7 +4527,7 @@ ipcMain.handle('whiteboard:export', async (_e, name, ext, bytes, to) => {
     ? to
     : null
   if (!filePath) {
-    const chosen = await dialog.showSaveDialog(mainWindow, {
+    const chosen = await dialog.showSaveDialog(windowOf(event), {
       title: `Export whiteboard as ${suffix.toUpperCase()}`,
       defaultPath: path.join(app.getPath('documents'), `${safe}.${suffix}`),
       filters: [{ name: suffix.toUpperCase(), extensions: [suffix] }]
@@ -4394,7 +4856,47 @@ function turnPdfs (context) {
   return [...new Set(paths)]
 }
 
+/**
+ * A small attached file, quoted rather than named.
+ *
+ * An attachment used to travel as a path and a line telling the agent to open
+ * it, which costs a whole turn of latency — the model asks for the file, the
+ * tool answers, and only then is the question addressed. For anything short
+ * that is a round trip spent moving bytes the prompt could have carried for the
+ * same tokens. So the small ones go inline and the rest keep the instruction:
+ * a long file is exactly the one worth reading selectively.
+ *
+ * Text only, and only what `safeTargetPath` will resolve — an attachment is a
+ * vault path the renderer offered, but it arrives over IPC and is treated as an
+ * assertion rather than a fact.
+ */
+const INLINE_ATTACHMENT_BYTES = 4096
+const INLINE_ATTACHMENT_EXT = new Set([
+  ...MD_EXT, TEX_EXT, '.txt', '.csv', '.tsv', '.json', '.yaml', '.yml', '.bib',
+  '.py', '.js', '.mjs', '.cjs', '.ts', '.sh', '.css', '.html', '.xml', '.toml', '.ini'
+])
+
+async function inlineAttachments (context) {
+  const paths = (context?.attachments || [])
+    .map((file) => String(file || ''))
+    .filter((file) => INLINE_ATTACHMENT_EXT.has(path.extname(file).toLowerCase()))
+  if (!paths.length) return []
+
+  const read = await Promise.all(paths.map(async (file) => {
+    try {
+      const abs = await realSafeTargetPath(file)
+      const stat = await fs.stat(abs)
+      if (!stat.isFile() || stat.size > INLINE_ATTACHMENT_BYTES) return null
+      return { path: file, text: await fs.readFile(abs, 'utf8') }
+    } catch { return null }
+  }))
+  return read.filter(Boolean)
+}
+
 async function preparePdfTurn (question, context, turnId = null) {
+  const inlined = await inlineAttachments(context)
+  if (inlined.length) context = { ...(context || {}), attachmentTexts: inlined }
+
   const paths = turnPdfs(context)
   if (!paths.length) return { context: context || null, failures: [] }
 
@@ -4405,7 +4907,7 @@ async function preparePdfTurn (question, context, turnId = null) {
   const onWork = () => {
     if (announced) return
     announced = true
-    send('ai:event', { k: 'preparing-pdf', turnId })
+    toCopilot('ai:event', { k: 'preparing-pdf', turnId })
   }
 
   const prepared = await Promise.all(paths.map(async (pdfPath) => {
@@ -4817,6 +5319,29 @@ const DEFAULT_TIMEOUT_MS = 10_000
 const runs = new Map()   // id -> { child, timer, dir, done }
 let nextRunId = 0
 
+/* Which window asked for each run, so its output goes back to the block that
+   is waiting for it and to no other. Kept beside `runs` rather than inside it
+   because a run is only in `runs` while a step of it is actually running, and
+   the owner has to outlast the gaps — a tikz render is two programs with a
+   pause between them, and both halves report to the same block. */
+const runOwners = new Map()   // id -> BrowserWindow
+
+/** Record who a run belongs to, and hand its id straight back. */
+function ownRun (id, event) {
+  const win = BrowserWindow.fromWebContents(event.sender)
+  if (win) runOwners.set(id, win)
+  return id
+}
+
+/** Stop what a window started, when that window goes. */
+function stopRunsOwnedBy (win) {
+  for (const [id, owner] of [...runOwners]) {
+    if (owner !== win) continue
+    runOwners.delete(id)
+    stopRun(id)
+  }
+}
+
 function runnerFor (lang) {
   return RUNNERS.get(String(lang || '').trim().toLowerCase()) || null
 }
@@ -4866,7 +5391,7 @@ function startRun (id, cmd, args, { cwd, timeoutMs, env: extraEnv, quiet = false
       const chunk = text.length > room ? text.slice(0, room) : text
       sizes[name] += chunk.length
       if (chunk.length < text.length) truncated = true
-      if (!quiet) send('run:out', { id, stream: name, text: chunk })
+      if (!quiet) toRun('run:out', { id, stream: name, text: chunk })
     })
     /* A pipe whose reader died mid-run errors on the stream, not on the child,
        and an unhandled stream error ends the main process. `close` below is
@@ -5039,7 +5564,7 @@ async function vaultMayRunCode () {
   }
 
   const name = key ? path.basename(key) : 'this folder'
-  const { response, checkboxChecked } = await dialog.showMessageBox(mainWindow, {
+  const { response, checkboxChecked } = await dialog.showMessageBox(focusedWindow(), {
     type: 'warning',
     buttons: ['Cancel', 'Run'],
     defaultId: 0,
@@ -5065,7 +5590,7 @@ async function vaultMayRunCode () {
   return true
 }
 
-ipcMain.handle('run:start', async (_e, lang, code) => {
+ipcMain.handle('run:start', async (event, lang, code) => {
   const spec = runnerFor(lang)
   if (!spec) throw new Error(`Tulip cannot run "${lang}" blocks.`)
   if (typeof code !== 'string') throw new Error('Nothing to run.')
@@ -5081,7 +5606,7 @@ ipcMain.handle('run:start', async (_e, lang, code) => {
     await warmRunner(lang).catch(() => {})
   }
 
-  const id = ++nextRunId
+  const id = ownRun(++nextRunId, event)
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tulip-run-'))
   const file = path.join(dir, typeof spec.file === 'function' ? spec.file(code) : spec.file)
   await fs.writeFile(file, code, 'utf8')
@@ -5095,7 +5620,7 @@ ipcMain.handle('run:start', async (_e, lang, code) => {
   // The vault is the working directory, so a snippet's relative paths mean what
   // they mean in the note. Without one, the scratch directory stands in.
   runSequence(id, steps, { cwd: vaultPath || dir, timeoutMs, cleanup: dir })
-    .then((result) => send('run:done', { id, ...result }))
+    .then((result) => toRun('run:done', { id, ...result }))
     /* A failure before `run:done` is sent leaves the block on screen saying
        "Running…" for the rest of the session — and unrunnable, since the
        renderer keeps the state keyed by its code and Stop cannot find an id
@@ -5104,7 +5629,7 @@ ipcMain.handle('run:start', async (_e, lang, code) => {
        The failure is reported as the run's own, which is what it is. */
     .catch((err) => {
       console.error('run failed', err)
-      send('run:done', {
+      toRun('run:done', {
         id,
         code: null,
         error: err?.message || 'This block could not be run.'
@@ -5135,12 +5660,6 @@ function stopRun (id) {
 }
 
 ipcMain.handle('run:kill', (_e, id) => stopRun(Number(id)))
-
-/* A run belongs to the page that started it; nothing should outlive the window
-   or the app. */
-function stopAllRuns () {
-  for (const id of [...runs.keys()]) stopRun(id)
-}
 
 /* For quitting, where there is no later: the SIGKILL escalation timer in
    `stopRun` would never fire, so the groups go outright. */
@@ -5282,7 +5801,7 @@ function manimQuality () {
   return MANIM_QUALITIES.has(q) ? q : 'm'
 }
 
-ipcMain.handle('manim:render', async (_e, noteName, code, scene) => {
+ipcMain.handle('manim:render', async (event, noteName, code, scene) => {
   if (!vaultPath) throw new Error('Open a vault first — the video is saved into it.')
   if (typeof code !== 'string' || !code.trim()) throw new Error('Nothing to render.')
 
@@ -5291,11 +5810,11 @@ ipcMain.handle('manim:render', async (_e, noteName, code, scene) => {
 
   const quality = manimQuality()
   const target = await manimTarget(noteName, code, quality)
-  const id = ++nextRunId
+  const id = ownRun(++nextRunId, event)
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tulip-manim-'))
 
   // Started before the work so the page can show progress and offer a Stop.
-  queueMicrotask(() => send('run:out', {
+  queueMicrotask(() => toRun('run:out', {
     id, stream: 'stdout', text: `Rendering ${name}…\n`
   }))
 
@@ -5333,7 +5852,7 @@ ipcMain.handle('manim:render', async (_e, noteName, code, scene) => {
 
   finish()
     .catch((err) => ({ code: null, ms: 0, error: err.message, path: null }))
-    .then((result) => send('run:done', { id, ...result }))
+    .then((result) => toRun('run:done', { id, ...result }))
 
   return { id, scene: name, quality }
 })
@@ -5464,16 +5983,16 @@ ipcMain.handle('tikz:lookup', async (_e, noteName, code) => {
   return found ? { path: found } : null
 })
 
-ipcMain.handle('tikz:render', async (_e, noteName, code) => {
+ipcMain.handle('tikz:render', async (event, noteName, code) => {
   if (!vaultPath) throw new Error('Open a vault first — the drawing is saved into it.')
   if (typeof code !== 'string' || !code.trim()) throw new Error('Nothing to draw.')
 
   const target = await tikzTarget(noteName, code)
-  const id = ++nextRunId
+  const id = ownRun(++nextRunId, event)
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tulip-tikz-'))
   const timeoutMs = runTimeoutMs('tikzTimeout', TIKZ_TIMEOUT_MS)
 
-  queueMicrotask(() => send('run:out', { id, stream: 'stdout', text: 'Drawing…\n' }))
+  queueMicrotask(() => toRun('run:out', { id, stream: 'stdout', text: 'Drawing…\n' }))
 
   const finish = async () => {
     await fs.writeFile(path.join(dir, 'figure.tex'), tikzDocument(code), 'utf8')
@@ -5518,7 +6037,7 @@ ipcMain.handle('tikz:render', async (_e, noteName, code) => {
 
   finish()
     .catch((err) => ({ code: null, ms: 0, error: err.message, path: null }))
-    .then((result) => send('run:done', { id, ...result }))
+    .then((result) => toRun('run:done', { id, ...result }))
 
   return { id }
 })
@@ -5555,16 +6074,17 @@ async function consumeAiRename (event) {
     const source = await realSafeTargetPath(request.path)
     const stat = await fs.stat(source)
     if (!stat.isFile() || !(MD_EXT.has(path.extname(source).toLowerCase()) ||
-        isTex(source) || isPdf(source) || isSite(source) || isWhiteboard(source))) {
+        isTex(source) || isPdf(source) || isSite(source) || isWhiteboard(source) ||
+        isNotebook(source))) {
       throw new Error('Copilot can rename Tulip documents, not folders or app state.')
     }
     const result = await renameDocument(request.path, request.name)
-    send('ai:event', {
+    toCopilot('ai:event', {
       k: 'renamed', id: event.id, name: 'Rename', from: request.path,
       ...result, turnId: event.turnId
     })
   } catch (err) {
-    send('ai:event', {
+    toCopilot('ai:event', {
       k: 'rename-failed',
       message: err?.message || 'The Copilot rename could not be completed.',
       turnId: event.turnId
@@ -5580,15 +6100,26 @@ async function consumeAiRename (event) {
 function sendAiReview (id, operation) {
   if (!operation || aiReviewsSent.has(id)) return
   aiReviewsSent.add(id)
-  send('ai:event', { k: 'review', operation, turnId: id })
+  toCopilot('ai:event', { k: 'review', operation, turnId: id })
   /* Duplicate terminal signals are intentionally coalesced, but the ids only
      need to outlive their queued IPC events. Do not retain every turn for the
      lifetime of a long-running app. */
   setTimeout(() => aiReviewsSent.delete(id), 60000).unref?.()
 }
 
+/**
+ * The after-snapshot of a turn, and the review built out of the difference.
+ *
+ * The caches are dropped first on purpose: an agent writes through its own
+ * tools, so the only thing that knows those files moved is the watcher, and its
+ * quiet window may not have elapsed. Forcing the walk is what makes a review
+ * card appear for a write that landed a moment ago — which is also why it is
+ * not worth doing for a turn that has no baseline to compare against. A stop
+ * pressed with nothing running, or a read-only turn that never took one, used
+ * to cost a full recursive walk of the vault apiece.
+ */
 async function finishAiHistory (id) {
-  if (!turnId(id)) return null
+  if (!turnId(id) || !aiTurns.has(id)) return null
   indexDirty = true
   invalidateVaultSnapshot()
   return aiTurns.finish(id)
@@ -5602,7 +6133,7 @@ function flushAiText () {
   const id = aiTextTurn
   aiText = ''
   aiTextTurn = ''
-  send('ai:event', { k: 'text', text, turnId: id })
+  toCopilot('ai:event', { k: 'text', text, turnId: id })
 }
 
 ai.attach(
@@ -5614,7 +6145,7 @@ ai.attach(
       if (event?.k === 'edited') {
         aiRenameWork = aiRenameWork.then(() => consumeAiRename(event)).catch(() => {})
       } else if (event?.k === 'tool-done' && event.error) {
-        send('ai:event', {
+        toCopilot('ai:event', {
           k: 'rename-failed', message: 'The Copilot could not write its rename request.',
           turnId: event.turnId
         })
@@ -5637,17 +6168,21 @@ ai.attach(
       aiRenameWork.then(() => finishAiHistory(id))
         .then((operation) => {
           sendAiReview(id, operation)
-          send('ai:event', event)
+          toCopilot('ai:event', event)
         })
-        .catch(() => send('ai:event', event))
+        .catch(() => toCopilot('ai:event', event))
       return
     }
-    send('ai:event', event)
+    toCopilot('ai:event', event)
   },
-  () => runnerPath()
+  () => runnerPath(),
+  /* Beside the app's other state rather than in the vault: what models a CLI
+     offers is an account property, not something about these notes. */
+  path.join(app.getPath('userData'), 'ai-catalogue.json')
 )
 
-ipcMain.handle('ai:start', (_e, opts) => {
+ipcMain.handle('ai:start', (event, opts) => {
+  assertCopilotWindow(event)
   ai.setVault(vaultPath)
   const id = turnId(opts?.turnId)
   if (!id) return { ok: false, error: 'The Copilot turn could not be identified.' }
@@ -5655,7 +6190,8 @@ ipcMain.handle('ai:start', (_e, opts) => {
 })
 ipcMain.handle('ai:models', (_e, opts) => ai.models({ fresh: !!opts?.fresh }))
 ipcMain.handle('ai:doctor', () => ai.doctor())
-ipcMain.handle('ai:send', async (_e, text, context, requestedTurnId) => {
+ipcMain.handle('ai:send', async (event, text, context, requestedTurnId) => {
+  assertCopilotWindow(event)
   ai.setVault(vaultPath)
   const id = turnId(requestedTurnId)
   if (!id) return { ok: false, error: 'The Copilot turn could not be identified.' }
@@ -5665,7 +6201,12 @@ ipcMain.handle('ai:send', async (_e, text, context, requestedTurnId) => {
     const names = prepared.failures.map((failure) => failure.path).join(', ')
     return { ok: false, error: `Tulip could not prepare ${names} for the copilot.` }
   }
-  await aiTurns.begin(id)
+  /* Only a turn that can write is worth a baseline. In read mode the CLI runs
+     under an agent that has no editing tools at all, so the pair of snapshots a
+     review is built from — two walks of the vault, and the whole of the delay
+     between pressing send and the first token — could only ever produce an
+     empty diff. */
+  if (ai.canWrite()) await aiTurns.begin(id)
   const result = await ai.send(words, prepared.context, id)
   if (!result?.ok) {
     const operation = await finishAiHistory(id).catch(() => null)
@@ -5683,7 +6224,8 @@ ipcMain.handle('ai:send', async (_e, text, context, requestedTurnId) => {
  * the front in the moment since the event was sent.
  */
 ipcMain.handle('ai:announce', (_e, info) => {
-  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.isFocused()) return { ok: false }
+  const win = copilotWindow()
+  if (!win || win.isFocused()) return { ok: false }
   if (!Notification.isSupported()) return { ok: false }
 
   const where = info?.note ? ` about ${info.note}` : ''
@@ -5696,14 +6238,15 @@ ipcMain.handle('ai:announce', (_e, info) => {
   // The banner is gone in a few seconds; the dock goes on saying so until the
   // window is looked at, which is the half of this that survives a coffee.
   notice.on('click', () => {
-    if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.show(); mainWindow.focus() }
+    if (!win.isDestroyed()) { win.show(); win.focus() }
   })
   notice.show()
   app.dock?.bounce?.('informational')
   return { ok: true }
 })
 
-ipcMain.handle('ai:stop', async (_e, requestedTurnId) => {
+ipcMain.handle('ai:stop', async (event, requestedTurnId) => {
+  assertCopilotWindow(event)
   const id = turnId(requestedTurnId)
   const stopped = ai.stop()
   const operation = await finishAiHistory(id).catch(() => null)
@@ -5770,7 +6313,7 @@ ipcMain.handle('trust:restore', async (_e, id, onlyPath = null) => {
   trust.record({ source: 'restore', changes: inverse })
   // Named, like the watcher's own message: these are the files a restore put
   // back, and the renderer decides what that means for the buffer it is holding.
-  send('vault:changed', { paths: selected.map((change) => change.path) })
+  broadcast('vault:changed', { paths: selected.map((change) => change.path) })
   return { restored: selected.map((change) => change.path) }
 })
 
@@ -5808,10 +6351,16 @@ ipcMain.handle('ai:history:load', () => {
   }
 })
 
-ipcMain.handle('ai:history:save', async (_e, history) => {
+ipcMain.handle('ai:history:save', async (event, history) => {
+  assertCopilotWindow(event)
   if (!vaultPath) return { ok: false }
   try {
     await fs.mkdir(CHAT_DIR(), { recursive: true })
+    let existing = {}
+    try {
+      existing = JSON.parse(fsSync.readFileSync(chatFile(), 'utf8')) || {}
+    } catch { /* nothing kept yet, or a file `ai:history:load` has moved aside */ }
+    history = mergeChatHistory(existing, history)
     /* Not fsync'd. The last write of a transcript is the one the window makes
        on its way out, and waiting on the disk there is both the slowest place
        to do it and the likeliest to be cut short — which is what left hundreds
@@ -6011,7 +6560,11 @@ ipcMain.handle('zoom:reset', () => applyZoom(DEFAULT_ZOOM))
 /* Settings can set it outright rather than nudging: the panel shows the stops
    as a stepper, and it is applyZoom that decides what is in range. */
 ipcMain.handle('zoom:set', (_e, factor) => applyZoom(Number(factor) || 1))
-ipcMain.handle('zoom:claim', (_e, on) => { documentOwnsZoom = !!on })
+ipcMain.handle('zoom:claim', (event, on) => {
+  const key = event.sender.id
+  if (on) documentZoomClaims.add(key)
+  else documentZoomClaims.delete(key)
+})
 /* The browser's own undo, for the plain text fields — the message box, the
    rename field, a search query. What the `undo` role used to do, asked for
    only when the renderer has decided this is the field's history to walk and
@@ -6461,9 +7014,9 @@ app.whenReady().then(async () => {
   }
 
   buildMenu()
-  createWindow()
+  const first = createWindow()
   guardGuests()
-  if (vaultPath) mainWindow.setTitle(path.basename(vaultPath))
+  if (vaultPath) first.setTitle(path.basename(vaultPath))
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

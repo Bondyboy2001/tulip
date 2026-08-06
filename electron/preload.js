@@ -34,11 +34,22 @@ contextBridge.exposeInMainWorld('tulip', {
     remove: (p) => ipcRenderer.invoke('file:delete', p),
     move: (p, destDir) => ipcRenderer.invoke('file:move', p, destDir),
     reveal: (p) => ipcRenderer.invoke('file:reveal', p),
+    // Is it text, and how big? Asked of the files the vault has no view of its
+    // own for, because the extension is a claim and the bytes are the fact.
+    probe: (p) => ipcRenderer.invoke('file:probe', p),
+    // Handed to whatever the desktop opens it with.
+    openDefault: (p) => ipcRenderer.invoke('file:open-default', p),
     import: (destDir, sources) => ipcRenderer.invoke('file:import', destDir, sources)
   },
   fileTags: {
     get: (p) => ipcRenderer.invoke('file-tags:get', p),
     set: (p, tags) => ipcRenderer.invoke('file-tags:set', p, tags)
+  },
+  /* How wide a table's columns were left. A `.csv` has nowhere inside it to
+     record that, so it is filed against the path instead — see csv.js. */
+  tableWidths: {
+    get: (p) => ipcRenderer.invoke('table-widths:get', p),
+    set: (p, widths) => ipcRenderer.invoke('table-widths:set', p, widths)
   },
   /**
    * The on-disk path of a dragged-in File. Electron stopped putting `.path` on
@@ -252,6 +263,16 @@ contextBridge.exposeInMainWorld('tulip', {
     claim: (on) => ipcRenderer.invoke('zoom:claim', on)
   },
   version: () => ipcRenderer.invoke('app:version'),
+
+  window: {
+    /* Which window this is: whether it restores and remembers the session's
+       tab strip, and whether it may hold the copilot. Asked once, in boot. */
+    role: () => ipcRenderer.invoke('window:role'),
+    /* Another window on the same vault, optionally opening a note in it. The
+       path is only ever handed on to the new window, which reads it the way it
+       reads anything else — see the handler in main. */
+    open: (open = null) => ipcRenderer.invoke('window:new', open)
+  },
 
   /* Said once, when the window is worth looking at: settings applied, tree
      drawn, the note that was open back on the page. The window is not shown

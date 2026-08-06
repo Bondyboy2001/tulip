@@ -3,28 +3,27 @@
 /**
  * The copilot, as a subprocess.
  *
- * None of these vendors sells API access on a personal subscription, but each
- * ships a CLI that authenticates against one — so the copilot is `devin` or
- * `opencode` run headlessly with the vault as its working directory, rather
- * than an HTTP client holding a key. That decision buys the file access
- * for nothing: the agent reads and writes notes through its own tools, Tulip's
- * job is narrowed to relaying what it says and noticing what it touched, and
- * there is no key of ours anywhere in it. A gateway — OpenRouter, z.ai — is
- * configured inside one of these CLIs, which is where its key already lives.
+ * No vendor here sells API access on a personal subscription, but opencode
+ * ships a CLI that authenticates against one — so the copilot is `opencode`
+ * run headlessly with the vault as its working directory, rather than an HTTP
+ * client holding a key. That decision buys the file access for nothing: the
+ * agent reads and writes notes through its own tools, Tulip's job is narrowed
+ * to relaying what it says and noticing what it touched, and there is no key of
+ * ours anywhere in it. Every model, and every gateway — OpenRouter, z.ai — is
+ * configured inside that CLI, which is where its key already lives.
  *
- * The CLIs speak different event streams — and one of them, devin, speaks no
- * event stream at all. Everything below funnels them into one vocabulary — see
- * `publish` calls for the whole of it — so the renderer never learns which one
- * is answering.
+ * Its event stream is translated into one vocabulary of Tulip's own — see
+ * `publish` calls for the whole of it — so the renderer never learns whose
+ * events they were. That indirection is what let a second CLI be added and
+ * later dropped without the panel noticing either.
  */
 
-const os = require('node:os')
 const path = require('node:path')
 const fs = require('node:fs')
 const { spawn, execFile } = require('node:child_process')
-const { systemPrompt, promptFor } = require('./prompt.js')
+const { systemPrompt, promptFor, nothingSent } = require('./prompt.js')
 
-/* The CLIs and what they offer before they are asked. Shared with the renderer
+/* The CLI and what it offers before it is asked. Shared with the renderer
    (src/models.js) rather than restated here: the same fact deciding what the
    dropdown shows and what this process will accept is how the two come to
    disagree. Same arrangement as vault-contract.json and zoom-steps.json. */
@@ -32,14 +31,13 @@ const CATALOGUE = require('./ai-models.json')
 /* Keyed by id, for the facts this file needs about a provider that are not its
    models: the binary to run, the name to call it in an error, and how to ask it
    whether it is signed in. Taken from the catalogue rather than written out
-   beside each `spawn`, so there is one answer to "what is devin" and the
+   beside each `spawn`, so there is one answer to "what is opencode" and the
    settings pane reads the same one. */
 const PROVIDERS = Object.fromEntries(CATALOGUE.providers.map((p) => [p.id, p]))
 const PERMISSION_MODES = new Set(['read', 'ask', 'auto'])
 
-/* opencode names its tools in lower case and has a couple the others do not.
-   Mapped here rather than in the renderer, so the panel goes on knowing one
-   vocabulary. */
+/* opencode names its tools in lower case. Mapped here rather than in the
+   renderer, so the panel goes on knowing one vocabulary. */
 const OPENCODE_TOOLS = {
   read: 'Read', edit: 'Edit', write: 'Write', patch: 'Edit',
   bash: 'Bash', grep: 'Grep', glob: 'Glob', list: 'Glob',
@@ -94,6 +92,58 @@ let emit = () => {}
 let vault = null
 let session = null   // { provider, model, effort, mode, write, proc, busy, thread, used, turnId }
 
+/**
+ * What each thread has already been told, kept by thread rather than by session.
+ *
+ * A session is replaced whenever the model, the effort, the mode or the
+ * conversation changes — and the replacement *resumes the same thread*, so
+ * everything the old session had put in front of the model is still there. Held
+ * on the session, the memory went with it: nudging the effort slider re-sent the
+ * whole open note, the turn rules and the ranked PDF pages into a thread that
+ * already carried all three. `send` already trusts a resumed thread for the
+ * system prompt; this is the same trust, spent on the rest of the briefing.
+ *
+ * Keyed by thread id, which is the only identity that survives a respawn. A
+ * thread with no id yet — the first turn of a conversation — gets a memory of
+ * its own, filed under the id the moment the CLI issues one.
+ *
+ * Bounded, because a vault worked in all day opens threads faster than it
+ * closes them and none of this is worth remembering forever. Oldest out first:
+ * a thread nobody has spoken in for a hundred conversations is one whose next
+ * message can afford to quote the note again.
+ */
+const MEMOS = new Map()   // thread id -> the `sent` record for that thread
+const MAX_MEMOS = 100
+
+function memoFor (thread) {
+  if (!thread) return nothingSent()
+  const had = MEMOS.get(thread)
+  if (had) {
+    // Freshest last, so the eviction below drops the least recently used.
+    MEMOS.delete(thread)
+    MEMOS.set(thread, had)
+    return had
+  }
+  const made = nothingSent()
+  MEMOS.set(thread, made)
+  if (MEMOS.size > MAX_MEMOS) MEMOS.delete(MEMOS.keys().next().value)
+  return made
+}
+
+/** The thread has a name now. File this session's memory under it, so the next
+ *  session resuming that thread picks up what has already been said. */
+function rememberThread (thread) {
+  if (!thread || !session || MEMOS.get(thread) === session.sent) return
+  MEMOS.set(thread, session.sent)
+  if (MEMOS.size > MAX_MEMOS) MEMOS.delete(MEMOS.keys().next().value)
+}
+
+/** Whether the running session may change files. Main asks before taking the
+ *  before/after snapshots a review is built from: a read-only turn cannot have
+ *  written anything, so the pair is two walks of the vault for a guaranteed
+ *  empty diff. */
+const canWrite = () => !!session?.write
+
 /** Every event carries the turn that caused it. Main may hold a terminal event
  * while it snapshots the vault, and without this identity an older completion
  * can arrive after a queued turn has begun and settle the newer one. */
@@ -101,10 +151,56 @@ function publish (event, owner = session) {
   emit({ ...event, turnId: event?.turnId || owner?.turnId || null })
 }
 
-/* A GUI app inherits a PATH that has never seen a login shell, and both of
-   these CLIs install somewhere only a profile knows about. Main lends us the one it
+/**
+ * What the thread is carrying, counted for the turns nobody counts for us.
+ *
+ * opencode reports a running total on most of its models and says nothing at
+ * all on some — and the panel hides its context ring for anything that reports
+ * nothing, which left a conversation filling up with no way to watch it do so
+ * until the turn that failed for want of room. Every character sent and every
+ * character streamed back is added up here instead, and a turn ending with no
+ * figure of the CLI's own reports this one, marked as the estimate it is.
+ *
+ * Characters over four is a rough token, and rough is the point: it is a
+ * reading to watch climb, not a bill.
+ */
+function account (text) {
+  if (session && text) session.chars += String(text).length
+}
+
+/**
+ * What a tool put in front of the model, for the count above.
+ *
+ * A CLI reports output in the same three shapes `detailOf` flattens, and only
+ * the string one was ever counted — so a provider handing back blocks filled
+ * the context with the ring reading as if nothing had been sent. Measured
+ * rather than joined: the length is the whole of what is wanted here, and
+ * building the string to throw it away is the copy `detailOf` already avoids.
+ */
+function measure (value) {
+  if (typeof value === 'string') return value.length
+  if (Array.isArray(value)) {
+    let total = 0
+    for (const block of value) total += typeof block === 'string' ? block.length : (block?.text || '').length
+    return total
+  }
+  return String(value?.text ?? value?.output ?? '').length
+}
+
+function accountOutput (value) {
+  if (session) session.chars += measure(value)
+}
+
+const estimated = (owner) => Math.round((owner?.chars || 0) / 4)
+
+/* A GUI app inherits a PATH that has never seen a login shell, and the CLI
+   installs somewhere only a profile knows about. Main lends us the one it
    already resolves for running fenced code. */
 let resolvePath = () => process.env.PATH
+
+/* Where the last catalogue this CLI gave is kept between launches — main names
+   it, because only main knows where the app's state lives. See `models`. */
+let catalogueFile = ''
 
 /** Where the renderer is told to look. Relative to the vault, so the paths
  *  match the ones the note tree already uses. */
@@ -117,12 +213,12 @@ function relative (abs) {
 /* ---------------------------------------------------------------- running */
 
 /**
- * A CLI, started.
+ * The CLI, started.
  *
- * They are spawned alike — the vault as the working directory, a login shell's
- * PATH, and a process group of their own so `stop` takes their tool
- * subprocesses with them — and they die alike, so all of that is here and the
- * `start…` functions below are left holding only their own arguments.
+ * Spawning is the same story every turn — the vault as the working directory, a
+ * login shell's PATH, and a process group of its own so `stop` takes the CLI's
+ * tool subprocesses with it — so all of that is here and the `start…` function
+ * below is left holding only its own arguments.
  *
  * The session is captured rather than read back off the module: `stop` nulls it
  * and `start` immediately builds another, so a SIGTERMed process can outlive
@@ -131,7 +227,7 @@ function relative (abs) {
  * which is the whole of the answer to "whose turn is this?" — the handlers
  * underneath never have to ask.
  */
-function launch (provider, args, onMessage, { prompt = null, stream = readLines } = {}) {
+function launch (provider, args, onMessage, { prompt = null } = {}) {
   const self = session
   const proc = spawn(PROVIDERS[provider].command, args, {
     cwd: vault,
@@ -146,17 +242,23 @@ function launch (provider, args, onMessage, { prompt = null, stream = readLines 
 
   /* A process that dies mid-turn has to close the turn out, or `busy` stays set
      and every later message is refused with "still working" — the reply it is
-     waiting for is never coming. Only the CLIs that report a running total ever
-     fill in `used`; the panel ignores a zero. */
+     waiting for is never coming. A turn the CLI counted for itself reports its
+     figure; one it said nothing about reports ours — see `account`. */
   const endTurn = () => {
     if (!mine()) return
     self.proc = null
-    if (self.busy) { self.busy = false; publish({ k: 'turn-end', used: self.used || 0 }, self) }
+    if (!self.busy) return
+    self.busy = false
+    publish({
+      k: 'turn-end',
+      used: self.used || estimated(self),
+      // Said, so the panel can show a count nobody vouched for as one.
+      estimated: !self.used
+    }, self)
   }
 
-  /* A line of JSON for most of them, and for devin — which publishes no event
-     stream — the prose itself, as it arrives. */
-  stream(proc.stdout, (msg) => { if (mine()) onMessage(msg) })
+  // A line of JSON at a time.
+  readLines(proc.stdout, (msg) => { if (mine()) onMessage(msg) })
 
   /* Writing to a CLI that has already died is an EPIPE on stdin, and an
      unhandled stream error takes the whole main process down. Treated as the
@@ -202,63 +304,13 @@ function launch (provider, args, onMessage, { prompt = null, stream = readLines 
 }
 
 
-/* ------------------------------------------------------------------- Devin */
-
-/**
- * A process per turn, and no event stream at all: devin's print mode answers in
- * prose on standard output, so what the panel is shown is the prose, relayed as
- * it arrives. There are no tool rows for a devin turn — the CLI does not
- * publish them — and the panel simply has nothing to draw in that column.
- *
- * The prompt goes in a file rather than on the command line: devin reads no
- * prompt from standard input (it panics), and a long question with a quoted
- * selection in it would overrun `argv`. The file is written where the OS puts
- * temporary things and removed once the process has taken it.
- */
-function startDevinTurn (text) {
-  const file = path.join(os.tmpdir(), `tulip-devin-${process.pid}-${Date.now()}.md`)
-  // Readable by this user alone: the prompt carries whatever note the question
-  // was asked about, and a shared temporary directory is not the place to
-  // publish it.
-  fs.writeFileSync(file, text, { encoding: 'utf8', mode: 0o600 })
-
-  const args = ['--print', '--prompt-file', file,
-                 // Read-only auto-approves the tools that only look; every
-                 // write-capable UI mode uses the provider's edit permission.
-                 '--permission-mode', session.write ? 'accept-edits' : 'auto']
-  /* Devin spells the reasoning level into the model name, so the catalogue
-     leaves a slot in the id and the slider fills it — see `parseDevin`. With no
-     level chosen the slot comes out altogether, which leaves the family's own
-     name: `claude-opus-5`, which is what devin calls the default of that
-     family anyway. */
-  const model = session.effort
-    ? session.model.replace('{effort}', session.effort)
-    : session.model.replace('-{effort}', '')
-  if (model) args.push('--model', model)
-  /* Devin threads a conversation per directory rather than by id, so the second
-     turn onwards continues the one this vault already has. That is as far as it
-     goes: two chats held open against devin at once are the same conversation
-     to it, because the vault is one directory and `--continue` means "the most
-     recent one here". The id below records only that a conversation is going. */
-  if (session.thread) args.push('--continue')
-
-  const proc = launch('devin', args, (chunk) => publish({ k: 'text', text: chunk }),
-    { stream: readText })
-  if (!session.thread) {
-    session.thread = 'devin'
-    publish({ k: 'thread', thread: session.thread })
-  }
-  proc.on('exit', () => { try { fs.unlinkSync(file) } catch { /* already gone */ } })
-  return proc
-}
-
 /* ---------------------------------------------------------------- opencode */
 
 /**
- * A process per turn, like devin: `run` resumes a thread by id rather than
- * holding one open.
+ * A process per turn: `run` resumes a thread by id rather than holding one
+ * open, which is also what makes a chat survive the app being closed.
  *
- * opencode has no system-prompt flag either, so the briefing rides the first
+ * opencode has no system-prompt flag, so the briefing rides the first
  * message — see `send`. What it does have is agents, and the built-in `plan`
  * agent is read-only, which is how "don't touch my notes" is made a fact about
  * the process rather than a request the model could talk itself out of.
@@ -287,17 +339,20 @@ function onOpencodeMessage (msg) {
   // whichever arrives first rather than from an event of its own.
   if (msg.sessionID && msg.sessionID !== session.thread) {
     session.thread = msg.sessionID
+    rememberThread(session.thread)
     publish({ k: 'thread', thread: session.thread })
   }
 
   const part = msg.part || {}
   switch (msg.type) {
     case 'reasoning':
+      account(part.text)
       publish({ k: 'thinking', text: part.text || '', tokens: 0 })
       break
 
     case 'text':
       // Delivered whole rather than in deltas.
+      account(part.text)
       publish({ k: 'text', text: part.text || '' })
       break
 
@@ -313,6 +368,10 @@ function onOpencodeMessage (msg) {
       // guard is for the builds that report it running first.
       if (state.status === 'completed' || state.status === 'error') {
         const failed = state.status === 'error'
+        /* Counted whole, before `detailOf` cuts it to what the panel shows: the
+           whole of it is what the model's context is carrying. Every shape a
+           tool reports in, not only the string one — see `measure`. */
+        accountOutput(state.output)
         publish({
           k: wrote(name) && !failed ? 'edited' : 'tool-done',
           id,
@@ -339,6 +398,8 @@ function onOpencodeMessage (msg) {
       session.busy = false
       publish({
         k: 'turn-end',
+        used: session.used || estimated(session),
+        estimated: !session.used,
         error: msg.error?.data?.message || msg.error?.name || 'The turn failed.'
       })
       break
@@ -372,14 +433,6 @@ function readLines (stream, onMessage) {
   })
 }
 
-/** And the same stream read as what it is — prose — for the CLI that publishes
- *  no events. Handed on as it arrives, so a long answer appears as it is
- *  written rather than in one piece at the end. */
-function readText (stream, onChunk) {
-  stream.setEncoding('utf8')
-  stream.on('data', (chunk) => { if (chunk) onChunk(chunk) })
-}
-
 /* -------------------------------------------------------------------- API */
 
 function setVault (dir) {
@@ -387,9 +440,10 @@ function setVault (dir) {
   vault = dir
 }
 
-function attach (fn, pathFn) {
+function attach (fn, pathFn, cacheFile = '') {
   emit = fn
   if (pathFn) resolvePath = pathFn
+  if (cacheFile) catalogueFile = String(cacheFile)
 }
 
 /** How long a catalogue query gets before it is taken as no answer. */
@@ -416,110 +470,6 @@ function ask (command, args, parse) {
     })
   })
 }
-
-/** The effort names any CLI here might use, for spotting one inside a model
- *  id. The catalogue's own list, so a level nobody has heard of yet is still
- *  recognised the day it is added to it. */
-const EFFORT_IDS = new Set(CATALOGUE.efforts.map((level) => level.id))
-
-/**
- * Devin lists its models as families, each with its variants indented beneath:
- *
- *     Claude Opus 5 (claude-opus-5)
- *       aliases: opus
- *       claude-opus-5-high         Claude Opus 5 High  [1M context, $5 / MTok In …]
- *       claude-opus-5-high-fast    Claude Opus 5 High Fast  [1M context, …]
- *
- * Those are not eleven models. Devin spells the reasoning level into the id
- * rather than taking it as a flag, so a family arrives as one row per level —
- * and listing them as models put the effort dial in the model list, where the
- * reader has to scroll past five copies of a thing to reach the next thing.
- *
- * So the level is taken back out. A row is read as `base-level[-variant]`: the
- * base and the variant are the model, the level joins that model's effort
- * ladder, and the id keeps a `{effort}` in the level's place for
- * `startDevinTurn` to fill in from whatever the slider says. What was eleven
- * rows is two — "Claude Opus 5" and "Claude Opus 5 Fast" — each with five
- * levels on the dial where levels belong.
- *
- * A row with no level in its id is a model with no dial, and is listed as it
- * came — unless the same base also arrived with levels, in which case it is the
- * same model said twice and the plain one is dropped.
- */
-function parseDevin (stdout) {
-  const models = []
-  const byKey = new Map()
-  const templated = new Set()
-  let group = ''
-  // The family's own id, in segments. What a family is called is not a level,
-  // however much it looks like one: "Nemotron 3 Ultra" is a model's name and
-  // `ultra` is also a reasoning level, and only this tells the two apart.
-  let familyWords = new Set()
-
-  for (const line of String(stdout || '').split('\n')) {
-    const family = /^(\S.*?)\s*\(([a-z0-9][\w.-]*)\)\s*$/.exec(line)
-    if (family) {
-      group = family[1].trim()
-      familyWords = new Set(family[2].toLowerCase().split(/[^a-z0-9]+/).filter(Boolean))
-      continue
-    }
-
-    // Two spaces in, an id, two or more spaces, then its label and, in
-    // brackets, what it costs and how much it holds.
-    const row = /^\s{2,}([a-z0-9][\w.\-/]*)\s{2,}(.+?)\s*(?:\[(.*)\])?\s*$/.exec(line)
-    if (!row || !group) continue
-
-    const id = row[1]
-    const context = contextSize(/([\d.]+\s*[KM]?)\s*context/i.exec(row[3] || '')?.[1] || '')
-
-    /* The last segment that names a level, because the level sits at the end of
-       an id and anything after it — `fast`, `priority`, `1m` — says which
-       arrangement of the same model this is. Segments the family is named after
-       are passed over: they were spoken for before any level was. */
-    const segments = id.split('-')
-    const at = segments.findLastIndex(
-      (segment) => EFFORT_IDS.has(segment) && !familyWords.has(segment)
-    )
-    if (at === -1) {
-      models.push({ id, label: row[2].trim(), group, efforts: [], effort: '', context })
-      continue
-    }
-
-    const base = segments.slice(0, at).join('-')
-    const variant = segments.slice(at + 1).join('-')
-    const key = `${base}|${variant}`
-    templated.add(base)
-
-    let model = byKey.get(key)
-    if (!model) {
-      model = {
-        id: `${base}-{effort}${variant ? `-${variant}` : ''}`,
-        // The family's own name, and what this arrangement of it is called —
-        // never the row's label, which has the level written into it.
-        label: variant ? `${group} ${variantLabel(variant)}` : group,
-        group,
-        efforts: [],
-        effort: '',
-        context
-      }
-      byKey.set(key, model)
-      models.push(model)
-    }
-    if (!model.efforts.includes(segments[at])) model.efforts.push(segments[at])
-    model.effort = model.efforts.includes('medium') ? 'medium' : model.efforts[0]
-    model.context = model.context || context
-  }
-
-  // A base that also arrived with levels has already said everything the plain
-  // row says, and two rows with one name is worse than one.
-  return models.filter((model) => model.efforts.length || !templated.has(model.id))
-}
-
-/** `fast` → `Fast`, `1m` → `1M`: the tail of an id as something to read at the
- *  end of a model's name. */
-const variantLabel = (variant) => variant.split('-')
-  .map((word) => (/\d/.test(word) ? word.toUpperCase() : word[0].toUpperCase() + word.slice(1)))
-  .join(' ')
 
 /**
  * opencode answers with one `provider/model` per line, and the provider is
@@ -586,11 +536,7 @@ function contextSize (text) {
 }
 
 /**
- * Every model the CLIs offer, which is what the settings pane chooses from.
- *
- * Only the two that will print a catalogue are asked — devin and opencode —
- * and they are asked in parallel, because opencode's answer takes a second and
- * there is no reason for devin to wait behind it.
+ * Every model the CLI offers, which is what the settings pane chooses from.
  *
  * Held once it has been read. Two callers want this — the panel when it
  * restores, and the settings pane every time it opens — and neither knew about
@@ -604,25 +550,83 @@ function contextSize (text) {
 const CATALOGUE_TTL = 5 * 60 * 1000
 let held = null      // { at, promise }
 
+/**
+ * And across launches.
+ *
+ * The five-minute hold above is per process, so every cold start paid a
+ * subprocess and most of a megabyte of JSON before the model list was anything
+ * but the built-in one — on the startup path, where the panel is restoring and
+ * the settings pane may already be waiting. The answer is written beside the
+ * app's other state and read back on the next launch, which makes the first
+ * catalogue free.
+ *
+ * Stale by design: the file is served immediately and a real query is started
+ * behind it, so installing a model shows up on the launch after the one that
+ * noticed it rather than never. A day is the outer bound — past that the saved
+ * copy is not worth trusting even as a first draft.
+ */
+const CATALOGUE_DISK_TTL = 24 * 60 * 60 * 1000
+
+function readCatalogueFile () {
+  if (!catalogueFile) return null
+  try {
+    const saved = JSON.parse(fs.readFileSync(catalogueFile, 'utf8'))
+    if (!saved || typeof saved !== 'object') return null
+    if (!(Date.now() - Number(saved.at) < CATALOGUE_DISK_TTL)) return null
+    // An empty answer is one the renderer already substitutes a built-in list
+    // for, and is not worth a launch's worth of trust.
+    return Array.isArray(saved.models?.opencode) && saved.models.opencode.length
+      ? saved.models
+      : null
+  } catch { return null }
+}
+
+function writeCatalogueFile (models) {
+  if (!catalogueFile || !models?.opencode?.length) return
+  try {
+    fs.mkdirSync(path.dirname(catalogueFile), { recursive: true })
+    fs.writeFileSync(catalogueFile, JSON.stringify({ at: Date.now(), models }))
+  } catch { /* a catalogue that cannot be cached is simply asked for again */ }
+}
+
+/** Ask the CLI, and remember what it said. */
+function askCatalogue () {
+  return ask('opencode', ['models', '--verbose'], parseOpencode)
+    .then((opencode) => {
+      const models = { opencode }
+      writeCatalogueFile(models)
+      return models
+    })
+    .catch((error) => {
+      // A rejection must not be cached, or the app spends the rest of its life
+      // handing out the same failure.
+      held = null
+      throw error
+    })
+}
+
 function models ({ fresh = false } = {}) {
   if (!fresh && held && Date.now() - held.at < CATALOGUE_TTL) return held.promise
 
-  const promise = Promise.all([
-    ask('devin', ['models', 'list'], parseDevin),
-    ask('opencode', ['models', '--verbose'], parseOpencode)
-  ]).then(([devin, opencode]) => ({
-    /* An empty answer — a CLI that is not installed, or one whose output has
-       changed shape — leaves the renderer to fall back to what this file's
-       catalogue already said the provider offers. */
-    devin,
-    opencode
-  })).catch((error) => {
-    // A rejection must not be cached, or the app spends the rest of its life
-    // handing out the same failure.
-    held = null
-    throw error
-  })
+  /* Keyed by provider, as the renderer expects: it is a catalogue per CLI on
+     that side, and was once two. An empty answer — a CLI that is not installed,
+     or one whose output has changed shape — leaves the renderer to fall back to
+     what this file's catalogue already said the provider offers. */
+  const saved = fresh ? null : readCatalogueFile()
+  if (saved) {
+    /* Served now, refreshed behind. The refresh replaces the held answer rather
+       than being awaited by anyone, so the caller that arrived at launch gets
+       the saved list at once and the one that opens ⌘, a minute later gets the
+       real one. Its failure is the saved list's to absorb. */
+    const promise = Promise.resolve(saved)
+    held = { at: Date.now(), promise }
+    askCatalogue().then((models) => {
+      if (held?.promise === promise) held = { at: Date.now(), promise: Promise.resolve(models) }
+    }).catch(() => {})
+    return promise
+  }
 
+  const promise = askCatalogue()
   held = { at: Date.now(), promise }
   return promise
 }
@@ -672,12 +676,9 @@ function doctor () {
       // is all this check can honestly claim about it.
       provider.auth ? probe(provider.command, provider.auth) : Promise.resolve({ ok: true, text: '' })
     ])
-    let signedIn = auth.ok
-    if (auth.ok && provider.id === 'opencode') {
-      signedIn = !/(?:0 credentials|no credentials)/i.test(auth.text)
-    } else if (auth.ok && provider.id === 'devin') {
-      signedIn = /logged in/i.test(auth.text)
-    }
+    const signedIn = auth.ok && provider.id === 'opencode'
+      ? !/(?:0 credentials|no credentials)/i.test(auth.text)
+      : auth.ok
     return {
       id: provider.id,
       label: provider.label,
@@ -692,14 +693,14 @@ function doctor () {
 }
 
 function start ({
-  provider = 'devin', model, effort = 'high', mode = null, write = null, resume = null,
-  turnId = null
+  provider = 'opencode', model, effort = '', mode = null, write = null, resume = null,
+  used = 0, turnId = null
 } = {}) {
   if (!vault) return { ok: false, error: 'Open a vault first.' }
   stop()
-  /* Taken at its word. Both catalogues are account properties this file cannot
+  /* Taken at its word. The catalogue is an account property this file cannot
      check a name against, so a model the renderer offers is a model this
-     spawns, and a name neither of them knows is the CLI's to refuse. */
+     spawns, and a name it does not know is the CLI's to refuse. */
   const selectedModel = model || ''
   /* Older renderer callers sent only `write`; migrate those requests to Ask,
      while a missing permission entirely is now safely read-only. */
@@ -710,19 +711,26 @@ function start ({
   session = {
     provider, model: selectedModel, effort, mode: selectedMode, write: canWrite,
     proc: null, busy: false, thread: resume || null, used: 0,
+    /* What the *thread* has already been told, not what this session has — see
+       `memoFor`. A session replaced to change the effort resumes the same
+       thread, and everything quoted into it is still in front of the model. */
+    sent: memoFor(resume || null),
+    /* Where the conversation had got to, so a resumed thread's ring starts from
+       what it was reading rather than from zero. */
+    chars: Math.max(0, Math.round(Number(used) || 0)) * 4,
     turnId: String(turnId || '') || null
   }
 
-  // Every one of them spawns per turn, so there is nothing to start until
-  // there is something to say.
+  // It spawns per turn, so there is nothing to start until there is something
+  // to say.
   publish({ k: 'ready', thread: session.thread })
   return { ok: true, provider, model: selectedModel, effort,
     mode: selectedMode, turnId: session.turnId }
 }
 
-/** Each CLI by the function that starts a turn against it. */
+/** Each CLI by the function that starts a turn against it. One, now; the map is
+ *  what keeps `send` from having to know that. */
 const TURN_STARTERS = {
-  devin: startDevinTurn,
   opencode: startOpencodeTurn
 }
 
@@ -738,18 +746,24 @@ function send (text, context, turnId = null) {
      it. */
   session.turnId = String(turnId || '') || session.turnId
 
-  const prompt = promptFor(text, context)
+  const prompt = promptFor(text, context, session.sent)
 
   session.busy = true
+
+  /* Reset in place rather than replaced: the record is shared with the memo
+     kept for this thread, and swapping this session's reference for a fresh
+     object would leave the memo still claiming the note had been quoted. */
+  const forgetSent = () => Object.assign(session.sent, nothingSent())
 
   const startTurn = TURN_STARTERS[session.provider]
   if (!startTurn) {
     session.busy = false
+    forgetSent()
     return { ok: false, error: `Tulip has no way to run ${session.provider}.` }
   }
 
-  // None of these has a system-prompt flag, so the same briefing rides the
-  // first message of the thread; every turn after resumes and still has it.
+  // opencode has no system-prompt flag, so the briefing rides the first message
+  // of the thread; every turn after resumes and still has it.
   const opening = session.thread
     ? prompt
     : `${systemPrompt(vault)}\n\n---\n\n${prompt}`
@@ -763,8 +777,13 @@ function send (text, context, turnId = null) {
   } catch (err) {
     session.busy = false
     session.proc = null
+    /* Nothing reached the model, so nothing has been said before: the next turn
+       carries the whole context again rather than naming a copy that is not
+       there. */
+    forgetSent()
     return { ok: false, error: err?.message || `${session.provider} could not be started.` }
   }
+  account(opening)
   return { ok: true }
 }
 
@@ -793,9 +812,9 @@ function stop (signal = 'SIGTERM') {
 
 /* What main talks to — and, under a name that says why they are here, the pure
    functions underneath it. They are the fragile half of this file: hand-rolled
-   parsers reading several CLIs' output, none of it reachable through the six
-   calls above and none of it exercised by anything short of running all of
-   those programs. `scripts/test-ai.mjs` is what they are exported for. */
+   readers of the CLI's output, none of it reachable through the six calls above
+   and none of it exercised by anything short of running that program.
+   `scripts/test-ai.mjs` is what they are exported for. */
 module.exports = {
   setVault,
   attach,
@@ -804,5 +823,6 @@ module.exports = {
   start,
   send,
   stop,
-  parsers: { detailOf, readLines, readText, parseDevin, parseOpencode, contextSize }
+  canWrite,
+  parsers: { detailOf, measure, readLines, parseOpencode, contextSize }
 }

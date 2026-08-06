@@ -1,19 +1,19 @@
 /**
- * The copilot's parsers, checked against what the CLIs actually say.
+ * The copilot's parsers, checked against what the CLI actually says.
  *
  * Everything the panel knows about a turn arrives through a handful of
- * hand-rolled readers — a line-splitter over a pipe, two catalogue parsers, the
+ * hand-rolled readers — a line-splitter over a pipe, the catalogue parser, the
  * reader that trims what a tool said — plus one regular expression tried at
  * every `[` of every reply. None of them is reachable from the six calls
- * electron/ai.js exports, and nothing short of running both programs exercises
+ * electron/ai.js exports, and nothing short of running that program exercises
  * any of it, so a regression here is invisible until the copilot is being used
  * for real: a catalogue that silently loses its models, a step with no file on
  * it, a citation that eats a link.
  *
  * All of it is pure, which is the whole reason this file can exist. The inputs
- * below are copied from real output — `devin models list`, `opencode models
- * --verbose` — rather than invented, because a parser tested against a guess
- * about its input is a parser tested against nothing.
+ * below are copied from real output — `opencode models --verbose` — rather
+ * than invented, because a parser tested against a guess about its input is a
+ * parser tested against nothing.
  *
  *   npm run test:ai
  */
@@ -28,8 +28,8 @@ import {
   COPILOT_MODES, copilotModeFromConfig
 } from '../src/models.js'
 
-const { detailOf, readLines, parseDevin, parseOpencode, contextSize } = ai.parsers
-const { systemPrompt, turnRules, promptFor } = prompt
+const { detailOf, measure, readLines, parseOpencode, contextSize } = ai.parsers
+const { systemPrompt, turnRules, promptFor, nothingSent } = prompt
 
 let failures = 0
 const check = (name, ok, detail = '') => {
@@ -42,13 +42,29 @@ const same = (name, got, want) =>
         `got ${JSON.stringify(got)}, wanted ${JSON.stringify(want)}`)
 
 /* A provider can have no built-in fallback while its real catalogue is being
-   fetched. The saved default must survive that first paint instead of becoming
-   the first Devin model. */
+   fetched. The saved default must survive that first paint instead of being
+   dropped for the first model that arrives. */
 const savedModel = 'opencode:opencode-go/deepseek-v4-flash'
 check('a saved default survives the fallback catalogue',
       modelFromConfig({ aiModel: savedModel }) === savedModel)
 check('the saved default leads the offered models before refresh',
        offeredModels(DEFAULT_CATALOGUE, [savedModel], savedModel)[0]?.key === savedModel)
+/* The list is held between calls, because `repaintControls` asks for it five
+   times over and the answer is a filter across the whole catalogue. What is
+   held has to expire on every part of the question — and must not be handed
+   back after the caller has mutated the array it asked with. */
+const enabledOnce = [savedModel]
+const held = offeredModels(DEFAULT_CATALOGUE, enabledOnce, savedModel)
+check('the same question gives back the same list',
+      offeredModels(DEFAULT_CATALOGUE, [savedModel], savedModel) === held)
+check('a different selection is a different question',
+      offeredModels(DEFAULT_CATALOGUE, [savedModel], '') !== held)
+enabledOnce.push('opencode:opencode-go/glm-5.2')
+check('a caller mutating its own list does not keep the old answer',
+      offeredModels(DEFAULT_CATALOGUE, enabledOnce, savedModel) !== held)
+check('the held list still leads with the saved default',
+      offeredModels(DEFAULT_CATALOGUE, [savedModel], savedModel)[0]?.key === savedModel)
+
 check('new Copilot installs default to read-only',
        copilotModeFromConfig({}) === COPILOT_MODES.READ)
 check('legacy write access migrates to Ask',
@@ -128,25 +144,128 @@ check('the turn rules show how to read one page instead of a whole book',
       pdfTurn.includes('sed -n \'START,ENDp\'') &&
       pdfTurn.includes('never the whole file'))
 
+/* A small attachment is quoted rather than named — main reads it and sends the
+   text along, because asking the agent to open a file it could have been handed
+   costs a whole round trip before the question is even addressed. A big one
+   still gets the instruction: reading that selectively is the point. */
+const inlinedTurn = promptFor('Which column is the date?', {
+  attachments: ['Data/rows.csv', 'Data/huge.csv'],
+  attachmentTexts: [{ path: 'Data/rows.csv', text: 'when,what\n2026-01-01,start' }]
+})
+check('a small attachment is quoted into the turn',
+      inlinedTurn.includes('2026-01-01,start') &&
+      inlinedTurn.includes('The user attached this file:'))
+check('a quoted attachment is not also asked for',
+      !/Open it with your file-reading tool:\n- Data\/rows\.csv/.test(inlinedTurn))
+check('an attachment too big to quote still names itself',
+      inlinedTurn.includes('- Data/huge.csv') &&
+      inlinedTurn.includes('Open it with your file-reading tool'))
+check('an attachment with nothing read for it behaves as it always did',
+      promptFor('Read this.', { attachments: ['Data/rows.csv'] })
+        .includes('Open it with your file-reading tool:\n- Data/rows.csv'))
+
+/* What a tool put in front of the model, for the context ring. Only the string
+   shape was ever counted, so a provider answering in blocks filled the context
+   with the ring reading as though nothing had been sent. */
+same('a string output is its own length', measure('twelve chars'), 12)
+same('blocks are counted through', measure([{ text: 'ab' }, 'cde']), 5)
+same('an output on a field of its own is counted', measure({ output: 'abcd' }), 4)
+same('nothing said is nothing counted', measure(null), 0)
+
 const noteTurn = promptFor('What does the introduction say?', {
   note: 'notes/lecture.md', kind: 'note', line: 12, heading: 'Introduction',
   excerpt: 'The introduction starts here.\nIt covers the plan.',
   excerptCut: true,
-  noteChars: 42000
+  noteChars: 420000
 })
-check('a markdown note carries a bounded excerpt around the cursor',
+check('a note too long to send whole carries a window around the cursor',
       noteTurn.includes('<open-note>notes/lecture.md') &&
-      noteTurn.includes('Note text around the cursor') &&
+      noteTurn.includes('notes/lecture.md, around the cursor') &&
       noteTurn.includes('The introduction starts here.'))
 check('and says how much of the note is not shown',
-      noteTurn.includes('42,000 characters shown') && noteTurn.includes('read the file for the rest'))
+      noteTurn.includes('420,000 characters shown') && noteTurn.includes('read the file for the rest'))
 
 const wholeNoteTurn = promptFor('Check this note.', {
   note: 'notes/short.md', kind: 'note', line: 1,
   excerpt: 'A short note.', excerptCut: false, noteChars: 12
 })
-check('a note small enough to show whole says so',
-      wholeNoteTurn.includes('the whole note shown') && wholeNoteTurn.includes('A short note.'))
+check('a note that fits is sent whole, and said to be whole',
+      wholeNoteTurn.includes('notes/short.md, in full:') &&
+      wholeNoteTurn.includes('A short note.') &&
+      !wholeNoteTurn.includes('read the file for the rest'))
+
+/* The text is its own block, so a selection can travel with the note rather
+   than in place of it: three highlighted lines do not say what they contradict
+   four screens further up. */
+const selectionTurn = promptFor('Does this contradict anything above?', {
+  note: 'notes/short.md', kind: 'note', line: 4, selection: 'the third claim',
+  excerpt: 'The first claim.\nThe third claim.', excerptCut: false, noteChars: 33
+})
+check('a selection does not displace the note it was made in',
+      selectionTurn.includes('Selected text') && selectionTurn.includes('The first claim.'))
+
+/* ------------------------------------------------- what is not said twice */
+
+/* Every CLI here resumes its thread, so a block sent on one turn is still in
+   front of the model on the next — and is re-sent, by the CLI, for the rest of
+   the conversation. Quoting the open note per turn therefore costs the square
+   of the chat's length. These check the memory that stops it, and that a note
+   which has actually changed is quoted again regardless. */
+const chat = { note: 'notes/lecture.md', kind: 'note', line: 12,
+               excerpt: 'The introduction starts here.', excerptCut: false, noteChars: 29 }
+const sent = nothingSent()
+const first = promptFor('What does this say?', chat, sent)
+check('the first turn of a thread carries the note and the rules',
+      first.includes('The introduction starts here.') && first.includes(turnRules))
+
+const second = promptFor('And the conclusion?', chat, sent)
+check('an unchanged note is named rather than quoted again',
+      !second.includes('The introduction starts here.') &&
+      second.includes('The copy of notes/lecture.md quoted earlier'))
+check('and the standing rules are not repeated into a thread that has them',
+      !second.includes(turnRules))
+check('the question itself still goes', second.includes('And the conclusion?'))
+
+/* The caret moved and the text did not. The framing is cheap and goes again;
+   the note is not and does not. */
+const moved = promptFor('And here?', { ...chat, line: 40 }, sent)
+check('moving the cursor does not re-send the note',
+      moved.includes('cursor is on line 40') &&
+      !moved.includes('The introduction starts here.'))
+
+const edited = promptFor('Now?', { ...chat, excerpt: 'The introduction was rewritten.' }, sent)
+check('a note that changed is quoted again',
+      edited.includes('The introduction was rewritten.'))
+
+/* A long note is quoted once. Edited after that, quoting it again would cost
+   its whole length for the sake of one changed line, so the agent is told the
+   copy is stale instead — and keeps being told until it sees the new text. */
+const bookText = 'x'.repeat(60000)
+const book = { note: 'notes/book.md', kind: 'note', line: 1,
+               excerpt: bookText, excerptCut: false, noteChars: bookText.length }
+const reading = nothingSent()
+check('a long note is quoted whole the first time',
+      promptFor('Summarise this.', book, reading).includes(bookText))
+const rewritten = { ...book, excerpt: `${bookText}y` }
+const afterEdit = promptFor('And now?', rewritten, reading)
+check('an edit to a long note names the file rather than re-quoting it',
+      !afterEdit.includes(bookText) &&
+      afterEdit.includes('notes/book.md has changed since the copy quoted earlier'))
+check('and keeps saying so while the copy the model holds is stale',
+      promptFor('Still?', rewritten, reading)
+        .includes('has changed since the copy quoted earlier'))
+check('a long note back to the version already quoted is named as current',
+      promptFor('Reverted?', book, reading)
+        .includes('The copy of notes/book.md quoted earlier'))
+
+const pages = { pdfContext: '--- book.pdf page 4 of 90 ---\nTIME: 16:00' }
+const askedOnce = nothingSent()
+promptFor('When?', pages, askedOnce)
+check('the same ranked PDF pages are not re-sent',
+      !promptFor('And where?', pages, askedOnce).includes('TIME: 16:00'))
+
+check('a caller with no memory still gets the whole context',
+      promptFor('What does this say?', chat).includes('The introduction starts here.'))
 
 /* --------------------------------------------------------------- detailOf */
 
@@ -208,67 +327,6 @@ same('the remainder after several lines is kept whole',
      lines(['{"a":1}\n{"a":2}\n{"a":', '3}\n']), [{ a: 1 }, { a: 2 }, { a: 3 }])
 
 /* ------------------------------------------------------------- catalogues */
-
-/* Shaped as `devin models list` answers: a family line naming the shelf, its
-   aliases, and then one indented row per variant. Devin spells the reasoning
-   level into the model id rather than taking it as a flag, so a family arrives
-   as one row per level — and the parser's whole job is to put the level back on
-   the effort dial, where it belongs, instead of leaving five copies of one
-   model in the list. */
-const devinCatalogue = `Available models (37 families)
-
-Claude Opus 5 (claude-opus-5)
-  aliases: opus
-  claude-opus-5-medium                   Claude Opus 5 Medium  [1M context, $5 / MTok In · $25 / MTok Out]
-  claude-opus-5-high                     Claude Opus 5 High  [1M context, $5 / MTok In · $25 / MTok Out]
-  claude-opus-5-high-fast                Claude Opus 5 High Fast  [1M context, $10 / MTok In · $50 / MTok Out]
-  claude-opus-5-max-fast                 Claude Opus 5 Max Fast  [1M context, $10 / MTok In · $50 / MTok Out]
-
-GPT-5.6 Sol (gpt-5.6-sol)
-  gpt-5-6-sol-none                       GPT-5.6 Sol No Thinking  [272K context, $5 / MTok In]
-
-SWE-1.7 (swe-1.7)
-  swe-1-7                                SWE-1.7  [256K context, $1 / MTok In]
-  swe-1-7-medium                         SWE-1.7 Medium  [256K context, $1 / MTok In]
-
-Nemotron 3 Ultra (nemotron-3-ultra)
-  nemotron-3-ultra-nvfp4                 Nemotron 3 Ultra  [128K context, $1 / MTok In]
-`
-
-const devinModels = parseDevin(devinCatalogue)
-same('a family of levels is one model, not one model per level',
-     devinModels.map((m) => m.id),
-     [
-       'claude-opus-5-{effort}',
-       'claude-opus-5-{effort}-fast',
-       'gpt-5-6-sol-{effort}',
-       'swe-1-7-{effort}',
-       'nemotron-3-ultra-nvfp4'
-     ])
-same('the levels it was listed at become its effort ladder',
-     devinModels[0].efforts, ['medium', 'high'])
-check('and one of them is the default', devinModels[0].effort === 'medium')
-same('what follows the level is a model of its own, named for it',
-     [devinModels[1].label, devinModels[1].efforts], ['Claude Opus 5 Fast', ['high', 'max']])
-same('a model is named after its family, never after the level',
-     devinModels.map((m) => m.label),
-     ['Claude Opus 5', 'Claude Opus 5 Fast', 'GPT-5.6 Sol', 'SWE-1.7', 'Nemotron 3 Ultra'])
-same('the family names the shelf it sits on',
-     devinModels.map((m) => m.group),
-     ['Claude Opus 5', 'Claude Opus 5', 'GPT-5.6 Sol', 'SWE-1.7', 'Nemotron 3 Ultra'])
-check('the context window is read out of the brackets',
-      devinModels[0].context === 1000000 && devinModels[2].context === 272000)
-/* `swe-1-7` and `swe-1-7-medium` are the same model said twice, and two rows
-   with one name is worse than one. A tail that is not a level — `nvfp4` — is
-   not a level, and that model keeps its own id and offers no dial. */
-check('a plain row is dropped when the same model also arrived with levels',
-      !devinModels.some((m) => m.id === 'swe-1-7'))
-check('and a tail that is not a level leaves the id alone',
-      devinModels[4].id === 'nemotron-3-ultra-nvfp4' && devinModels[4].efforts.length === 0)
-check('an alias line is not a model', !devinModels.some((m) => /alias/.test(m.id)))
-check('and neither is the count at the top',
-      !devinModels.some((m) => /families/.test(m.label)))
-same('a catalogue with no families at all is empty', parseDevin('Nothing here\n'), [])
 
 check('a context size is read in either unit',
       contextSize('1M') === 1000000 && contextSize('272K') === 272000 &&

@@ -31,6 +31,7 @@ const boolean = (v) => typeof v === 'boolean'
 const number = (v) => typeof v === 'number' && Number.isFinite(v)
 const stringList = (v) => Array.isArray(v) && v.every(string)
 const numberList = (v) => Array.isArray(v) && v.every(number)
+const booleanList = (v) => Array.isArray(v) && v.every(boolean)
 /* A plain object of JSON scalars — the model catalogue and the saved searches.
    Deliberately shallow: nothing that reads these walks a nested structure. */
 const record = (v) => !!v && typeof v === 'object' && !Array.isArray(v)
@@ -65,6 +66,8 @@ const CONFIG_KEYS = {
   tabs: stringList,
   /* Where each tab was left, as a source line, one per entry of `tabs`. */
   tabPlaces: numberList,
+  /* Which of them are pinned, again one per entry of `tabs`. */
+  tabPinned: booleanList,
   tabIndex: number,
   expanded: stringList,
 

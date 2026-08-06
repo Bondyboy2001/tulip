@@ -45,11 +45,12 @@ await writeFile('node_modules/.cache/grid-page.html', `<!doctype html>
   body { margin: 0; }
   #host { position: relative; width: 720px; height: 420px; }
   .csv-frame { display: flex; flex-direction: column; height: 100%; }
+  .csv-table { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
   .csv-head { display: flex; height: 30px; overflow: hidden; }
   .csv-scroller { flex: 1 1 auto; min-height: 0; overflow: auto; }
   .csv-canvas, .csv-window { position: relative; }
   .csv-row { position: absolute; left: 0; display: flex; height: 28px; }
-  .csv-cell, .csv-gutter { flex: 0 0 auto; height: 100%; white-space: pre; overflow: hidden; }
+  .csv-cell, .csv-gutter, .csv-pad { flex: 0 0 auto; height: 100%; white-space: pre; overflow: hidden; }
   .csv-gutter { width: 58px; min-width: 58px; }
   .csv-menu[hidden] { display: none; }
 </style>
@@ -146,17 +147,40 @@ ok('undo takes the applied sort back out of the file', () => {
 
 ok('shift-click makes a rectangle of the cells between', () => {
   assert.equal(r.rectangle, 6, 'three rows by two columns')
-  assert.match(r.rectangleStats, /^3 × 2/)
-})
-
-ok('a rectangle of numbers says what they come to', () => {
-  assert.match(r.columnStats, /sum 21/)   // 10 + 2 + 9, with the blank skipped
-  assert.match(r.columnStats, /avg 7/)
-  assert.match(r.columnStats, /1 empty/)
 })
 
 ok('⌃space takes the whole column, heading and all', () => {
   assert.equal(r.columnSelection, 5, 'four rows and the heading')
+})
+
+/* ------------------------------------------------------------- the totals */
+
+ok('a selected column says what it comes to', () => {
+  /* Four cells of the score column: 10, 2, a blank and 9. The blank is not a
+     number, so the average is over the three that are. */
+  assert.ok(r.totalsSummary.includes('4 selected'), r.totalsSummary)
+  assert.ok(r.totalsSummary.includes('sum 21'), r.totalsSummary)
+  assert.ok(r.totalsSummary.includes('avg 7'), r.totalsSummary)
+})
+
+ok('one cell has no arithmetic to report', () => {
+  assert.ok(!r.singleCellSummary.includes('selected'), r.singleCellSummary)
+  // The shape of the table is still there — only the totals went.
+  assert.ok(r.singleCellSummary.includes('rows'), r.singleCellSummary)
+})
+
+ok('a column of words says how big it is and totals nothing', () => {
+  assert.ok(r.wordsSummary.includes('4 selected'), r.wordsSummary)
+  assert.ok(!r.wordsSummary.includes('sum'), r.wordsSummary)
+})
+
+ok('scrolling does not set the totals going again', () => {
+  /* `decorate` runs on every scroll tick, and the totals hang off it. Keyed on
+     the rectangle so that a scroll — which moves no selection — is recognised
+     as the same one, which is what keeps a whole-column total off the scroll
+     path. */
+  assert.equal(r.selectionsFromScrolling, 0,
+    'scrolling recomputed a total for a selection that had not moved')
 })
 
 /* ------------------------------------------------------------- the typing */
@@ -281,6 +305,115 @@ ok('and the item it was opened for does what it says', () => {
 ok('the table is what everything above left behind', () => {
   assert.deepEqual(r.headings, ['name', 'date'])
   assert.equal(r.fileAtEnd, r.fileAfterMenuDelete)
+})
+
+/* ------------------------------------------------ a column that starts late */
+
+ok('a field no sample would have seen still gets a column', () => {
+  /* The fixture is three columns wide for its first three hundred and eighty
+     rows. The fourth column exists because one row, far past anything a width
+     sample reads, has a fourth field — and a field the file contains has to be
+     a field the grid shows. */
+  assert.equal(r.raggedColumns, 4, 'the late field was left without a column')
+  assert.ok(r.raggedSummary.includes('4 columns'), r.raggedSummary)
+})
+
+ok('and that field can be reached, not merely counted', () => {
+  assert.equal(r.raggedFiltered, 1, 'the filter should leave the one row that matches')
+  assert.equal(r.raggedLateCell, 'late', 'the late field never made it onto the screen')
+})
+
+/* ---------------------------------------------- a file the extension lied about */
+
+ok('a semicolon .csv opens as a table rather than one long column', () => {
+  /* What the extension promises is a comma. What a spreadsheet writes in every
+     country that spells decimals with a comma is this — and read with a comma
+     it is one column of unsplit lines: every row intact, entirely unusable,
+     and nothing on screen saying why. */
+  assert.deepEqual(r.semiHeadings, ['id', 'name', 'price'])
+  assert.deepEqual(r.semiFirstRow, ['1,50', '2,75'], 'the decimals stayed in their cells')
+})
+
+ok('and the grid says what it decided, because the extension disagreed', () => {
+  assert.equal(r.semiPickerShown, true, 'nothing said why the file split that way')
+  assert.equal(r.semiPickerValue, ';')
+})
+
+ok('a file is written back with the delimiter it came with', () => {
+  /* Resaving a semicolon file as a comma file is a diff against every line of
+     it, and turns each decimal into an extra column on the way. */
+  assert.equal(r.semiFileAfterEdit, 'id;name;price\nca1;Zara;1,50\nb2;Grace;2,75\n')
+})
+
+ok('and an ordinary comma file says nothing about its delimiter', () => {
+  assert.equal(r.commaPickerShown, false, 'the bar explained something with nothing to explain')
+})
+
+/* ---------------------------------------------------------- a wide export */
+
+ok('a wide table builds the columns in view rather than all of them', () => {
+  assert.ok(r.wideColumns.includes('200 columns'), r.wideColumns)
+  /* The pane is 720px against columns of at least 72, so a dozen or so fit.
+     What matters is that it is a fraction of two hundred rather than two
+     hundred: this used to build every column of every row in the band. */
+  assert.ok(r.wideCellsPerRow > 0, 'no cells were built at all')
+  assert.ok(r.wideCellsPerRow < 40,
+    `built ${r.wideCellsPerRow} cells per row for a pane that fits about a dozen`)
+})
+
+ok('and the table is still as wide as all of them', () => {
+  /* The spacers standing in for the columns off screen keep the row its full
+     width. Without them the scrollbar would shrink to the built band and jump
+     under the reader's hand on every scroll. */
+  assert.ok(r.wideTotalWidth > 200 * 72,
+    `the canvas is ${r.wideTotalWidth}px, narrower than two hundred columns`)
+  assert.equal(r.widthHeldOnScroll, true, 'the table changed width when it scrolled')
+})
+
+ok('scrolling by a row keeps the rows that are still on screen', () => {
+  /* The band used to be discarded and rebuilt to move by one line, which on a
+     wide table is thousands of elements for a scroll of 28 pixels. */
+  assert.equal(r.rowRecycled, true, 'a row still in view was rebuilt rather than kept')
+})
+
+ok('scrolling sideways brings the far columns in, under their own headings', () => {
+  assert.equal(r.wideFarLastColumn, 199, 'the last column never arrived')
+  assert.ok(r.wideFarFirstColumn > 100,
+    `column ${r.wideFarFirstColumn} was still built at the far right of the table`)
+  assert.ok(r.wideFarCellsPerRow < 40, 'the far end built the whole table again')
+  // The heading strip is virtual on the same axis and has to move with it.
+  assert.deepEqual(r.wideFarHeadings, ['198:c198', '199:c199'])
+  assert.equal(r.wideFarCellText, 'r0f199', 'the far cell holds another column\'s value')
+})
+
+/* ------------------------------------------------------ what a reader hears */
+
+ok('the grid says it is a grid, and how big it really is', () => {
+  assert.equal(r.ariaRole, 'grid')
+  /* Four body rows and the header. The point of saying it here is that only
+     the rows in view exist to be walked — without this a reader is told the
+     table is as big as the window. */
+  assert.equal(r.ariaRowCount, '5')
+  assert.equal(r.ariaColCount, '3')
+})
+
+ok('the headings, the line numbers and the cells each say what they are', () => {
+  assert.equal(r.ariaHeadingRole, 'columnheader')
+  assert.equal(r.ariaGutterRole, 'rowheader')
+  assert.equal(r.ariaCellRole, 'gridcell')
+  assert.equal(r.ariaFirstBodyRow, '2', 'the header is row one')
+  assert.equal(r.ariaColIndex, '2')
+})
+
+ok('and which cell is selected, and which one the keyboard is on', () => {
+  assert.equal(r.ariaSelected, 'true')
+  assert.equal(r.ariaUnselected, 'false')
+  assert.equal(r.ariaActive, true, 'the grid did not point at the cursor cell')
+})
+
+ok('a sorted column says which way it is pointed', () => {
+  // The mark beside the label is a triangle, and a triangle reads as nothing.
+  assert.equal(r.ariaSorted, 'ascending')
 })
 
 console.log(`\n${passed} checks passed`)

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { TurnLedger, turnId } from '../electron/ai-turns.js'
+import { mergeChatHistory, MAX_CHAT_NOTES } from '../electron/chat-history.js'
 import { newTurnId, ownsTurn } from '../src/copilot-turns.js'
 import { restoreConflicts } from '../electron/copilot-restore.js'
 import renameRequest from '../electron/copilot-rename.js'
@@ -62,6 +63,58 @@ snapshots.push('after-b')
 assert.deepEqual(await ledger.finish('b'), { before: 'before-b', after: 'after-b' })
 assert.equal(completed, 2)
 assert.equal(await ledger.finish('missing'), null)
+
+/* Whether finishing a turn can produce anything at all. Main drops the index
+ * and the vault snapshot on the way into `finish` — a full recursive walk —
+ * so that a write which landed a moment ago is seen. A turn that never took a
+ * baseline (read-only, or a Stop pressed with nothing running) has nothing to
+ * compare against, and that walk would be spent for a guaranteed empty diff. */
+assert.equal(ledger.has('missing'), false)
+assert.equal(ledger.has(''), false)
+snapshots.push('before-c')
+await ledger.begin('c')
+assert.equal(ledger.has('c'), true)
+snapshots.push('after-c')
+await ledger.finish('c')
+assert.equal(ledger.has('c'), false, 'a finished turn is done being asked about')
+
+/* ---------------------------------------------------- transcripts on disk */
+
+/* The panel writes the notes that changed rather than its whole history, so
+ * the file is a merge. Getting this wrong loses conversations silently — the
+ * window still shows them, and the next launch simply opens without them. */
+const older = {
+  'A.md': { at: 3, convos: [{ id: 'a1' }] },
+  'B.md': { at: 2, convos: [{ id: 'b1' }] }
+}
+assert.deepEqual(
+  mergeChatHistory(older, { notes: { 'B.md': { at: 9, convos: [{ id: 'b2' }] } }, remove: [] }),
+  {
+    'A.md': { at: 3, convos: [{ id: 'a1' }] },
+    'B.md': { at: 9, convos: [{ id: 'b2' }] }
+  },
+  'a note not mentioned by the write keeps what is on disk'
+)
+assert.deepEqual(
+  Object.keys(mergeChatHistory(older, { notes: {}, remove: ['A.md'] })),
+  ['B.md'],
+  'a renamed-away note is taken off disk'
+)
+assert.deepEqual(
+  mergeChatHistory(older, { notes: { 'C.md': { at: 4 } }, remove: ['C.md'] }),
+  { 'A.md': { at: 3, convos: [{ id: 'a1' }] }, 'B.md': { at: 2, convos: [{ id: 'b1' }] }, 'C.md': { at: 4 } },
+  'a note renamed onto a name being written in the same breath keeps the write'
+)
+/* A window still running the old code sends its whole history, with the note
+ * paths at the top level and no envelope. It has to go on working. */
+assert.deepEqual(mergeChatHistory(older, { 'Z.md': { at: 1 } }), { 'Z.md': { at: 1 } })
+
+const many = {}
+for (let n = 0; n < MAX_CHAT_NOTES + 5; n++) many[`n${n}.md`] = { at: n }
+const capped = mergeChatHistory(many, { notes: { 'new.md': { at: 9999 } }, remove: [] })
+assert.equal(Object.keys(capped).length, MAX_CHAT_NOTES, 'the file is capped, not the window')
+assert.ok(capped['new.md'], 'the newest survives the cap')
+assert.ok(!capped['n0.md'], 'the oldest does not')
 
 const operation = {
   source: 'copilot',

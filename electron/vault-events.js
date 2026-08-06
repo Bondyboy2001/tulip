@@ -13,6 +13,7 @@ function classifyVaultEvent (filename, {
   pdfExtension,
   siteExtension,
   whiteboardExtension,
+  notebookExtension,
   assetExtensions
 }) {
   if (!filename) {
@@ -45,6 +46,15 @@ function classifyVaultEvent (filename, {
   }
   if (extension === pdfExtension) {
     return { ignore: false, index: false, snapshot: true, notify: true, pdf: relative, path: relative }
+  }
+  /* A notebook is not indexed — the index is built from headings, wikilinks
+     and tags, and nbformat has none of them — but it is a document on screen,
+     so a Jupyter running beside Tulip and writing to the same file has to
+     reach the renderer. Named rather than left to the fallback below, which
+     would answer every autosave from that Jupyter with a full re-index and a
+     sweep of every PDF in the vault. */
+  if (extension === notebookExtension) {
+    return { ignore: false, index: false, snapshot: true, notify: true, pdf: null, path: relative }
   }
   if (extension === siteExtension || assetExtensions.has(extension)) {
     return { ignore: false, index: false, snapshot: true, notify: true, pdf: null, path: relative }

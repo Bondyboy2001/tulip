@@ -15,6 +15,7 @@
   "pdfExtension": ".pdf",
   "siteExtension": ".website",
   "whiteboardExtension": ".excalidraw",
+  "notebookExtension": ".ipynb",
 
   "_code_comment": [
     "Source files: text the vault opens and edits, but does not read as prose.",

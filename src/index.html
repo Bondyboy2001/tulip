@@ -329,6 +329,17 @@
              it scrolls and is navigated with the arrow keys. -->
         <div class="data" id="data" tabindex="-1" hidden></div>
 
+        <!-- A Jupyter notebook, shown as its cells rather than as the JSON it
+             is stored as. Mounted lazily by src/notebook.js, which owns
+             everything inside; Tulip owns the tab, the file and the saving,
+             exactly as it does for the grid. -->
+        <div class="nb" id="notebook" hidden></div>
+
+        <!-- Everything else the vault holds: a picture, a recording, a file
+             the desktop opens and Tulip does not. Built by src/fileview.js.
+             Focusable because a tall picture scrolls. -->
+        <div class="fileview" id="fileview" tabindex="-1" hidden></div>
+
         <!-- The letters a language has and a US keyboard does not, docked under
              the table. Which letters is decided from the folder's flag and
              name — there is nothing to fill in. See src/keyboard.js. Inside the
@@ -482,9 +493,9 @@
                the screen reader's announcement all come with it, and a thumb
                built out of pointer events reimplements every one of them badly.
                Its stops are drawn in copilot.js, because how many there are is
-               the chosen model's business — devin publishes what each family
-               was listed at, and most of opencode's catalogue has none at all,
-               which hides this row. -->
+               the chosen model's business — it publishes the variants it
+               takes, and most of the catalogue has none at all, which hides
+               this row. -->
           <div class="pop-row" id="ai-effort-row">
             <span class="pop-name">Effort</span>
             <div class="ai-effort" id="ai-effort">

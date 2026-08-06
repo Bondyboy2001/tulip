@@ -1412,6 +1412,34 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
 .tabs .tab:only-child .tab-close { display: none; }
 .tabs .tab:only-child { padding-right: 10px; }
 
+/* A pinned tab is narrower than the rest, because it is meant to be recognised
+   rather than read: these are the few documents kept open all session, and the
+   reader knows them by the second or third letter. Shrinking them is also what
+   pays for pinning at all — the strip has a fixed width, and tabs held open for
+   ever would otherwise crowd out the ones being worked in. */
+.tab.is-pinned {
+  max-width: 108px;
+  padding-right: 8px;
+}
+/* Unlike the ×, the mark is not held back until hover: it says why this tab has
+   no × of its own, and an explanation that only appears once you have gone
+   looking for the thing it explains is no explanation. */
+.tab-pin {
+  display: flex;
+  align-items: center;
+  width: 13px; height: 13px;
+  color: var(--faint);
+  flex: none;
+}
+.tab.is-active .tab-pin { color: var(--accent); }
+/* The pinned block and the rest are one strip, not two, so the seam between
+   them is the lightest mark that can still be read as a seam. */
+.tab.is-pinned + .tab:not(.is-pinned) {
+  margin-left: 7px;
+  border-left: 1px solid var(--line-soft);
+  padding-left: 12px;
+}
+
 .stage {
   position: relative;
   flex: 1;
@@ -6023,6 +6051,18 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 }
 .msg pre code { background: none; border: 0; color: inherit; padding: 0; font-size: 11.5px; }
 
+/* The tail of a reply that is still arriving inside a long code fence. There is
+   no seam to cut a fence at, so past a point it is appended as plain text
+   rather than re-parsed as markdown on every frame — see `LIVE_TAIL_LIMIT` in
+   copilot.js. Set as the block it is about to become, so the moment the stream
+   settles and the real render lands is not a visible jump. */
+.msg pre.stream-plain {
+  font: 11.5px/1.5 var(--font-mono);
+  color: var(--ink);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* Maths in a reply is set close to the prose size around it rather than at
    KaTeX's 1.21em default: that default assumes body text, and in a panel this
    narrow an expression standing a fifth taller than its sentence makes the
@@ -8238,8 +8278,8 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   gap: 2px;
   padding: 2px 10px 10px 22px;
 }
-/* One shelf inside the fold — a sub-provider under opencode, a family under
-   devin. The heading carries what the old per-row badge repeated. */
+/* One shelf inside the fold — a sub-provider under the copilot that offers it.
+   The heading carries what the old per-row badge repeated. */
 .model-shelf-head {
   display: flex;
   align-items: center;
@@ -9031,6 +9071,425 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 }
 .data[hidden] { display: none; }
 
+/* ------------------------------------------------- the last-resort viewer
+
+   A picture, a recording, or a card saying plainly that this is a file Tulip
+   does not show. Laid out as one centred column: there is one thing on screen
+   and the pane's whole job is to present it. */
+.fileview {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  padding: 24px;
+  overflow: auto;
+  background: var(--sunk);
+  outline: none;
+}
+.fileview[hidden] { display: none; }
+
+/* Fit, until it is clicked. A picture in a vault is being looked at rather
+   than worked on, so the whole of the zoom is these two states — and the
+   scrollbars the pane already has carry the full-size one. */
+.fileview-image {
+  display: flex;
+  min-height: 0;
+  max-width: 100%;
+}
+.fileview-image img {
+  max-width: 100%;
+  max-height: 74vh;
+  object-fit: contain;
+  border-radius: 8px;
+  box-shadow: 0 2px 18px rgb(0 0 0 / 0.22);
+  cursor: zoom-in;
+  background: var(--paper);
+}
+.fileview-image.is-full img {
+  max-width: none;
+  max-height: none;
+  cursor: zoom-out;
+}
+
+.fileview-player {
+  max-width: 100%;
+  border-radius: 8px;
+  background: #000;
+}
+.fileview-player.is-video { max-height: 74vh; }
+/* An audio player given the video's black box would be a black bar; it takes
+   the surface it sits on and a width worth aiming a scrubber at. */
+.fileview-player.is-audio {
+  width: min(520px, 100%);
+  background: transparent;
+}
+
+.fileview-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  max-width: 460px;
+  padding: 28px 32px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--paper);
+  text-align: center;
+}
+.fileview-mark { width: 44px; height: 44px; color: var(--ink-soft); }
+.fileview-name {
+  font-weight: 600;
+  /* A long name wraps rather than stretching the card off the pane. */
+  overflow-wrap: anywhere;
+}
+.fileview-facts { color: var(--ink-soft); font-size: 12px; }
+.fileview-said { color: var(--ink-soft); font-size: 13px; }
+
+.fileview-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+.fileview-btn {
+  padding: 5px 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--paper);
+  color: var(--ink-soft);
+  font: inherit;
+  cursor: pointer;
+}
+.fileview-btn:hover { color: var(--ink); border-color: var(--line-strong, var(--line)); }
+.fileview-btn.is-primary { color: var(--accent); border-color: var(--accent); }
+.fileview-btn.is-primary:hover {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+/* ------------------------------------------------------------- notebook
+
+   The pane an `.ipynb` opens into: a column of cells, each one a source block
+   and whatever that source last printed. See the account at the top of
+   src/notebook.js.
+
+   The one measurement everything here depends on is that `.nb-ink` and
+   `.nb-input` set text identically. The `<pre>` holds the text and gives the
+   cell its height; the textarea lies on top of it with transparent ink, and
+   the caret is only over the letter it thinks it is over while the two wrap
+   the same way. Font, size, line height, padding, tab size and the wrapping
+   rules are therefore declared once, for both. */
+.nb {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--paper);
+}
+.nb[hidden] { display: none; }
+
+.nb-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 5px 14px;
+  border-bottom: 1px solid var(--line);
+  font: 12px/1.4 var(--font-ui);
+  color: var(--muted);
+}
+.nb-bar-actions { display: flex; gap: 6px; }
+.nb-find-wrap { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.nb-find {
+  width: 180px;
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+}
+.nb-find:focus { outline: none; border-color: var(--accent); }
+.nb-found { color: var(--faint); font-variant-numeric: tabular-nums; }
+/* The cell a find landed on, marked until the next search or the next paint.
+   The accent rather than a highlight behind the text: the source under it is
+   already coloured, and a wash over that is two colour systems at once. */
+.nb-cell.is-hit { border-color: var(--accent); background: var(--accent-dim); }
+.nb-btn {
+  padding: 3px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink-soft);
+  font: inherit;
+  cursor: pointer;
+}
+.nb-btn:hover { color: var(--ink); background: var(--hover); }
+
+.nb-scroll {
+  flex: 1;
+  overflow: auto;
+  outline: none;
+  /* Room under the last cell, so the cell you are typing into can be scrolled
+     up to somewhere comfortable to read rather than sitting on the bottom
+     edge — the same courtesy the editor gives the last line of a note. */
+  padding: 16px 0 40vh;
+}
+.nb-col {
+  max-width: min(58rem, 100%);
+  margin-inline: auto;
+  padding-inline: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* Only the cells near the viewport are laid out and painted. A notebook of two
+   hundred cells, each with a plot under it, is otherwise a full layout pass
+   per hover anywhere in the window — the same argument, and the same fix, as
+   the reading view's blocks. */
+.nb-cell {
+  position: relative;
+  display: grid;
+  grid-template-columns: 3.4rem minmax(0, 1fr);
+  padding: 4px 6px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  content-visibility: auto;
+  contain-intrinsic-block-size: auto 120px;
+}
+.nb-cell:hover, .nb-cell:focus-within { border-color: var(--line-soft); }
+.nb-cell:focus-within { background: var(--active-line); }
+
+.nb-gutter { padding: 8px 8px 0 0; text-align: right; }
+.nb-prompt {
+  font: 11.5px/1.5 var(--font-mono);
+  color: var(--faint);
+  white-space: nowrap;
+}
+.nb-body { min-width: 0; }
+
+/* Laid over the cell's top corner rather than given a row of its own: a
+   toolbar in the flow would put a strip of furniture between every pair of
+   cells in the notebook, which is most of what you would be looking at.
+
+   Inside the border box, not overhanging it. `content-visibility` above brings
+   paint containment with it, and a box that hangs over the edge of a contained
+   element is a box clipped in half. */
+.nb-cell-tools {
+  position: absolute;
+  top: 3px;
+  right: 5px;
+  z-index: 2;
+  display: none;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 1px 6px rgb(0 0 0 / 0.10);
+}
+.nb-cell:hover > .nb-cell-tools,
+.nb-cell:focus-within > .nb-cell-tools { display: flex; }
+.nb-cell-btn {
+  display: flex;
+  padding: 3px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.nb-cell-btn:hover { color: var(--ink); background: var(--hover); }
+.nb-cell-ico { width: 15px; height: 15px; }
+.nb-cell-type {
+  margin-right: 2px;
+  padding: 1px 4px;
+  border: 1px solid var(--line-soft);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--ink-soft);
+  font: 11px/1.4 var(--font-ui);
+}
+
+.nb-source {
+  position: relative;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  background: var(--sunk);
+}
+.nb-ink, .nb-input {
+  margin: 0;
+  padding: 7px 10px;
+  border: 0;
+  font: 13px/1.55 var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  tab-size: 4;
+}
+.nb-ink { color: var(--ink); }
+.nb-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  resize: none;
+  /* Never its own scrollbar: the `<pre>` underneath has already grown to hold
+     this text, so anything the textarea scrolled would be text that is on
+     screen at a different offset from the ink drawn for it. */
+  overflow: hidden;
+  background: transparent;
+  color: transparent;
+  caret-color: var(--ink);
+  outline: none;
+}
+.nb-input::selection { background: var(--selected); }
+.nb-input::placeholder { color: var(--faint); }
+.nb-source.is-empty .nb-ink::after {
+  content: "Empty cell";
+  color: var(--faint);
+}
+
+.nb-tail {
+  align-self: start;
+  margin: 2px 0 0 3.4rem;
+  padding: 4px 10px;
+  border: 1px dashed var(--line);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  font: 12px/1.4 var(--font-ui);
+  cursor: pointer;
+}
+.nb-tail:hover { color: var(--ink); border-color: var(--line-strong, var(--line)); }
+
+/* --------------------------------------------------------- cell outputs */
+
+.nb-outputs {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+.nb-out-text {
+  margin: 0;
+  padding: 4px 10px;
+  /* Tall outputs get a scroller of their own rather than pushing the next
+     cell a screen and a half down the page. */
+  max-height: 32em;
+  overflow: auto;
+  font: 12.5px/1.5 var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  color: var(--ink-soft);
+}
+.nb-out-text.is-stderr {
+  color: var(--code-removed);
+  background: color-mix(in srgb, var(--code-removed) 7%, transparent);
+  border-radius: 5px;
+}
+.nb-out-error {
+  border-left: 2px solid var(--code-removed);
+  border-radius: 0 5px 5px 0;
+  background: color-mix(in srgb, var(--code-removed) 7%, transparent);
+}
+.nb-elided { color: var(--faint); font-style: italic; }
+
+.nb-out-image { display: flex; }
+.nb-out-image img {
+  max-width: 100%;
+  border-radius: 4px;
+  /* A plot is drawn for a white page and ships with a transparent background;
+     on a dark theme it would otherwise be black axes on a black pane. */
+  background: #fff;
+}
+
+.nb-out-html { overflow-x: auto; font: 13px/1.5 var(--font-ui); color: var(--ink); }
+.nb-out-html table { border-collapse: collapse; font-size: 12.5px; }
+.nb-out-html th, .nb-out-html td {
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  text-align: right;
+}
+.nb-out-html th { background: var(--sunk); font-weight: 600; }
+
+/* ------------------------------------------------------- markdown cells
+
+   Prose, set the way the reading view sets prose. Its rules are scoped to
+   `.reading` and stay there — that pane carries furniture a notebook has no
+   use for, heading folds and embed slots among it — so what a markdown cell
+   needs is stated here, and only what a markdown cell can actually contain. */
+.nb-md {
+  padding: 2px 2px 4px;
+  font-family: var(--font-body);
+  font-size: 15.5px;
+  line-height: 1.6;
+  color: var(--ink);
+}
+.nb-md > :first-child { margin-top: 0; }
+.nb-md > :last-child { margin-bottom: 0; }
+.nb-md h1, .nb-md h2, .nb-md h3, .nb-md h4, .nb-md h5, .nb-md h6 {
+  margin: 1.2em 0 .4em;
+  font-weight: 600;
+  line-height: 1.24;
+}
+.nb-md h1 { font-size: 1.6em; color: var(--h1, var(--ink)); }
+.nb-md h2 { font-size: 1.3em; color: var(--h2, var(--ink)); }
+.nb-md h3 { font-size: 1.1em; color: var(--h3, var(--ink)); }
+.nb-md p, .nb-md ul, .nb-md ol, .nb-md blockquote, .nb-md table { margin: .6em 0; }
+.nb-md ul, .nb-md ol { padding-left: 1.5em; }
+.nb-md li { margin: .2em 0; }
+.nb-md a { color: var(--accent); }
+.nb-md code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--sunk);
+  font: .88em var(--font-mono);
+  color: var(--code-inline);
+}
+.nb-md pre {
+  overflow-x: auto;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--sunk);
+}
+.nb-md pre code { padding: 0; background: none; color: inherit; }
+.nb-md blockquote {
+  padding-left: .9em;
+  border-left: 2px solid var(--line);
+  color: var(--ink-soft);
+}
+.nb-md table { border-collapse: collapse; }
+.nb-md th, .nb-md td { padding: 3px 10px; border: 1px solid var(--line); }
+.nb-md img { max-width: 100%; }
+.nb-empty { color: var(--faint); font-style: italic; }
+
+/* --------------------------------------------------------------- ansi
+
+   A kernel colours its own output and a traceback is nothing but colour. The
+   eight names are mapped onto the theme's own token hues rather than onto the
+   terminal's literal red and green: this text sits on the app's paper, next to
+   the app's code, and a raw #FF0000 in the middle of it reads as a rendering
+   fault. The bright variants share the hue — a second set of nearly-identical
+   colours buys nothing on a page that is not a terminal. */
+.nb-fg-black, .nb-fg-bright-black { color: var(--faint); }
+.nb-fg-red, .nb-fg-bright-red { color: var(--code-removed); }
+.nb-fg-green, .nb-fg-bright-green { color: var(--code-string); }
+.nb-fg-yellow, .nb-fg-bright-yellow { color: var(--code-atom); }
+.nb-fg-blue, .nb-fg-bright-blue { color: var(--code-function); }
+.nb-fg-magenta, .nb-fg-bright-magenta { color: var(--code-keyword); }
+.nb-fg-cyan, .nb-fg-bright-cyan { color: var(--code-string2); }
+.nb-fg-white, .nb-fg-bright-white { color: var(--ink); }
+.nb-bg-red, .nb-bg-bright-red { background: color-mix(in srgb, var(--code-removed) 18%, transparent); }
+.nb-bg-green, .nb-bg-bright-green { background: color-mix(in srgb, var(--code-string) 18%, transparent); }
+.nb-bg-yellow, .nb-bg-bright-yellow { background: color-mix(in srgb, var(--code-atom) 18%, transparent); }
+.nb-bg-blue, .nb-bg-bright-blue { background: color-mix(in srgb, var(--code-function) 18%, transparent); }
+.nb-bg-magenta, .nb-bg-bright-magenta { background: color-mix(in srgb, var(--code-keyword) 18%, transparent); }
+.nb-bg-cyan, .nb-bg-bright-cyan { background: color-mix(in srgb, var(--code-string2) 18%, transparent); }
+.nb-bold { font-weight: 700; }
+.nb-italic { font-style: italic; }
+.nb-underline { text-decoration: underline; }
+
 .csv-frame {
   position: relative;
   display: flex;
@@ -9043,6 +9502,17 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 }
 /* A column being dragged wider must not select text on its way past. */
 .csv-frame.is-resizing { user-select: none; cursor: col-resize; }
+
+/* The grid proper — the headings and the body, which are two separately
+   scrolled strips that have to be one element for anything reading the page.
+   It carries no look of its own; it exists so `role="grid"` has something to
+   sit on that is neither half of the table. */
+.csv-table {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
 
 /* ------------------------------------------------------------ the strip
 
@@ -9082,20 +9552,33 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 }
 .csv-btn:hover:not(:disabled) { color: var(--ink); border-color: var(--line-strong, var(--line)); }
 .csv-btn:disabled { opacity: 0.4; cursor: default; }
+
+/* What the file is separated by. Shaped like the buttons beside it, and on the
+   bar only when the answer is not the one the extension implies — so a comma
+   `.csv`, which is nearly all of them, never shows this at all. */
+.csv-delimiter {
+  padding: 3px 6px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 10%, var(--paper));
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+.csv-delimiter[hidden] { display: none; }
 .csv-btn.is-on {
   color: var(--accent);
   border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
-.csv-found, .csv-stats {
+.csv-found {
   color: var(--ink-soft);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .csv-found.is-empty { color: var(--warn, var(--ink-soft)); }
-.csv-stats { font-variant-numeric: tabular-nums; }
 
 /* The heading strip scrolls sideways with the body but never up: it is
    translated by the scroller's own offset rather than being sticky, which a
@@ -9138,6 +9621,17 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   white-space: pre;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* The width of the columns that are off screen and therefore not built. It
+   holds the row's total width steady whichever columns exist inside it, so the
+   horizontal scrollbar stays where it is while the table scrolls under it.
+   Nothing is drawn: no border, no background, and it is not a `.csv-cell`, so
+   nothing that walks the cells to decorate them ever sees it. */
+.csv-pad {
+  flex: 0 0 auto;
+  height: 100%;
+  pointer-events: none;
 }
 .csv-th {
   position: relative;
@@ -9199,12 +9693,81 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 .csv-cell.csv-num { justify-content: flex-end; font-variant-numeric: tabular-nums; }
 .csv-th.csv-num .csv-sort { margin-left: 4px; }
 
+/* Dragging across a grid selects cells, not words — but the browser lays its
+   own text selection over whatever the pointer crossed as well, and that
+   highlight hugs the letters. A rectangle of cells came out as a ragged run of
+   text-shaped boxes with the real selection faintly underneath it.
+
+   The browser's selection is hidden rather than turned off. `user-select:
+   none` would take it away with the paint, and the window menu's Edit ▸ Copy
+   is a Chromium editing command that does nothing — and fires no `copy` event
+   for csv.js to answer — when there is no native selection to act on. So the
+   selection stays, and only its highlight goes; an open cell is a real text
+   field and keeps its own. */
+.csv-frame ::selection { background: transparent; }
+.csv-input::selection { background: var(--sel); }
+
+/* A selection is a tinted block with a line drawn round the outside of it, and
+   the cell the keys are pointing at ringed inside that — the arrangement every
+   spreadsheet uses, because the tint says how much is selected and only the
+   outline says where it stops.
+
+   All of it is one box-shadow. A cell can be a corner (two sides), a match and
+   the cursor at once, and separate rules for each would take turns overwriting
+   the others' shadow; layering them as custom properties lets every part of the
+   grid write its own slot and the composed rule draw all four. Cells with no
+   part in it match none of these rules and carry no shadow at all. */
+.csv-cell {
+  --edge-t: 0 0 0 0 transparent;
+  --edge-b: 0 0 0 0 transparent;
+  --edge-l: 0 0 0 0 transparent;
+  --edge-r: 0 0 0 0 transparent;
+  --edge-ring: 0 0 0 0 transparent;
+  --edge-match: 0 0 0 0 transparent;
+}
+.csv-cell.is-sel, .csv-cell.is-cursor, .csv-cell.is-match {
+  box-shadow:
+    inset var(--edge-t), inset var(--edge-b), inset var(--edge-l),
+    inset var(--edge-r), inset var(--edge-ring), inset var(--edge-match);
+}
+
+/* The tint stays light: it is read through, and the outline is what the eye
+   lands on. It still has to survive being laid over a striped row on ten
+   themes, which is what the colour mix is for. */
 .csv-cell.is-sel { background: color-mix(in srgb, var(--accent) 16%, transparent); }
-.csv-cell.is-match { box-shadow: inset 0 0 0 1px var(--accent-dim); }
+.csv-cell.is-edge-t { --edge-t: 0 2px 0 0 var(--accent); }
+.csv-cell.is-edge-b { --edge-b: 0 -2px 0 0 var(--accent); }
+.csv-cell.is-edge-l { --edge-l: 2px 0 0 0 var(--accent); }
+.csv-cell.is-edge-r { --edge-r: -2px 0 0 0 var(--accent); }
+.csv-cell.is-match { --edge-match: 0 0 0 1px var(--accent-dim); }
+/* Inside a range the cursor is the cell being typed into rather than a second
+   selection, so it is a thin ring on the tint; alone, it is the filled box that
+   says "this cell is about to be written". */
 .csv-cell.is-cursor {
-  box-shadow: inset 0 0 0 2px var(--accent);
+  --edge-ring: 0 0 0 2px var(--accent);
   background: var(--sel);
 }
+
+/* ------------------------------------------------------------ reading view
+
+   The same grid with the editing taken out of it, so what changes here is what
+   the table *offers*: nothing points at a cell as a thing to type into. The
+   cursor stays — it is what the arrow keys move and what a selection is
+   measured from — but as a quiet outline rather than the filled box that says
+   "this cell is about to be written". */
+.csv-frame.is-reading .csv-cell { cursor: default; }
+.csv-frame.is-reading .csv-cell.is-cursor {
+  /* The slot, not the whole shadow: this cell may also be a corner of the
+     selection, and overwriting `box-shadow` here took those two sides of the
+     outline away with it. */
+  --edge-ring: 0 0 0 1px var(--accent-dim);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+/* Rules between columns do the reading work; a full lattice is for aiming at
+   cells. The stripes and the frozen line numbers keep the rows apart. */
+.csv-frame.is-reading .csv-cell { border-right-color: transparent; }
+.csv-frame.is-reading .csv-th { border-right-color: var(--line-soft); }
+.csv-frame.is-reading .csv-gutter { color: var(--ink-faint, var(--ink-soft)); opacity: 0.75; }
 
 /* The right-click menu. Inside the frame so it scrolls away with the pane it
    belongs to rather than hanging over the window. */

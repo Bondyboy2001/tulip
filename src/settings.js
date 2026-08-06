@@ -459,12 +459,12 @@ export function mountSettings ({ el, api, values, onChange }) {
     },
 
     /**
-     * Every model the CLIs will admit to, ticked or not.
+     * Every model the CLI will admit to, ticked or not.
      *
-     * One row per copilot, and its models inside it. opencode and devin answer
-     * with several hundred between them, so what the pane shows at rest is the
-     * five copilots — the question anyone opening it is actually asking — and
-     * the models are a fold away. Search opens whichever copilots match.
+     * One row per copilot, and its models inside it. opencode answers with
+     * several hundred, so what the pane shows at rest is the copilot itself —
+     * the question anyone opening it is actually asking — and the models are a
+     * fold away. Search opens whichever copilots match.
      *
      * A model's own shelf (`anthropic`, `Claude Opus 5`) is not a row of its
      * own any more: it rides each model as a quiet qualifier, because `glm-5.2`
@@ -638,8 +638,8 @@ export function mountSettings ({ el, api, values, onChange }) {
           if (open) {
             const body = node('div', 'model-group-body')
 
-            /* The fold, grouped by shelf — opencode's sub-providers, devin's
-               families. The shelf used to ride each row as a badge, which put
+            /* The fold, grouped by shelf — opencode's own sub-providers. The
+               shelf used to ride each row as a badge, which put
                `opencode-go` four hundred times down the right edge and said
                nothing about where one shelf ended; a heading says it once, and
                gives each shelf an All of its own. First-appearance order, so a

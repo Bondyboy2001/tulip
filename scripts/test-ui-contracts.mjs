@@ -25,6 +25,12 @@ for (const id of ['saved-searches', 'panel-save-search', 'ai-write']) {
 for (const id of ['tex-divider', 'tex-preview', 'tex-pdf']) {
   assert.match(html, new RegExp(`id=["']${id}["']`), `${id} is part of the installed shell`)
 }
+/* Every viewed kind needs a pane of its own in the shell, and one that is
+   shipped rather than merely written: a pane missing from the built HTML is a
+   tab that opens onto the last document. */
+for (const id of ['data', 'notebook', 'fileview']) {
+  assert.match(html, new RegExp(`id=["']${id}["']`), `${id} is part of the installed shell`)
+}
 assert.doesNotMatch(html, /tex-preview-head|tex-preview-status|>PDF preview</)
 assert.match(renderer, /Search notes, PDFs, and highlights/)
 assert.match(renderer, /Saved searches|saved-searches/)
@@ -35,6 +41,16 @@ assert.match(preload, /doctor:\s*\(\)/)
 assert.match(preload, /tex:compile/)
 assert.match(main, /createTexCompiler/)
 assert.match(source ? read('src', 'styles.css') : styles, /\.tex-preview/)
+/* KaTeX's stylesheet is emitted beside index.html, so it is resolved against
+   the document. `import.meta.url` is wherever esbuild's splitting last put
+   math.js — and when that was a shared chunk, the link asked for
+   `chunks/katex.css`, 404ed, and every expression in the app rendered as its
+   own source with nothing thrown. */
+if (source) {
+  const math = read('src', 'math.js')
+  assert.match(math, /new URL\('katex\.css', document\.baseURI\)/)
+  assert.doesNotMatch(math, /new URL\('katex\.css', import\.meta\.url\)/)
+}
 assert.match(styles, /width:\s*min\(320px/)
 
 if (source) {
@@ -51,6 +67,20 @@ if (source) {
   }
   assert.match(renderer, /id: 'note-history', title: [^\n]+scope: 'text'/)
   assert.match(renderer, /COMMANDS\.filter\(\(\{ scope \}\)/)
+  /* A command that cannot act on what is open is not offered: the study record
+     belongs to the language tables, and there is no file to move with nothing
+     open. Both are scopes rather than checks inside the handler, so the row
+     itself disappears. */
+  assert.match(renderer, /id: 'review-stats', title: [^\n]+scope: 'language'/)
+  assert.match(renderer, /id: 'move-file', title: [^\n]+scope: 'file'/)
+  assert.match(renderer, /id: 'toggle-spellcheck', title: [^\n]+scope: 'markdown'/)
+  /* The overlay's selection: the ends are ends, and a row arriving under a
+     still mouse is not a hover. Both regressions are one line each to
+     reintroduce and neither is visible in a screenshot. */
+  assert.match(renderer, /Math\.max\(0, Math\.min\(count - 1, state\.overlay\.index \+ by\)\)/)
+  assert.doesNotMatch(renderer, /state\.overlay\.index [+-] 1( \+ count)?\) % count/)
+  assert.match(renderer, /mouseenter[\s\S]{0,60}if \(overlayHoverMuted\) return/)
+  assert.match(renderer, /el\.panelList\.addEventListener\('mousemove'/)
   assert.ok(
     html.indexOf('id="zoom"') > html.indexOf('class="doc-tools"') &&
     html.indexOf('id="zoom"') < html.indexOf('<!-- A PDF'),
@@ -58,7 +88,8 @@ if (source) {
   )
   assert.doesNotMatch(html, /class="status-end"/)
   const newFileCommands = /const NEW_FILE_COMMANDS = \[([\s\S]*?)\n\]/.exec(renderer)?.[1] || ''
-  for (const id of ['new-note', 'new-tex', 'new-whiteboard', 'new-website', 'new-table']) {
+  for (const id of ['new-note', 'new-tex', 'new-whiteboard', 'new-website', 'new-table',
+    'new-notebook']) {
     assert.match(renderer, new RegExp(`id: '${id}', title:`), `${id} is offered by the nested new-file palette`)
   }
   assert.doesNotMatch(newFileCommands, /id: 'new-folder'/)
@@ -75,7 +106,11 @@ if (source) {
   assert.match(renderer, /if \(viewingWhiteboard\(\)\) \{[\s\S]{0,180}whiteboardInstance\?\.open\(relPath/)
   assert.doesNotMatch(ai, /turn-end', processed:/)
   assert.doesNotMatch(copilot, /tokens processed this turn/)
-  assert.match(copilot, /const stale = convo\.threadOf === 'codex' \|\| convo\.threadOf === 'claude'/)
+  /* The copilots Tulip no longer runs. Their threads cannot be resumed and
+     their context readings are about conversations nothing here can reopen, so
+     a restored chat of theirs must come back with its gauge cleared. */
+  assert.match(copilot, /const gone = new Set\(\['codex', 'claude', 'devin'\]\)/)
+  assert.match(copilot, /const stale = gone\.has\(convo\.threadOf\)/)
   /* Through `docIcon`, not `fileIcon` directly: the tint a source file's row
      is drawn with comes from its path, and a call site that skipped the helper
      would show every language in the same grey. */
@@ -90,6 +125,20 @@ if (source) {
      that chooses a language, and the import filter that lets one be dragged. */
   assert.match(renderer, /case 'new-source': openOverlay\('new-source', \{ dir \}\)/)
   assert.match(renderer, /case 'new-csv': createSource\(dir, '\.csv'\)/)
+  assert.match(renderer, /case 'new-notebook': createSource\(dir, '\.ipynb'\)/)
+  /* A table and a notebook are each read and edited in one pane, so the view
+     switch is on the bar while either is open and the viewer is told which of
+     the two it is in. Without the second and third lines the control would
+     move and the document would not. */
+  assert.match(renderer,
+    /el\.viewSwitch\.hidden = \(!text && !dataOpen && !notebookOpen\) \|\| sourceOnly/)
+  assert.match(renderer, /if \(dataOpen\) dataInstance\?\.setReadonly\(state\.view === 'read'\)/)
+  assert.match(renderer, /if \(notebookOpen\) notebookInstance\?\.setReadonly\(state\.view === 'read'\)/)
+  /* Auto-resize is offered for both grids and routed to whichever is open —
+     the palette row and the thing it calls, which are easy to add one of. */
+  assert.match(renderer,
+    /if \(viewingLanguageTable\(\) \|\| viewingData\(\)\) \{\s*commands\.push\(\{ id: 'fit-columns'/)
+  assert.match(renderer, /viewingData\(\) \? dataInstance\?\.fitColumns\(\) : editor\?\.fitAllColumns\(\)/)
   assert.match(preload, /create: \(dir, name, ext\) => ipcRenderer\.invoke\('source:create', dir, name, ext\)/)
   assert.match(main, /ipcMain\.handle\('source:create'/)
   assert.match(main, /!isCode\(source\) && !isData\(source\)\) \{ skipped\+\+; return \}/)
@@ -116,6 +165,13 @@ if (source) {
   const baseStyles = read('src', 'styles.css')
   const texSplit = read('src', 'tex-split.js')
   assert.match(baseStyles, /body\s*\{\s*cursor:\s*default/)
+  /* A selected rectangle is filled cell by cell. The browser's own text
+     highlight over the same cells hugs the letters instead, and two selections
+     drawn at once read as a ragged mess — so the grid's is the one that
+     paints. Hidden rather than switched off: `user-select: none` would take
+     the menu's Edit ▸ Copy with it. */
+  assert.match(baseStyles, /\.csv-frame ::selection \{ background: transparent; \}/)
+  assert.doesNotMatch(baseStyles, /\.csv-(row|cell)[^\n]*user-select: none/)
   assert.match(baseStyles, /a\[href\][\s\S]{0,220}\[role="button"\][\s\S]{0,220}cursor:\s*default\s*!important/)
   assert.match(baseStyles, /\.reading, \.reading \*[\s\S]{0,190}cursor:\s*default\s*!important/)
   assert.match(baseStyles, /\.grip\s*\{[\s\S]{0,190}cursor:\s*col-resize/)

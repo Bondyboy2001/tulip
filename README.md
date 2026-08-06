@@ -17,10 +17,13 @@ lock-in.
 - Write in focused Editing, Reading, or Raw views.
 - Link and embed notes with `[[wikilinks]]`, backlinks, tabs, and a live outline.
 - Keep Markdown, PDFs, websites, whiteboards, and TeX documents together.
+- Read and edit Jupyter notebooks as cells, with their saved outputs, plots and
+  tracebacks — no kernel, so nothing is run.
 - Search the whole vault and work with an optional AI copilot.
 - Build language-learning tables and review them with spaced repetition.
 - Start notes from a `templates/` folder, and click any `#tag` to find its notes.
 - Split the sidebar to keep the file tree and the outline on screen together.
+- Open a second window on the same vault, and pin the tabs worth keeping.
 - See what studying adds up to under **Review statistics…** in the palette.
 
 ## Requirements
@@ -109,8 +112,28 @@ past it with `xattr -cr /Applications/Tulip.app`, but signing is the real fix.
 | `⌘1` / `⌘2` / `⌘3` | Reading / Editing / Raw |
 | `⌘⇧F` | Search the vault |
 | `⌘⇧A` | Toggle Copilot |
+| `⌘⌥N` | New window |
 
 On Windows, use `Ctrl` wherever this table says `⌘`.
+
+## Tabs and windows
+
+Right-clicking a tab offers **Pin tab**, which moves it to the front of the
+strip and takes away its close ×, and **Close others** and **Close to the
+right**, neither of which touches a pinned tab. Pinned tabs come back the next
+time Tulip starts.
+
+**New window** (`⌘⌥N`, or the Window menu) opens a second window on the same
+vault; **Open in new window** on a tab or a file does the same with that
+document already showing. Both windows are the same app on the same notes — an
+edit in one appears in the other.
+
+Two things belong to the first window only. It is the one whose tabs are
+remembered, so a second window opened to read one note cannot replace the strip
+you left behind; and it is the one that holds the copilot, because the CLI
+session and the saved transcripts are one per vault and two windows writing them
+would overwrite each other. The copilot's button is hidden in a second window
+rather than half-working there.
 
 ## Templates
 

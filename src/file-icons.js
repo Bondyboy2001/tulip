@@ -39,6 +39,15 @@ const FILE_ICONS = {
                <circle cx="7" cy="7" r="1.3" fill="#C38B16"/>`,
   video: `<rect x="3" y="5" width="18" height="14" rx="2.5" fill="#6D70C9"/>
           <path d="m10 8.3 5.2 3.7-5.2 3.7z" fill="#fff" fill-opacity=".9"/>`,
+  /* A picture: the frame, a sun and the hills every photo icon has drawn since
+     the first one. Named for the kind rather than for a format, because a
+     `.png` and a `.heic` are the same thing to a reader. */
+  image: `<rect x="3" y="4.6" width="18" height="14.8" rx="2.4" fill="none"
+           stroke="#3F9E63" stroke-width="1.7"/>
+          <circle cx="8.6" cy="9.6" r="1.6" fill="#3F9E63"/>
+          <path d="M4.2 17.2 9.4 12l3.2 3.2 3-2.6 4.2 4.6"
+           fill="none" stroke="#3F9E63" stroke-width="1.7"
+           stroke-linecap="round" stroke-linejoin="round"/>`,
   audio: `<circle cx="12" cy="12" r="9" fill="#D88745"/>
           <path d="M7 12v2M10 9v6M13 7v10M16 10v4" stroke="#fff" stroke-width="1.5"
             stroke-linecap="round" opacity=".92"/>`,
@@ -51,6 +60,15 @@ const FILE_ICONS = {
           stroke-linecap="round" stroke-linejoin="round"/>
         <path d="M13.3 5.6 10.7 18.4" fill="none" stroke="currentColor"
           stroke-width="1.6" stroke-linecap="round" opacity=".55"/>`,
+  /* A notebook: cells, one of them holding the prompt every notebook opens
+     with. Jupyter's own orange, because that is the colour an `.ipynb` is in
+     every file manager the reader has already used. */
+  notebook: `<rect x="3.2" y="3.4" width="17.6" height="17.2" rx="2.4" fill="none"
+              stroke="#E8792B" stroke-width="1.7"/>
+             <path d="M3.2 9.2h17.6M3.2 15h17.6" fill="none" stroke="#E8792B"
+              stroke-width="1.35"/>
+             <path d="M6 5.4v2.2M6 11.2v2.2M6 17v2.2" stroke="#E8792B"
+              stroke-width="1.5" stroke-linecap="round"/>`,
   /* A data file: a table, not a document. Separated from the note mark on
      purpose — a `.csv` opens in a grid and never in the editor. */
   data: `<rect x="3.1" y="4.6" width="17.8" height="14.8" rx="2.2" fill="none"

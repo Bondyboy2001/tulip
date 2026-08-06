@@ -1,20 +1,6 @@
 {
-  "comment": "The CLIs the copilot can be, and what they offer before they are asked. Shared because both processes need it: electron/ai.js decides what it will spawn, src/models.js decides what the dropdown shows, and two copies of that is how the two disagree. Same arrangement as vault-contract.json and zoom-steps.json. `command` is the binary spawned — one process per turn, with the vault as its working directory. There is no HTTP client here and no key of ours to keep: a gateway (OpenRouter, z.ai) is reached by configuring it inside opencode, where its key already lives. The `fallbacks` below are what the dropdown shows before the CLIs have been asked — a seed, not a limit, because both of these catalogues are account properties this file cannot check a name against, so what the panel offers is what gets spawned. A devin id carries `{effort}` where the reasoning level goes: devin spells the level into the model name rather than taking it as a flag, and `startDevinTurn` fills the slot from whatever the effort slider says. `offerByDefault` is false for opencode alone — its four hundred-odd entries are what the Models-offered setting exists to keep out of the dropdown. `auth` is the argument list that answers whether the CLI is signed in. `grants` is what each CLI can actually do in the read-only or write-capable provider mode, in the user's words: neither takes a per-tool allowlist, so each is fenced only by that mode — the UI's Ask and Auto choices decide whether write access is confirmed first.",
+  "comment": "The CLI the copilot is, and what it offers before it is asked. Shared because both processes need it: electron/ai.js decides what it will spawn, src/models.js decides what the dropdown shows, and two copies of that is how the two disagree. Same arrangement as vault-contract.json and zoom-steps.json. `command` is the binary spawned — one process per turn, with the vault as its working directory. There is no HTTP client here and no key of ours to keep: every model, and every gateway (OpenRouter, z.ai), is reached by configuring it inside opencode, where its key already lives. `fallbacks` is what the dropdown shows before the CLI has been asked — a seed, not a limit, because the catalogue is an account property this file cannot check a name against, so what the panel offers is what gets spawned. `offerByDefault` is false because opencode's four hundred-odd entries are what the Models-offered setting exists to keep out of the dropdown. `auth` is the argument list that answers whether the CLI is signed in. `grants` is what it can actually do in the read-only or write-capable provider mode, in the user's words: it takes no per-tool allowlist, so it is fenced only by that mode — the UI's Ask and Auto choices decide whether write access is confirmed first.",
   "providers": [
-    {
-      "id": "devin",
-      "label": "Devin",
-      "command": "devin",
-      "offerByDefault": true,
-      "auth": [
-        "auth",
-        "status"
-      ],
-      "grants": {
-        "read": "read and search your notes",
-        "write": "read, edit and create notes, and run shell commands inside the vault"
-      }
-    },
     {
       "id": "opencode",
       "label": "opencode",
@@ -31,34 +17,6 @@
     }
   ],
   "fallbacks": {
-    "devin": [
-      {
-        "id": "claude-opus-5-{effort}",
-        "label": "Claude Opus 5",
-        "effort": "medium",
-        "efforts": [
-          "low",
-          "medium",
-          "high",
-          "xhigh",
-          "max"
-        ],
-        "context": 1000000
-      },
-      {
-        "id": "claude-sonnet-5-{effort}",
-        "label": "Claude Sonnet 5",
-        "effort": "medium",
-        "efforts": [
-          "low",
-          "medium",
-          "high",
-          "xhigh",
-          "max"
-        ],
-        "context": 1000000
-      }
-    ],
     "opencode": []
   },
   "efforts": [
