@@ -22,7 +22,9 @@ import {
   notebookLanguage,
   notebookShape,
   outputParts,
-  ansiSpans
+  ansiSpans,
+  kernelOutput,
+  applyOutput
 } from '../src/notebook.js'
 import VAULT_CONTRACT from '../electron/vault-contract.json'
 import { isNotebookPath, isViewedFilePath, isCodePath } from '../src/vault-paths.js'
@@ -338,6 +340,138 @@ ok('an escape code written out as text is text', () => {
   // the escape. A scanner anchored on the bracket alone would eat them.
   assert.deepEqual(ansiSpans('print("[0m")'),
     [{ text: 'print("[0m")', classes: '' }])
+})
+
+/* ------------------------------------------------------ what a kernel says
+
+   The claim this half rests on is that a kernel message and a saved output are
+   the same object. If that is true, everything `outputParts` was already
+   tested for above applies unchanged to a cell that is running — so these
+   check the translation, and then check the round trip through it. */
+
+ok('a kernel message becomes the output nbformat records', () => {
+  assert.deepEqual(kernelOutput('stream', { name: 'stdout', text: 'hi\n' }),
+    { output_type: 'stream', name: 'stdout', text: 'hi\n' })
+
+  assert.deepEqual(
+    kernelOutput('execute_result', { data: { 'text/plain': '42' }, metadata: {}, execution_count: 3 }),
+    { output_type: 'execute_result', data: { 'text/plain': '42' }, metadata: {}, execution_count: 3 })
+
+  // display_data is the same shape without the number: it is something the
+  // cell showed, not the value the cell had.
+  const shown = kernelOutput('display_data', { data: { 'image/png': 'AAAA' }, metadata: {} })
+  assert.deepEqual(shown, { output_type: 'display_data', data: { 'image/png': 'AAAA' }, metadata: {} })
+  assert.equal('execution_count' in shown, false)
+
+  assert.deepEqual(
+    kernelOutput('error', { ename: 'ZeroDivisionError', evalue: 'division by zero', traceback: ['a', 'b'] }),
+    { output_type: 'error', ename: 'ZeroDivisionError', evalue: 'division by zero', traceback: ['a', 'b'] })
+})
+
+ok('the messages that are not outputs are not treated as any', () => {
+  // Our own request, echoed back on iopub. Recorded as an output it would put
+  // the cell's own source into the cell's output.
+  assert.equal(kernelOutput('execute_input', { code: 'x = 1', execution_count: 1 }), null)
+  assert.equal(kernelOutput('status', { execution_state: 'idle' }), null)
+  assert.equal(kernelOutput('comm_open', {}), null)
+  assert.equal(kernelOutput('stream', null)?.text, '')
+})
+
+ok('a kernel message draws the same as the output it becomes', () => {
+  // The whole bargain of this file: live output and saved output are one path.
+  const live = kernelOutput('display_data', {
+    data: { 'text/plain': '<Figure size 640x480>', 'image/png': 'iVBOR\nw0KG' }, metadata: {}
+  })
+  assert.deepEqual(outputParts(live), [{ kind: 'image', mime: 'image/png', data: 'iVBORw0KG' }])
+})
+
+ok('a thousand printed lines are one output, not a thousand', () => {
+  // A loop sends a message per flush. Recorded one-for-one this would write a
+  // notebook no other tool writes, and build a <pre> per line to show one
+  // paragraph.
+  let state = { outputs: [], clearWhenNext: false }
+  for (const text of ['a\n', 'b\n', 'c\n']) {
+    state = applyOutput(state, kernelOutput('stream', { name: 'stdout', text }))
+  }
+  assert.equal(state.outputs.length, 1)
+  assert.equal(state.outputs[0].text, 'a\nb\nc\n')
+})
+
+ok('the two streams stay apart', () => {
+  // stdout and stderr are drawn differently and interleaving them into one
+  // output would lose which was which.
+  let state = { outputs: [], clearWhenNext: false }
+  state = applyOutput(state, kernelOutput('stream', { name: 'stdout', text: 'out' }))
+  state = applyOutput(state, kernelOutput('stream', { name: 'stderr', text: 'err' }))
+  state = applyOutput(state, kernelOutput('stream', { name: 'stdout', text: 'more' }))
+  assert.deepEqual(state.outputs.map((o) => [o.name, o.text]),
+    [['stdout', 'out'], ['stderr', 'err'], ['stdout', 'more']])
+})
+
+ok('a plot between two prints does not merge them', () => {
+  let state = { outputs: [], clearWhenNext: false }
+  state = applyOutput(state, kernelOutput('stream', { name: 'stdout', text: 'before' }))
+  state = applyOutput(state, kernelOutput('display_data', { data: { 'image/png': 'x' }, metadata: {} }))
+  state = applyOutput(state, kernelOutput('stream', { name: 'stdout', text: 'after' }))
+  assert.deepEqual(state.outputs.map((o) => o.output_type),
+    ['stream', 'display_data', 'stream'])
+})
+
+ok('clear_output empties the cell', () => {
+  let state = { outputs: [], clearWhenNext: false }
+  state = applyOutput(state, kernelOutput('stream', { name: 'stdout', text: 'gone' }))
+  state = applyOutput(state, kernelOutput('clear_output', { wait: false }))
+  assert.deepEqual(state.outputs, [])
+})
+
+ok('clear_output with wait holds the old output until there is a new one', () => {
+  /* How a progress bar redraws without the cell flickering empty between
+     frames: the clear is a promise to replace, not an instruction to blank. */
+  let state = { outputs: [], clearWhenNext: false }
+  state = applyOutput(state, kernelOutput('stream', { name: 'stdout', text: '10%' }))
+  state = applyOutput(state, kernelOutput('clear_output', { wait: true }))
+  assert.equal(state.outputs.length, 1, 'still showing the old frame')
+  assert.equal(state.outputs[0].text, '10%')
+
+  state = applyOutput(state, kernelOutput('stream', { name: 'stdout', text: '20%' }))
+  assert.equal(state.outputs.length, 1, 'replaced, not appended')
+  assert.equal(state.outputs[0].text, '20%')
+})
+
+ok('a clear marker never reaches the file', () => {
+  // It is an instruction about outputs, carried down the same path so a cell's
+  // story arrives in order. A notebook holding one is a notebook that fails
+  // validation everywhere else.
+  let state = { outputs: [], clearWhenNext: false }
+  state = applyOutput(state, kernelOutput('clear_output', { wait: true }))
+  state = applyOutput(state, kernelOutput('stream', { name: 'stdout', text: 'x' }))
+  assert.equal(state.outputs.some((o) => o.output_type === 'clear_output'), false)
+})
+
+ok('what a run records is what a notebook file holds', () => {
+  /* The end of the claim: run a cell, write the file, read it back, and the
+     outputs are the ones the kernel produced — through the same writer that
+     has to keep a byte-for-byte round trip above. */
+  let state = { outputs: [], clearWhenNext: false }
+  state = applyOutput(state, kernelOutput('stream', { name: 'stdout', text: 'hello\n' }))
+  state = applyOutput(state, kernelOutput('execute_result', {
+    data: { 'text/plain': '42' }, metadata: {}, execution_count: 1
+  }))
+
+  const { shell, cells } = readNotebook(JSON.stringify({
+    cells: [{ cell_type: 'code', execution_count: null, metadata: {}, outputs: [], source: ['1+1'] }],
+    metadata: {},
+    nbformat: 4,
+    nbformat_minor: 5
+  }))
+  cells[0].outputs = state.outputs
+  cells[0].executionCount = 1
+
+  const reread = readNotebook(writeNotebook(shell, cells))
+  assert.equal(reread.cells[0].executionCount, 1)
+  assert.deepEqual(reread.cells[0].outputs.map((o) => o.output_type),
+    ['stream', 'execute_result'])
+  assert.deepEqual(outputParts(reread.cells[0].outputs[1]), [{ kind: 'text', text: '42' }])
 })
 
 /* ------------------------------------------------------- the vault path */

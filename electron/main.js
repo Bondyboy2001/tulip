@@ -36,6 +36,7 @@ const { makePathStore, relocateAll, forgetAll, resetAll } = require('./path-stor
 const { safeFileName } = require('./safe-name')
 const { parseFrontmatter, propsOf, propValues } = require('./frontmatter.cjs')
 const { emptyWhiteboard, whiteboardText } = require('./whiteboard-data')
+const { KernelHost } = require('./kernel')
 const PDF_TEXT_FORMAT = require('./pdf-text-format.json').version
 const VAULT_CONTRACT = require('./vault-contract.json')
 const WEB_PARTITIONS = require('./web-partitions.json')
@@ -1791,6 +1792,10 @@ ipcMain.handle('vault:open', async (_event, dir) => {
 
 async function openVault (dir) {
   vaultPath = dir
+  /* The kernels belonged to the vault that is closing, and their namespaces
+     describe notebooks nothing is showing any more. */
+  kernels.dispose().catch(() => {})
+  kernels.setRoot(dir)
   // The next read of each is of the new vault's own file.
   resetAll()
   rememberVault(dir)
@@ -2185,6 +2190,7 @@ function createWindow ({ open = null } = {}) {
     reveals.delete(win.webContents.id)
     documentZoomClaims.delete(win.webContents.id)
     stopRunsOwnedBy(win)
+    stopKernelsOwnedBy(win)
     if (primary) {
       primaryWindow = null
       try { ai.stop('SIGKILL') } catch { /* nothing running */ }
@@ -5534,70 +5540,10 @@ function warmRunner (lang) {
 
 ipcMain.handle('run:warm', (_e, lang) => warmRunner(lang))
 
-/* Vaults whose code blocks may run, asked once each.
-
-   A run block is a real program with the reader's own privileges, the login
-   shell's PATH and the vault as its working directory. That is the feature, and
-   for a vault of your own notes it is the right one — you wrote them. A vault is
-   not always that: notes arrive shared, synced, cloned and downloaded, and a
-   ```sh block in one of those is a script from a stranger that runs on a click.
-
-   The ```html and ```tikz paths were fenced against exactly that (an in-memory
-   partition with no network; \input refused) because they draw themselves on
-   open. Run blocks need a click, which is weaker than it looks: the click says
-   "show me what this does", not "I have read this and vouch for it".
-
-   So the vault is trusted once, by name, in the main process — the renderer
-   cannot grant this to itself. Held in config rather than the trust store: it
-   describes this installation's opinion of a folder, not anything in the vault,
-   and a vault that could carry its own permission grant would be no fence. */
-const sessionTrustedVaults = new Set()
-
-async function vaultMayRunCode () {
-  const key = vaultPath || ''
-  if (sessionTrustedVaults.has(key)) return true
-
-  const remembered = readConfig().trustedVaults
-  if (Array.isArray(remembered) && remembered.includes(key) && key) {
-    sessionTrustedVaults.add(key)
-    return true
-  }
-
-  const name = key ? path.basename(key) : 'this folder'
-  const { response, checkboxChecked } = await dialog.showMessageBox(focusedWindow(), {
-    type: 'warning',
-    buttons: ['Cancel', 'Run'],
-    defaultId: 0,
-    cancelId: 0,
-    message: `Run code from “${name}”?`,
-    detail:
-      'Code blocks in this vault will run as programs on your Mac, with your ' +
-      'own access to your files and network.\n\n' +
-      'Only continue if you trust the notes in this vault. Notes that were ' +
-      'shared, synced or downloaded can carry code you did not write.',
-    checkboxLabel: 'Trust this vault from now on',
-    checkboxChecked: false,
-    noLink: true
-  })
-
-  if (response !== 1) return false
-  // Trusting for the session costs nothing to withhold from disk.
-  sessionTrustedVaults.add(key)
-  if (checkboxChecked && key) {
-    const kept = Array.isArray(readConfig().trustedVaults) ? readConfig().trustedVaults : []
-    writeConfig({ trustedVaults: [...new Set([...kept, key])] })
-  }
-  return true
-}
-
 ipcMain.handle('run:start', async (event, lang, code) => {
   const spec = runnerFor(lang)
   if (!spec) throw new Error(`Tulip cannot run "${lang}" blocks.`)
   if (typeof code !== 'string') throw new Error('Nothing to run.')
-
-  /* Before the warmup below, not after: a compiler warmup is already a spawned
-     process, and asking after it has started is asking too late. */
-  if (!await vaultMayRunCode()) throw new Error('Running code from this vault was declined.')
 
   /* If its control already started a compiler warmup, let that finish before
      compiling a new block. A cache hit skips the wait: it has no need for a
@@ -5660,6 +5606,87 @@ function stopRun (id) {
 }
 
 ipcMain.handle('run:kill', (_e, id) => stopRun(Number(id)))
+
+/* ------------------------------------------------------------ notebooks
+
+   A notebook's cells run in a kernel rather than as programs, because they are
+   meant to share one namespace — see electron/kernel.js for why that is
+   borrowed from Jupyter rather than built here. */
+const kernels = new KernelHost({
+  pathFor: runnerPath,
+  onEvent: (event) => {
+    const win = kernelOwners.get(event.path)
+    if (win) sendTo(win, 'kernel:event', event)
+  }
+})
+
+/* Which window is showing each notebook, so a kernel's output goes to the pane
+   that asked for it. Keyed by notebook path because that is what a kernel
+   belongs to — two windows on the same notebook would share one namespace,
+   which is what opening the same notebook twice in Jupyter does too. */
+const kernelOwners = new Map()   // notebook path -> BrowserWindow
+
+function ownKernel (notebookPath, event) {
+  const win = BrowserWindow.fromWebContents(event.sender)
+  if (win) kernelOwners.set(notebookPath, win)
+  return win
+}
+
+/** Shut down what a window started, when that window goes. A kernel is a
+ *  Python process; leaving it running for a pane nobody can see is a leak
+ *  measured in hundreds of megabytes. */
+function stopKernelsOwnedBy (win) {
+  for (const [notebookPath, owner] of [...kernelOwners]) {
+    if (owner !== win) continue
+    kernelOwners.delete(notebookPath)
+    kernels.shutdown(notebookPath).catch(() => {})
+  }
+}
+
+ipcMain.handle('kernel:start', async (event, notebookPath, wanted) => {
+  if (typeof notebookPath !== 'string' || !notebookPath) throw new Error('No notebook.')
+  ownKernel(notebookPath, event)
+  const kernel = await kernels.kernelFor(notebookPath, wanted)
+  return { kernel: kernel.displayName, name: kernel.name, state: kernel.state }
+})
+
+ipcMain.handle('kernel:execute', async (event, notebookPath, code) => {
+  const kernel = kernels.get(notebookPath)
+  if (!kernel) throw new Error('This notebook has no kernel running.')
+  const win = ownKernel(notebookPath, event)
+
+  /* The id goes back at once and the verdict follows as an event. The viewer
+     cannot attribute a line of output to a cell until it knows which request
+     produced it, and output starts arriving the moment the kernel begins. */
+  const { msgId, done } = kernel.execute(code)
+  const finish = (payload) =>
+    sendTo(win, 'kernel:event', { path: notebookPath, kind: 'done', msgId, ...payload })
+  done.then(
+    (result) => finish({ status: result.status, executionCount: result.executionCount }),
+    // A rejected `done` is the kernel dying, restarting or being shut down
+    // under a running cell — all of which the cell has to be told about, or it
+    // says "Running…" for the rest of the session.
+    (err) => finish({ status: 'aborted', error: err?.message || 'The run stopped.' })
+  )
+  return { msgId }
+})
+
+ipcMain.handle('kernel:interrupt', async (_e, notebookPath) => {
+  const kernel = kernels.get(notebookPath)
+  return kernel ? kernel.interrupt() : false
+})
+
+ipcMain.handle('kernel:restart', async (_e, notebookPath) => {
+  const kernel = kernels.get(notebookPath)
+  return kernel ? kernel.restart() : false
+})
+
+ipcMain.handle('kernel:shutdown', async (_e, notebookPath) => {
+  kernelOwners.delete(notebookPath)
+  return kernels.shutdown(notebookPath)
+})
+
+ipcMain.handle('kernel:specs', () => kernels.kernelSpecs())
 
 /* For quitting, where there is no later: the SIGKILL escalation timer in
    `stopRun` would never fire, so the groups go outright. */
@@ -7031,6 +7058,7 @@ app.on('before-quit', () => {
   quitting = true
   if (watcher) watcher.close()
   killAllRuns()
+  kernels.disposeSync()
   ai.stop('SIGKILL')
   trust?.flushSync()
   flushDurabilitySync()

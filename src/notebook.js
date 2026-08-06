@@ -18,11 +18,19 @@
      itself writes. A notebook edited here and a notebook saved by Jupyter
      produce the same bytes, so a one-cell edit is a one-cell diff.
 
-   - Outputs are read, never made. Tulip does not run cells: what is on screen
-     is what the file recorded the last time something did. That is a real
-     limit and the viewer says so rather than drawing a Run button that would
-     lie. It also means an output is untrusted text from somewhere else, which
-     is why the `text/html` ones go through the note sanitiser on the way in.
+   - Outputs are read and written, and the two are the same shape. A cell that
+     has never been run here shows what the file recorded the last time
+     something did; a cell that is run shows what this machine's kernel is
+     saying, arriving live. Both are nbformat output objects and both go
+     through `outputParts` below, because a kernel message and a saved output
+     carry the same fields under the same names — the file format is a log of
+     those messages. Either way an output is untrusted text from somewhere
+     else, which is why the `text/html` ones go through the note sanitiser and
+     the SVGs are drawn through an `<img>`.
+
+     Running is not done here. This file asks `kernel.*` and a real Jupyter
+     kernel does the work, one per notebook, so that `import pandas as pd` in
+     the first cell is still true in the fortieth — see electron/kernel.js.
 
    - Editing is editing the source. A cell is a textarea over a highlighted
      `<pre>`: the `<pre>` holds the same text and does the layout, the textarea
@@ -35,6 +43,7 @@
 
      edit          any cell's source, in place, with the caret where you put it
      structure     add, delete, move a cell; change what kind of cell it is
+     run           a cell (⇧⏎, ⌘⏎, ⌥⏎) or all of them, against a live kernel
      outputs       clear one cell's, or the whole notebook's
      undo          every structural change above, as snapshots of the cell list
    ================================================================== */
@@ -279,6 +288,99 @@ export function outputParts (output) {
   return [{ kind: 'text', text: bundleText(value) }]
 }
 
+/* ------------------------------------------------------- what a kernel says
+
+   A running kernel and a saved notebook describe the same four things in the
+   same words. `stream`, `display_data`, `execute_result` and `error` arrive
+   from the kernel carrying the fields nbformat records under those names —
+   which is not a coincidence, because the file format is a log of these
+   messages. So a message becomes an output by naming its type, and a plot that
+   arrives live is the same object as a plot read from disk, drawn by the same
+   `outputParts` above.
+   ================================================================== */
+
+/**
+ * One kernel message as the nbformat output it is, or `null` for the many that
+ * are not outputs at all — `execute_input` is our own request echoed back,
+ * comm traffic belongs to widgets this app does not draw.
+ */
+export function kernelOutput (msgType, content) {
+  const body = (content && typeof content === 'object') ? content : {}
+
+  if (msgType === 'stream') {
+    return {
+      output_type: 'stream',
+      name: body.name === 'stderr' ? 'stderr' : 'stdout',
+      text: cellText(body.text)
+    }
+  }
+  if (msgType === 'display_data' || msgType === 'execute_result') {
+    const output = {
+      output_type: msgType,
+      data: (body.data && typeof body.data === 'object') ? body.data : {},
+      metadata: (body.metadata && typeof body.metadata === 'object') ? body.metadata : {}
+    }
+    // Only `execute_result` is numbered: it is the value of the cell, and the
+    // number is the prompt it belongs to.
+    if (msgType === 'execute_result') output.execution_count = body.execution_count ?? null
+    return output
+  }
+  if (msgType === 'error') {
+    return {
+      output_type: 'error',
+      ename: String(body.ename || 'Error'),
+      evalue: String(body.evalue || ''),
+      traceback: Array.isArray(body.traceback) ? body.traceback.map(String) : []
+    }
+  }
+  /* Not an output but an instruction about them, and carried as one so that a
+     cell's whole story arrives down a single path in order. `applyOutput`
+     below is what acts on it; it never reaches the file. */
+  if (msgType === 'clear_output') {
+    return { output_type: 'clear_output', wait: body.wait === true }
+  }
+  return null
+}
+
+/**
+ * Add one output to what a cell has produced so far.
+ *
+ * Pure, and returns the next state rather than editing this one, because the
+ * two rules here are the sort that are easy to get subtly wrong:
+ *
+ * - Consecutive stream outputs on the same name are one output. A loop that
+ *   prints a thousand lines sends a thousand messages, and recording them as a
+ *   thousand outputs would write a notebook no other tool writes and make the
+ *   viewer build a thousand `<pre>`s to show one paragraph.
+ *
+ * - `clear_output` with `wait` does not clear anything yet. It means "replace
+ *   this when there is something to replace it with", which is how a progress
+ *   bar redraws without the cell flickering empty between frames.
+ *
+ * @param {{outputs: object[], clearWhenNext: boolean}} state
+ * @param {object} output  an output from `kernelOutput`
+ */
+export function applyOutput (state, output) {
+  const outputs = Array.isArray(state?.outputs) ? state.outputs : []
+  const clearWhenNext = state?.clearWhenNext === true
+  if (!output) return { outputs, clearWhenNext }
+
+  if (output.output_type === 'clear_output') {
+    return output.wait
+      ? { outputs, clearWhenNext: true }
+      : { outputs: [], clearWhenNext: false }
+  }
+
+  const base = clearWhenNext ? [] : outputs
+  const last = base[base.length - 1]
+  if (output.output_type === 'stream' && last?.output_type === 'stream' &&
+      last.name === output.name) {
+    const merged = { ...last, text: cellText(last.text) + cellText(output.text) }
+    return { outputs: [...base.slice(0, -1), merged], clearWhenNext: false }
+  }
+  return { outputs: [...base, output], clearWhenNext: false }
+}
+
 /* ---------------------------------------------------------------- ansi
 
    Every kernel colours its own output, and a traceback is nothing but colour:
@@ -403,6 +505,7 @@ export function mountNotebook ({
   host,
   file,
   markdown = null,
+  kernel = null,
   onDirty = () => {},
   onSaved = () => {},
   onStatus = () => {}
@@ -428,6 +531,22 @@ export function mountNotebook ({
   let history = []
   let future = []
   const HISTORY_LIMIT = 60
+
+  /* ------------------------------------------------------------ running
+
+     What is known about this notebook's kernel, and which cells are waiting on
+     it. `runs` is keyed by the cell *object* rather than its index, because a
+     cell that is running can be moved or deleted while it runs and an index
+     would then point at somebody else's output. */
+  let kernelInfo = null        // { kernel, name, state } once started
+  let kernelStarting = null    // the in-flight start, so two clicks start one
+  let kernelNotice = ''        // something the kernel wants said, e.g. a substitution
+  const runs = new Map()       // cell -> { msgId, state: {outputs, clearWhenNext} }
+  let queue = []               // cells still to run, for Run all
+  let queueStop = false
+
+  const isRunning = (cell) => runs.has(cell)
+  const anyRunning = () => runs.size > 0 || queue.length > 0
 
   host.classList.add('nb')
 
@@ -504,6 +623,11 @@ export function mountNotebook ({
   host.replaceChildren(bar, scroller)
 
   const editable = () => !readonly && !!current
+  /* Running is an Editing-view act, like every other control here: it writes
+     outputs into the file, and Reading view is where a notebook is a document
+     rather than a workspace. It also needs the bridge to exist at all, which
+     it does not in the tests or in a window built without it. */
+  const canRun = () => editable() && !!kernel?.start
 
   const setDirty = (next) => {
     if (dirty === next) return
@@ -636,6 +760,278 @@ export function mountNotebook ({
     return wrap.childElementCount ? wrap : null
   }
 
+  /* ------------------------------------------------------------- running
+
+     A cell that is running changes two things on screen and nothing else: its
+     prompt, and its outputs. Repainting the notebook for either would be the
+     wrong tool — `paint()` rebuilds every textarea, which throws away the
+     caret of whoever is typing in a different cell while this one runs.
+     ================================================================== */
+
+  /** The section showing a cell right now, or null if it is not on screen. */
+  function sectionFor (cell) {
+    const index = cells.indexOf(cell)
+    return index < 0 ? null : (column.children[index] || null)
+  }
+
+  /** Redraw just one cell's prompt and outputs, in place. */
+  function repaintCell (cell) {
+    const section = sectionFor(cell)
+    if (!section) return
+
+    section.querySelector(':scope > .nb-gutter')?.replaceWith(drawGutter(cell))
+    section.classList.toggle('is-running', isRunning(cell) || queue.includes(cell))
+
+    const body = section.querySelector('.nb-body')
+    if (!body) return
+    const existing = body.querySelector(':scope > .nb-outputs')
+    const next = cell.type === 'code' ? drawOutputs(cell) : null
+    if (existing && next) existing.replaceWith(next)
+    else if (existing) existing.remove()
+    else if (next) body.append(next)
+  }
+
+  /* One paint per frame. A loop printing a thousand lines sends a thousand
+     messages, and rebuilding the output panel for each makes the work grow
+     with the square of the output — chunk 900 redrawing chunks 1 to 899 again.
+     The same bargain src/runcode.js makes, for the same reason. */
+  const dirtyCells = new Set()
+  let repaintFrame = null
+
+  function scheduleRepaint (cell) {
+    dirtyCells.add(cell)
+    if (repaintFrame != null) return
+    repaintFrame = requestAnimationFrame(() => {
+      repaintFrame = null
+      const pending = [...dirtyCells]
+      dirtyCells.clear()
+      for (const each of pending) repaintCell(each)
+    })
+  }
+
+  function repaintNow (cell) {
+    dirtyCells.delete(cell)
+    repaintCell(cell)
+  }
+
+  /* Output that arrived before the cell that asked for it learned its request
+     id. `kernel:execute` resolves over one bridge and the output comes down
+     another, so the first chunk can and does overtake the id — the same race
+     src/runcode.js keeps a holding pen for. */
+  const inbox = new Map()      // msgId -> event[]
+  const byMsg = new Map()      // msgId -> cell
+
+  function kernelEvent (event) {
+    if (!current || event?.path !== current.path) return
+
+    if (event.kind === 'state') {
+      if (kernelInfo) kernelInfo.state = event.state
+      paintBar()
+      return
+    }
+    if (event.kind === 'notice') {
+      kernelNotice = String(event.text || '')
+      paintBar()
+      return
+    }
+
+    const cell = byMsg.get(event.msgId)
+    if (!cell) {
+      // Not yet claimed. Hold it, bounded, so a runaway cell whose id never
+      // arrives cannot grow this without limit.
+      const held = inbox.get(event.msgId) || []
+      if (held.length < 5000) held.push(event)
+      inbox.set(event.msgId, held)
+      return
+    }
+    applyEvent(cell, event)
+  }
+
+  function applyEvent (cell, event) {
+    const run = runs.get(cell)
+    if (!run) return
+
+    if (event.kind === 'count') {
+      cell.executionCount = event.executionCount ?? null
+      scheduleRepaint(cell)
+      return
+    }
+
+    if (event.kind === 'output') {
+      const output = kernelOutput(event.msgType, event.content)
+      if (!output) return
+      run.state = applyOutput(run.state, output)
+      cell.outputs = run.state.outputs
+      /* Written into the cell, and the cell is the file — so a run makes the
+         notebook dirty exactly as typing does, and the outputs are still there
+         when it is opened again. */
+      setDirty(true)
+      queueSave()
+      scheduleRepaint(cell)
+      return
+    }
+
+    if (event.kind === 'done') {
+      runs.delete(cell)
+      byMsg.delete(event.msgId)
+      inbox.delete(event.msgId)
+      if (event.error) {
+        /* A run that ended without the kernel saying why still has to say
+           something. Recorded as an error output rather than a dialog: it
+           belongs to the cell it happened to. */
+        run.state = applyOutput(run.state, {
+          output_type: 'error', ename: 'Tulip', evalue: event.error, traceback: [event.error]
+        })
+        cell.outputs = run.state.outputs
+        setDirty(true)
+        queueSave()
+      }
+      run.settle?.({ status: event.status || 'ok' })
+      repaintNow(cell)
+      paintBar()
+      onStatus()
+    }
+  }
+
+  /** The kernel for this notebook, started on first use. Two clicks while it
+   *  is starting wait on the one start rather than racing to make two. */
+  function ensureKernel () {
+    if (kernelInfo) return Promise.resolve(kernelInfo)
+    if (kernelStarting) return kernelStarting
+    if (!kernel?.start) return Promise.reject(new Error('Running cells is not available.'))
+
+    const wanted = shell?.metadata?.kernelspec?.name || ''
+    const path = current?.path
+    kernelStarting = kernel.start(path, wanted)
+      .then((info) => {
+        // The notebook was closed or swapped while Python was starting.
+        if (current?.path !== path) return info
+        kernelInfo = { ...info }
+        paintBar()
+        return kernelInfo
+      })
+      .finally(() => { kernelStarting = null })
+    paintBar()
+    return kernelStarting
+  }
+
+  /**
+   * Run one cell and settle when the kernel is done with it.
+   *
+   * An empty cell is skipped rather than sent: Jupyter gives it no number and
+   * no output, so sending it would cost a round trip to change nothing.
+   */
+  async function runCell (cell) {
+    if (!current || cell.type !== 'code' || !cell.source.trim()) return { status: 'skipped' }
+    if (isRunning(cell)) return { status: 'busy' }
+
+    const run = { msgId: null, state: { outputs: [], clearWhenNext: false }, settle: null }
+    const finished = new Promise((resolve) => { run.settle = resolve })
+    runs.set(cell, run)
+    /* Cleared before the run, not after it: the old output is what the *last*
+       run printed, and leaving it under a spinner reads as this run's. */
+    cell.outputs = []
+    cell.executionCount = null
+    repaintNow(cell)
+    paintBar()
+
+    try {
+      await ensureKernel()
+      if (!runs.has(cell)) return { status: 'aborted' }
+      const { msgId } = await kernel.execute(current.path, cell.source)
+      run.msgId = msgId
+      byMsg.set(msgId, cell)
+      // Anything that overtook the id, now that there is somewhere to put it.
+      for (const held of inbox.get(msgId) || []) applyEvent(cell, held)
+      inbox.delete(msgId)
+    } catch (err) {
+      runs.delete(cell)
+      if (run.msgId) byMsg.delete(run.msgId)
+      const text = err?.message || 'This cell could not be run.'
+      run.state = applyOutput(run.state, {
+        output_type: 'error', ename: 'Tulip', evalue: text, traceback: [text]
+      })
+      cell.outputs = run.state.outputs
+      setDirty(true)
+      queueSave()
+      repaintNow(cell)
+      paintBar()
+      return { status: 'error' }
+    }
+    return finished
+  }
+
+  /**
+   * Run a list of cells in order, stopping at the first that fails.
+   *
+   * Stopping is what `stop_on_error` means and what Jupyter does: the cells
+   * below one that raised would run against a state that never happened, and
+   * their output would describe a notebook nobody has.
+   */
+  async function runCells (list) {
+    queue = list.filter((cell) => cell.type === 'code' && cell.source.trim())
+    queueStop = false
+    paintBar()
+    while (queue.length && !queueStop) {
+      const cell = queue.shift()
+      // It may have been deleted while the cell above it was running.
+      if (!cells.includes(cell)) continue
+      sectionFor(cell)?.scrollIntoView({ block: 'nearest' })
+      const result = await runCell(cell)
+      if (result?.status === 'error' || result?.status === 'aborted') break
+    }
+    queue = []
+    queueStop = false
+    paintBar()
+  }
+
+  const runAll = () => runCells([...cells])
+
+  function stopQueue () {
+    queueStop = true
+    queue = []
+  }
+
+  async function interruptKernel () {
+    stopQueue()
+    if (kernelInfo) await kernel.interrupt(current.path).catch(() => {})
+    paintBar()
+  }
+
+  async function restartKernel () {
+    stopQueue()
+    if (!kernelInfo) return
+    await kernel.restart(current.path).catch(() => {})
+    /* Every number in the file describes a session that no longer exists. The
+       outputs stay — they are what those runs printed, and deleting them is a
+       separate thing the reader can ask for. */
+    for (const cell of cells) {
+      if (cell.type === 'code') cell.executionCount = null
+    }
+    runs.clear()
+    byMsg.clear()
+    inbox.clear()
+    setDirty(true)
+    queueSave()
+    paint()
+  }
+
+  /** Let go of this notebook's kernel. Called when it closes, so a Python
+   *  process is not left holding a gigabyte for a pane nobody is looking at. */
+  function releaseKernel () {
+    const path = current?.path
+    stopQueue()
+    runs.clear()
+    byMsg.clear()
+    inbox.clear()
+    kernelInfo = null
+    kernelStarting = null
+    kernelNotice = ''
+    if (path && kernel?.shutdown) kernel.shutdown(path).catch(() => {})
+  }
+
+  const stopListening = kernel?.on ? kernel.on(kernelEvent) : null
+
   /* ----------------------------------------------------------- the source */
 
   const highlightTimers = new WeakMap()
@@ -701,6 +1097,29 @@ export function mountNotebook ({
     })
 
     input.addEventListener('keydown', (event) => {
+      /* The three Enters every notebook has, and the reason a code cell cannot
+         simply treat Enter as newline and be done: ⇧⏎ runs and moves on, which
+         is how a notebook is read top to bottom; ⌘⏎ runs and stays, which is
+         how one cell is worked on; ⌥⏎ runs and opens a new cell under it. */
+      if (event.key === 'Enter' && (event.shiftKey || event.metaKey || event.ctrlKey || event.altKey)) {
+        event.preventDefault()
+        if (!canRun()) return
+        const at = cells.indexOf(cell)
+        // Markdown and raw cells have nothing to run, but ⇧⏎ still means
+        // "done with this one" — it renders the prose and moves on.
+        const running = cell.type === 'code' ? runCell(cell) : Promise.resolve()
+        void running
+
+        if (event.metaKey || event.ctrlKey) {
+          if (cell.type === 'markdown') { editingIndex = -1; paint() }
+          return
+        }
+        if (event.altKey) { addCell(at + 1); return }
+        if (cell.type === 'markdown') editingIndex = -1
+        if (at === cells.length - 1) addCell(at + 1)
+        else { paint(); focusCell(at + 1) }
+        return
+      }
       if (event.key === 'Escape') {
         event.stopPropagation()
         // A markdown cell goes back to being the prose it describes; anything
@@ -727,8 +1146,13 @@ export function mountNotebook ({
 
   /* ------------------------------------------------------------ the cells */
 
-  const promptFor = (cell) =>
-    cell.type !== 'code' ? '' : cell.executionCount == null ? '[ ]' : `[${cell.executionCount}]`
+  /* `[*]` is Jupyter's own spelling for "this is running or waiting to", and
+     the one thing a reader watching a slow cell is looking for. */
+  const promptFor = (cell) => {
+    if (cell.type !== 'code') return ''
+    if (isRunning(cell) || queue.includes(cell)) return '[*]'
+    return cell.executionCount == null ? '[ ]' : `[${cell.executionCount}]`
+  }
 
   function iconButton (label, markup, onClick) {
     const button = el('button', 'nb-cell-btn')
@@ -751,6 +1175,8 @@ export function mountNotebook ({
       stroke-linejoin="round"/>`
   const BROOM = `<path d="M14.5 4.5 9 10M6 19l-1.5-4.5 7-7L15 9l-7 7z" fill="none"
       stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>`
+  const PLAY = `<path d="M8 5.5v13l11-6.5z" fill="currentColor"/>`
+  const STOP = `<rect x="7" y="7" width="10" height="10" rx="1.5" fill="currentColor"/>`
 
   /** The controls that act on one cell. Present only while the notebook is
    *  editable — in Reading view a notebook is a document, not a workspace. */
@@ -794,17 +1220,51 @@ export function mountNotebook ({
     return tools
   }
 
+  /**
+   * The strip to the left of a cell: what number the run has, and the control
+   * that starts it.
+   *
+   * Its own function because a run changes both of those and nothing else, so
+   * this is exactly what `repaintCell` swaps while a cell runs — see there for
+   * why repainting the notebook instead is the wrong tool.
+   */
+  function drawGutter (cell) {
+    const gutter = el('div', 'nb-gutter')
+    const prompt = el('div', 'nb-prompt', promptFor(cell))
+    if (cell.type === 'code') {
+      prompt.title = isRunning(cell) || queue.includes(cell)
+        ? 'Running'
+        : cell.executionCount == null
+          ? 'This cell has not been run'
+          : `Run ${cell.executionCount} of this kernel`
+    }
+    gutter.append(prompt)
+
+    /* Run lives in the gutter under the prompt rather than in the hover
+       toolbar with the rest. It is the one control here anybody presses twice
+       in a row, and the prompt beside it is what it changes — a Run you have
+       to hover to find is a Run people never discover. While the cell is
+       running the same button interrupts: "stop this" is wanted from the
+       control you just pressed, and in the place you pressed it. */
+    if (cell.type === 'code' && canRun()) {
+      const busy = isRunning(cell) || queue.includes(cell)
+      const run = iconButton(
+        busy ? 'Interrupt' : 'Run this cell  (⇧⏎)',
+        busy ? STOP : PLAY,
+        () => { if (busy) interruptKernel(); else runCell(cell) }
+      )
+      run.classList.add('nb-run')
+      gutter.append(run)
+    }
+    return gutter
+  }
+
   function drawCell (cell, index) {
     const section = el('section', `nb-cell is-${cell.type}`)
     section.dataset.index = String(index)
+    if (isRunning(cell) || queue.includes(cell)) section.classList.add('is-running')
 
-    const gutter = el('div', 'nb-gutter')
-    const prompt = el('div', 'nb-prompt', promptFor(cell))
-    if (cell.type === 'code') prompt.title = cell.executionCount == null
-      ? 'This cell has not been run'
-      : `Run ${cell.executionCount} in the session that wrote this file`
-    gutter.append(prompt)
-    section.append(gutter)
+    section.append(drawGutter(cell))
 
     const body = el('div', 'nb-body')
 
@@ -884,14 +1344,45 @@ export function mountNotebook ({
 
   function paintBar () {
     const shape = notebookShape(cells)
-    const kernel = shell?.metadata?.kernelspec?.display_name || ''
+    /* Which kernel is *running*, when one is — the file's `kernelspec` is what
+       the notebook asked for, and those are different facts the moment a
+       notebook written elsewhere is opened here. */
+    const named = kernelInfo?.kernel || shell?.metadata?.kernelspec?.display_name || ''
     barShape.textContent = [
       `${shape.cells} ${shape.cells === 1 ? 'cell' : 'cells'}`,
-      kernel
+      named,
+      kernelInfo ? (anyRunning() ? 'busy' : 'idle') : (kernelStarting ? 'starting…' : '')
     ].filter(Boolean).join(' · ')
+    barShape.title = kernelNotice || ''
+    barShape.classList.toggle('is-notice', !!kernelNotice)
 
     barActions.replaceChildren()
     if (!editable()) return
+
+    if (canRun()) {
+      const runAllBtn = el('button', 'nb-btn', 'Run all')
+      runAllBtn.type = 'button'
+      runAllBtn.title = 'Run every code cell, top to bottom'
+      runAllBtn.disabled = anyRunning()
+      runAllBtn.addEventListener('click', () => { runAll() })
+      barActions.append(runAllBtn)
+
+      if (anyRunning()) {
+        const stop = el('button', 'nb-btn is-stop', 'Interrupt')
+        stop.type = 'button'
+        stop.title = 'Stop what the kernel is doing'
+        stop.addEventListener('click', () => { interruptKernel() })
+        barActions.append(stop)
+      }
+
+      if (kernelInfo) {
+        const restart = el('button', 'nb-btn', 'Restart')
+        restart.type = 'button'
+        restart.title = 'Throw away every variable and start the kernel again'
+        restart.addEventListener('click', () => { restartKernel() })
+        barActions.append(restart)
+      }
+    }
 
     const add = el('button', 'nb-btn', 'Add cell')
     add.type = 'button'
@@ -950,6 +1441,10 @@ export function mountNotebook ({
     async open (path, place = null) {
       const text = await file.read(path)
       const read = readNotebook(text)
+      /* The kernel that is running belongs to the notebook being replaced. Let
+         it go before the model does, while `current` still says which one it
+         was — after this point there is nothing left to name it by. */
+      if (current && current.path !== path) releaseKernel()
       shell = read.shell
       cells = read.cells
       // Never nothing, for the same reason a delete never empties it.
@@ -986,6 +1481,7 @@ export function mountNotebook ({
     async close () {
       await saveFile({ flush: true }).catch(() => {})
       clearTimeout(saveTimer)
+      releaseKernel()
       current = null
       shell = null
       cells = []
@@ -1029,6 +1525,27 @@ export function mountNotebook ({
 
     /** ⌘F, routed here by the renderer while a notebook is the open document. */
     find () { search.focus(); search.select() },
+
+    /** Running, for the window menu — the same three things the bar offers,
+     *  reachable from a keyboard shortcut rather than a click. */
+    run: {
+      cell: () => {
+        const cell = cells[editingIndex]
+        return cell ? runCell(cell) : Promise.resolve({ status: 'skipped' })
+      },
+      all: runAll,
+      interrupt: interruptKernel,
+      restart: restartKernel,
+      busy: anyRunning
+    },
+
+    /** The window is going. Let go of the kernel and stop listening for what
+     *  it says — this pane is mounted for the life of the window, so without
+     *  this the process outlives everything that could show its output. */
+    destroy () {
+      releaseKernel()
+      stopListening?.()
+    },
 
     /**
      * ⌘Z and ⇧⌘Z, which arrive through the window menu rather than as keys.

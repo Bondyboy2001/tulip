@@ -9224,6 +9224,15 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   cursor: pointer;
 }
 .nb-btn:hover { color: var(--ink); background: var(--hover); }
+.nb-btn:disabled { opacity: 0.45; cursor: default; }
+.nb-btn:disabled:hover { color: var(--ink-soft); background: var(--surface); }
+/* Interrupt is the one destructive thing in the bar, and the only one worth
+   colouring — everything beside it is additive. */
+.nb-btn.is-stop { color: var(--danger, #c0392b); border-color: currentColor; }
+/* The kernel had something to say — a substituted kernelspec, most often. The
+   whole summary carries it rather than a banner: it is one sentence about the
+   thing the summary already names, and it is in the title attribute. */
+.nb-shape.is-notice { color: var(--danger, #c0392b); cursor: help; }
 
 .nb-scroll {
   flex: 1;
@@ -9260,12 +9269,42 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 .nb-cell:hover, .nb-cell:focus-within { border-color: var(--line-soft); }
 .nb-cell:focus-within { background: var(--active-line); }
 
-.nb-gutter { padding: 8px 8px 0 0; text-align: right; }
+.nb-gutter {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  padding: 8px 8px 0 0;
+  text-align: right;
+}
 .nb-prompt {
   font: 11.5px/1.5 var(--font-mono);
   color: var(--faint);
   white-space: nowrap;
 }
+/* A running cell's prompt is the one thing on screen someone watching a slow
+   cell is actually looking at, so it gets the accent and a pulse — `[*]` in
+   the same grey as `[ ]` is a state change nobody notices. */
+.nb-cell.is-running .nb-prompt {
+  color: var(--accent);
+  animation: nb-pulse 1.4s ease-in-out infinite;
+}
+@keyframes nb-pulse { 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) {
+  .nb-cell.is-running .nb-prompt { animation: none; }
+}
+
+/* Unlike the hover toolbar, Run is always there — see drawGutter for why. Dim
+   until the cell is hovered or focused, so a notebook at rest is still a
+   column of prose and code rather than a column of buttons. */
+.nb-run {
+  opacity: 0.35;
+  transition: opacity 90ms ease;
+}
+.nb-cell:hover .nb-run,
+.nb-cell:focus-within .nb-run,
+.nb-cell.is-running .nb-run { opacity: 1; }
+.nb-cell.is-running .nb-run { color: var(--accent); }
 .nb-body { min-width: 0; }
 
 /* Laid over the cell's top corner rather than given a row of its own: a

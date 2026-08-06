@@ -131,6 +131,24 @@ contextBridge.exposeInMainWorld('tulip', {
     kill: (id) => ipcRenderer.invoke('run:kill', id)
   },
 
+  /**
+   * Running a notebook's cells.
+   *
+   * Unlike `run`, which is one program per block, these all name a notebook:
+   * its cells share a kernel, so the notebook — not the cell — is the thing a
+   * running process belongs to. Output arrives on `kernel:event` rather than
+   * as the answer to `execute`, because a cell that prints for ten seconds
+   * should be readable while it does.
+   */
+  kernel: {
+    start: (path, wanted) => ipcRenderer.invoke('kernel:start', path, wanted),
+    execute: (path, code) => ipcRenderer.invoke('kernel:execute', path, code),
+    interrupt: (path) => ipcRenderer.invoke('kernel:interrupt', path),
+    restart: (path) => ipcRenderer.invoke('kernel:restart', path),
+    shutdown: (path) => ipcRenderer.invoke('kernel:shutdown', path),
+    specs: () => ipcRenderer.invoke('kernel:specs')
+  },
+
   /* Manim renders to a real file in the vault rather than to the page, so it
      answers with a path. `lookup` asks whether a block has been rendered
      already without running anything. */
@@ -300,7 +318,7 @@ contextBridge.exposeInMainWorld('tulip', {
   on: (channel, fn) => {
     const allowed = [
       'vault:changed', 'vault:opened', 'menu', 'zoom',
-      'run:out', 'run:done', 'ai:event', 'app:flush',
+      'run:out', 'run:done', 'ai:event', 'app:flush', 'kernel:event',
       // A word was taught or untaught — the open note's spelling is one word
       // out of date, wherever the asking happened.
       'dictionary:changed'

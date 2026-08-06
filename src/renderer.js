@@ -230,11 +230,7 @@ const el = {
   linksList: $('links-list'),
   spellingList: $('spelling-list'),
   infoPane: $('info-pane'),
-  paneFilesTab: $('pane-files-tab'),
   paneOutlineTab: $('pane-outline-tab'),
-  paneLinksTab: $('pane-links-tab'),
-  paneSpellingTab: $('pane-spelling-tab'),
-  paneInfoTab: $('pane-info-tab'),
   paneSplit: $('pane-split'),
   paneSplitGrip: $('pane-split-grip'),
   paneSplitToggle: $('pane-split-toggle'),
@@ -245,7 +241,6 @@ const el = {
   panelReplaceGo: $('panel-replace-go'),
   panelSaveSearch: $('panel-save-search'),
   savedSearches: $('saved-searches'),
-  paneTabs: $('pane-tabs'),
   askDetail: $('ask-detail'),
   settings: $('settings'),
   settingsRail: $('settings-rail'),
@@ -966,6 +961,17 @@ function ensureNotebook () {
         markdown: {
           prepare: (text) => prepareMath(text),
           render: (text) => md.render(text)
+        },
+        /* Running cells. The bridge is handed in the same way the file access
+           is, so the viewer names what it needs and the renderer decides what
+           that is — and a window built without it simply has no Run button. */
+        kernel: {
+          start: (path, wanted) => api.kernel.start(path, wanted),
+          execute: (path, code) => api.kernel.execute(path, code),
+          interrupt: (path) => api.kernel.interrupt(path),
+          restart: (path) => api.kernel.restart(path),
+          shutdown: (path) => api.kernel.shutdown(path),
+          on: (fn) => api.on('kernel:event', fn)
         },
         /* The same bargain the grid makes: the viewer owns the document and
            reports what it is doing with it, and the tab strip, the save queue
