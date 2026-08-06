@@ -32,7 +32,10 @@ import {
   embedResizeGrip, wireEmbedResize
 } from './assets.js'
 import { calloutHead, calloutIcon } from './callouts.js'
-import { slashCommands, fenceLanguages, calloutKinds } from './slash.js'
+import {
+  slashEmbed, openEmbedPicker, fenceLanguages, calloutKinds,
+  embedChoices as embedChoicesFacet
+} from './slash.js'
 import { mermaidBlocks } from './mermaid.js'
 import { tikzBlocks, tikzNote } from './tikz.js'
 import { svgBlocks } from './svg.js'
@@ -548,12 +551,40 @@ function sizerFor (img, view) {
         'stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>' +
     '</svg>'
 
+  /* The second control: change what the picture embeds. Same corner, one
+     button over from the source reveal — clicking the picture itself stays
+     free for caret placement, and this is the explicit "click into it" the
+     placeholder chip already offers. */
+  const change = document.createElement('button')
+  change.type = 'button'
+  change.className = 'tk-embed-control tk-embed-change'
+  change.title = 'Choose what to embed'
+  change.setAttribute('aria-label', 'Choose what to embed')
+  change.innerHTML =
+    '<svg viewBox="0 0 16 16" aria-hidden="true">' +
+      '<path d="M7 2.5 3.5 6 7 9.5M9 2.5l3.5 3.5L9 9.5" fill="none" stroke="currentColor" ' +
+        'stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>' +
+    '</svg>'
+
   const grip = embedResizeGrip()
-  host.append(img, source, grip)
+  host.append(img, change, source, grip)
 
   /* Keep the editor's caret where it is until the click selects the exact
      source range below. Otherwise mousedown first moves it to whichever side
      of the replacement CodeMirror happens to hit-test. */
+  change.addEventListener('mousedown', (event) => {
+    event.preventDefault()
+    event.stopPropagation()
+  })
+  change.addEventListener('click', (event) => {
+    event.preventDefault()
+    event.stopPropagation()
+    const range = embedRangeAtDOM(view, host)
+    if (range) openEmbedPicker(view, range.from, range.to)
+  })
+
+  /* Same for the source reveal: keep the caret put until the click selects
+     the exact range below. */
   source.addEventListener('mousedown', (event) => {
     event.preventDefault()
     event.stopPropagation()
@@ -1034,6 +1065,13 @@ function buildDecorations (view, imageSource = null) {
         if (inCode(start, end) || isClaimed(start, end)) continue
 
         claimed.push([start, end])
+
+        /* An embed with no target is the slash placeholder — `![[ ]]`, the
+           chip the slash key leaves behind. It is an instruction to choose,
+           not a missing picture, so the live preview stays off it; the slash
+           module's own field draws the chip. Claimed so the brackets are not
+           decorated as a link underneath it. */
+        if (!embed.src.trim()) continue
 
         const spec = specForEmbed(embed, { resolve, resolveNote })
         if (spec.kind === 'image' &&
@@ -1885,7 +1923,8 @@ const RENDERED = [livePreview, mathPreview, tablePreview, tableCursorGuard, tabl
                   moneyPreview, runBlocks, propertiesPreview,
                   mermaidBlocks, tikzBlocks, svgBlocks, codeBlockView,
                   headingFoldService, codeFolding({ placeholderText: ' … ' }),
-                  keymap.of(foldKeymap)]
+                  keymap.of(foldKeymap),
+                  ...slashEmbed]
 
 /* Passing the language list straight to `markdown()` leaves any word it does
    not recognise unparsed, and therefore uncoloured — `manim` among them. The
@@ -1935,7 +1974,7 @@ const markdownKeymap = [
 
 export function createEditor ({
   parent, onChange, onOpenLink, noteNames, noteTitle, onRename, resolveEmbed,
-  resolveNoteEmbed, languageTable, noteFlag, titleEditable
+  resolveNoteEmbed, languageTable, noteFlag, titleEditable, embedChoices
 }) {
   const preview = new Compartment()
   const sourceLanguage = new Compartment()
@@ -1964,6 +2003,12 @@ export function createEditor ({
   const wikiCompletion = (context) => {
     const before = context.matchBefore(/\[\[[^\]]*/)
     if (!before) return null
+
+    /* `![[` asks for something to stand in the page — an attachment or a
+       note — and the slash module answers those keystrokes with its inline
+       ghost instead of this tooltip. So the target of an embed never opens
+       the note list; the two completions must not both claim the same `[[`. */
+    if (context.state.sliceDoc(before.from - 1, before.from) === '!') return null
 
     /* `[[#` names a heading in this note rather than another note — the one
        target the editor can answer for on its own, since the vault's other
@@ -2057,13 +2102,14 @@ export function createEditor ({
         agentTyping,
         tableAssetResolver.of(resolveEmbed || (() => null)),
         embedNoteResolver.of(resolveNoteEmbed || (() => null)),
+        embedChoicesFacet.of(embedChoices || (() => [])),
         // Raw view empties this compartment: same document, same history, no
         // decorations standing between you and the markup.
         preview.of(RENDERED),
         codeBlockKeymap,
         proseBrackets,
         autocompletion({
-          override: [wikiCompletion, slashCommands, fenceLanguages, calloutKinds],
+          override: [wikiCompletion, fenceLanguages, calloutKinds],
           icons: false
         }),
         tulipTheme,
@@ -2175,6 +2221,23 @@ export function createEditor ({
     parent,
     state: EditorState.create({ doc: '', extensions })
   })
+
+  /* The selection is not painted on the text — it is a layer of absolutely
+     positioned rectangles, measured once and redrawn only when CodeMirror
+     believes the geometry moved. CodeMirror watches its scroller for that, and
+     the scroller is not what changes here: the writing column is a max-width on
+     the content inside it, so turning "Readable line length" off, picking a
+     different line width, or dragging a pane divider all reflow the text while
+     leaving the scroller exactly the width it was.
+
+     The layer therefore kept rectangles measured against the old column, and a
+     selection inside a code block came out overhanging the block it belongs to
+     — the band still as wide as the column had been. Watching the content
+     element is watching the thing that actually resizes. */
+  const columnObserver = new ResizeObserver(() => view.requestMeasure())
+  columnObserver.observe(view.contentDOM)
+  const destroy = view.destroy.bind(view)
+  view.destroy = () => { columnObserver.disconnect(); destroy() }
 
   const sourceEffects = () => [
     sourceLanguage.reconfigure(sourceMode === 'tex' ? TEX_SOURCE : MD_SOURCE),

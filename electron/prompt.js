@@ -75,11 +75,18 @@ function opened (context) {
   const caret = !context.selection && context.line
     ? `\n\nTheir cursor is on line ${context.line}${context.heading ? `, under the heading “${context.heading}”` : ''}.`
     : ''
+  /* A bounded view of the note around the cursor, so the model can answer
+     without reading the whole file into the thread — the same bargain the
+     ranked PDF pages make. The size says what is not shown, and when the
+     excerpt covers the whole note that is said too. */
+  const excerpt = context.excerpt
+    ? `\n\nNote text around the cursor (${context.excerptCut ? `first ${context.excerpt.length.toLocaleString('en-US')} of ${context.noteChars?.toLocaleString?.('en-US') ?? 'a longer'} characters shown — read the file for the rest` : 'the whole note shown'}):\n${context.excerpt}`
+    : ''
   if (context.kind === 'language') {
-    return `<open-language-table>${context.note}${selection}</open-language-table>`
+    return `<open-language-table>${context.note}${selection}${excerpt}</open-language-table>`
   }
   if (context.kind === 'tex') {
-    return `<open-tex-document>${context.note}${caret}${selection}</open-tex-document>`
+    return `<open-tex-document>${context.note}${caret}${selection}${excerpt}</open-tex-document>`
   }
   if (context.kind === 'site') {
     const title = context.title ? `\n\nThe page is titled “${context.title}”.` : ''
@@ -90,7 +97,7 @@ function opened (context) {
     const count = `\n\nThe board has ${context.elements || 0} elements.`
     return `<open-whiteboard>${context.note}${count}${selection}${text}</open-whiteboard>`
   }
-  if (context.kind !== 'pdf') return `<open-note>${context.note}${caret}${selection}</open-note>`
+  if (context.kind !== 'pdf') return `<open-note>${context.note}${caret}${selection}${excerpt}</open-note>`
 
   const where = `\n\nThe reader is on page ${context.page}${context.pages ? ` of ${context.pages}` : ''}.`
   const words = `\n\nIts text is in ${VAULT_CONTRACT.annotationDirectory}/${context.note}${VAULT_CONTRACT.pdfTextSuffix}.`
@@ -110,7 +117,9 @@ function promptFor (text, context) {
     : ''
   const pdfs = Array.isArray(context?.pdfDocuments) && context.pdfDocuments.length
     ? `PDF documents are ready as page-marked text${context.pdfDocuments.some((pdf) => pdf.ocrPages) ? ', with Vision OCR where needed' : ''}:\n` +
-      context.pdfDocuments.map((pdf) => `- ${pdf.path}: ${pdf.textPath}`).join('\n')
+      context.pdfDocuments.map((pdf) =>
+        `- ${pdf.path}: ${pdf.textPath}${pdf.pages ? ` (${pdf.pages} pages)` : ''}`).join('\n') +
+      '\n\nRead single pages, never the whole file: `grep -n \'^--- page \' <textPath>` finds the page markers with line numbers; then `sed -n \'START,ENDp\' <textPath>` reads one page.'
     : ''
 
   return [

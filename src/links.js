@@ -117,6 +117,33 @@ export function routeAnchor (event, openExternal) {
 }
 
 /**
+ * ↵ on a focused wikilink, as the click it stands for.
+ *
+ * Re-dispatched rather than routed here: every surface already decides what a
+ * click on a link means — a tab, the side pane, a popover to dismiss — and a
+ * second answer for the keyboard is a second answer to keep in step. The
+ * modifiers travel with it, so ⌘↵ and ⌥↵ mean what ⌘-click and ⌥-click mean.
+ *
+ * @returns {boolean} whether the key was taken
+ */
+export function activateFocusedWikilink (event) {
+  if (event.key !== 'Enter') return false
+  if (event.target?.closest?.('input, textarea, [contenteditable="true"]')) return false
+  // Tags are focusable for the same reason and reached the same way.
+  const wiki = event.target?.closest?.('[data-wikilink], [data-tag]')
+  if (!wiki) return false
+  event.preventDefault()
+  wiki.dispatchEvent(new MouseEvent('click', {
+    bubbles: true,
+    cancelable: true,
+    metaKey: event.metaKey,
+    ctrlKey: event.ctrlKey,
+    altKey: event.altKey
+  }))
+  return true
+}
+
+/**
  * The whole of what a click means inside a rendered fragment — the popover and
  * the side pane, which hold nothing but a note. Surfaces with cases of their
  * own (a callout to fold, a checkbox to tick) run those first and then call
@@ -128,7 +155,7 @@ export function routeAnchor (event, openExternal) {
  *
  * @returns {boolean} whether the click was taken
  */
-export function routeFragmentClick (event, { openWikilink, openAsset, openExternal, after = () => {} }) {
+export function routeFragmentClick (event, { openWikilink, openAsset, openExternal, openTag, after = () => {} }) {
   const wiki = event.target.closest('[data-wikilink]')
   if (wiki) {
     event.preventDefault()
@@ -138,6 +165,17 @@ export function routeFragmentClick (event, { openWikilink, openAsset, openExtern
       newTab: event.metaKey || event.ctrlKey,
       side: event.altKey
     })
+    after()
+    return true
+  }
+
+  /* A tag was a pill you could read and nothing else, even though the vault
+     search has understood `tag:` all along and answers hierarchically —
+     `tag:book` finds `#book/fiction`. Clicking one asks that question. */
+  const tag = event.target.closest('[data-tag]')
+  if (tag && openTag) {
+    event.preventDefault()
+    openTag(tag.dataset.tag)
     after()
     return true
   }

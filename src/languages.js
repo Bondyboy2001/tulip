@@ -5,7 +5,6 @@
    the two- or three-letter monogram, drawn in the same tile at the same size.
    ================================================================== */
 
-import { logoSvg } from './logos.js'
 import RUNNABLE from '../electron/runnable-languages.json'
 
 const DARK_INK = '#1A1815'
@@ -49,6 +48,10 @@ export const LANGUAGES = [
   { id: 'java', label: 'Java', short: 'JV', color: '#E76F00' },
   { id: 'c', label: 'C', short: 'C', color: '#5C6BC0', alias: ['h'] },
   { id: 'cpp', label: 'C++', short: 'C++', color: '#00599C', alias: ['c++', 'cc', 'hpp', 'cxx'] },
+  /* CUDA blocks are C++ and highlight as it, but they are their own kind of
+     block — what runs is a kernel on a GPU, not a program on this machine — so
+     they get NVIDIA's own green rather than C++'s blue. */
+  { id: 'cuda', label: 'CUDA', short: 'CU', color: '#76B900', ink: DARK_INK, alias: ['cu', 'cuh'] },
   { id: 'csharp', label: 'C#', short: 'C#', color: '#68217A', alias: ['cs', 'c#'] },
   { id: 'objective-c', label: 'Objective-C', short: 'OBJ', color: '#438EFF', alias: ['objc', 'objectivec'] },
   { id: 'php', label: 'PHP', short: 'PHP', color: '#777BB4' },
@@ -140,6 +143,47 @@ export const DRAWN = RUNNABLE.drawn
  */
 const chipTemplates = new Map()
 
+/* ------------------------------------------------------------------ logos
+
+   The brand marks are 60KB of SVG path data — the single largest thing in the
+   bundle after the app's own code, and about a tenth of everything the renderer
+   compiles before it can draw. None of it is needed to open a note that has no
+   code in it, and none of it is needed at all until the first fence renders, so
+   it is fetched then instead of at launch.
+
+   A chip drawn before the marks arrive shows its monogram, which is the same
+   tile at the same size — the fallback that already existed for the languages
+   Simple Icons does not carry. When the module lands, those chips are given
+   their mark and the template cache is dropped, so nothing keeps a monogram it
+   should not have. */
+let logos = null
+let logosLoading = null
+const awaitingLogo = []
+
+function loadLogos () {
+  if (logos) return Promise.resolve(logos)
+  logosLoading ||= import('./logos.js').then((mod) => {
+    logos = mod
+    for (const { mark, id } of awaitingLogo.splice(0)) {
+      const logo = mod.logoSvg(id)
+      if (!logo) continue
+      mark.textContent = ''
+      mark.classList.add('has-logo')
+      mark.append(logo)
+    }
+    /* A template cached while the monogram stood in would clone that monogram
+       for the rest of the session. */
+    chipTemplates.clear()
+    return mod
+  }).catch(() => {
+    /* The marks are decoration: a failure here leaves every chip wearing its
+       monogram, which is a complete tile, so nothing is retried or reported. */
+    logosLoading = null
+    return null
+  })
+  return logosLoading
+}
+
 /**
  * @param {string} token   the word after the opening fence
  * @param {{label?: boolean}} [opts]  include the spelled-out language name
@@ -167,12 +211,17 @@ export function languageChip (token, { label = true } = {}) {
 
   // The brand mark when there is one, the monogram when there is not — so a
   // language Simple Icons does not carry still gets a tile of the same size.
-  const logo = logoSvg(info.id)
+  const logo = logos ? logos.logoSvg(info.id) : null
   if (logo) {
     mark.classList.add('has-logo')
     mark.append(logo)
   } else {
     mark.textContent = info.short
+    // Before the marks have arrived, this one is owed whichever is its own.
+    if (!logos) {
+      awaitingLogo.push({ mark, id: info.id })
+      loadLogos()
+    }
   }
 
   if (info.color) {
@@ -188,7 +237,10 @@ export function languageChip (token, { label = true } = {}) {
     chip.append(name)
   }
 
-  if (key) {
+  /* Only once the marks are in. Caching before that stores a chip whose mark
+     is still a monogram, and the swap above reaches the instance in the
+     document rather than the template it was cloned from. */
+  if (key && logos) {
     chipTemplates.set(key, chip)
     return chip.cloneNode(true)
   }

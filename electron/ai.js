@@ -392,6 +392,9 @@ function attach (fn, pathFn) {
   if (pathFn) resolvePath = pathFn
 }
 
+/** How long a catalogue query gets before it is taken as no answer. */
+const ASK_TIMEOUT_MS = 15000
+
 /** One CLI asked for its catalogue. An empty answer is the answer: `allModels`
  *  in the renderer substitutes the built-in list for a provider that gives
  *  nothing, so a GUI launched before the CLI is installed still shows one. */
@@ -399,7 +402,14 @@ function ask (command, args, parse) {
   return new Promise((resolve) => {
     execFile(command, args, {
       env: { ...process.env, PATH: resolvePath() },
-      maxBuffer: 8 * 1024 * 1024
+      maxBuffer: 8 * 1024 * 1024,
+      /* A CLI that asks for a login, or one that hangs against a network that
+         is not there, otherwise never calls back — and Settings waits on this
+         to draw its model list. An empty answer is already a valid one here
+         (the built-in list stands in), so a slow catalogue costs a stale list
+         rather than a pane that never fills. */
+      timeout: ASK_TIMEOUT_MS,
+      killSignal: 'SIGKILL'
     }, (error, stdout) => {
       if (error) { resolve([]); return }
       try { resolve(parse(stdout)) } catch { resolve([]) }
@@ -743,7 +753,18 @@ function send (text, context, turnId = null) {
   const opening = session.thread
     ? prompt
     : `${systemPrompt(vault)}\n\n---\n\n${prompt}`
-  session.proc = startTurn(opening)
+  /* A starter that throws on the way out — a spawn that fails synchronously, a
+     PATH that is not a string — left `busy` set with no process to clear it,
+     and the panel said "the copilot is still working" until the app was
+     restarted. Every other exit from this function puts `busy` back; so does
+     this one. */
+  try {
+    session.proc = startTurn(opening)
+  } catch (err) {
+    session.busy = false
+    session.proc = null
+    return { ok: false, error: err?.message || `${session.provider} could not be started.` }
+  }
   return { ok: true }
 }
 

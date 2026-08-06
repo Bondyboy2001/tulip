@@ -21,7 +21,12 @@ IDENTIFIER=com.hb.tulip
 [ -d "$ELECTRON" ] || { echo "electron is not installed — run npm install"; exit 1; }
 
 echo "› bundling the renderer"
-npm run build --silent
+# `--release` is what advances the patch version, and this script is the only
+# caller that passes it: packaging is the release boundary, `npm start` is not.
+node build.mjs --release
+
+# Read after the build, not before: the build has just advanced the version, and
+# the bundle should say what the source tree now says rather than lag it by one.
 VERSION=$(node -p "require('./package.json').version")
 
 echo "› drawing the icon"
@@ -50,6 +55,13 @@ mv "$APP/Contents/MacOS/Electron" "$APP/Contents/MacOS/Tulip"
 rm -f "$APP/Contents/Resources/electron.icns"
 cp "$BUILD/Tulip.icns" "$APP/Contents/Resources/Tulip.icns"
 rm -rf "$APP/Contents/Resources/default_app.asar"
+
+# Squirrel.framework, Mantle.framework and ReactiveObjC.framework look like dead
+# weight — Tulip has no autoUpdater, so no Tulip code can reach them. They are
+# NOT removable: `Electron Framework` hard-links all three (LC_LOAD_DYLIB, not
+# weak — check with `otool -L`), so deleting them makes dyld kill the app at
+# launch. Removing them means patching load commands out of a binary that is
+# then signed, which is a far worse trade than 760 KB. Leave them.
 
 # Electron runs Contents/Resources/app/package.json's "main". Only the three
 # things that file reaches are copied: everything the renderer needs is already
@@ -81,7 +93,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundleVersion</key><string>$VERSION</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-  <key>LSMinimumSystemVersion</key><string>11.0</string>
+  <!-- Electron 43 does not run on macOS 11; claiming it only turns a clear
+       "requires macOS 12" into a launch that dies without saying why. -->
+  <key>LSMinimumSystemVersion</key><string>12.0.0</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
@@ -107,9 +121,92 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 
 # An edited bundle fails Gatekeeper's signature check on Apple Silicon and dies
-# on launch as "damaged". An ad-hoc signature is enough for a local app.
-echo "› signing"
-codesign --force --deep --sign - "$APP" 2>/dev/null
+# on launch as "damaged", so it always gets signed. WHICH signature depends on
+# whether this machine has a Developer ID to hand:
+#
+#   TULIP_SIGN_IDENTITY   e.g. "Developer ID Application: Name (TEAMID)"
+#   TULIP_NOTARY_PROFILE  a `notarytool store-credentials` profile name
+#
+# With neither, the signature is ad-hoc: fine for the app this script installs
+# locally, but `spctl -a` rejects an ad-hoc bundle that has been downloaded, so
+# a copy sent to anyone else is refused as "unidentified developer". With the
+# identity it is distributable; with the profile as well it is notarised and
+# stapled, so it opens on a machine that has never seen it and has no network.
+SIGN_IDENTITY=${TULIP_SIGN_IDENTITY:-}
+NOTARY_PROFILE=${TULIP_NOTARY_PROFILE:-}
+
+# The hardened runtime is required for notarisation, and Electron cannot run
+# under it without these three: V8 writes and then executes JIT pages, and
+# Electron's own launcher reads DYLD_ environment variables.
+ENTITLEMENTS=$BUILD/entitlements.plist
+cat > "$ENTITLEMENTS" <<'ENTS'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.cs.allow-jit</key><true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
+  <key>com.apple.security.cs.allow-dyld-environment-variables</key><true/>
+</dict>
+</plist>
+ENTS
+
+if [ -z "$SIGN_IDENTITY" ]; then
+  echo "› signing (ad-hoc — set TULIP_SIGN_IDENTITY to make a distributable app)"
+  codesign --force --deep --sign - "$APP" 2>/dev/null
+else
+  echo "› signing as $SIGN_IDENTITY"
+  # Inside out, one component at a time. `--deep` is Apple-deprecated and gets
+  # this wrong: it applies the app's entitlements to helpers that must not have
+  # them and skips components it does not recognise, and a bundle signed that
+  # way is rejected at notarisation rather than at build time.
+  sign () {
+    codesign --force --timestamp --options runtime \
+             --entitlements "$ENTITLEMENTS" --sign "$SIGN_IDENTITY" "$1"
+  }
+
+  # Frameworks and their versioned contents first.
+  find "$APP/Contents/Frameworks" -maxdepth 1 -name '*.framework' -print0 |
+    while IFS= read -r -d '' framework; do
+      find "$framework" -type f -perm +111 -print0 |
+        while IFS= read -r -d '' binary; do sign "$binary"; done
+      sign "$framework"
+    done
+
+  # Then the helper apps, then anything else executable in the payload, then the
+  # app itself — a parent's signature seals its children, so it must go last.
+  find "$APP/Contents/Frameworks" -maxdepth 1 -name '*.app' -print0 |
+    while IFS= read -r -d '' helper; do
+      sign "$helper/Contents/MacOS/"* 2>/dev/null || true
+      sign "$helper"
+    done
+
+  find "$APP/Contents/Resources" -type f \( -name '*.dylib' -o -name '*.so' -o -perm +111 \) -print0 |
+    while IFS= read -r -d '' binary; do
+      # Skip anything that is not actually Mach-O: scripts and data files carry
+      # the execute bit too, and signing them is an error, not a no-op.
+      file -b "$binary" | grep -q 'Mach-O' && sign "$binary" || true
+    done
+
+  sign "$APP"
+  codesign --verify --deep --strict --verbose=2 "$APP"
+
+  if [ -z "$NOTARY_PROFILE" ]; then
+    echo "  (not notarised — set TULIP_NOTARY_PROFILE to submit)"
+  else
+    echo "› notarising (this waits on Apple, usually a few minutes)"
+    ZIP=$BUILD/Tulip-notarize.zip
+    rm -f "$ZIP"
+    # ditto, not zip: the bundle's symlinks and extended attributes have to
+    # survive the round trip or the signature does not.
+    ditto -c -k --keepParent "$APP" "$ZIP"
+    xcrun notarytool submit "$ZIP" --keychain-profile "$NOTARY_PROFILE" --wait
+    xcrun stapler staple "$APP"
+    rm -f "$ZIP"
+    # The real test: this is what Gatekeeper asks on the receiving machine.
+    spctl -a -vvv -t install "$APP"
+  fi
+fi
 
 if [ "${1:-}" = "--no-install" ]; then
   echo "✓ $APP"

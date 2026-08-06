@@ -158,7 +158,11 @@ export function mountCopilot ({
 }) {
   const state = {
     open: false,
-    effort: 'high',
+    /* The default level of the model's own ladder, not the top of it: high
+       reasoning burns thinking tokens on every turn — including turns that
+       only want a summary — and the slider is one click away for the turns
+       that do want it. */
+    effort: 'medium',
     /* One choice, not two: `provider:id` names the CLI and the model together,
        so the panel has a single control where it used to have a pair. Empty
        until Settings says otherwise — there is no model nobody chose. */

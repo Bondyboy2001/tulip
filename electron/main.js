@@ -27,6 +27,8 @@ const { classifyVaultEvent } = require('./vault-events')
 const { narrowsFrom } = require('./search-narrow')
 const { parseByteRange, streamFileRange } = require('./range-response')
 const { ocrPagesOf, parsePages, relevantPdfContext } = require('./pdf-context')
+const { sanitizeConfigPatch } = require('./config-keys')
+const { safeFileName } = require('./safe-name')
 const { parseFrontmatter, propsOf, propValues } = require('./frontmatter.cjs')
 const { emptyWhiteboard, whiteboardText } = require('./whiteboard-data')
 const PDF_TEXT_FORMAT = require('./pdf-text-format.json').version
@@ -37,6 +39,48 @@ const WEB_PARTITIONS = require('./web-partitions.json')
 const GUEST_LIBRARY = require('./guest-library.json')
 
 const CONFIG_PATH = () => path.join(app.getPath('userData'), 'config.json')
+
+/* ------------------------------------------------------------ crash guard
+
+   Electron kills the process on an unhandled rejection, and the main process
+   is what holds the autosave timer, the durability checkpoint and the trust
+   store — so a stray rejection from a closed window or a dead child pipe can
+   take the vault's pending writes with it.
+
+   These handlers keep the app alive, but they never swallow: every throw is
+   written to `crash.log` in the app's data directory with a timestamp, so the
+   thing that would have shown up as "Tulip vanished" shows up as a line to
+   read instead. */
+
+const CRASH_LOG = () => path.join(app.getPath('userData'), 'crash.log')
+const CRASH_LOG_MAX = 512 * 1024
+
+function logCrash (kind, err) {
+  const detail = err instanceof Error ? (err.stack || err.message) : String(err)
+  console.error(`[${kind}]`, err)
+  try {
+    const file = CRASH_LOG()
+    fsSync.mkdirSync(path.dirname(file), { recursive: true })
+    /* Truncate rather than rotate: this file is read by a person looking for
+       what just happened, and a crash loop should not be able to fill a disk. */
+    if (fsSync.statSync(file, { throwIfNoEntry: false })?.size > CRASH_LOG_MAX) {
+      fsSync.truncateSync(file, 0)
+    }
+    fsSync.appendFileSync(file, `${new Date().toISOString()} ${kind}\n${detail}\n\n`)
+  } catch {
+    // Logging the failure to log it would be the next thing to fail.
+  }
+}
+
+process.on('unhandledRejection', (reason) => logCrash('unhandledRejection', reason))
+process.on('uncaughtException', (err) => {
+  logCrash('uncaughtException', err)
+  /* The vault is the part worth saving. Best effort, and guarded: these run
+     inside an already-broken process. */
+  try { flushDurabilitySync() } catch { /* nothing left to try */ }
+  try { trust?.flushSync() } catch { /* nothing left to try */ }
+  try { flushConfig() } catch { /* nothing left to try */ }
+})
 
 const IGNORED_DIRS = new Set(['.git', '.obsidian', '.tulip', 'node_modules', '.trash'])
 
@@ -1018,23 +1062,38 @@ async function followMoves (moves) {
     if (!mentions.test(entry.text)) continue
     const next = rewriteLinks(entry.text, moves, before, after)
     if (next === entry.text) continue
-    pending.push({ key, abs: path.resolve(vaultPath, key), next })
+    pending.push({ key, abs: path.resolve(vaultPath, key), next, previous: entry.text })
   }
 
   /* Concurrently: `writeAtomic` fsyncs both the file and its directory, so a
      folder rename that touches a hundred backlinks was two hundred fsyncs one
      after another with the main process pinned for all of them. The notes are
      different files and the writes do not depend on one another. */
-  const touched = await mapLimit(pending, WALK_LIMIT, async ({ key, abs, next }) => {
+  const touched = await mapLimit(pending, WALK_LIMIT, async ({ key, abs, next, previous }) => {
     try {
       touchIndex(abs, next, await writeAtomic(abs, next))
-      return key
+      return { key, previous, next }
     } catch (err) {
       console.error('link rewrite failed', key, err)
       return null
     }
   })
-  return touched.filter(Boolean)
+
+  /* Recorded as one entry, like a copilot turn: these are notes the user never
+     opened, edited by the app's own decision, and History is the only account
+     of it there is. The rename itself is undone by renaming back — which comes
+     back through here and rewrites the links again — so what this entry has to
+     hold is the link text, which nothing else remembers. */
+  const written = touched.filter(Boolean)
+  if (written.length) {
+    trust?.record({
+      source: 'rename',
+      changes: written.map(({ key, previous, next }) => ({
+        path: key, before: previous, after: next
+      }))
+    })
+  }
+  return written.map(({ key }) => key)
 }
 
 /**
@@ -1163,6 +1222,48 @@ function flushPendingDurability () {
   })
 
   return durabilityFlushing
+}
+
+/**
+ * The same checkpoint, but synchronous — for `before-quit`, which does not wait
+ * on promises. Without it a balanced-durability save made in the last thirty
+ * seconds is renamed into place but never fsynced, so a power cut after a clean
+ * quit can still lose it.
+ */
+function flushDurabilitySync () {
+  clearTimeout(durabilityTimer)
+  durabilityTimer = null
+  const paths = [...pendingDurability]
+  pendingDurability.clear()
+  const dirs = new Set()
+  for (const abs of paths) {
+    try {
+      const fd = fsSync.openSync(abs, 'r')
+      try {
+        fsSync.fsyncSync(fd)
+      } finally {
+        fsSync.closeSync(fd)
+      }
+      dirs.add(path.dirname(abs))
+    } catch {
+      // A deleted or moved note no longer needs its former path checkpointed.
+    }
+  }
+  /* One fsync per directory rather than one per note: the rename entries all
+     live in the same few directories, and quitting is not the moment to do the
+     same work three hundred times. */
+  for (const dir of dirs) {
+    try {
+      const fd = fsSync.openSync(dir, 'r')
+      try {
+        fsSync.fsyncSync(fd)
+      } finally {
+        fsSync.closeSync(fd)
+      }
+    } catch {
+      // Same reason as above.
+    }
+  }
 }
 
 function checkpointLater (abs) {
@@ -1419,6 +1520,13 @@ let quitting = false
 let flushReply = null
 let flushAsked = null
 ipcMain.handle('app:version', () => app.getVersion())
+
+/* The window's own reveal, set by createWindow and called from the renderer's
+   `app:painted` — see the account there. A no-op before there is a window and
+   after the first show, so a second announcement (a boot retried after an
+   error) costs nothing. */
+let revealMainWindow = () => {}
+ipcMain.on('app:painted', () => revealMainWindow())
 ipcMain.handle('app:flushed', async () => {
   await flushPendingDurability()
   flushReply?.()
@@ -1439,14 +1547,57 @@ function askRendererToFlush (win) {
   return flushAsked
 }
 
+/* The app draws its own title bar (see `.titlebar` in styles.css — a 38px drag
+   strip the document scrolls under), so the system one is hidden. What replaces
+   it is not the same on both platforms:
+
+   macOS keeps its traffic lights and only needs them moved down into the strip.
+   Windows has no equivalent — `hiddenInset` there means `hidden`, which removes
+   the caption buttons and leaves a window that cannot be minimised, maximised
+   or closed except by keyboard. `titleBarOverlay` is the supported way back:
+   Windows draws Minimise/Maximise/Close over our strip, in colours we choose,
+   and reserves the space through the env-var-free `titlebarAreaInset` CSS vars
+   the renderer already has access to. */
+const CAPTION_HEIGHT = 38
+
+function overlayColors () {
+  const dark = nativeTheme.shouldUseDarkColors
+  return {
+    color: dark ? '#141317' : '#FBFAF8',      // matches backgroundColor below
+    symbolColor: dark ? '#E8E4DE' : '#3A3631',
+    height: CAPTION_HEIGHT
+  }
+}
+
+function windowChrome () {
+  if (process.platform === 'darwin') {
+    return { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 18, y: 20 } }
+  }
+  if (process.platform === 'win32') {
+    return { titleBarStyle: 'hidden', titleBarOverlay: overlayColors() }
+  }
+  /* Everything else keeps the window manager's own frame. A hidden title bar
+     with no overlay is how you ship a window with no way to close it. */
+  return {}
+}
+
+/* The overlay's colours are baked in at creation, so a system switch to dark
+   would otherwise leave three light-grey caption buttons on a near-black strip
+   until the next launch. */
+if (process.platform === 'win32') {
+  nativeTheme.on('updated', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    try { mainWindow.setTitleBarOverlay(overlayColors()) } catch { /* window went */ }
+  })
+}
+
 function createWindow () {
   mainWindow = new BrowserWindow({
     width: 1180,
     height: 780,
     minWidth: 680,
     minHeight: 460,
-    titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 18, y: 20 },
+    ...windowChrome(),
     backgroundColor: nativeTheme.shouldUseDarkColors ? '#141317' : '#FBFAF8',
     show: false,
     webPreferences: {
@@ -1468,8 +1619,33 @@ function createWindow () {
      restore size equal to the screen would make the green button do nothing. */
   mainWindow.maximize()
 
+  /* Shown when there is something to read, not when there is a frame to fill.
+     `ready-to-show` fires as soon as the document has painted once — about
+     half a second in — which is well before the renderer has read the config,
+     walked the vault and opened the last note. Showing then meant the launch
+     was an empty window wearing a "Opening your workspace" card for the
+     remaining half second. The window now waits for `app:painted`, so the
+     launch is a dock bounce and then the note.
+
+     The timer is the backstop: a renderer that throws before it can say
+     anything, or never finishes loading, must still leave a window on screen
+     — with the boot screen's error card in it, which is the one thing the
+     splash was actually good for. */
+  let shown = false
+  let revealBackstop = null
+  const reveal = () => {
+    if (shown || !mainWindow || mainWindow.isDestroyed()) return
+    shown = true
+    clearTimeout(revealBackstop)
+    mainWindow.show()
+  }
+  revealMainWindow = reveal
+  mainWindow.once('ready-to-show', () => { revealBackstop = setTimeout(reveal, 4000) })
+  mainWindow.webContents.on('render-process-gone', reveal)
+  mainWindow.webContents.on('did-fail-load', reveal)
+  mainWindow.on('closed', () => clearTimeout(revealBackstop))
+
   mainWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'))
-  mainWindow.once('ready-to-show', () => mainWindow.show())
 
   // External links open in the browser; the vault never navigates away.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -1496,14 +1672,20 @@ function createWindow () {
   mainWindow.webContents.on('context-menu', (_event, params) => {
     const word = params.misspelledWord
     const spelling = []
+    /* A menu outlives the click that opened it: the window can be closed while
+       it is still up, and calling into a destroyed webContents throws from a
+       place with no caller to catch it. */
+    const live = () => !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()
     if (word) {
       for (const to of params.dictionarySuggestions.slice(0, 5)) {
-        spelling.push({ label: to, click: () => mainWindow.webContents.replaceMisspelling(to) })
+        spelling.push({ label: to, click: () => { if (live()) mainWindow.webContents.replaceMisspelling(to) } })
       }
       if (!spelling.length) spelling.push({ label: 'No suggestions', enabled: false })
       spelling.push({ type: 'separator' }, {
         label: `Add “${word}” to Dictionary`,
-        click: () => mainWindow.webContents.session.addWordToSpellCheckerDictionary(word)
+        click: () => {
+          if (live()) mainWindow.webContents.session.addWordToSpellCheckerDictionary(word)
+        }
       })
     }
     const edit = params.isEditable ? [{ role: 'cut' }, { role: 'copy' }, { role: 'paste' }] : []
@@ -1966,9 +2148,14 @@ ipcMain.handle('file:write', async (_e, p, content, metadata = null) => {
 })
 
 ipcMain.handle('file:create', async (_e, dir, name) => {
+  /* Same rules as a rename — a name that cannot be created is better refused
+     here than turned into a file nobody can open. An empty ask is not a
+     failure though: "new note" with nothing typed is how most of them start. */
+  const asked = safeFileName(name || 'Untitled', { strip: [NOTE_EXT] })
+  if (!asked.ok) throw new Error(asked.error)
   const target = freeName(
     await realSafePath(dir || ''),
-    name || 'Untitled',
+    asked.name,
     '.md'
   )
   await fs.mkdir(path.dirname(target), { recursive: true })
@@ -2081,9 +2268,12 @@ async function renameDocument (p, nextName) {
   /* The extension is the file's, not the name's: the tree shows a document
      without one, so a name typed back with `.pdf` or `.md` on it would other-
      wise be filed as `Paper.pdf.pdf`. */
-  let clean = String(nextName || '').replace(/[/\\]/g, '-')
-    .replace(NOTE_EXT, '')
-    .replace(DOCUMENT_EXT, '')
+  /* Every rule about what a filename may be lives in safe-name.js — including
+     the Windows ones, which a vault written here still has to keep to if it is
+     ever going to open there. */
+  const safe = safeFileName(nextName, { strip: [NOTE_EXT, DOCUMENT_EXT] })
+  if (!safe.ok) throw new Error(safe.error)
+  let clean = safe.name
   if (language) {
     const current = languageName(languageTableStem(abs))
     const asked = languageName(clean).name
@@ -2324,11 +2514,65 @@ ipcMain.handle('dictionary:words', async () => {
 })
 ipcMain.handle('dictionary:add', (_e, word) => {
   const w = String(word ?? '').trim()
-  return w ? session.defaultSession.addWordToSpellCheckerDictionary(w) : false
+  if (!w) return false
+  // Both checkers, or the sidebar keeps listing a word the red underlines have
+  // already stopped marking.
+  speller?.add(w)
+  return session.defaultSession.addWordToSpellCheckerDictionary(w)
 })
 ipcMain.handle('dictionary:remove', (_e, word) => {
   const w = String(word ?? '').trim()
-  return w ? session.defaultSession.removeWordFromSpellCheckerDictionary(w) : false
+  if (!w) return false
+  // nspell has no way to take a word back out, so the checker is thrown away
+  // and rebuilt without it on the next question.
+  speller = null
+  return session.defaultSession.removeWordFromSpellCheckerDictionary(w)
+})
+
+/* ---------------------------------------------------------- spelling
+
+   Chromium underlines misspellings in the editor and tells no one which words
+   they were: there is no API for reading them back, and the panel in the
+   sidebar needs a list. So the app keeps a Hunspell dictionary of its own (see
+   src/spellcheck.js) and asks it here — the same side as the custom
+   dictionary, which only exists in this process.
+
+   Nothing is loaded until the first question. The dictionaries are a megabyte
+   of word list to parse, and most sessions never open the pane. */
+let speller = null
+let spellerLoading = null
+
+function spellerNow () {
+  if (speller) return Promise.resolve(speller)
+  if (spellerLoading) return spellerLoading
+  spellerLoading = (async () => {
+    const { createSpeller, variantForLocale } = require(appAsset('spellcheck.cjs'))
+    /* The words taught from the context menu are the app's answer for "this is
+       not a mistake", and the panel has to honour it the same way the
+       underlines do. */
+    const taught = await session.defaultSession.listWordsInSpellCheckerDictionary().catch(() => [])
+    speller = createSpeller(variantForLocale(app.getLocale()), taught)
+    return speller
+  })()
+  spellerLoading.finally(() => { spellerLoading = null })
+  return spellerLoading
+}
+
+/* A ceiling on one question. A note is a few thousand distinct words at the
+   very outside; a number far past that is a bug or a paste of something that
+   is not prose, and neither is worth blocking this process over. */
+const MAX_SPELL_WORDS = 8000
+
+ipcMain.handle('spell:check', async (_e, words) => {
+  if (!Array.isArray(words) || !words.length) return []
+  const checker = await spellerNow()
+  return checker.check(words.slice(0, MAX_SPELL_WORDS))
+})
+
+ipcMain.handle('spell:suggest', async (_e, word) => {
+  const w = String(word ?? '').trim()
+  if (!w) return []
+  return (await spellerNow()).suggest(w)
 })
 
 /* ------------------------------------------------------------- searching
@@ -2359,7 +2603,43 @@ const WORD_AFTER = '(?![\\p{L}\\p{N}_])'
  * function wrote every character of the source and knows it is valid under it
  * — a hand-written pattern can carry escapes that `u` rejects.
  */
+/* A quantifier wrapped around a group that already holds one — `(a+)+`,
+   `(\w+\s?)*`, `(x|xx)+` — is the shape that backtracks exponentially. A
+   pattern like that against a line of a few dozen characters does not take a
+   moment longer, it takes longer than the session: JavaScript cannot interrupt
+   a running match, and there is no watchdog to reach for, so the main process
+   is simply gone — no autosave, no watcher, no quit.
+
+   Refused rather than run. This costs the small number of legitimate patterns
+   of that shape, all of which can be written another way; the alternative
+   costs the vault. Only ever applied to patterns the user wrote — see
+   `termRegex`, where a literal search escapes its term first. */
+const NESTED_QUANTIFIER = /\((?:\?:)?[^()]*[+*][^()]*\)\s*[+*{]/
+
+/* The other shape: a repeated group whose branches can match the same text, so
+   the engine has two ways to consume it and tries both — `(x|xx)+`. Branches
+   that cannot overlap are not this, which is why `(cat|dog)+` is left alone; a
+   shared prefix is the cheap test for whether they can. */
+const REPEATED_ALTERNATION = /\((?:\?:)?([^()|]*\|[^()]*)\)\s*[+*]/g
+
+function overlappingAlternation (source) {
+  for (const match of source.matchAll(REPEATED_ALTERNATION)) {
+    const branches = match[1].split('|').filter(Boolean)
+    for (const one of branches) {
+      if (branches.some((other) => other !== one && other.startsWith(one))) return true
+    }
+  }
+  return false
+}
+
 function termRegex (term, { regex, caseSensitive, word }) {
+  if (regex && (NESTED_QUANTIFIER.test(term) || overlappingAlternation(term))) {
+    const refused = new Error(
+      'That pattern can take forever to match. Try writing it without a repeat inside a repeat.'
+    )
+    refused.sayWhy = true
+    throw refused
+  }
   const source = regex
     ? term
     : word
@@ -2425,9 +2705,15 @@ function compileQuery (raw, opts = {}) {
   let terms
   try {
     terms = words.map((w) => termRegex(w, opts))
-  } catch {
-    // The only way to get here is a half-typed pattern in regex mode.
-    return { error: 'Not a valid pattern.', terms: [], filters, usable: false }
+  } catch (err) {
+    /* Two ways to get here, both of them a pattern in regex mode: one the
+       engine will not compile — a half-typed one, which is most keystrokes on
+       the way to a whole one — and one it would compile but must not run. The
+       second says why; the first has nothing to add. */
+    return {
+      error: err?.sayWhy ? err.message : 'Not a valid pattern.',
+      terms: [], filters, usable: false
+    }
   }
 
   return { terms, words, filters, usable: filtered || words.some((w) => w.length >= 2) }
@@ -2517,7 +2803,12 @@ async function searchPdfDocuments (q) {
   const results = []
   const unsearchedPaths = []
 
-  await Promise.all(pdfs.map(async (pdfPath) => {
+  /* Bounded, like every other walk of the vault here. Each PDF costs a couple
+     of stats, an eighty-byte header read and — when the sidecar is current and
+     not already cached — the page text, and this runs on the keystroke path: a
+     library of four hundred PDFs was four hundred of those in flight at once,
+     which is enough open handles to make the ones that matter wait. */
+  await mapLimit(pdfs, WALK_LIMIT, async (pdfPath) => {
     const name = path.basename(pdfPath)
     const base = {
       name, text: '', kind: 'pdf', props: [],
@@ -2577,7 +2868,7 @@ async function searchPdfDocuments (q) {
         score: total + 6
       })
     }
-  }))
+  })
 
   return { results, unsearchedPaths: [...new Set(unsearchedPaths)] }
 }
@@ -2979,23 +3270,37 @@ ipcMain.handle('search:replace', async (_e, raw, replacement, opts = {}) => {
     const next = entry.text.replace(find, into)
     if (next === entry.text) continue
 
-    pending.push({ key, abs: path.resolve(vaultPath, key), next, n })
+    pending.push({ key, abs: path.resolve(vaultPath, key), next, n, previous: entry.text })
   }
 
   /* Concurrently, for the same reason the link rewriter is: a replace across
      three hundred notes was six hundred sequential fsyncs. */
-  const done = await mapLimit(pending, WALK_LIMIT, async ({ key, abs, next, n }) => {
+  const done = await mapLimit(pending, WALK_LIMIT, async ({ key, abs, next, n, previous }) => {
     try {
       touchIndex(abs, next, await writeAtomic(abs, next))
-      return { key, n }
+      return { key, n, previous, next }
     } catch (err) {
       console.error('replace failed', key, err)
       return null
     }
   })
 
-  const rewritten = done.filter(Boolean).map((r) => r.key)
-  const hits = done.filter(Boolean).reduce((sum, r) => sum + r.n, 0)
+  const written = done.filter(Boolean)
+  /* One entry for the whole batch. A replace across the vault is the only edit
+     in Tulip with no inverse anywhere else — the notes it rewrites are mostly
+     closed, so neither the editor's undo stack nor the autosave snapshots have
+     them — and getting the pattern slightly wrong is easy. */
+  if (written.length) {
+    trust?.record({
+      source: 'replace',
+      changes: written.map(({ key, previous, next }) => ({
+        path: key, before: previous, after: next
+      }))
+    })
+  }
+
+  const rewritten = written.map((r) => r.key)
+  const hits = written.reduce((sum, r) => sum + r.n, 0)
   return { notes: rewritten.length, hits, rewritten }
 })
 
@@ -3039,6 +3344,57 @@ function linkTables () {
 }
 
 /**
+ * The other names a note answers to: its frontmatter `aliases`.
+ *
+ * Obsidian's oldest property, and the one a vault moved over misses hardest —
+ * without it every `[[Other Name]]` in an imported vault resolves to nothing,
+ * and the first click on one does not report a broken link, it creates a note
+ * with the alias for a title. That is a silent fork of a note that already
+ * exists, written to disk before anyone can see it happen.
+ *
+ * Unlike `linkTables` this depends on what is *in* the notes, so it is held
+ * against the index generation rather than against the set of keys — every
+ * write bumps that. The parse itself is cached per entry by `entryProps`, so a
+ * rebuild is a walk over already-parsed heads.
+ */
+let aliasTableCache = null
+let aliasTableAt = -1
+
+function aliasesOf (entry) {
+  if (entry.aliases) return entry.aliases
+  const prop = entryProps(entry).find((one) => String(one.key).toLowerCase() === 'aliases' ||
+    String(one.key).toLowerCase() === 'alias')
+  entry.aliases = prop ? propValues(prop) : []
+  return entry.aliases
+}
+
+function aliasTable () {
+  if (aliasTableCache && aliasTableAt === indexGeneration) return aliasTableCache
+  const byAlias = new Map()
+  for (const [key, entry] of index) {
+    for (const alias of aliasesOf(entry)) {
+      if (!byAlias.has(alias)) byAlias.set(alias, [])
+      byAlias.get(alias).push(key)
+    }
+  }
+  aliasTableCache = byAlias
+  aliasTableAt = indexGeneration
+  return byAlias
+}
+
+/**
+ * Every alias in the vault, for the renderer — which resolves links itself,
+ * from the flattened tree, and has no way to see inside a note it has not
+ * opened. Sent as one object rather than asked per link: a vault's aliases are
+ * a short list even when its notes are not.
+ */
+ipcMain.handle('vault:aliases', async () => {
+  if (!vaultPath) return {}
+  await ensureIndex()
+  return Object.fromEntries(aliasTable())
+})
+
+/**
  * Which note `[[Name]]` means when the vault holds more than one by that name.
  *
  * The rule the renderer follows in `bestLinkTarget`: the note beside the one
@@ -3073,8 +3429,13 @@ function linkTarget (rawTarget, fromKey, { byBase, byPath }) {
   const link = normaliseTarget(hash === -1 ? rawTarget : rawTarget.slice(0, hash))
   if (!link) return null                     // `[[#Heading]]`: this note itself
   const wanted = link.toLowerCase()
-  // A name first, then a path — the order the renderer resolves them in.
-  return nearestNamed(byBase.get(wanted) || [], fromKey) || byPath.get(wanted) || null
+  /* A name, then a path, then an alias — the order the renderer resolves them
+     in. Aliases last because a note actually called `Wanted` outranks one that
+     merely answers to it, which is also Obsidian's order. */
+  return nearestNamed(byBase.get(wanted) || [], fromKey) ||
+    byPath.get(wanted) ||
+    nearestNamed(aliasTable().get(wanted) || [], fromKey) ||
+    null
 }
 
 /**
@@ -3813,9 +4174,11 @@ async function preparePdfTurn (question, context, turnId = null) {
     failures,
     context: {
       ...(context || {}),
-      // The pages are for ranking here; what crosses to the agent is the path
-      // to the file they came out of, which it can read for itself.
-      pdfDocuments: documents.map(({ pages: _pages, ...document }) => document),
+      /* The pages are for ranking here, and what crosses to the agent is the
+         path to the file they came out of — which it can read for itself. The
+         page count stays: a model that knows a book has 400 pages reads one
+         page at a time instead of dumping the whole sidecar into context. */
+      pdfDocuments: documents.map(({ pages, ...document }) => ({ ...document, pages: pages.length })),
       pdfContext: relevantPdfContext(question, documents)
     }
   }
@@ -4071,6 +4434,27 @@ compiledRunner('cpp', {
   compile: (source, output) => ['c++', ['-std=c++20', '-o', output, source]]
 })
 
+/* CUDA is C++ that nvcc splits into host code and device code, so a ```cu
+   block compiles and runs exactly like a ```cpp one — the difference is only
+   which compiler sees it, and that the machine needs a GPU and a driver at run
+   time rather than at build time. A machine without either still compiles the
+   block; what it prints is the failing cudaError, which is the honest answer.
+
+   `-std=c++17` because that is the newest standard every shipping nvcc
+   accepts for host code — c++20 is still gated on the host compiler in CUDA 12
+   and would refuse blocks that have nothing to do with the GPU. The device
+   architecture is deliberately left at nvcc's default: `-arch=native` reads the
+   card in the machine doing the compiling, which is wrong for the note author
+   who has no card at all, and the default's embedded PTX is JIT-compiled by
+   the driver for whatever card actually runs it. */
+compiledRunner('cuda', {
+  file: 'main.cu',
+  prefix: 'cu',
+  seed: 'nvcc c++17',
+  warmCode: 'int main() { return 0; }\n',
+  compile: (source, output) => ['nvcc', ['-std=c++17', '-o', output, source]]
+})
+
 /**
  * The PATH to run snippets with.
  *
@@ -4083,20 +4467,34 @@ compiledRunner('cpp', {
  * So ask the login shell, once, for the PATH it would hand an interactive
  * session. The well-known locations below are a fallback for when that fails,
  * and a backstop for shells that only export PATH for interactive use.
+ *
+ * None of this describes Windows, where a process started from Explorer already
+ * inherits the machine and user PATH that installers write to, and where none of
+ * these directories exist. There the list is empty and the login-shell probe is
+ * skipped entirely rather than spawning a shell that is not there.
  */
-const FALLBACK_PATHS = [
+const FALLBACK_PATHS = process.platform === 'win32' ? [] : [
   '/opt/homebrew/bin', '/opt/homebrew/sbin',   // Homebrew, Apple silicon
   '/usr/local/bin', '/usr/local/sbin',         // Homebrew, Intel — and much else
   '/opt/local/bin',                            // MacPorts
   path.join(os.homedir(), '.local/bin'),
   path.join(os.homedir(), '.cargo/bin'),
   path.join(os.homedir(), '.elan/bin'),           // Lean, via elan
-  '/Library/TeX/texbin'                           // MacTeX, for ```tikz
+  '/Library/TeX/texbin',                          // MacTeX, for ```tikz
+  /* The CUDA toolkit installs outside every shell's default PATH and expects
+     the profile to add it, which the launchd-inherited environment never has —
+     so ```cu reported nvcc missing on machines with a working toolkit. The
+     unversioned symlink is what a normal install leaves pointing at the
+     newest. */
+  '/usr/local/cuda/bin'
 ]
 
 let loginPath = null        // resolved once, at startup
 
 function readLoginPath () {
+  /* See FALLBACK_PATHS: there is no login shell to ask on Windows, and asking
+     means spawning `/bin/zsh` to watch it fail on every launch. */
+  if (process.platform === 'win32') return Promise.resolve(null)
   return new Promise((resolve) => {
     const shell = process.env.SHELL || '/bin/zsh'
     // -l runs the profile files, -i because an interactive session is where
@@ -4126,6 +4524,8 @@ function readLoginPath () {
 
     child.stdout.setEncoding('utf8')
     child.stdout.on('data', (chunk) => { out += chunk })
+    // The kill below tears this pipe down; its complaint is not a crash.
+    child.stdout.on('error', () => {})
     child.on('error', () => finish(null))
     child.on('close', () => finish(out.split('\0')[1]?.trim() || null))
 
@@ -4210,6 +4610,10 @@ function startRun (id, cmd, args, { cwd, timeoutMs, env: extraEnv, quiet = false
       if (chunk.length < text.length) truncated = true
       if (!quiet) send('run:out', { id, stream: name, text: chunk })
     })
+    /* A pipe whose reader died mid-run errors on the stream, not on the child,
+       and an unhandled stream error ends the main process. `close` below is
+       already telling this run's story; there is nothing to add here. */
+    stream.on('error', () => {})
   }
   pipe(child.stdout, 'stdout')
   pipe(child.stderr, 'stderr')
@@ -4347,10 +4751,70 @@ function warmRunner (lang) {
 
 ipcMain.handle('run:warm', (_e, lang) => warmRunner(lang))
 
+/* Vaults whose code blocks may run, asked once each.
+
+   A run block is a real program with the reader's own privileges, the login
+   shell's PATH and the vault as its working directory. That is the feature, and
+   for a vault of your own notes it is the right one — you wrote them. A vault is
+   not always that: notes arrive shared, synced, cloned and downloaded, and a
+   ```sh block in one of those is a script from a stranger that runs on a click.
+
+   The ```html and ```tikz paths were fenced against exactly that (an in-memory
+   partition with no network; \input refused) because they draw themselves on
+   open. Run blocks need a click, which is weaker than it looks: the click says
+   "show me what this does", not "I have read this and vouch for it".
+
+   So the vault is trusted once, by name, in the main process — the renderer
+   cannot grant this to itself. Held in config rather than the trust store: it
+   describes this installation's opinion of a folder, not anything in the vault,
+   and a vault that could carry its own permission grant would be no fence. */
+const sessionTrustedVaults = new Set()
+
+async function vaultMayRunCode () {
+  const key = vaultPath || ''
+  if (sessionTrustedVaults.has(key)) return true
+
+  const remembered = readConfig().trustedVaults
+  if (Array.isArray(remembered) && remembered.includes(key) && key) {
+    sessionTrustedVaults.add(key)
+    return true
+  }
+
+  const name = key ? path.basename(key) : 'this folder'
+  const { response, checkboxChecked } = await dialog.showMessageBox(mainWindow, {
+    type: 'warning',
+    buttons: ['Cancel', 'Run'],
+    defaultId: 0,
+    cancelId: 0,
+    message: `Run code from “${name}”?`,
+    detail:
+      'Code blocks in this vault will run as programs on your Mac, with your ' +
+      'own access to your files and network.\n\n' +
+      'Only continue if you trust the notes in this vault. Notes that were ' +
+      'shared, synced or downloaded can carry code you did not write.',
+    checkboxLabel: 'Trust this vault from now on',
+    checkboxChecked: false,
+    noLink: true
+  })
+
+  if (response !== 1) return false
+  // Trusting for the session costs nothing to withhold from disk.
+  sessionTrustedVaults.add(key)
+  if (checkboxChecked && key) {
+    const kept = Array.isArray(readConfig().trustedVaults) ? readConfig().trustedVaults : []
+    writeConfig({ trustedVaults: [...new Set([...kept, key])] })
+  }
+  return true
+}
+
 ipcMain.handle('run:start', async (_e, lang, code) => {
   const spec = runnerFor(lang)
   if (!spec) throw new Error(`Tulip cannot run "${lang}" blocks.`)
   if (typeof code !== 'string') throw new Error('Nothing to run.')
+
+  /* Before the warmup below, not after: a compiler warmup is already a spawned
+     process, and asking after it has started is asking too late. */
+  if (!await vaultMayRunCode()) throw new Error('Running code from this vault was declined.')
 
   /* If its control already started a compiler warmup, let that finish before
      compiling a new block. A cache hit skips the wait: it has no need for a
@@ -5299,10 +5763,17 @@ ipcMain.handle('edit:redo', (e) => e.sender.redo())
 
 ipcMain.handle('config:get', () => readConfig())
 ipcMain.handle('config:set', (_e, patch) => {
-  const next = writeConfig(patch)
+  /* Not every config key is a preference — see electron/config-keys.js. The
+     renderer writes the settable ones; main keeps `vaultPath` and the command
+     strings to itself. */
+  const { accepted, rejected } = sanitizeConfigPatch(patch)
+  if (rejected.length) {
+    console.warn(`config:set refused ${rejected.join(', ')} — not settable from the renderer`)
+  }
+  const next = writeConfig(accepted)
   /* The two settings that move something on disk rather than repaint it.
      Setting them lands nowhere unless the thing that reads them is told. */
-  if (Object.prototype.hasOwnProperty.call(patch, 'historyInVault') && vaultPath) {
+  if (Object.prototype.hasOwnProperty.call(accepted, 'historyInVault') && vaultPath) {
     trust?.setVault(vaultPath, next.historyInVault === true)
   }
   return next
@@ -5365,14 +5836,25 @@ const HTML_RUN_PARTITION = WEB_PARTITIONS.htmlrun
  */
 const YOUTUBE_HOST = /(^|\.)(youtube\.com|youtu\.be|youtube-nocookie\.com|google\.com|ytimg\.com|googlevideo\.com|gstatic\.com)$/
 
+/* Plain http means anyone on the same network can read the page the reader is
+   reading and rewrite it on the way through, inside a window wearing Tulip's
+   chrome. The one place it is still worth having is a server on this machine —
+   a local preview, a notebook, a docs build — which no one else can reach and
+   which nobody gives a certificate to. So: https anywhere, http on loopback. */
+const LOOPBACK = /^(localhost|127(?:\.\d{1,3}){3}|\[::1\]|::1)$/i
+
 function allowedGuestUrl (url, partition) {
   // A preview guest is exactly the document the renderer wrote into it. Never
   // http(s), and never any other local scheme either.
   if (partition === HTML_RUN_PARTITION) return /^data:text\/html[;,]/i.test(String(url || ''))
   try {
     const u = new URL(url)
-    if (u.protocol !== 'https:' && u.protocol !== 'http:') return false
+    if (u.protocol === 'http:') {
+      if (!LOOPBACK.test(u.hostname)) return false
+    } else if (u.protocol !== 'https:') return false
     if (partition === YOUTUBE_PARTITION) return YOUTUBE_HOST.test(u.hostname)
+    /* Not a fallthrough: a guest whose partition is none of the three named
+       ones is not a feature this app has, and gets nothing. */
     return partition === WEB_PARTITION
   } catch {
     return false
@@ -5734,5 +6216,6 @@ app.on('before-quit', () => {
   killAllRuns()
   ai.stop('SIGKILL')
   trust?.flushSync()
+  flushDurabilitySync()
   flushConfig()
 })

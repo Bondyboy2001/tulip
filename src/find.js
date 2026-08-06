@@ -134,6 +134,25 @@ class FindPanel {
     this.count()
   }
 
+  /**
+   * CodeMirror calls this once the panel is in the document.
+   *
+   * `main-field` above is only half the story: `openSearchPanel` reads it to
+   * move focus when the panel is *already* open, and does nothing but dispatch
+   * when it is not — the stock panel focuses itself from here, and a panel that
+   * replaces it has to do the same. Without it the first ⌘F of a note opened
+   * the bar and left the caret in the document, so the word you came to search
+   * for was typed into the note instead. (Every ⌘F after that one worked, which
+   * is what made it read as flaky rather than missing.)
+   *
+   * Selected, not merely focused: the query is seeded from what was under the
+   * cursor, and typing should replace that rather than run on from it.
+   */
+  mount () {
+    this.input.focus()
+    this.input.select()
+  }
+
   /* ------------------------------------------------------------ pieces */
 
   /* Every control here hands the caret back to the query when it is done: the

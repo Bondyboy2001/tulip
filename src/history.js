@@ -109,6 +109,17 @@ export function diffBlock (change) {
   return node
 }
 
+/* What each entry says it came from. `replace` and `rename` are the two that
+   edit notes the user never opened, so they say so rather than reading as a
+   copilot turn. Anything unrecognised is a copilot turn, which is what every
+   entry that names no source has always been. */
+const TAGS = {
+  restore: 'restore point',
+  save: 'saved',
+  replace: 'replaced',
+  rename: 'renamed'
+}
+
 export function mountHistory ({ el, api, confirm, beforeRestore, onError }) {
   const state = { path: null, operations: [] }
 
@@ -154,9 +165,7 @@ export function mountHistory ({ el, api, confirm, beforeRestore, onError }) {
         `${delta > 0 ? '+' : '−'}${count(Math.abs(delta))}`
       ))
     }
-    if (operation.source === 'restore') open.append(element('span', 'history-tag', 'restore point'))
-    else if (operation.source === 'save') open.append(element('span', 'history-tag', 'saved'))
-    else open.append(element('span', 'history-tag', 'copilot'))
+    open.append(element('span', 'history-tag', TAGS[operation.source] || 'copilot'))
     head.append(open)
 
     const actions = element('div', 'history-actions')

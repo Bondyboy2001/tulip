@@ -636,6 +636,17 @@ function remoteSpec (src, { alt, size, writtenAsImage }) {
 export function embedSpec (src, {
   alt = '', size = null, resolve, resolveNote = null, dir = '', writtenAsImage = false
 } = {}) {
+  /* An embed with no target at all — `![[ ]]`, the slash key's placeholder —
+     is not a missing file, it is a choice still to be made. Named rather than
+     left a blank, so a note that never finished the gesture says so quietly
+     in both views instead of hiding an invisible gap. */
+  if (!String(src || '').trim()) {
+    return {
+      kind: 'missing', path: null, url: null, alt,
+      label: alt || 'Embed', width: null, height: null, page: null, start: null
+    }
+  }
+
   /* `Sample.pdf#page=3` — the fragment is an instruction to the viewer, not
      part of the name, so it comes off before the vault is asked. Only for a
      local target: a URL keeps its fragment, which belongs to the site. */

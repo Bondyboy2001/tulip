@@ -16,8 +16,9 @@ import { highlightInto } from './highlight.js'
    builder comes in under another — the same aliasing settings.js and copilot.js
    do. */
 import { codeCopilotButton, copyButton } from './blocks.js'
-import { svgIcon, el as node } from './dom.js'
+import { svgIcon, el as node, trapModalFocus } from './dom.js'
 import { fileIcon } from './file-icons.js'
+import { wordsIn, groupWords } from './spelling.js'
 import { prepareMath, equationIndex, equationsFor, docText } from './math.js'
 import { dressCitations } from './citations.js'
 import { THEMES, resolveTheme, isTheme, isDarkTheme } from './themes.js'
@@ -33,7 +34,7 @@ import {
 import {
   initSidePane, openToSide, closeSidePane, sideDoc, refreshSidePane
 } from './sidepane.js'
-import { routeFragmentClick } from './links.js'
+import { routeFragmentClick, activateFocusedWikilink } from './links.js'
 import { attachRunControl, onAskToFix, retirePainters } from './runcode.js'
 import { htmlFence, isHtmlRun } from './htmlrun.js'
 import { isThree, threeFence } from './threejs.js'
@@ -45,7 +46,7 @@ import {
   headings, headingsFor, splitAnchor, findHeading, findBlock, installHeadingFolds
 } from './headings.js'
 import { lintEdits } from './lint.js'
-import { mountCopilot } from './copilot.js'
+import { diffTrees, compareTreeNodes } from './tree-diff.js'
 import { mountHistory } from './history.js'
 import { parseFrontmatter } from '../electron/frontmatter.cjs'
 import { when } from './time.js'
@@ -84,6 +85,13 @@ const state = {
   vault: null,
   tree: [],
   files: [],          // flattened, for the switcher and wikilinks
+  /* Frontmatter `aliases`, as lowercased alias -> the paths that claim it. The
+     tree does not carry them — they live inside notes, and the sidebar is a
+     walk of names — so they are asked for separately; see refreshAliases. */
+  aliases: {},
+  /* The tree's one tab stop, as a path. The arrows move it; renderTree puts it
+     back on the same row, or on the open note if that row has gone. */
+  treeFocus: null,
   assetsKey: '',      // the attachment list as last seen, to skip no-op rebuilds
   /* Main's signature for the vault as it is currently drawn — { tree, assets }.
      Sent back with the next snapshot request so an unchanged vault answers
@@ -169,10 +177,12 @@ const el = {
   zoom: $('zoom'),
   outlineList: $('outline-list'),
   linksList: $('links-list'),
+  spellingList: $('spelling-list'),
   infoPane: $('info-pane'),
   paneFilesTab: $('pane-files-tab'),
   paneOutlineTab: $('pane-outline-tab'),
   paneLinksTab: $('pane-links-tab'),
+  paneSpellingTab: $('pane-spelling-tab'),
   paneInfoTab: $('pane-info-tab'),
   panelChips: $('panel-chips'),
   panelReplace: $('panel-replace'),
@@ -180,6 +190,7 @@ const el = {
   panelReplaceGo: $('panel-replace-go'),
   panelSaveSearch: $('panel-save-search'),
   savedSearches: $('saved-searches'),
+  paneTabs: $('pane-tabs'),
   askDetail: $('ask-detail'),
   settings: $('settings'),
   settingsRail: $('settings-rail'),
@@ -211,7 +222,6 @@ const el = {
   aiConfigModel: $('ai-config-model'),
   aiConfigEffort: $('ai-config-effort'),
   gripSidebar: $('grip-sidebar'),
-  closeSidebar: $('btn-close-sidebar'),
   gripAi: $('grip-ai'),
   sidepane: $('sidepane'),
   sidepaneBody: $('sidepane-body'),
@@ -362,6 +372,7 @@ const editor = createEditor({
       if (viewingTex()) scheduleTexCompile()
     }
     queueOutline()
+    queueSpelling()
     queueInfo()
   },
   onOpenLink: (link) => {
@@ -394,7 +405,16 @@ const editor = createEditor({
   // Read at decoration time, so opening a different note re-resolves relative
   // embeds against the folder that note is actually in.
   resolveEmbed: resolveHere,
-  resolveNoteEmbed: noteFromName
+  resolveNoteEmbed: noteFromName,
+  // What the embed picker offers and the inline ghost completes against:
+  // every attachment by its vault path, every note by its name. Read at pick
+  // and keystroke time, so a file added a moment ago is offered at once.
+  embedChoices: () => [
+    ...state.assets.map((path) => ({ label: path, name: path })),
+    ...state.files
+      .filter((f) => NOTE_EXT.test(f.path))
+      .map((f) => ({ label: f.name, name: f.name }))
+  ]
 })
 
 /* ----------------------------------------------------- language timestamps
@@ -1006,6 +1026,9 @@ async function loadTree () {
   const revision = answer.revision || {}
   const before = state.revision || {}
   const { tree, assets } = answer
+  /* The tree as it is drawn right now. `patchTree` diffs the old against the
+     new, so it has to be captured before state.tree is overwritten. */
+  const oldTree = state.tree
   state.revision = answer.revision || null
   state.tree = tree
   state.files = flatten(tree)
@@ -1014,7 +1037,11 @@ async function loadTree () {
      image adds an attachment and not a row, and rebuilding the sidebar for it
      would be the very redraw this exists to avoid. */
   if (revision.tree !== before.tree) {
-    renderTree()
+    /* Before the redraw, not after: a note that arrived with `aliases` in its
+       head changes what every `[[…]]` in the vault resolves to, and refreshing
+       afterwards would draw the links once with the old answer. */
+    await refreshAliases()
+    patchTree(oldTree, tree)
     /* A note created or renamed may have turned a missing `![[Note]]` into a
        transclusion, or the reverse — the note resolver just changed its
        answer. The same move applyAssets makes when an attachment lands. */
@@ -1057,9 +1084,217 @@ function applyAssets (next, revision) {
  *  `![[…]]` that names it never reached the note. */
 const loadAssets = async () => applyAssets((await api.vault.snapshot()).assets)
 
+/* Ids for the groups a folder owns. A counter rather than the folder's path:
+   a path is not a legal id fragment, and nothing outside this file looks these
+   up by name. */
+let treeGroupSerial = 0
+
 function renderTree () {
   el.tree.replaceChildren(buildLevel(state.tree, 0))
+  /* The row the arrow keys left off at may have gone — a rename, a delete, a
+     folder shut over it. Falling back to the open note, then to the first row,
+     keeps exactly one row tabbable, which is what makes the tree one stop. */
+  if (!el.tree.querySelector('.row[tabindex="0"]')) {
+    const fallback =
+      el.tree.querySelector('.row.is-active') || el.tree.querySelector('.row[data-path]')
+    if (fallback) {
+      fallback.tabIndex = 0
+      state.treeFocus = fallback.dataset.path
+    }
+  }
   paintFoldToggle()
+}
+
+/**
+ * Redraw only the rows a snapshot change actually moved.
+ *
+ * `renderTree` rebuilds every visible row — two SVG clones, a file icon and
+ * half a dozen listeners apiece — so a vault of a thousand open rows paid for
+ * a thousand fresh rows to draw one new note. `diffTrees` (src/tree-diff.js)
+ * says which levels moved and which rows within them changed; this applies
+ * that answer to the live DOM, row by row, and leaves everything else exactly
+ * as it was — listeners, focus, drag state and all. The wholesale rebuild
+ * stays for the callers with no old tree to diff against, which is every
+ * caller but a snapshot refresh: a folder toggle, the fold-all command and a
+ * rename all end in renderTree().
+ *
+ * The first draw is a diff too: `before` starts as the empty tree, so every
+ * row is an insertion, which is exactly what a first draw is.
+ */
+function patchTree (before, after) {
+  const levels = diffTrees(before, after)
+  const replacedFolders = new Set()
+
+  for (const { parent, children, replace } of levels) {
+    /* A replaced folder row was rebuilt together with its children container
+       (buildLevel draws them as a pair), so the level that container owns is
+       already new — reconciling it would be diffing the new children against
+       themselves. */
+    if (replacedFolders.has(parent)) continue
+    const container = parent === ''
+      ? el.tree
+      : el.tree.querySelector(`.children[data-for="${cssEscape(parent)}"]`)
+    /* A closed folder's container is empty by design — buildLevel does not
+       draw what it would be told to hide — so a change inside one is drawn
+       the next time it opens, by the renderTree() that opening triggers. */
+    if (!container || (parent !== '' && !container.classList.contains('is-open'))) continue
+    const depth = parent === '' ? 0 : parent.split('/').length
+    patchLevel(container, children, replace, depth, replacedFolders)
+  }
+
+  /* The two invariants renderTree leaves behind, so a patched tree ends the
+     same way a rebuilt one would: exactly one row tabbable, and the fold-all
+     button reading the tree it is drawn over. */
+  if (!el.tree.querySelector('.row[tabindex="0"]')) {
+    const fallback =
+      el.tree.querySelector('.row.is-active') || el.tree.querySelector('.row[data-path]')
+    if (fallback) {
+      fallback.tabIndex = 0
+      state.treeFocus = fallback.dataset.path
+    }
+  }
+  paintFoldToggle()
+}
+
+/**
+ * Bring one level of the tree in line with its new snapshot: drop the rows
+ * that are gone, rebuild the rows whose record moved, build the new ones in
+ * place. Rows that were already right are not touched.
+ */
+function patchLevel (container, children, replace, depth, replacedFolders) {
+  const byPath = new Map()
+  for (const row of container.querySelectorAll('.row[data-path]')) {
+    byPath.set(row.dataset.path, row)
+  }
+  const keep = new Set()
+  for (const node of children) keep.add(node.path)
+
+  /* Removals first, so the rows the pass below walks are the ones that stay. */
+  for (const row of byPath.values()) {
+    if (keep.has(row.dataset.path)) continue
+    const kids = row.nextElementSibling
+    if (kids && kids.classList.contains('children')) kids.remove()
+    row.remove()
+  }
+
+  /* Then the new order, one pass: keep, replace or insert as each row needs.
+     Both lists are sorted the same way, so a single cursor over the drawn
+     rows places every insertion where the sort puts it. */
+  const drawn = [...container.querySelectorAll('.row[data-path]')]
+  let cursor = 0
+  for (const node of children) {
+    const row = byPath.get(node.path)
+    if (row) {
+      if (replace.has(node.path)) {
+        if (node.type === 'folder') {
+          replacedFolders.add(node.path)
+          const kids = row.nextElementSibling
+          if (kids && kids.classList.contains('children')) kids.remove()
+        }
+        row.replaceWith(buildLevel([node], depth))
+      }
+      cursor++
+      continue
+    }
+
+    /* A new row: placed where the sort puts it, before the first drawn row
+       that sorts after it, or at the end of the level. */
+    while (cursor < drawn.length && compareTreeNodes(node, rowIdentity(drawn[cursor])) > 0) {
+      cursor++
+    }
+    const frag = buildLevel([node], depth)
+    if (cursor < drawn.length) drawn[cursor].before(frag)
+    else container.append(frag)
+  }
+}
+
+/** The sort key of a drawn row: its type, and the label that shows its name. */
+function rowIdentity (row) {
+  const label = row.querySelector('.label')
+  return { type: row.dataset.type, name: label ? label.textContent : row.dataset.path }
+}
+
+/* ------------------------------------------------------ tree keyboard
+
+   The arrow keys, as every file tree on the desktop has them: ↑↓ move, → opens
+   a folder and then steps into it, ← shuts one and then steps out to the parent.
+   The rest of what a row answers to — ↵ to rename, ⌘↵ to open, the context menu
+   key — is wired per row in buildLevel, next to the row it belongs to.
+   ================================================================== */
+
+/** The rows the arrows can reach: what is drawn, which is what is visible. */
+function treeRows () {
+  return [...el.tree.querySelectorAll('.row[data-path]')]
+}
+
+/** Move the tree's single tab stop, and the focus with it. */
+function focusTreeRow (row) {
+  if (!row) return
+  for (const other of el.tree.querySelectorAll('.row[tabindex="0"]')) other.tabIndex = -1
+  row.tabIndex = 0
+  state.treeFocus = row.dataset.path
+  row.focus()
+}
+
+/** The same, by path — for after a renderTree has replaced every row. */
+function focusTreePath (path) {
+  focusTreeRow(el.tree.querySelector(`.row[data-path="${cssEscape(path)}"]`))
+}
+
+/** The folder row a row sits inside, or null at the top level. */
+function parentRowOf (path) {
+  const at = path.lastIndexOf('/')
+  if (at === -1) return null
+  return el.tree.querySelector(`.row.is-folder[data-path="${cssEscape(path.slice(0, at))}"]`)
+}
+
+function wireTreeKeys () {
+  el.tree.addEventListener('keydown', (event) => {
+    // A row being renamed holds an input, and the arrows belong to the text.
+    if (event.target.closest('input, textarea')) return
+    const row = event.target.closest('.row[data-path]')
+    if (!row) return
+    const path = row.dataset.path
+    const isFolder = row.dataset.type === 'folder'
+    const open = isFolder && state.expanded.has(path)
+
+    const step = (by) => {
+      const rows = treeRows()
+      const at = rows.indexOf(row)
+      if (at === -1) return
+      focusTreeRow(rows[Math.min(rows.length - 1, Math.max(0, at + by))])
+    }
+
+    switch (event.key) {
+      case 'ArrowDown': event.preventDefault(); step(1); return
+      case 'ArrowUp': event.preventDefault(); step(-1); return
+      case 'Home': {
+        event.preventDefault()
+        focusTreeRow(treeRows()[0])
+        return
+      }
+      case 'End': {
+        event.preventDefault()
+        const rows = treeRows()
+        focusTreeRow(rows[rows.length - 1])
+        return
+      }
+      case 'ArrowRight': {
+        event.preventDefault()
+        /* Open, then — on a second press — step inside. A folder that is
+           already open has nothing left to do but move, and a file has no
+           inside at all. */
+        if (isFolder && !open) { toggleFolder(path); focusTreePath(path); return }
+        step(1)
+        return
+      }
+      case 'ArrowLeft': {
+        event.preventDefault()
+        if (isFolder && open) { toggleFolder(path); focusTreePath(path); return }
+        focusTreeRow(parentRowOf(path))
+      }
+    }
+  })
 }
 
 /* ------------------------------------------------------ fold everything
@@ -1132,7 +1367,13 @@ function buildLevel (nodes, depth) {
     row.style.paddingLeft = `${7 + depth * 13}px`
     row.dataset.path = node.path
     row.dataset.type = node.type
-    row.tabIndex = 0
+    row.setAttribute('role', 'treeitem')
+    row.setAttribute('aria-level', String(depth + 1))
+    /* One stop for the whole tree, not one per row. A vault of four hundred
+       notes was four hundred presses of Tab to get past the sidebar; the arrow
+       keys move within it instead — see wireTreeKeys — which is how every other
+       tree on the desktop behaves. */
+    row.tabIndex = node.path === state.treeFocus ? 0 : -1
     row.draggable = true
     wireDrag(row, node)
 
@@ -1152,12 +1393,20 @@ function buildLevel (nodes, depth) {
       const open = state.expanded.has(node.path)
       if (open) row.classList.add('is-open')
       if (state.picked.has(node.path)) row.classList.add('is-picked')
+      row.setAttribute('aria-expanded', String(open))
+      row.setAttribute('aria-selected', String(state.picked.has(node.path)))
       row.addEventListener('click', (e) => clickRow(node, e))
       frag.append(row)
 
       const kids = document.createElement('div')
       kids.className = `children${open ? ' is-open' : ''}`
       kids.dataset.for = node.path
+      /* The rows a folder contains are its siblings in the DOM — the twist and
+         the indent do the nesting visually — so the relationship a screen
+         reader needs is stated rather than implied. */
+      kids.setAttribute('role', 'group')
+      kids.id = `tree-group-${treeGroupSerial++}`
+      row.setAttribute('aria-owns', kids.id)
       /* A closed folder's rows are `display: none` and are built again the
          moment it opens — every path that changes what is expanded ends in
          another renderTree() — so building them now is work that is thrown
@@ -1168,6 +1417,7 @@ function buildLevel (nodes, depth) {
     } else {
       if (state.current?.path === node.path) row.classList.add('is-active')
       if (state.picked.has(node.path)) row.classList.add('is-picked')
+      row.setAttribute('aria-selected', String(state.picked.has(node.path)))
       row.addEventListener('click', (e) => clickRow(node, e))
       /* Middle-click opens in a new tab. ⌘-click is already spoken for here —
          it extends the selection, the way it does in a file manager — so the
@@ -1198,6 +1448,21 @@ function buildLevel (nodes, depth) {
       if (e.key === 'Enter') {
         e.preventDefault()
         node.type === 'folder' ? toggleFolder(node.path) : openNote(node.path)
+        return
+      }
+      /* The menu key, and ⇧F10 for the keyboards without one. Everything the
+         row's context menu offers — reveal, move, duplicate, trash — was
+         reachable only by right-clicking it. Positioned over the row itself,
+         since there is no pointer to put it under. */
+      if (e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey)) {
+        e.preventDefault()
+        const box = row.getBoundingClientRect()
+        showContextMenu({
+          clientX: box.left + 12,
+          clientY: box.bottom,
+          keyboard: true,
+          preventDefault: () => {}
+        }, node)
       }
     })
   }
@@ -1458,6 +1723,41 @@ async function importFrom (event, destDir) {
   }
 }
 
+/**
+ * The folders `paths` could be moved into, as picker items.
+ *
+ * Moving was a drag and nothing else, which is a gesture some people cannot
+ * make and nobody can make between two folders that are not on screen at the
+ * same time. The same rules the drop obeys are applied here — a folder cannot
+ * receive itself or anything it already holds — so the list offers only moves
+ * that would actually happen.
+ */
+/** The folder picker, over whatever was named — a row, a selection, the open note. */
+function openMovePicker (paths) {
+  const wanted = (paths || []).filter(Boolean)
+  if (!wanted.length) { toast('Nothing to move.'); return }
+  if (!moveDestinations(wanted).length) {
+    toast('There is nowhere else to move that.')
+    return
+  }
+  openOverlay('move-to', { paths: wanted })
+}
+
+function moveDestinations (paths) {
+  const wanted = paths.filter(Boolean)
+  const holds = (dir) => wanted.every((p) => {
+    if (p === dir || dir.startsWith(p + '/')) return false
+    return p.split('/').slice(0, -1).join('/') !== dir
+  })
+
+  const items = []
+  if (holds('')) items.push({ path: '', label: state.vault?.name || 'Vault root' })
+  for (const dir of allFolders(state.tree)) {
+    if (holds(dir)) items.push({ path: dir, label: dir })
+  }
+  return items
+}
+
 /** A folder cannot receive itself, nor anything already sitting in it. */
 function canDropInto (destDir) {
   return (state.dragging || []).some((p) => {
@@ -1466,8 +1766,14 @@ function canDropInto (destDir) {
   })
 }
 
-async function moveInto (destDir) {
-  const paths = state.dragging || []
+/**
+ * Move documents into a folder.
+ *
+ * `paths` is explicit for the callers that are not a drag — the row menu and
+ * the palette both name what they are moving — and defaults to what is being
+ * dragged, which is how a drop still calls this with nothing but its target.
+ */
+async function moveInto (destDir, paths = state.dragging || []) {
   state.dragging = null
   if (!paths.length) return
 
@@ -1632,6 +1938,7 @@ function settleDoc (path, { chat = true } = {}) {
   if (chat) copilot.setNote(path)
   renderOutline()
   renderLinks()
+  renderSpelling()
   renderInfo()
   rememberTabs()
   api.config.set({ lastNote: path })
@@ -2842,7 +3149,7 @@ async function recheckOpenNote () {
 
 window.addEventListener('focus', () => { recheckOpenNote() })
 
-const copilot = mountCopilot({
+const copilotDeps = {
   el: {
     app: el.app,
     panel: el.aiPanel,
@@ -2928,7 +3235,70 @@ const copilot = mountCopilot({
       return null
     })
   }
-})
+}
+
+/* ------------------------------------------------------- copilot, on demand
+
+   The panel is a tenth of everything the renderer compiles at launch, and it
+   opens closed. So it is fetched the first time something actually wants it,
+   and until then `copilot` below stands in for it.
+
+   The stand-in is not a general proxy, because the two kinds of call it takes
+   are not the same:
+
+   - Things a reader asked for — open, toggle, ask, quote — load the panel and
+     then happen. Ordering survives: every one of them awaits the same promise,
+     so `open()` then `quote()` still arrives in that order.
+   - Things that only tell the panel about a change — setNote, applyConfig,
+     close, flush — are dropped when it was never built. A quit must not load
+     the copilot in order to flush transcripts it does not have, and moving
+     between notes must not build a panel nobody opened.
+
+   `renamed` is the exception in that second group, and the reason this is a
+   list rather than a rule: chats are filed under the note's path, in memory and
+   in the history file, so a rename that the panel sleeps through leaves every
+   conversation about that note under a name nothing will ask for again. It
+   loads. Renames are rare; a lost conversation is not recoverable. */
+let copilotLive = null
+let copilotArriving = null
+
+function loadCopilot () {
+  if (copilotLive) return Promise.resolve(copilotLive)
+  copilotArriving ||= import('./copilot.js').then(async ({ mountCopilot }) => {
+    const built = mountCopilot(copilotDeps)
+    /* Built after boot, so it has missed what boot would have told it: the
+       settings that dress its controls, the stored conversations, and which
+       note is on screen. `restore` is the first two — the same call boot used
+       to make — and it is awaited so that whoever asked for the panel gets one
+       with its history already in it. */
+    await built.restore(state.cfg).catch(() => {})
+    copilotLive = built
+    if (state.current?.path) built.setNote(state.current.path)
+    return built
+  })
+  return copilotArriving
+}
+
+const copilot = {
+  // Asked for: these build the panel.
+  open: () => loadCopilot().then((c) => c.open()),
+  toggle: () => loadCopilot().then((c) => c.toggle()),
+  ask: (text) => loadCopilot().then((c) => c.ask(text)),
+  quote: (text) => loadCopilot().then((c) => c.quote(text)),
+  renamed: (moved) => loadCopilot().then((c) => c.renamed(moved)),
+
+  /* Boot. A panel left open is built now, because it is about to be on screen
+     anyway and the window should not be revealed with a gap where it goes. A
+     panel left closed is not built at all — its conversations are read when it
+     is first opened, which is the only moment anything can look at them. */
+  restoreAtBoot: (cfg) => (cfg.ai === 'open' ? loadCopilot() : Promise.resolve()),
+
+  // Told to: these are nothing at all until there is a panel to tell.
+  close: () => copilotLive?.close(),
+  setNote: (path) => copilotLive?.setNote(path),
+  applyConfig: (cfg) => copilotLive?.applyConfig(cfg),
+  flush: async () => copilotLive ? copilotLive.flush() : undefined
+}
 
 /* A block that failed offers to hand the failure over — see runcode.js, which
    writes the question and knows nothing about who answers it. Opening the panel
@@ -3082,6 +3452,16 @@ async function copilotContext () {
 
   const caret = editor.state.selection.main
   const selection = reading() ? '' : editor.state.sliceDoc(caret.from, caret.to)
+  /* A bounded view of the note around the cursor. Without one the agent's
+     first move on any question is to Read the whole file — and a long note,
+     once read, sits in the conversation thread and is re-sent on every later
+     turn. The excerpt answers the common questions directly; the size says
+     when the answer needs more than it shows. Skipped when a selection is
+     being sent, which already says what is being discussed. */
+  const doc = editor.state.doc
+  const excerpt = selection
+    ? ''
+    : noteExcerpt(doc, caret.head, NOTE_EXCERPT_LIMIT)
   return {
     note: state.current?.path || '',
     kind: viewingTex() ? 'tex' : (viewingLanguageTable() ? 'language' : 'note'),
@@ -3089,8 +3469,29 @@ async function copilotContext () {
     truncated: selection.length > SELECTION_LIMIT,
     /* Where the reader is, when they have not said. The rendered view has no
        caret worth reporting — it is a page, not a document being edited. */
-    line: reading() ? 0 : editor.state.doc.lineAt(caret.head).number,
-    heading: reading() ? '' : headingAt(caret.head)
+    line: reading() ? 0 : doc.lineAt(caret.head).number,
+    heading: reading() ? '' : headingAt(caret.head),
+    excerpt: excerpt.text,
+    excerptCut: excerpt.cut,
+    noteChars: doc.length
+  }
+}
+
+/* Half a screenful either way, snapped to whole lines. Enough to answer
+   "what does the intro say" without reading the file; small enough that a
+   long note does not buy its way into the thread by the front door. */
+const NOTE_EXCERPT_LIMIT = 6000
+
+function noteExcerpt (doc, head, limit) {
+  const half = Math.floor(limit / 2)
+  const startLine = doc.lineAt(Math.max(0, head - half))
+  const endLine = doc.lineAt(Math.min(doc.length, head + half))
+  const start = startLine.from
+  const end = endLine.to
+  if (start === 0 && end === doc.length) return { text: doc.toString(), cut: false }
+  return {
+    text: `${start ? '…\n' : ''}${doc.sliceString(start, end)}${end < doc.length ? '\n…' : ''}`,
+    cut: doc.length > limit
   }
 }
 
@@ -3386,9 +3787,17 @@ async function openWikilink (target, { newTab = false, side = false } = {}) {
   }
 
   const wanted = name.toLowerCase()
-  const hit =
-    bestLinkTarget(state.files.filter((f) => f.name.toLowerCase() === wanted)) ||
-    state.files.find((f) => f.path.toLowerCase().replace(NOTE_EXT, '') === wanted)
+  let hit = linkTargetFor(wanted)
+
+  /* Nothing by that name — which is the one moment it is worth asking main for
+     a fresh alias list, because the alternative is creating a note. An alias
+     added since the last refresh (in a note that is open, or by a sync client)
+     would otherwise be a second copy of a note the vault already has, written
+     to disk before anyone saw the link fail. */
+  if (!hit) {
+    await refreshAliases()
+    hit = linkTargetFor(wanted)
+  }
 
   if (hit) {
     // ⌥ on a website falls back to the ordinary open rather than doing
@@ -3409,6 +3818,36 @@ async function openWikilink (target, { newTab = false, side = false } = {}) {
 }
 
 /**
+ * The note a lowercased link name means, as a tree entry.
+ *
+ * A name, then a path, then an alias — main's `linkTarget` resolves in the same
+ * order for the same reason: a note actually called `Wanted` outranks one that
+ * merely answers to it, and two answers for one link is how a backlink used to
+ * be attributed to the wrong note.
+ */
+function linkTargetFor (wanted, files = state.files) {
+  const named = bestLinkTarget(files.filter((f) => f.name.toLowerCase() === wanted))
+  if (named) return named
+  const byPath = files.find((f) => f.path.toLowerCase().replace(NOTE_EXT, '') === wanted)
+  if (byPath) return byPath
+  const claimed = state.aliases[wanted]
+  if (!claimed?.length) return null
+  const set = new Set(claimed)
+  return bestLinkTarget(files.filter((f) => set.has(f.path)))
+}
+
+/** The alias list, re-read. Cheap, and only asked for when a link misses. */
+async function refreshAliases () {
+  try {
+    state.aliases = (await api.vault.aliases()) || {}
+  } catch {
+    // A vault that is closed or gone has no aliases; the caller falls through
+    // to the same "no such note" it would have reached anyway.
+    state.aliases = {}
+  }
+}
+
+/**
  * The note a bare name means, as a path — what a transclusion or a hover
  * preview resolves through. The same answer `openWikilink` arrives at, minus
  * the creating: an embed of a note that does not exist is a missing embed,
@@ -3418,10 +3857,7 @@ async function openWikilink (target, { newTab = false, side = false } = {}) {
 function noteFromName (name) {
   if (!name) return state.current && NOTE_EXT.test(state.current.path) ? state.current.path : null
   const wanted = String(name).toLowerCase().replace(NOTE_EXT, '')
-  const notes = state.files.filter((f) => NOTE_EXT.test(f.path))
-  const hit =
-    bestLinkTarget(notes.filter((f) => f.name.toLowerCase() === wanted)) ||
-    notes.find((f) => f.path.toLowerCase().replace(NOTE_EXT, '') === wanted)
+  const hit = linkTargetFor(wanted, state.files.filter((f) => NOTE_EXT.test(f.path)))
   return hit ? hit.path : null
 }
 
@@ -3605,6 +4041,7 @@ const PANES = {
   files: { tab: () => el.paneFilesTab, body: () => el.tree, paint: paintOutlineTab },
   outline: { tab: () => el.paneOutlineTab, body: () => el.outlineList, paint: renderOutline },
   links: { tab: () => el.paneLinksTab, body: () => el.linksList, paint: renderLinks },
+  spelling: { tab: () => el.paneSpellingTab, body: () => el.spellingList, paint: renderSpelling },
   info: { tab: () => el.paneInfoTab, body: () => el.infoPane, paint: renderInfo }
 }
 
@@ -3643,6 +4080,10 @@ function setPane (pane, remember = true) {
     spec.body().hidden = !on
     spec.tab().classList.toggle('is-on', on)
     spec.tab().setAttribute('aria-selected', String(on))
+    /* Roving tabindex: the strip is one stop on the way through the app, and
+       the arrow keys move within it — see the keydown handler below. Without
+       this, Tab visited all four. */
+    spec.tab().tabIndex = on ? 0 : -1
     if (on) spec.tab().scrollIntoView({ inline: 'nearest', block: 'nearest' })
   }
   el.savedSearches.classList.toggle('is-pane-hidden', state.pane !== 'files')
@@ -3671,6 +4112,37 @@ const toggleOutline = (on) => togglePane('outline', on)
 for (const [name, spec] of Object.entries(PANES)) {
   spec.tab().addEventListener('click', () => setPane(name))
 }
+
+/* A tablist is navigated with the arrow keys, not with Tab — Tab is how you
+   leave it for the panel it controls. The strip declared `role="tablist"` and
+   had none of that, so the four tabs were four separate stops on the way to
+   the tree, which is the failure the role exists to prevent.
+
+   Hidden tabs are skipped rather than focused: which panes exist depends on
+   what is open (a PDF has contents, a note has an outline), and stepping onto
+   a tab that is not there would look like the keys had stopped working. */
+el.paneTabs?.addEventListener('keydown', (event) => {
+  const STEP = { ArrowRight: 1, ArrowLeft: -1, Home: 0, End: 0 }
+  if (!(event.key in STEP)) return
+
+  const tabs = Object.values(PANES).map((spec) => spec.tab()).filter((tab) => !tab.hidden)
+  if (tabs.length < 2) return
+  const from = tabs.indexOf(document.activeElement)
+  if (from < 0) return
+
+  event.preventDefault()
+  const to = event.key === 'Home'
+    ? 0
+    : event.key === 'End'
+      ? tabs.length - 1
+      // Wraps, which is what a tablist does at either end.
+      : (from + STEP[event.key] + tabs.length) % tabs.length
+
+  /* Selection follows focus. With four cheap panels that is the behaviour the
+     spec prefers — it saves a keystroke and there is nothing to commit. */
+  tabs[to].focus()
+  tabs[to].click()
+})
 
 /**
  * The tab's name, which is the name of whatever it would show: a note has an
@@ -4233,6 +4705,159 @@ function textFacts (text) {
     headings: headingsFor(editor.state.doc).length,
     links: links.size
   }
+}
+
+/* ------------------------------------------------------------- spelling
+
+   The words the dictionary does not know, and where each of them is.
+
+   The editor already underlines them in red — but Chromium draws those
+   underlines itself and will not say what it drew them under, so this panel
+   cannot read them off the page. It asks main instead (see the spelling
+   section of electron/main.js), which keeps a dictionary of its own and the
+   custom words Chromium was taught, so a word accepted in one place is
+   accepted in both.
+
+   Which words are even asked about is the interesting half, and it lives in
+   src/spelling.js: a note is prose with code, maths, links and filenames mixed
+   into it, and a panel that lists those is a panel nobody keeps open.
+   ================================================================== */
+
+let spellingToken = 0
+let spellingKeys = ''
+/* Where each word's places are, refreshed on every pass — the rows survive an
+   edit that adds no new mistakes, but every position in the note behind them
+   has moved. */
+let spellingGroups = new Map()
+/* Which occurrence the next click on a word goes to, so clicking a word that
+   appears four times walks the four rather than returning to the first. */
+const spellingStep = new Map()
+
+function spellingMessage (text) {
+  spellingKeys = ''
+  spellingGroups = new Map()
+  el.spellingList.replaceChildren(node('p', 'outline-empty', text))
+}
+
+/** Select one occurrence of a flagged word and put it on screen. */
+function goToSpelling (key) {
+  const group = spellingGroups.get(key)
+  if (!group?.at.length) return
+  const step = ((spellingStep.get(key) ?? -1) + 1) % group.at.length
+  spellingStep.set(key, step)
+  const at = group.at[step]
+
+  // A misspelling is something to fix, and fixing happens in the editing view.
+  if (reading()) setView('edit')
+  /* Selected rather than merely scrolled to: the next thing after finding a
+     typo is typing over it. The scroll is left to scrollToLine for the reason
+     goToLine explains — two alignments in one gesture fight each other. */
+  editor.dispatch({ selection: { anchor: at.from, head: at.to } })
+  editor.focus()
+  scrollToLine(editor.state.doc.lineAt(at.from).number)
+}
+
+async function renderSpelling () {
+  if (!paneOpen('spelling')) return
+
+  if (!state.current) { spellingMessage('No note is open.'); return }
+  if (viewingPdf() || viewingSite() || viewingWhiteboard()) {
+    spellingMessage('Spelling is checked in notes.')
+    return
+  }
+  if (state.cfg?.spellcheck === false) {
+    spellingMessage('Spellcheck is off — turn it on in Settings.')
+    return
+  }
+
+  const text = editor.state.doc.toString()
+  const groups = groupWords(wordsIn(text, editor.state))
+  // Positions first: the rows below may not be rebuilt, and a click has to
+  // land where the word is now rather than where it was two edits ago.
+  spellingGroups = groups
+
+  const asked = [...groups.values()].map((group) => group.word)
+  if (!asked.length) { spellingMessage('Nothing to check in this note.'); return }
+
+  const token = ++spellingToken
+  let flagged
+  try {
+    flagged = new Set(await api.spell.check(asked))
+  } catch {
+    spellingMessage('The dictionary could not be read.')
+    return
+  }
+  // A newer pass has started, or the pane was closed while the dictionary
+  // loaded — its answer is about a note that may no longer be open.
+  if (token !== spellingToken || !paneOpen('spelling')) return
+  spellingGroups = groups
+
+  const rows = [...groups.entries()]
+    .filter(([, group]) => flagged.has(group.word))
+    .sort((a, b) => a[1].at[0].from - b[1].at[0].from)
+
+  if (!rows.length) { spellingMessage('No spelling mistakes in this note.'); return }
+
+  /* The rows stand while the set of flagged words stands. Rebuilding them on
+     every keystroke would throw away the step through a repeated word — and
+     the row you were about to click. */
+  const keys = rows.map(([key, group]) => `${key}:${group.at.length}`).join(' ')
+  if (keys === spellingKeys && el.spellingList.childElementCount) return
+  spellingKeys = keys
+
+  // Words that left the list have no place left to step through.
+  const live = new Set(rows.map(([key]) => key))
+  for (const key of [...spellingStep.keys()]) if (!live.has(key)) spellingStep.delete(key)
+
+  const frag = document.createDocumentFragment()
+  for (const [key, group] of rows) {
+    const item = node('div', 'spelling-item')
+
+    const row = document.createElement('button')
+    row.type = 'button'
+    row.className = 'spelling-row'
+    row.title = group.at.length > 1
+      ? `“${group.word}” · ${group.at.length} places — click to step through them`
+      : `“${group.word}” — click to go to it`
+    row.append(node('span', 'spelling-word', group.word))
+    if (group.at.length > 1) {
+      row.append(node('span', 'spelling-count', String(group.at.length)))
+    }
+    row.addEventListener('click', () => goToSpelling(key))
+
+    /* The other half of a spelling panel: half of what it flags is not a
+       mistake but a name it has never met. Teaching it here is the same act as
+       "Learn Spelling" in the editor's own context menu, and writes to the same
+       list — so the red underline goes too. */
+    const teach = document.createElement('button')
+    teach.type = 'button'
+    teach.className = 'spelling-teach'
+    teach.title = `Add “${group.word}” to the dictionary`
+    teach.setAttribute('aria-label', `Add “${group.word}” to the dictionary`)
+    teach.textContent = '+'
+    teach.addEventListener('click', async (event) => {
+      event.stopPropagation()
+      await api.dictionary.add(group.word)
+      // The word is gone from the list, so the list is what has to be redrawn
+      // — not this row, which is about to stop existing.
+      spellingKeys = ''
+      renderSpelling()
+    })
+
+    item.append(row, teach)
+    frag.append(item)
+  }
+  el.spellingList.replaceChildren(frag)
+}
+
+let spellingTimer = null
+
+function queueSpelling () {
+  if (!paneOpen('spelling')) return
+  clearTimeout(spellingTimer)
+  /* Slower than the outline's quarter second: this crosses to another process
+     and back, and a word half-typed is a misspelling of nothing. */
+  spellingTimer = setTimeout(renderSpelling, 500)
 }
 
 let infoToken = 0
@@ -4935,7 +5560,17 @@ function toggleTaskAtLine (lineIndex, box) {
 /* Where a click inside a rendered note goes, shared by every surface that
    renders one — this view, the hover popover and the side pane. See
    src/links.js for what the rule is and why it is only written once. */
-const fragmentRouting = { openWikilink, openAsset, openExternal: (url) => api.openExternal(url) }
+/* Clicking a tag asks the vault for it. The search understands `tag:` already
+   and answers hierarchically, so this is the existing question with the
+   existing answer — only now there is a way to ask it by pointing at one. */
+const openTag = (name) => openOverlay('search', { query: `tag:${name}` })
+
+const fragmentRouting = {
+  openWikilink,
+  openAsset,
+  openTag,
+  openExternal: (url) => api.openExternal(url)
+}
 
 el.reading.addEventListener('click', (e) => {
   const target = e.target
@@ -4987,12 +5622,17 @@ const COMMANDS = [
   { id: 'new-file', title: 'New file…', key: '›' },
   { id: 'fold-all-headings', title: 'Fold all headings', scope: 'markdown' },
   { id: 'unfold-all-headings', title: 'Unfold all headings', scope: 'markdown' },
+  { id: 'center-headings', title: 'Center headings', scope: 'markdown' },
   { id: 'note-history', title: 'Show history…', scope: 'text' },
+  { id: 'move-file', title: 'Move this file…' },
   { id: 'orphaned-images', title: 'Show orphaned images…' },
   { id: 'themes', title: 'Change theme…' },
   { id: 'font-body', title: 'Change markdown font…' },
   { id: 'font-ui', title: 'Change interface font…' },
   { id: 'lint-file', title: 'Lint current file', scope: 'markdown' },
+  /* Passes the test above: a template has no key and no menu item, and the
+     only other way to use one would be to open it and copy it out by hand. */
+  { id: 'insert-template', title: 'Insert template…', scope: 'markdown' },
   { id: 'export-pdf', title: 'Export as PDF…', scope: 'markdown' },
   { id: 'settings', title: 'Settings…', key: '⌘,' },
   { id: 'copilot', title: 'Toggle copilot', key: '⌘⇧A' }
@@ -5050,6 +5690,93 @@ const FONT_MODES = { 'font-body': 'body', 'font-ui': 'ui' }
    pickers open with no vault, the same way the theme picker does. */
 const VAULTLESS = new Set(['commands', 'themes', 'font-body', 'font-ui'])
 
+/* What the panel says it is, in the field and to a screen reader. Kept side by
+   side so a new picker cannot gain a prompt without gaining an announcement. */
+const OVERLAY_PROMPT = {
+  switcher: 'Jump to a note…',
+  search: 'Search notes, PDFs, and highlights…',
+  commands: 'Run a command…',
+  'new-files': 'Choose a file type…',
+  themes: 'Change the theme…',
+  'font-body': 'Choose the font notes are written in…',
+  'font-ui': 'Choose the font the app is drawn in…',
+  countries: 'Choose a country flag…',
+  'move-to': 'Move to a folder…',
+  templates: 'Insert a template…'
+}
+
+const OVERLAY_LABEL = {
+  switcher: 'Quick switcher',
+  search: 'Search the vault',
+  commands: 'Command palette',
+  'new-files': 'New file',
+  themes: 'Theme',
+  'font-body': 'Markdown font',
+  'font-ui': 'Interface font',
+  countries: 'Country flag',
+  'move-to': 'Move to a folder',
+  templates: 'Insert a template'
+}
+
+/* A folder of notes to start other notes from. A plain folder in the vault,
+   because everything else here is: a template is a note, editable the way every
+   other note is, and a vault carried to another app keeps them as readable
+   files rather than as a feature that only existed inside Tulip. */
+const TEMPLATE_DIR = 'templates'
+
+/** The templates the vault holds, newest name order, as overlay items. */
+function templateItems () {
+  const prefix = `${TEMPLATE_DIR}/`
+  return state.files
+    .filter((f) => f.path.toLowerCase().startsWith(prefix) && isEditableTextPath(f.path))
+    .map((f) => ({ ...f, label: f.path.slice(prefix.length).replace(/\.md$/i, '') }))
+}
+
+/**
+ * The handful of placeholders a template may carry.
+ *
+ * Deliberately few, and all answerable from what the app already knows — a
+ * template language is a program, and this is a note with today's date in it.
+ * `{{title}}` is the note being written into, not the template.
+ */
+function fillTemplate (text, title) {
+  const now = new Date()
+  const pad = (n) => String(n).padStart(2, '0')
+  const values = {
+    date: `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`,
+    time: `${pad(now.getHours())}:${pad(now.getMinutes())}`,
+    title
+  }
+  return String(text).replace(/\{\{\s*(date|time|title)\s*\}\}/gi, (whole, name) => {
+    const value = values[name.toLowerCase()]
+    return value === undefined ? whole : value
+  })
+}
+
+/**
+ * Put a template into the note on screen, at the caret.
+ *
+ * Inserted rather than replacing: a template is usually reached from an empty
+ * note, but "insert" is the honest description of what happens in one that is
+ * not, and it is the behaviour that cannot lose anything.
+ */
+async function insertTemplate (path) {
+  const text = await api.file.read(path)
+  if (typeof text !== 'string') return
+  const title = state.current?.path
+    ? state.current.path.split('/').pop().replace(/\.md$/i, '')
+    : ''
+  const filled = fillTemplate(text, title)
+  const at = editor.state.selection.main
+  editor.dispatch({
+    changes: { from: at.from, to: at.to, insert: filled },
+    // The caret lands after what was inserted, where writing continues.
+    selection: { anchor: at.from + filled.length },
+    scrollIntoView: true
+  })
+  editor.focus()
+}
+
 function openOverlay (mode, meta = {}) {
   if (!state.vault && !VAULTLESS.has(mode)) { pickVault(); return }
   // One picker opening straight over another never reaches closeOverlay, so
@@ -5058,16 +5785,12 @@ function openOverlay (mode, meta = {}) {
   state.overlay = { mode, items: [], index: 0, ...meta }
   el.overlay.hidden = false
   el.panelInput.value = String(meta.query || '')
-  el.panelInput.placeholder = {
-    switcher: 'Jump to a note…',
-    search: 'Search notes, PDFs, and highlights…',
-    commands: 'Run a command…',
-    'new-files': 'Choose a file type…',
-    themes: 'Change the theme…',
-    'font-body': 'Choose the font notes are written in…',
-    'font-ui': 'Choose the font the app is drawn in…',
-    countries: 'Choose a country flag…'
-  }[mode]
+  el.panelInput.placeholder = OVERLAY_PROMPT[mode]
+  /* The panel is one dialog reused by nine pickers. Its label is written in the
+     markup as "Quick switcher", which is what a screen reader announced when it
+     was opened to change the theme or search the vault — the placeholder said
+     one thing and the announcement another. */
+  el.panel.setAttribute('aria-label', OVERLAY_LABEL[mode] || 'Quick switcher')
   el.panelFoot.innerHTML = mode === 'themes' || FONT_MODES[mode]
     ? '<span><kbd>↑↓</kbd> preview</span><span><kbd>↵</kbd> keep</span><span><kbd>esc</kbd> cancel</span>'
     : mode === 'search'
@@ -5296,8 +6019,13 @@ async function runOverlayQuery (query) {
   }
 
   if (mode === 'switcher' || mode === 'commands' || mode === 'new-files' ||
-      mode === 'themes' || mode === 'countries' || FONT_MODES[mode]) {
-    const source = mode === 'switcher'
+      mode === 'themes' || mode === 'countries' || mode === 'move-to' ||
+      mode === 'templates' || FONT_MODES[mode]) {
+    const source = mode === 'move-to'
+      ? moveDestinations(state.overlay.paths || [])
+      : mode === 'templates'
+      ? templateItems()
+      : mode === 'switcher'
       ? state.files.map((f) => ({ ...f, label: f.name }))
       : mode === 'themes'
         ? themeItems()
@@ -5566,10 +6294,12 @@ function syncSelection () {
 async function chooseOverlayItem (i) {
   const entry = state.overlay?.items[i]
   if (!entry) return
-  const { mode, dir } = state.overlay
+  const { mode, dir, paths } = state.overlay
   const { item } = entry
   closeOverlay()
 
+  if (mode === 'move-to') { await moveInto(item.path, paths); return }
+  if (mode === 'templates') { await insertTemplate(item.path); return }
   if (mode === 'themes') { commitTheme(item.id); return }
   if (FONT_MODES[mode]) { commitFont(FONT_MODES[mode], item.id); return }
   if (mode === 'commands') { runCommand(item.id); return }
@@ -5702,6 +6432,7 @@ function showContextMenu (event, node) {
       run: () => paths.forEach((p) => api.file.reveal(p))
     })
     items.push({ label: `Copy ${paths.length} paths`, run: () => copyPaths(paths) })
+    items.push({ label: `Move ${paths.length} items to…`, run: () => openMovePicker(paths) })
     items.push({ sep: true })
     items.push({
       label: `Move ${paths.length} items to Trash`,
@@ -5723,6 +6454,7 @@ function showContextMenu (event, node) {
   if (node.type !== 'folder' && isEditableTextPath(node.path)) {
     items.push({ label: 'Show history…', run: () => noteHistory.show(node.path) })
   }
+  items.push({ label: 'Move to…', run: () => openMovePicker([node.path]) })
   items.push({ label: 'Reveal in Finder', run: () => api.file.reveal(node.path) })
   items.push({ label: 'Copy path', run: () => copyPaths([node.path]) })
   items.push({ sep: true })
@@ -5750,6 +6482,7 @@ function renderContextMenu (items, event) {
     if (item.sep) { el.ctx.append(document.createElement('hr')); continue }
     const btn = document.createElement('button')
     btn.textContent = item.label
+    btn.setAttribute('role', 'menuitem')
     if (item.danger) btn.className = 'danger'
     if (item.disabled) btn.disabled = true
     // A setting the menu turns on and off says which it is now, the way a
@@ -5775,6 +6508,15 @@ function renderContextMenu (items, event) {
   const rect = el.ctx.getBoundingClientRect()
   el.ctx.style.left = `${Math.min(event.clientX, innerWidth - rect.width - 8)}px`
   el.ctx.style.top = `${Math.min(event.clientY, innerHeight - rect.height - 8)}px`
+
+  /* Opened from the keyboard, the menu takes the focus — otherwise there is no
+     way to reach what it is offering. Opened from the mouse it does not: the
+     pointer is already the way in, and stealing focus from the editor mid-
+     sentence to do nothing with it is worse than leaving it alone. */
+  if (event.keyboard) {
+    ctxReturn = document.activeElement
+    el.ctx.querySelector('button:not([disabled])')?.focus()
+  }
 }
 
 /** Move a rendered local image to the system Trash and remove every reference
@@ -5846,7 +6588,40 @@ async function removeMany (paths) {
   else toast(`Moved ${paths.length} items to the Trash`)
 }
 
-function hideContextMenu () { el.ctx.hidden = true }
+/* Where the focus was when the menu opened, so closing it puts the keyboard
+   back where it came from rather than at the top of the document. */
+let ctxReturn = null
+
+function hideContextMenu () {
+  if (el.ctx.hidden) return
+  el.ctx.hidden = true
+  const back = ctxReturn
+  ctxReturn = null
+  if (back?.isConnected) back.focus()
+}
+
+/* The menu, once it is up, behaves like a menu: the arrows walk it, Escape
+   leaves it, and Tab is not a way out — a menu that Tab escapes leaves the
+   reader somewhere behind an overlay they cannot see past. */
+el.ctx.addEventListener('keydown', (event) => {
+  const items = [...el.ctx.querySelectorAll('button:not([disabled])')]
+  if (!items.length) return
+  const at = items.indexOf(document.activeElement)
+
+  if (event.key === 'Escape') { event.preventDefault(); hideContextMenu(); return }
+  if (event.key === 'ArrowDown' || (event.key === 'Tab' && !event.shiftKey)) {
+    event.preventDefault()
+    items[(at + 1 + items.length) % items.length].focus()
+    return
+  }
+  if (event.key === 'ArrowUp' || (event.key === 'Tab' && event.shiftKey)) {
+    event.preventDefault()
+    items[(at - 1 + items.length) % items.length].focus()
+    return
+  }
+  if (event.key === 'Home') { event.preventDefault(); items[0].focus(); return }
+  if (event.key === 'End') { event.preventDefault(); items[items.length - 1].focus() }
+})
 window.addEventListener('mousedown', (e) => {
   if (!el.ctx.hidden && !el.ctx.contains(e.target)) hideContextMenu()
 })
@@ -6080,6 +6855,7 @@ function closeCurrentNote () {
   // Nothing is open, so no row is active; the tree's shape has not moved.
   markActiveRow()
   renderOutline()
+  renderSpelling()
   renderInfo()
   updateStatus()
 }
@@ -6135,6 +6911,11 @@ function runCommand (id, dir = state.current?.dir || '') {
     case 'reopen-tab': reopenTab(); break
     case 'next-tab': cycleTab(1); break
     case 'prev-tab': cycleTab(-1); break
+    /* Whatever the tree has selected, or — when it has nothing — the note on
+       screen, which is what "this file" means from the palette. */
+    case 'move-file':
+      openMovePicker(state.picked.size ? topLevelOnly(state.picked) : [state.current?.path])
+      break
     case 'switcher': openOverlay('switcher'); break
     // The heading jump is the switcher with its query already started.
     case 'headings':
@@ -6150,6 +6931,14 @@ function runCommand (id, dir = state.current?.dir || '') {
       editor.unfoldAllHeadings()
       if (reading()) setReadingHeadingFolds(false)
       break
+    /* The same switch the Markdown settings tab carries, so the palette and
+       the pane cannot disagree about which way it points. */
+    case 'center-headings': {
+      const on = state.cfg.centerHeadings !== true
+      setSetting('centerHeadings', on)
+      toast(on ? 'Headings centered.' : 'Headings left aligned.')
+      break
+    }
     case 'fit-columns':
       toast(editor.fitAllColumns()
         ? 'Columns fit their content again.'
@@ -6160,6 +6949,19 @@ function runCommand (id, dir = state.current?.dir || '') {
     case 'info': togglePane('info'); break
     case 'search': openOverlay('search'); break
     case 'lint-file': lintFile(); break
+    case 'insert-template': {
+      /* An empty templates folder is the ordinary state of a vault that has
+         never used one, so it explains itself rather than opening a picker
+         with nothing in it. */
+      if (!templateItems().length) {
+        toast(`No templates yet — add notes to a “${TEMPLATE_DIR}” folder.`)
+        break
+      }
+      // Inserting needs a caret, and the reading view has none.
+      if (reading()) setView('editing')
+      openOverlay('templates')
+      break
+    }
     case 'orphaned-images': showOrphanedImages(); break
     case 'note-history':
       if (!state.current || !isEditableTextPath(state.current.path)) {
@@ -6380,6 +7182,8 @@ function applySettings (cfg) {
 
   // Both views number their code from the same switch; the CSS decides how.
   el.app.dataset.codeNumbers = cfg.codeNumbers === false ? 'off' : 'on'
+  // Reading view headings sit left with the prose, or centred when asked.
+  el.app.dataset.centerHeadings = cfg.centerHeadings === true ? 'on' : 'off'
   /* Reading view only: the editing view's whole scroll-sync machinery for code
      (see codeblock.js) assumes lines that do not fold. */
   const wrapsCode = cfg.codeWrap === true
@@ -6532,8 +7336,10 @@ function closeNarrowPanel () {
   return false
 }
 
+/* The drawer's own dismissal. There is no cross in the sidebar's header any
+   more, so tapping beside the drawer is what closes it — along with the toggle
+   that opened it. */
 el.drawerScrim.addEventListener('click', closeNarrowPanel)
-el.closeSidebar.addEventListener('click', () => toggleSidebar(false))
 
 /* ------------------------------------------------------- panel widths */
 
@@ -7023,13 +7829,15 @@ function toast (message) {
 
 /* ----------------------------------------------------------------- boot */
 
+/* There is no loading screen. The window stays off-screen until one of the two
+   below has run — see the reveal in electron/main.js — so what a launch shows
+   is the note, and nothing before it. All this does is put the half-built page
+   out of sight for the one case where the window is already up: a boot retried
+   from the error card. */
 function paintBootLoading () {
   el.app.dataset.booting = ''
-  el.bootScreen.hidden = false
+  el.bootScreen.hidden = true
   el.bootScreen.dataset.state = 'loading'
-  el.bootScreen.setAttribute('aria-busy', 'true')
-  el.bootTitle.textContent = 'Opening your workspace'
-  el.bootMessage.textContent = 'Reading your settings and vault.'
   el.bootDetail.hidden = true
   el.bootDetail.textContent = ''
   el.bootRetry.hidden = true
@@ -7041,6 +7849,7 @@ function paintBootReady () {
   el.bootScreen.hidden = true
   el.bootScreen.dataset.state = 'ready'
   el.bootScreen.setAttribute('aria-busy', 'false')
+  api.painted()
 }
 
 function paintBootError (error) {
@@ -7054,6 +7863,9 @@ function paintBootError (error) {
   el.bootDetail.hidden = false
   el.bootRetry.hidden = false
   el.bootConnect.hidden = false
+  // The launch failed, so nothing else will ask for the window: this card is
+  // what there is to show, and a window that never appears is worse than it.
+  api.painted()
 }
 
 /* Connecting a vault is the same act whether it is the first one or the fifth:
@@ -7534,6 +8346,17 @@ window.__tulip = {
 
 async function boot () {
   paintBootLoading()
+  /* Before the first tree is drawn, and outside the try: the tree is redrawn
+     from a dozen places and the listener is on the container, which outlives
+     all of them. */
+  wireTreeKeys()
+  // Every panel that calls itself modal actually behaves like one — see
+  // trapModalFocus, which reads the attribute rather than a list of panels.
+  trapModalFocus()
+  /* One listener for every surface that renders a note. The links are anchors
+     without an href — see the wikilink rule in src/markdown.js — so nothing
+     follows them on ↵ unless something says so. */
+  document.addEventListener('keydown', activateFocusedWikilink)
   try {
   /* Asked together: neither needs the other, and main is at its busiest in
      exactly this moment — indexing the vault, chasing attachment moves,
@@ -7562,7 +8385,7 @@ async function boot () {
      is the read of the stored conversations, which has nothing to do with the
      vault walk it now runs beside. The note opened further down still finds its
      own conversation in hand, because the barrier is above it. */
-  const restoringCopilot = copilot.restore(cfg)
+  const restoringCopilot = copilot.restoreAtBoot(cfg)
   state.expanded = new Set(cfg.expanded || [])
 
   /* No vault: nothing below this line has a folder to run against, so the

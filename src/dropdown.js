@@ -86,6 +86,10 @@ const icon = (path, size) => svgIcon(`<path d="${path}"/>`, { size, stroke: 1.6 
  *                  caller may hand `''` back as a choice, so a selection that
  *                  disappears can stay gone rather than turning into the first
  *                  entry. The empty string is the only value treated this way.
+ * @param onClose called once the menu has actually closed — Escape, an outside
+ *                  click, or a pick. A caller that built the control around a
+ *                  transient anchor (the embed picker stands on an invisible
+ *                  button at the chip's position) takes it down here.
  *
  * @returns { root, set, value } — `set` replaces the options and the choice at
  *          once, which is what a catalogue arriving late needs.
@@ -111,7 +115,7 @@ export function matcher (query) {
   }
 }
 
-export function dropdown ({ options = [], value, onChange, label, className = '', search = false, placeholder = '' }) {
+export function dropdown ({ options = [], value, onChange, label, className = '', search = false, placeholder = '', onClose } = {}) {
   let items = options
   /* What the menu is actually showing — `items` until something is typed. Every
      index below is into this, not into `items`, or picking the third row of a
@@ -296,6 +300,7 @@ export function dropdown ({ options = [], value, onChange, label, className = ''
     button.setAttribute('aria-expanded', 'false')
     if (live?.close === close) live = null
     if (focus) button.focus()
+    onClose?.()
   }
 
   const isOpen = () => !menu.hidden

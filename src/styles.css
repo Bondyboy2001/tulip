@@ -32,9 +32,20 @@
   font-style: italic;
 }
 
-/* Text colours are held to a contrast floor against their own background:
-   --muted at roughly 5:1 and --faint at roughly 4:1, so status text and
-   keyboard hints stay legible instead of fading into the paper. */
+/* Text colours are held to a contrast floor against their own background: both
+   --muted and --faint clear WCAG AA for body text (4.5:1), so status text and
+   keyboard hints stay legible instead of fading into the paper.
+
+   --faint used to sit at roughly 4:1 by design, on the reasoning that it is
+   decoration. It is not: completed tasks, study progress, timestamps and the
+   version string are all real text wearing it, in 149 places. Nine of the
+   eleven themes were below the floor; they were moved along their own hue and
+   saturation until they cleared it, so each theme still looks like itself.
+   (Solarized's --muted is the one deliberate divergence from a published
+   palette — base00 lands at 4.3:1 on base3, and legibility won.)
+
+   Keep new themes to the same floor. The check is a contrast ratio against
+   --paper, not an eyeball: these were all plausible-looking before. */
 :root {
   --paper:     #FBFAF8;
   --surface:   #FFFFFF;
@@ -42,7 +53,7 @@
   --ink:       #1A1815;
   --ink-soft:  #443F39;
   --muted:     #6B655E;
-  --faint:     #8A847B;
+  --faint:     #756F67;
   --line:      #E1DCD4;
   --line-soft: #EBE8E1;
   --accent:    #A63A5A;
@@ -172,7 +183,7 @@
   --ink:       #E9E5DF;
   --ink-soft:  #C4BEB6;
   --muted:     #9C958C;
-  --faint:     #7E776E;
+  --faint:     #867F75;
   --line:      #332F3B;
   --line-soft: #272430;
   --accent:    #E87D9B;
@@ -230,8 +241,8 @@
   --sunk:      #EEE8D5;
   --ink:       #073642;
   --ink-soft:  #40565E;
-  --muted:     #657B83;
-  --faint:     #7E8E93;
+  --muted:     #5E737A;
+  --faint:     #637176;
   --line:      #DCD4BD;
   --line-soft: #E9E2CC;
   --accent:    #268BD2;
@@ -276,7 +287,7 @@
   --ink:       #E7E4D8;
   --ink-soft:  #BFC5BC;
   --muted:     #93A1A1;
-  --faint:     #7C8D8D;
+  --faint:     #819292;
   --line:      #14495A;
   --line-soft: #0A3844;
   --accent:    #268BD2;
@@ -321,7 +332,7 @@
   --ink:       #ECEFF4;
   --ink-soft:  #D8DEE9;
   --muted:     #A7B1C2;
-  --faint:     #8791A3;
+  --faint:     #959EAE;
   --line:      #434C5E;
   --line-soft: #3B4252;
   --accent:    #88C0D0;
@@ -456,7 +467,7 @@
   --ink:       #D7DAE0;
   --ink-soft:  #ABB2BF;
   --muted:     #9AA1AF;
-  --faint:     #7F8694;
+  --faint:     #9096A2;
   --line:      #3B4048;
   --line-soft: #31353D;
   --accent:    #61AFEF;
@@ -501,7 +512,7 @@
   --ink:       #F8F8F2;
   --ink-soft:  #D8D8D2;
   --muted:     #A3A9C8;
-  --faint:     #7B85AE;
+  --faint:     #8B94B8;
   --line:      #44475A;
   --line-soft: #363948;
   --accent:    #FF79C6;
@@ -546,7 +557,7 @@
   --ink:       #F8F8F2;
   --ink-soft:  #D9D8CE;
   --muted:     #ADA894;
-  --faint:     #8B8676;
+  --faint:     #949081;
   --line:      #3E3D32;
   --line-soft: #32332B;
   --accent:    #F92672;
@@ -636,7 +647,7 @@
   --ink:       #D7DEE7;
   --ink-soft:  #B0BAC6;
   --muted:     #8B95A3;
-  --faint:     #6C7684;
+  --faint:     #737E8C;
   --line:      #232A34;
   --line-soft: #1A1F28;
   --accent:    #6AA6F8;
@@ -1056,7 +1067,6 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
 }
 
 .sidebar-actions { display: flex; gap: 1px; }
-.narrow-only { display: none; }
 
 .icon-btn {
   display: grid;
@@ -1534,6 +1544,14 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
 .reading em, .reading i { color: var(--emph); }
 .reading h1 strong, .reading h2 strong, .reading h3 strong,
 .reading h4 strong, .reading h5 strong, .reading h6 strong { color: inherit; }
+/* "Center headings" (Markdown settings): the titles sit on the column's
+   centre, over their own lines, like a paper's chapter titles. */
+.app[data-center-headings="on"] .reading h1,
+.app[data-center-headings="on"] .reading h2,
+.app[data-center-headings="on"] .reading h3,
+.app[data-center-headings="on"] .reading h4,
+.app[data-center-headings="on"] .reading h5,
+.app[data-center-headings="on"] .reading h6 { text-align: center; }
 
 /* `**bold**` and `*italic*` in the editor. The same colours as the reading
    view above, said in classes so the active-line rule further down has
@@ -1617,7 +1635,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
   max-width: 100%;
   padding: 2px 3px 2px 7px;
   border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--line-soft));
-  border-radius: 999px;
+  border-radius: 6px;
   background: var(--accent-dim);
   color: var(--accent);
 }
@@ -1630,7 +1648,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
   margin-left: 2px;
   padding: 0;
   border: 0;
-  border-radius: 50%;
+  border-radius: 4px;
   background: none;
   color: currentColor;
   cursor: pointer;
@@ -2463,7 +2481,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
 .study-feedback {
   margin-top: 20px;
   padding: 8px 13px;
-  border-radius: 999px;
+  border-radius: 8px;
   font-family: var(--font-ui);
   font-size: 15px;
   font-weight: 700;
@@ -3303,6 +3321,14 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
   border-radius: 3px;
   padding: .06em .3em;
 }
+/* In the reading view a tag is a question you can ask — see openTag. In the
+   editing view it is text under the caret, so the affordance is only offered
+   where the click does something. */
+.reading .tk-tag[data-tag] { cursor: pointer; }
+.reading .tk-tag[data-tag]:hover,
+.reading .tk-tag[data-tag]:focus-visible {
+  background: color-mix(in srgb, var(--stem) 20%, transparent);
+}
 /* The same chip in the editing view, and in a table's cells. The backticks
    themselves stay visible on the active line, which is what the chip is
    wrapped around — so the padding is kept modest: it sits inside a line of
@@ -3685,7 +3711,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
   gap: 5px;
   padding: 2px 8px 2px 6px;
   border: 1px solid transparent;
-  border-radius: 999px;
+  border-radius: 6px;
   background: none;
   font: inherit;
   font-size: 10.5px;
@@ -5211,7 +5237,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 }
 .embed-file {
   border: 1px solid var(--line);
-  border-radius: 999px;
+  border-radius: 6px;
   color: var(--ink-soft);
   cursor: pointer;
   text-decoration: none;
@@ -5224,6 +5250,42 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   border: 1px dashed var(--line);
   border-radius: 5px;
   color: var(--faint);
+}
+
+/* The slash key's placeholder: the chip `![[ ]]` becomes in the editor, and
+   the target of "click into it and choose". A button the size of its own
+   label, in the same quiet chip language as the embed-file link. */
+.tk-embed-placeholder {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0 2px;
+  padding: 2px 8px 2px 7px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  background: var(--accent-dim);
+  color: var(--accent);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  line-height: 1.5;
+  cursor: pointer;
+  vertical-align: middle;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.tk-embed-placeholder:hover {
+  border-color: var(--accent-strong, var(--accent));
+  background: color-mix(in srgb, var(--accent-dim) 60%, var(--surface));
+}
+.tk-embed-placeholder svg { flex: none; }
+
+/* The inline autocomplete: the rest of the first matching name, greyed in
+   where it will land. A decoration, never text — it types nothing and saves
+   nothing, and the caret walks straight past it. */
+.tk-embed-ghost {
+  color: var(--faint);
+  opacity: .75;
+  pointer-events: none;
+  user-select: none;
 }
 
 /* ------------------------------------------------------- transclusion
@@ -5693,7 +5755,15 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   border-radius: 7px;
   opacity: .82;
 }
-.tk-embed-source svg {
+.tk-embed-change {
+  top: 8px;
+  right: 41px;
+  width: 29px;
+  height: 27px;
+  border-radius: 7px;
+  opacity: .82;
+}
+.tk-embed-control svg {
   width: 16px;
   height: 16px;
 }
@@ -7207,6 +7277,82 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 .link-note.is-missing .link-note-name { font-style: italic; }
 .link-note-count.is-missing { color: var(--accent); font-size: 12px; }
 
+/* ------------------------------------------------------------- spelling pane
+   A word and, when it appears more than once, how many places it is in. The
+   teach button sits at the row's end and only comes out under the pointer:
+   "not a mistake" is the second thing you do with this list, and a `+` on every
+   row would compete with the words for the eye. */
+.spelling-item {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 2px;
+  padding-right: 4px;
+  border-radius: 5px;
+}
+.spelling-item:hover { background: var(--hover); }
+
+.spelling-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: var(--ink-soft);
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  font-weight: 550;
+  text-align: left;
+  cursor: pointer;
+}
+.spelling-item:hover .spelling-row { color: var(--ink); }
+
+/* The word as it was written, under the same red squiggle the editor draws
+   under it — the panel and the page saying the same thing the same way. */
+.spelling-word {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  /* `--code-removed` is the theme's own red, defined by every one of them —
+     the colour a deletion is drawn in, which is the same "this is wrong" the
+     squiggle means. A red of this file's own would be right in one theme. */
+  text-decoration: underline wavy color-mix(in srgb, var(--code-removed) 70%, transparent);
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
+}
+.spelling-count {
+  margin-left: auto;
+  flex: none;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--faint);
+}
+
+.spelling-teach {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: var(--faint);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+}
+.spelling-item:hover .spelling-teach,
+.spelling-teach:focus-visible { opacity: 1; }
+.spelling-teach:hover { background: var(--sunk); color: var(--accent); }
+
 .link-hit {
   position: relative;
   width: 100%;
@@ -7580,7 +7726,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   flex: none;
   padding: 2px 8px;
   border: 1px solid var(--line);
-  border-radius: 999px;
+  border-radius: 6px;
   background: none;
   color: var(--faint);
   font-family: var(--font-ui);
@@ -7859,7 +8005,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   gap: 5px;
   padding: 3px 6px 3px 8px;
   border: 1px solid var(--line);
-  border-radius: 999px;
+  border-radius: 7px;
   background: var(--surface);
   font: 500 11.5px/1.35 var(--font-ui);
   color: var(--ink-soft);
@@ -7897,10 +8043,18 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 .dict-add .field { flex: 1; }
 .dict-list {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
   gap: 5px;
   max-height: 300px;
   overflow-y: auto;
+}
+/* One word per line, with its remove at the far end — a vocabulary of a few
+   hundred words wraps badly as a wall of pills, and a row apiece lets a word
+   be found by eye. */
+.dict-list .model-chip {
+  width: 100%;
+  justify-content: space-between;
+  align-items: center;
 }
 
 /* The settings search, between the pane's title and its close button. The
@@ -8720,7 +8874,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   height: 25px;
   padding: 0 10px;
   border: 1px solid var(--line);
-  border-radius: 999px;
+  border-radius: 7px;
   background: var(--surface);
   color: var(--ink-soft);
   font-family: var(--font-ui);
@@ -9355,7 +9509,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
     --ink:       #1A1815;
     --ink-soft:  #443F39;
     --muted:     #6B655E;
-    --faint:     #8A847B;
+    --faint:     #756F67;
     --line:      #E1DCD4;
     --line-soft: #EBE8E1;
     --accent:    #A63A5A;
@@ -9509,7 +9663,6 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
     transition-delay: 0s;
   }
   .app[data-sidebar="closed"] .doc-head { padding-left: 18px; }
-  .narrow-only { display: grid; }
 
   body:has(.app[data-sidebar="open"]) .drawer-scrim { display: block; }
 }

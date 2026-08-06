@@ -59,6 +59,64 @@ const current = relevantPdfContext('summarize this', [{
 }], { maxPages: 1, maxChars: 2000 })
 assert.match(current, /Book\.pdf page 3 of 4/)
 
+/* Context is paid for per question, and a conversation spends a lot of turns
+   on questions with nothing to search for. "thanks" must not rank six pages
+   of a book: with an open page it carries just that page, and with none it
+   carries nothing at all. */
+{
+  const book = {
+    path: 'Book.pdf',
+    textPath: '.annotations/Book.pdf.txt',
+    openPage: 2,
+    pages: parsePages(formatPdfText('Book.pdf', [
+      'one', 'two', 'three', 'four', 'five', 'six', 'seven'
+    ]))
+  }
+  const open = relevantPdfContext('ok thanks', [book])
+  assert.match(open, /Book\.pdf page 2 of 7/)
+  assert.equal((open.match(/--- /g) || []).length, 1, 'a termless follow-up carries one page')
+  assert.doesNotMatch(open, /page 4 of 7/, 'and never a ranked spread')
+
+  assert.equal(relevantPdfContext('ok thanks', [{ ...book, openPage: 0 }]), '',
+    'a termless question with no open page has nothing to ground it')
+}
+
+/* A real question's budget scales with the terms it names: two terms buy a
+   few pages, not the whole six-page allowance a long question gets. */
+{
+  const book = {
+    path: 'Book.pdf',
+    textPath: '.annotations/Book.pdf.txt',
+    pages: parsePages(formatPdfText('Book.pdf', Array.from({ length: 20 }, (_, i) => `page ${i + 1} of twenty`)))
+  }
+  const twoTerms = relevantPdfContext('quantum smoothability', [book])
+  assert.equal((twoTerms.match(/--- /g) || []).length, 3,
+    'two terms buy three pages, not six')
+  const manyTerms = relevantPdfContext('compare quantum smoothability with the garden argument from the lemma section', [book])
+  assert.ok((manyTerms.match(/--- /g) || []).length <= 6, 'the budget stays capped at six pages')
+  assert.ok(manyTerms.length > twoTerms.length, 'a longer question earns a larger excerpt')
+}
+
+/* "page 42" is a question about a number, and a number is searchable from two
+   digits — the old three-letter minimum dropped it, and the question fell back
+   to the open page. */
+{
+  const book = {
+    path: 'Book.pdf',
+    textPath: '.annotations/Book.pdf.txt',
+    openPage: 1,
+    pages: parsePages(formatPdfText('Book.pdf', [
+      'first page', 'page 42 explained here', 'third page', 'page 4 about nothing'
+    ]))
+  }
+  const byNumber = relevantPdfContext('what about page 42?', [book])
+  assert.match(byNumber, /Book\.pdf page 2 of 4/, 'a page number ranks the page that has it')
+  assert.match(byNumber, /page 42 explained here/, 'and the page it names is actually in the excerpt')
+  /* The open page may co-rank by proximity — the point is the number is no
+     longer dropped, so the question is not answered from the wrong page. */
+  assert.ok(byNumber.indexOf('page 42 explained here') !== -1)
+}
+
 /* The sidecar header states how the text was got, and main.js reads the OCR
    count back out of it rather than scanning the book for the wording. */
 assert.equal(ocrPagesOf(formatPdfText('S.pdf', ['a', 'b'], { ocrPages: 2 })), 2)

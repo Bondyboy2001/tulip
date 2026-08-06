@@ -125,7 +125,11 @@ const MAX_HIGHLIGHT = 120_000
    of its own — `three`, `threejs`, `3js` — is one entry here rather than one
    per alias. languages.js already holds that list, and the second copy this
    avoids is the kind that silently stops colouring when the first one grows. */
-const FENCE_ALIAS = { manim: 'python', tikz: 'latex', svg: 'xml', three: 'javascript' }
+/* `cuda` is here for the same reason as the rest: language-data has no CUDA
+   parser, and its fuzzy matcher answers nothing for the word. The C++ parser
+   is the right one — a .cu file is C++ plus `__global__`, `<<<…>>>` and the
+   builtin variables, none of which stop it parsing. */
+const FENCE_ALIAS = { manim: 'python', tikz: 'latex', svg: 'xml', three: 'javascript', cuda: 'cpp' }
 const descriptions = new Map()
 
 /**

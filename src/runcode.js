@@ -23,7 +23,8 @@ const api = window.tulip
 const RUNNABLE = new Set(Object.values(RUNNERS).flat())
 const WARMABLE = new Set([
   ...(RUNNERS.rust || []),
-  ...(RUNNERS.cpp || [])
+  ...(RUNNERS.cpp || []),
+  ...(RUNNERS.cuda || [])
 ])
 const warming = new Set()
 

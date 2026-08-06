@@ -114,8 +114,62 @@ ctx.lineWidth = u(0.0035)
 ctx.stroke()
 
 window.__png = document.getElementById('c').toDataURL('image/png')
+
+/* Windows wants an .ico, which is a container of several fixed sizes rather
+   than one image scaled at display time — Explorer, the taskbar and Alt-Tab
+   each pick a different entry. Chromium's own downscaler does the resampling
+   here, so the small sizes stay legible instead of turning to mush. */
+window.__icons = {}
+for (const n of [16, 24, 32, 48, 64, 128, 256]) {
+  const small = document.createElement('canvas')
+  small.width = small.height = n
+  const g = small.getContext('2d')
+  g.imageSmoothingEnabled = true
+  g.imageSmoothingQuality = 'high'
+  g.drawImage(document.getElementById('c'), 0, 0, n, n)
+  window.__icons[n] = small.toDataURL('image/png')
+}
 </script></body>`
 
+
+/**
+ * Pack PNGs into an .ico. Since Vista an icon directory entry may hold a PNG
+ * verbatim instead of a BMP, which is the whole of the format below: a 6-byte
+ * header, one 16-byte entry per size, then the PNG bytes.
+ *
+ * Sizes are written as a single byte, and 256 does not fit in one — the format
+ * spells it 0, which is why the entry below reads `size & 0xFF` rather than
+ * rejecting it.
+ */
+function packIco (icons) {
+  const images = Object.keys(icons)
+    .map(Number)
+    .sort((a, b) => a - b)
+    .map((size) => ({ size, data: Buffer.from(icons[size].split(',')[1], 'base64') }))
+
+  const header = Buffer.alloc(6)
+  header.writeUInt16LE(0, 0)              // reserved
+  header.writeUInt16LE(1, 2)              // 1 = icon (2 would be a cursor)
+  header.writeUInt16LE(images.length, 4)
+
+  const directory = Buffer.alloc(16 * images.length)
+  // The first image starts after the header and the whole directory.
+  let offset = header.length + directory.length
+  images.forEach(({ size, data }, i) => {
+    const at = i * 16
+    directory.writeUInt8(size & 0xFF, at)      // width  (0 means 256)
+    directory.writeUInt8(size & 0xFF, at + 1)  // height
+    directory.writeUInt8(0, at + 2)            // palette size: none
+    directory.writeUInt8(0, at + 3)            // reserved
+    directory.writeUInt16LE(1, at + 4)         // colour planes
+    directory.writeUInt16LE(32, at + 6)        // bits per pixel
+    directory.writeUInt32LE(data.length, at + 8)
+    directory.writeUInt32LE(offset, at + 12)
+    offset += data.length
+  })
+
+  return Buffer.concat([header, directory, ...images.map((image) => image.data)])
+}
 
 app.whenReady().then(async () => {
   /* Loaded from a file rather than a data: URL — Chromium restricts scripts in
@@ -133,6 +187,11 @@ app.whenReady().then(async () => {
     const out = path.join(build, 'icon.png')
     writeFileSync(out, Buffer.from(dataUrl.split(',')[1], 'base64'))
     console.log('wrote', out)
+
+    const icons = await win.webContents.executeJavaScript('window.__icons')
+    const ico = path.join(build, 'icon.ico')
+    writeFileSync(ico, packIco(icons))
+    console.log('wrote', ico)
   } catch (err) {
     console.error('icon render failed:', err)
     process.exitCode = 1

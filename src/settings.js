@@ -73,6 +73,12 @@ const SECTIONS = [
         fallback: 'normal'
       },
       {
+        key: 'centerHeadings',
+        type: 'toggle',
+        name: 'Center headings',
+        fallback: false
+      },
+      {
         key: 'spellcheck',
         type: 'toggle',
         name: 'Check spelling',
@@ -981,18 +987,31 @@ export function mountSettings ({ el, api, values, onChange }) {
     if (!el.root.hidden) renderBody()
   }
 
+  /* What had the keyboard before Settings took it, so shutting the pane gives
+     it back rather than dropping the reader at the top of the document. */
+  let openedFrom = null
+
   function open (section) {
     if (section && SECTIONS.some((s) => s.id === section)) active = section
     renderRail()
     renderBody()
     loadModels().catch(() => {})
+    openedFrom = document.activeElement
     el.root.hidden = false
-    el.close.focus()
+    /* The section rail, not the close button. Opening a pane already focused
+       on the way out of it means the first thing Tab offers is leaving, and a
+       reader arriving by keyboard has to walk past the exit to reach the
+       settings they came for. */
+    const first = el.rail.querySelector('[aria-current="true"]') || el.rail.querySelector('button')
+    ;(first || el.close).focus()
   }
 
   function close () {
     clearSearch()
     el.root.hidden = true
+    const back = openedFrom
+    openedFrom = null
+    if (back?.isConnected) back.focus()
   }
 
   el.close.addEventListener('click', close)

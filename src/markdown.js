@@ -171,9 +171,16 @@ export function createMarkdown ({ resolveEmbedSrc }) {
     return true
   })
 
-  // The editor's own tag class, so the pill is one rule in the stylesheet.
-  md.renderer.rules.hashtag = (tokens, i) =>
-    `<span class="tk-tag">${md.utils.escapeHtml(tokens[i].content)}</span>`
+  /* The editor's own tag class, so the pill is one rule in the stylesheet.
+     `data-tag` carries the name without its `#`, which is the spelling the
+     vault search wants — see the tag branch in routeFragmentClick. Focusable
+     and given a role for the same reason wikilinks are: a tag that only a
+     mouse can follow is a note only a mouse can read. */
+  md.renderer.rules.hashtag = (tokens, i) => {
+    const name = tokens[i].content.replace(/^#/, '')
+    return `<span class="tk-tag" role="link" tabindex="0" ` +
+           `data-tag="${escapeAttr(name)}">${md.utils.escapeHtml(tokens[i].content)}</span>`
+  }
 
   /* markdown-it has no task lists, which would leave the reading view showing a
      literal "[x]" where the editor shows a checkbox. */
@@ -302,7 +309,12 @@ export function createMarkdown ({ resolveEmbedSrc }) {
 
   md.renderer.rules.wikilink = (tokens, i) => {
     const { content, meta } = tokens[i]
-    return `<a class="wikilink" data-wikilink="${escapeAttr(meta.target)}">${escapeHtml(content)}</a>`
+    /* No `href` — the click is taken over in JavaScript, and a real one would
+       let a note navigate the window away from itself. Which means the anchor
+       is not focusable and has no role of its own either, so both are stated:
+       a link that only a mouse can follow is a note only a mouse can read. */
+    return `<a class="wikilink" role="link" tabindex="0" ` +
+           `data-wikilink="${escapeAttr(meta.target)}">${escapeHtml(content)}</a>`
   }
 
   /**

@@ -9,13 +9,26 @@ import { promisify } from 'node:util'
 const run = promisify(execFile)
 
 const watch = process.argv.includes('--watch')
+/* Only a release build advances the version. `npm start` runs this file too, so
+   an unconditional bump rewrote package.json and the lockfile on every launch —
+   the working tree drifted several patch versions without a single release, and
+   the number in the built app stopped meaning anything. */
+const release = process.argv.includes('--release')
 const output = watch ? 'dist' : `.dist-stage-${process.pid}`
+/* Vision and PDFKit are macOS frameworks and `swiftc` is part of the Mac
+   toolchain, so the OCR helper is a macOS artifact and nothing else can build
+   it. The worker that runs it already treats a missing binary as "this PDF has
+   no text layer and cannot be read" (see recognize() in pdf-text-worker.js), so
+   the other platforms simply go without rather than failing to build. */
+const mac = process.platform === 'darwin'
 const pdfOcrCache = path.join(os.homedir(), 'Library', 'Caches', 'Tulip', 'native')
 
-/* A production build is a release boundary for the local app. Advance only the
+/* A release build is a version boundary for the local app. Advance only the
    patch component — one thousandth in the project's three-part version — after
-   the new dist has safely replaced the old one. Watch mode stays version-neutral
-   so saving a file does not rewrite package manifests on every rebuild. */
+   the new dist has safely replaced the old one. Plain builds and watch mode stay
+   version-neutral, so neither `npm start` nor saving a file rewrites the package
+   manifests; `build-app.sh`, which is what actually produces an installable app,
+   passes `--release`. */
 async function bumpPatchVersion () {
   const packagePath = 'package.json'
   const lockPath = 'package-lock.json'
@@ -147,6 +160,12 @@ const options = {
   sourcemap: watch,
   minify: !watch,
   logLevel: 'info',
+  /* `node build.mjs --metafile` writes build/meta.json, which is what answers
+     "why is the eager bundle this size" — the startup cost is dominated by how
+     much real code V8 has to compile before the first paint, so the question
+     comes up whenever that number moves. Off by default: it is analysis
+     output, not part of the app. */
+  metafile: process.argv.includes('--metafile'),
   plugins: [leanExcalidraw, leanKatex]
 }
 
@@ -226,14 +245,37 @@ const lint = {
   logLevel: 'info'
 }
 
+/* The spellchecker, for the sidebar's Spelling pane. Main-process code again,
+   and compiled for the same reason as the two above: the packaged app carries
+   no node_modules, so the Hunspell dictionaries have to be *inside* a file that
+   ships. The `.aff`/`.dic` loader is what puts them there — the dictionary
+   packages read those files off disk relative to themselves at import time,
+   which works in the checkout and finds nothing inside /Applications.
+
+   It is the largest thing in `dist` after pdf.js, and it is two dictionaries.
+   That is the price of not asking the network for a word list in an app that
+   runs with the network off. */
+const spellcheck = {
+  entryPoints: ['src/spellcheck.js'],
+  bundle: true,
+  platform: 'node',
+  format: 'cjs',
+  target: ['node20'],
+  outfile: path.join(output, 'spellcheck.cjs'),
+  loader: { '.aff': 'text', '.dic': 'text' },
+  minify: !watch,
+  logLevel: 'info'
+}
+
 /* Named once: a bundle listed for one of the two branches and forgotten in the
    other is a file that either never rebuilds or never builds. */
-const bundles = [options, worker, pdfText, lint, three]
+const bundles = [options, worker, pdfText, lint, three, spellcheck]
 
 /* Scanned pages have no text layer for pdf.js to return. A tiny native helper
    uses the Vision and PDFKit frameworks already present on macOS, compiled for
    the same architecture as Electron and shipped beside the text extractor. */
 async function buildPdfOcr () {
+  if (!mac) return
   const arch = process.arch === 'x64' ? 'x86_64' : 'arm64'
   const target = `${arch}-apple-macos11.0`
   const flags = [
@@ -289,14 +331,22 @@ if (watch) {
   console.log('PDF OCR ready')
 } else {
   try {
-    await Promise.all([...bundles.map((config) => esbuild.build(config)), buildPdfOcr()])
+    const built = await Promise.all([
+      ...bundles.map((config) => esbuild.build(config)),
+      buildPdfOcr()
+    ])
+    if (options.metafile && built[0]?.metafile) {
+      await mkdir('build', { recursive: true })
+      await writeFile('build/meta.json', JSON.stringify(built[0].metafile))
+      console.log('wrote build/meta.json')
+    }
 
   /** A production tree is complete before it can replace the last known-good
    *  one. This catches a successful-looking partial build and makes stale maps
    *  impossible to carry into the packaged app. */
   const required = [
     'index.html', 'renderer.js', 'renderer.css', 'katex.css',
-    'pdf.worker.js', 'pdf-text.cjs', 'pdf-ocr', 'lint.cjs', 'three.js',
+    'pdf.worker.js', 'pdf-text.cjs', ...(mac ? ['pdf-ocr'] : []), 'lint.cjs', 'three.js',
     'pdfjs/standard_fonts', 'pdfjs/cmaps', 'pdfjs/iccs', 'pdfjs/wasm'
   ]
   for (const item of required) await access(path.join(output, item))
@@ -346,5 +396,5 @@ if (watch) {
     await rm(output, { recursive: true, force: true }).catch(() => {})
     throw err
   }
-  await bumpPatchVersion()
+  if (release) await bumpPatchVersion()
 }

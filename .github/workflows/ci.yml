@@ -1,0 +1,111 @@
+# Tulip runs a real Electron window in several of its test suites — the table,
+# reading and UI-contract tests drive an offscreen BrowserWindow rather than a
+# DOM emulation — so CI runs on the same operating systems the app ships on
+# rather than on a Linux container.
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+# A second push to the same branch makes the first run's answer worthless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: verify (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing should not hide the other's result.
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # `npm ci` and not `npm install`: the lockfile is the thing under test,
+      # and a run that silently resolves a different tree proves nothing.
+      - name: Install
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      # The production build swaps a staged directory into place. This asserts
+      # that a build failing midway leaves the previous dist intact instead of
+      # a half-written one.
+      - name: Staged-swap failure is safe
+        run: npm run test:build-staging
+
+      # Advisories are a build failure, not a notice someone scrolls past. The
+      # overrides in package.json exist to keep this green; when it goes red,
+      # the fix is a new override or an upstream bump, not a lowered threshold.
+      - name: Audit
+        run: npm audit --audit-level=moderate
+
+  package:
+    name: package (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      # Packaging is where signing, the icon pipeline and the Info.plist are
+      # exercised. Ad-hoc signed and left in build/ — no secrets are needed for
+      # CI to prove the bundle still assembles.
+      - name: Package the app
+        run: ./scripts/build-app.sh --no-install
+
+      # A bundle that assembles but will not launch is the failure mode worth
+      # catching: the payload must be present and the signature must verify.
+      - name: The bundle is well formed
+        run: |
+          test -f build/Tulip.app/Contents/MacOS/Tulip
+          test -f build/Tulip.app/Contents/Resources/app/electron/main.js
+          test -f build/Tulip.app/Contents/Resources/app/dist/renderer.js
+          codesign --verify --deep --strict --verbose=2 build/Tulip.app
+
+  package-windows:
+    name: package (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      # rcedit is what stamps the icon and version strings into the .exe. The
+      # packager runs without it, so it is installed here rather than carried as
+      # a dependency of the project.
+      - run: npm i -D rcedit --no-save
+
+      - name: Package the app
+        run: npm run app:win
+
+      - name: The folder is well formed
+        shell: bash
+        run: |
+          test -f build/Tulip-win32-x64/Tulip.exe
+          test ! -f build/Tulip-win32-x64/electron.exe
+          test -f build/Tulip-win32-x64/resources/app/electron/main.js
+          test -f build/Tulip-win32-x64/resources/app/dist/renderer.js
+          test ! -f build/Tulip-win32-x64/resources/default_app.asar

@@ -97,3 +97,69 @@ const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&
 export function escapeHtml (s) {
   return String(s).replace(/[&<>"']/g, (c) => ESCAPES[c])
 }
+
+/* ------------------------------------------------------------ focus trap
+
+   Five panels in this app say `aria-modal="true"` — the quick switcher, the
+   study box, Settings, the confirm dialog and the orphan list — and saying it
+   is all any of them did. Tab walked straight out of the overlay and into the
+   note behind it, which a mouse cannot even see: the reader was typing into a
+   document that was not on screen.
+
+   One trap for all of them rather than five wirings, keyed off the attribute
+   they already carry. A panel added later is covered by having said the same
+   thing every other panel says.
+   ================================================================== */
+
+const FOCUSABLE = [
+  'a[href]', 'button', 'input', 'select', 'textarea',
+  '[tabindex]', '[contenteditable="true"]'
+].join(',')
+
+/** The things inside `root` that Tab can reach, in the order it reaches them. */
+export function focusableWithin (root) {
+  return [...root.querySelectorAll(FOCUSABLE)].filter((node) => {
+    if (node.disabled || node.getAttribute('tabindex') === '-1') return false
+    if (node.closest('[hidden]')) return false
+    // `offsetParent` is null for anything display:none, which is how every
+    // panel here hides the halves of itself it is not showing.
+    return node.offsetParent !== null || node === document.activeElement
+  })
+}
+
+/**
+ * The modal currently on screen, if any — the last one, so a dialog raised
+ * from another dialog holds the focus rather than the one underneath it.
+ */
+function topModal () {
+  const open = [...document.querySelectorAll('[aria-modal="true"]')]
+    .filter((node) => node.offsetParent !== null)
+  return open[open.length - 1] || null
+}
+
+/**
+ * Keep Tab inside whichever modal is open. Registered once, in the capture
+ * phase so it settles the question before anything else answers it.
+ */
+export function trapModalFocus (target = window) {
+  target.addEventListener('keydown', (event) => {
+    if (event.key !== 'Tab') return
+    const modal = topModal()
+    if (!modal) return
+    const items = focusableWithin(modal)
+    if (!items.length) return
+
+    const first = items[0]
+    const last = items[items.length - 1]
+    const active = document.activeElement
+    /* Focus that has already escaped — or never arrived, which is what an
+       overlay opened by a click leaves behind — comes back to the near end. */
+    if (!modal.contains(active)) {
+      event.preventDefault()
+      ;(event.shiftKey ? last : first).focus()
+      return
+    }
+    if (event.shiftKey && active === first) { event.preventDefault(); last.focus() }
+    else if (!event.shiftKey && active === last) { event.preventDefault(); first.focus() }
+  }, true)
+}

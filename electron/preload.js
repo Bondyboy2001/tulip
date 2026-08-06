@@ -14,7 +14,9 @@ contextBridge.exposeInMainWorld('tulip', {
     // `known` is the revision the caller already drew; passing it lets main
     // answer "still that one" instead of sending the whole tree back.
     snapshot: (known) => ipcRenderer.invoke('vault:snapshot', known),
-    notes: () => ipcRenderer.invoke('vault:notes')
+    notes: () => ipcRenderer.invoke('vault:notes'),
+    // The other names notes answer to, for resolving `[[Alias]]`.
+    aliases: () => ipcRenderer.invoke('vault:aliases')
   },
   file: {
     read: (p) => ipcRenderer.invoke('file:read', p),
@@ -212,6 +214,14 @@ contextBridge.exposeInMainWorld('tulip', {
     add: (word) => ipcRenderer.invoke('dictionary:add', word),
     remove: (word) => ipcRenderer.invoke('dictionary:remove', word)
   },
+  /* Which of these words are not words. Chromium draws the red underlines and
+     will not say what it underlined, so the sidebar's Spelling pane asks main,
+     which keeps a dictionary of its own — and the custom words above, so the
+     two answers agree. */
+  spell: {
+    check: (words) => ipcRenderer.invoke('spell:check', words),
+    suggest: (word) => ipcRenderer.invoke('spell:suggest', word)
+  },
   durability: {
     flush: () => ipcRenderer.invoke('durability:flush')
   },
@@ -234,6 +244,14 @@ contextBridge.exposeInMainWorld('tulip', {
     claim: (on) => ipcRenderer.invoke('zoom:claim', on)
   },
   version: () => ipcRenderer.invoke('app:version'),
+
+  /* Said once, when the window is worth looking at: settings applied, tree
+     drawn, the note that was open back on the page. The window is not shown
+     until this arrives, so a launch is a dock bounce and then the text —
+     rather than an empty frame with a splash card in it while the rest loads.
+     Sent, not invoked: nothing here waits for an answer, and boot should not
+     be able to stall on one. */
+  painted: () => ipcRenderer.send('app:painted'),
 
   // The answer to `app:flush`: the renderer has written what it had to write,
   // and the window may close. See the close handler in main.

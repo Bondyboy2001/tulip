@@ -22,10 +22,13 @@ const MAX_BYTES = 4 * 1024 * 1024
 const COALESCE_MS = 120000
 
 /* What gets kept: the copilot's turns, the snapshot a restore leaves behind
-   so a restore can itself be undone, and the copy an autosave leaves of the
-   note it replaced. Applied on load as well, so a store written by an older
-   build sheds anything else the first time it is opened. */
-const KEPT = new Set(['copilot', 'restore', 'save'])
+   so a restore can itself be undone, the copy an autosave leaves of the note
+   it replaced, and the two bulk rewrites — replace-across-the-vault and the
+   link chase a rename sets off. Those last two edit notes the user never
+   opened, which is exactly the kind of edit there has to be a way back from.
+   Applied on load as well, so a store written by an older build sheds anything
+   else the first time it is opened. */
+const KEPT = new Set(['copilot', 'restore', 'save', 'replace', 'rename'])
 const emptyData = () => ({ operations: [], created: {} })
 
 const digest = (value) =>

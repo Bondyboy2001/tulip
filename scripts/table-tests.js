@@ -18,8 +18,8 @@ import {
   insertTable, fitAllColumns
 } from '../src/table.js'
 import { propertiesPreview } from '../src/properties.js'
-import { slashCommands } from '../src/slash.js'
-import { CompletionContext } from '@codemirror/autocomplete'
+import { slashEmbed, embedChoices as embedChoicesFacet } from '../src/slash.js'
+import { markdown } from '@codemirror/lang-markdown'
 
 const results = []
 
@@ -886,52 +886,161 @@ async function run () {
     }
   })
 
-  /* ------------------------------------------------------- the slash menu */
+  /* ------------------------------------------------------- the slash key
 
-  /** The menu as it would open at the cursor: the options, in order. */
-  function slashOptions (view) {
-    const pos = view.state.selection.main.head
-    const result = slashCommands(new CompletionContext(view.state, pos, false))
-    return result ? result.options : []
-  }
+     `/` at the start of a line makes an embed placeholder instead of opening
+     a menu; the chip it leaves is clickable, and `![[` targets answer typing
+     with an inline ghost. The old suite for the completion-menu version of
+     this (its options, /table, /tags) tested a surface this one removed. */
 
-  function choose (view, label) {
-    const pos = view.state.selection.main.head
-    const result = slashCommands(new CompletionContext(view.state, pos, false))
-    const option = result?.options.find((one) => one.label === label)
-    assert(option, `no ${label} in the menu`)
-    option.apply(view, option, result.from, pos)
-  }
-
-  await test('the menu offers no syntax on the right of a row', async (parent) => {
-    const view = mount(parent, '/')
-    view.dispatch({ selection: { anchor: 1 } })
-    const options = slashOptions(view)
-    assert(options.length, 'the menu did not open')
-    assert(options.every((one) => !one.detail),
-      'a row still carries the syntax the menu exists to spare its reader')
+  /** Type one character the way the browser would, so the slash filter sees a
+   *  real typed transaction and can rewrite it. */
+  const typeChar = (view, char) => view.dispatch({
+    changes: { from: view.state.selection.main.head, insert: char },
+    selection: { anchor: view.state.selection.main.head + char.length },
+    userEvent: 'input.type'
   })
 
-  await test('/table writes a grid and lands in it', async (parent) => {
-    const view = mount(parent, '/')
-    view.dispatch({ selection: { anchor: 1 } })
-    choose(view, 'Table')
+  /** The editor the slash behaviour lives in: the placeholder field, the
+   *  ghost, the slash filter, and a small vault to complete against. */
+  function slashMount (parent, doc, choices = [], extra = []) {
+    return new EditorView({
+      doc,
+      parent,
+      extensions: [
+        history(),
+        keymap.of([...defaultKeymap, ...historyKeymap]),
+        search(),
+        embedChoicesFacet.of(() => choices),
+        ...slashEmbed,
+        ...extra
+      ]
+    })
+  }
+
+  const ghostText = (view) =>
+    view.dom.querySelector('.tk-embed-ghost')?.textContent ?? null
+
+  await test('typing / at the start of a line makes an embed placeholder', async (parent) => {
+    const view = slashMount(parent, '')
+    typeChar(view, '/')
     await frame()
-    assert(!view.state.doc.toString().startsWith('/'), 'the slash was left in the note')
-    assert(view.state.doc.line(2).text.includes('---'), 'no delimiter row')
-    assert(cellAt(view, 0, 0), 'the grid was not drawn')
+    equal(view.state.doc.toString(), '![[ ]]', 'the slash became the placeholder')
+    assert(view.dom.querySelector('.tk-embed-placeholder'), 'no chip rendered for the placeholder')
   })
 
-  await test('/tags opens the tag editor without placeholder YAML', async (parent) => {
-    const view = mount(parent, 'A note.\n\n/')
+  await test('a slash mid-sentence stays a slash', async (parent) => {
+    const view = slashMount(parent, 'and/or')
+    view.dispatch({ selection: { anchor: 3 } })
+    typeChar(view, '/')
+    equal(view.state.doc.toString(), 'and//or', 'a prose slash was not rewritten')
+  })
+
+  await test('a slash inside a code fence stays a slash', async (parent) => {
+    const view = slashMount(parent, '```\n/usr', [], [markdown()])
     view.dispatch({ selection: { anchor: view.state.doc.length } })
-    let opened = false
-    view.dom.addEventListener('tulip:tags', () => { opened = true })
-    choose(view, 'Tags')
+    typeChar(view, '/')
+    equal(view.state.doc.toString(), '```\n/usr/', 'a code slash was not rewritten')
+  })
+
+  await test('a slash typed over a selection replaces it', async (parent) => {
+    const view = slashMount(parent, 'pick this')
+    /* What the browser's input handler really dispatches: the selection is
+       the range the keystroke replaces. */
+    view.dispatch({
+      changes: { from: 0, to: 4, insert: '/' },
+      selection: { anchor: 1 },
+      userEvent: 'input.type'
+    })
     await frame()
-    const text = view.state.doc.toString()
-    equal(text, 'A note.\n\n', `the command wrote metadata before a tag existed:\n${text}`)
-    assert(opened, 'the tag editor was not asked to open')
+    equal(view.state.doc.toString(), '![[ ]] this', 'the slash rewrote the selection, not just its start')
+    equal(view.state.selection.main.head, '![[ ]]'.length, 'the caret waits after the chip')
+  })
+
+  await test('an IME keystroke is not a slash gesture', async (parent) => {
+    const view = slashMount(parent, '')
+    view.dispatch({
+      changes: { from: 0, insert: '/' },
+      selection: { anchor: 1 },
+      userEvent: 'input.type.compose'
+    })
+    await frame()
+    equal(view.state.doc.toString(), '/', 'a composing slash stayed a literal slash')
+    assert(!view.dom.querySelector('.tk-embed-placeholder'), 'no chip for a composition event')
+  })
+
+  await test('the letter after the placeholder continues the embed', async (parent) => {
+    const view = slashMount(parent, '')
+    typeChar(view, '/')
+    typeChar(view, 'd')
+    await frame()
+    equal(view.state.doc.toString(), '![[d', 'the placeholder became the start of a target')
+    assert(!view.dom.querySelector('.tk-embed-placeholder'), 'the chip was replaced, not kept')
+  })
+
+  await test('the ghost completes an embed target and Tab takes it', async (parent) => {
+    const view = slashMount(parent, '', [{ label: 'diagram.png', name: 'diagram.png' }])
+    typeChar(view, '/')
+    typeChar(view, 'd')
+    typeChar(view, 'i')
+    await frame()
+    equal(view.state.doc.toString(), '![[di', 'the target so far')
+    equal(ghostText(view), 'agram.png]]', 'the ghost shows the rest of the first match')
+    key(view.contentDOM, 'Tab')
+    await frame()
+    equal(view.state.doc.toString(), '![[diagram.png]]', 'Tab wrote the ghost and closed the embed')
+    equal(ghostText(view), null, 'nothing left to complete')
+  })
+
+  await test('a hand-written ![[ target autocompletes the same way', async (parent) => {
+    const view = slashMount(parent, '![[di', [{ label: 'diagram.png', name: 'diagram.png' }])
+    view.dispatch({ selection: { anchor: view.state.doc.length } })
+    await frame()
+    equal(ghostText(view), 'agram.png]]', 'no slash needed for the inline ghost')
+  })
+
+  await test('backspace takes the whole placeholder in one press', async (parent) => {
+    const view = slashMount(parent, '')
+    typeChar(view, '/')
+    key(view.contentDOM, 'Backspace')
+    await frame()
+    equal(view.state.doc.toString(), '', 'one backspace removed the whole placeholder')
+  })
+
+  await test('the picker offers the vault’s files and a choice embeds it', async (parent) => {
+    const view = slashMount(parent, '', [
+      { label: 'img/diagram.png', name: 'img/diagram.png' },
+      { label: 'Spanish', name: 'Spanish' }
+    ])
+    typeChar(view, '/')
+    await frame()
+    view.dom.querySelector('.tk-embed-placeholder').click()
+    await frame()
+    const menu = document.querySelector('.dd-menu')
+    assert(menu, 'the picker did not open')
+    const labels = [...menu.querySelectorAll('.dd-option-name')].map((n) => n.textContent)
+    equal(labels, ['Add website URL…', 'Add YouTube video…', 'img/diagram.png', 'Spanish'],
+      'the picker lists the URL actions and every embeddable file')
+    ;[...menu.querySelectorAll('.dd-option')]
+      .find((b) => b.textContent.includes('diagram.png')).click()
+    await frame()
+    equal(view.state.doc.toString(), '![[img/diagram.png]]', 'the choice became the embed')
+    assert(!document.querySelector('.dd-menu'), 'the picker closed itself')
+  })
+
+  await test('the URL actions leave a skeleton to finish', async (parent) => {
+    const view = slashMount(parent, '')
+    typeChar(view, '/')
+    await frame()
+    view.dom.querySelector('.tk-embed-placeholder').click()
+    await frame()
+    ;[...document.querySelectorAll('.dd-option')]
+      .find((b) => b.textContent.includes('website')).click()
+    await frame()
+    equal(view.state.doc.toString(), '![[https://', 'the website skeleton')
+    equal(view.state.selection.main.head, '![[https://'.length, 'the caret waits inside the target')
+    typeChar(view, 'e')
+    equal(view.state.doc.toString(), '![[https://e', 'typing continues the URL')
   })
 
   await test('a language table that is only frontmatter still has a cursor', async (parent) => {

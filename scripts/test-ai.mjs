@@ -110,6 +110,7 @@ const pdfTurn = promptFor('What time is the cruise?', {
   pdfDocuments: [{
     path: '.attachments/Chat/ticket.pdf',
     textPath: '.annotations/.attachments/Chat/ticket.pdf.txt',
+    pages: 12,
     ocrPages: 1
   }],
   pdfContext: '--- ticket.pdf page 1 of 1 ---\nTIME: 16:00'
@@ -120,6 +121,32 @@ check('PDF attachments name prepared text rather than asking to open the binary'
 check('ranked PDF pages ride the turn', pdfTurn.includes('TIME: 16:00'))
 check('ordinary attachments still reach the file tool',
       pdfTurn.includes('.attachments/Chat/photo.png'))
+check('the PDF list names the page count so the agent reads selectively',
+      pdfTurn.includes('ticket.pdf.txt (12 pages)'))
+check('the turn rules show how to read one page instead of a whole book',
+      pdfTurn.includes('grep -n \'^--- page \'') &&
+      pdfTurn.includes('sed -n \'START,ENDp\'') &&
+      pdfTurn.includes('never the whole file'))
+
+const noteTurn = promptFor('What does the introduction say?', {
+  note: 'notes/lecture.md', kind: 'note', line: 12, heading: 'Introduction',
+  excerpt: 'The introduction starts here.\nIt covers the plan.',
+  excerptCut: true,
+  noteChars: 42000
+})
+check('a markdown note carries a bounded excerpt around the cursor',
+      noteTurn.includes('<open-note>notes/lecture.md') &&
+      noteTurn.includes('Note text around the cursor') &&
+      noteTurn.includes('The introduction starts here.'))
+check('and says how much of the note is not shown',
+      noteTurn.includes('42,000 characters shown') && noteTurn.includes('read the file for the rest'))
+
+const wholeNoteTurn = promptFor('Check this note.', {
+  note: 'notes/short.md', kind: 'note', line: 1,
+  excerpt: 'A short note.', excerptCut: false, noteChars: 12
+})
+check('a note small enough to show whole says so',
+      wholeNoteTurn.includes('the whole note shown') && wholeNoteTurn.includes('A short note.'))
 
 /* --------------------------------------------------------------- detailOf */
 
