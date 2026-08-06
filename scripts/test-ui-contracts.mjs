@@ -76,11 +76,23 @@ if (source) {
   assert.doesNotMatch(ai, /turn-end', processed:/)
   assert.doesNotMatch(copilot, /tokens processed this turn/)
   assert.match(copilot, /const stale = convo\.threadOf === 'codex' \|\| convo\.threadOf === 'claude'/)
-  assert.match(renderer, /li\.append\(fileIcon\(fileKind\)\)/)
+  /* Through `docIcon`, not `fileIcon` directly: the tint a source file's row
+     is drawn with comes from its path, and a call site that skipped the helper
+     would show every language in the same grey. */
+  assert.match(renderer, /li\.append\(docIcon\(fileKind, item\.path\)\)/)
+  assert.match(renderer, /row\.append\(docIcon\(node\.kind, node\.path\)\)/)
   assert.match(preload, /create: \(dir\) => ipcRenderer\.invoke\('tex:create', dir\)/)
   assert.match(main, /ipcMain\.handle\('tex:create'/)
   assert.match(main, /EMPTY_TEX_DOCUMENT/)
   assert.match(renderer, /case 'new-file': openOverlay\('new-files', \{ dir \}\)/)
+  /* Creating a source or data file is the difference between the vault opening
+     these and merely tolerating them. Both routes in are asserted: the picker
+     that chooses a language, and the import filter that lets one be dragged. */
+  assert.match(renderer, /case 'new-source': openOverlay\('new-source', \{ dir \}\)/)
+  assert.match(renderer, /case 'new-csv': createSource\(dir, '\.csv'\)/)
+  assert.match(preload, /create: \(dir, name, ext\) => ipcRenderer\.invoke\('source:create', dir, name, ext\)/)
+  assert.match(main, /ipcMain\.handle\('source:create'/)
+  assert.match(main, /!isCode\(source\) && !isData\(source\)\) \{ skipped\+\+; return \}/)
   assert.match(renderer, /mode === 'new-files'\) \{ runCommand\(item\.id, dir\)/)
   assert.doesNotMatch(renderer, /title = 'Press ⌘Enter to send'/)
   assert.match(renderer, /codeAiPop\.isConnected && codeAiSession\?\.anchor === anchor/)
@@ -94,7 +106,7 @@ if (source) {
   assert.match(copilot, /function attachmentKind \(path\)/)
   assert.match(copilot, /preview\.append\(fileIcon\(kind\)\)/)
   assert.match(copilot, /element\('button', 'icon-btn ai-attachment-remove'\)/)
-  assert.match(read('src', 'file-icons.js'), /export function fileIcon \(kind\)/)
+  assert.match(read('src', 'file-icons.js'), /export function fileIcon \(kind, \{ color = null \} = \{\}\)/)
   assert.doesNotMatch(copilot, /isPdfPath\(entry\.path\) \|\| isSitePath\(entry\.path\)/)
   assert.doesNotMatch(copilot, /element\('button', 'ghost is-compact is-accent', 'Restore'\)/)
   assert.doesNotMatch(copilot, /'Undo turn'/)

@@ -41,10 +41,17 @@ export function mountPanels ({
      property, one stored key. The column arithmetic stays in the CSS — this only
      ever moves a number, so a panel that is closed needs no special case.
      `grow` is which way the panel widens as the cursor moves right: the sidebar
-     is anchored on the left, the two right-hand panels on the other side. */
+     is anchored on the left, the two right-hand panels on the other side.
+
+     `share` is a second ceiling for a panel whose content has a natural width:
+     a fraction of the window it may not take more than, whatever `max` says. */
   const PANELS = [
+    /* The file rail holds names, not prose — one deep heading is as wide as it
+       ever needs to be, and past that the drag is only taking the note's room
+       away. 380 is comfortably wider than the deepest tree the outline draws,
+       and the share keeps it from swallowing a small window on the way there. */
     { grip: el.gripSidebar, host: el.sidebar, prop: '--rail', key: 'railWidth',
-      def: 248, min: 172, max: 520, grow: 1 },
+      def: 248, min: 172, max: 380, share: 0.34, grow: 1 },
     { grip: el.gripSide, host: el.sidepane, prop: '--side', key: 'sideWidth',
       def: 380, min: 280, max: 720, grow: -1 },
     { grip: el.gripAi, host: el.aiPanel, prop: '--chat', key: 'chatWidth',
@@ -72,13 +79,28 @@ export function mountPanels ({
     return fitPanel(p, paint)
   }
 
+  /**
+   * The widest this panel may actually be drawn in this window — its own
+   * ceiling, and for a panel with a `share`, that fraction of the window.
+   *
+   * Applied here rather than to `want` for the same reason the room is: the
+   * width asked for is remembered whole, so a window that grows hands it back
+   * instead of leaving the panel stuck at what a smaller screen allowed.
+   */
+  function panelCeiling (p) {
+    if (!p.share) return p.max
+    // Never below the floor: a window too small for the share still owes the
+    // panel the width it cannot work under.
+    return Math.max(p.min, Math.min(p.max, Math.round(window.innerWidth * p.share)))
+  }
+
   function fitPanel (p, paint = true) {
     // The other open panels are already spoken for, so the room this one may
     // take is what is left over once they and the note's floor are counted.
     const taken = PANELS.reduce(
       (sum, q) => sum + (q === p || !panelOpen(q) ? 0 : q.width), 0)
     const room = window.innerWidth - taken - MAIN_FLOOR
-    p.width = Math.max(p.min, Math.min(p.want, room))
+    p.width = Math.max(p.min, Math.min(p.want, panelCeiling(p), room))
     if (paint) el.app.style.setProperty(p.prop, `${p.width}px`)
     return p.width
   }

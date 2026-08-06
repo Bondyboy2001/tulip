@@ -4,10 +4,11 @@ import { createMarkdown } from './markdown.js'
 import { mountPanels } from './panels.js'
 import { mountTexSplit } from './tex-split.js'
 import { mountAsk } from './ask.js'
-import { languageChip } from './languages.js'
+import { languageChip, languageColor, languageLabel, SOURCE_CHOICES } from './languages.js'
 import {
   NOTE_EXT, TEX_EXT, PDF_EXT, SITE_EXT, WHITEBOARD_EXT,
-  isChatAttachment, isTexPath, isPdfPath, isSitePath, isWhiteboardPath
+  isChatAttachment, isTexPath, isPdfPath, isSitePath, isWhiteboardPath,
+  isCodePath, isDataPath, codeToken
 } from './vault-paths.js'
 import { DEFAULT_ZOOM } from './zoom.js'
 import { highlightInto } from './highlight.js'
@@ -71,6 +72,46 @@ import { COUNTRIES, countryCode, languageIdentity } from './countries.js'
 const api = window.tulip
 const $ = (id) => document.getElementById(id)
 
+/* ------------------------------------------------------- failures, out loud
+
+   Installed first, before anything below it can be the thing that goes wrong.
+
+   Main has kept a crash log since it had crashes to log. The window had no
+   equivalent: an exception thrown here reached a DevTools console nobody had
+   open, and stopped there. What that cost was measurable — three unhandled
+   TypeErrors were being thrown on every launch, each one silently skipping
+   something the reader was owed (the first note's spellcheck pass; the
+   disk-conflict check that runs on window focus), and finding them meant
+   attaching a debugger rather than using the app.
+
+   Every failure goes to the log. The reader is told once per session and no
+   more: the second failure is nearly always the first one repeating, and a
+   toast per repeat would bury the app under its own bad news. The log is the
+   complete record; the toast only says that there is one worth reading. */
+let toldOfFailure = false
+
+function reportFailure (kind, error) {
+  const detail = error instanceof Error
+    ? `${error.stack || error.message}`
+    : String(error?.message || error)
+  try { api.reportError(kind, detail) } catch { /* the bridge is what failed */ }
+  if (toldOfFailure) return
+  toldOfFailure = true
+  /* `toast` is defined further down and this can fire before then — a boot
+     failure is exactly when it might — so the call is deferred rather than
+     made from inside a handler that would then throw its own error. */
+  setTimeout(() => {
+    try { toast('Something went wrong. The details are in the crash log.') } catch {}
+  }, 0)
+}
+
+window.addEventListener('error', (event) => {
+  reportFailure('error', event.error || event.message)
+})
+window.addEventListener('unhandledrejection', (event) => {
+  reportFailure('unhandledRejection', event.reason)
+})
+
 /* Read from Electron's packaged metadata rather than duplicated in HTML, so a
    release changes this label simply by changing the app's real version. */
 api.version().then((version) => {
@@ -119,6 +160,8 @@ const state = {
   // The typeface in each role — see FONT_ROLES in fonts.js.
   fonts: { body: 'charter', ui: 'system-sans' },
   pane: 'files',      // 'files' | 'outline' | 'links'
+  // The optional second panel underneath it, or null. See setPaneBelow.
+  paneBelow: null,
   saveTimer: null,
   overlay: null       // { mode, items, index }
 }
@@ -138,6 +181,7 @@ const el = {
   texDivider: $('tex-divider'),
   texPreview: $('tex-preview'),
   texPdf: $('tex-pdf'),
+  data: $('data'),
   empty: $('empty'),
   emptyActions: $('empty-actions'),
   landing: $('landing'),
@@ -183,6 +227,10 @@ const el = {
   paneLinksTab: $('pane-links-tab'),
   paneSpellingTab: $('pane-spelling-tab'),
   paneInfoTab: $('pane-info-tab'),
+  paneSplit: $('pane-split'),
+  paneSplitGrip: $('pane-split-grip'),
+  paneSplitToggle: $('pane-split-toggle'),
+  paneTabsBelow: $('pane-tabs-below'),
   panelChips: $('panel-chips'),
   panelReplace: $('panel-replace'),
   panelReplaceInput: $('panel-replace-input'),
@@ -263,7 +311,13 @@ mountPanelAccessibility(el.app, {
   }
 })
 
-const reading = () => state.view === 'read' && state.current?.kind !== 'tex'
+/* The kinds with no reading view: source of one sort or another, shown as
+   itself. `state.view` is a preference held across documents, so the question
+   is not what the user last chose but whether what is open has three views to
+   choose between — a `.py` opened while the preference says "read" must not
+   put a Python script through the Markdown renderer. */
+const SOURCE_KINDS = new Set(['tex', 'code', 'data'])
+const reading = () => state.view === 'read' && !SOURCE_KINDS.has(state.current?.kind)
 
 /** Resolve an attachment the way the open note would read it. Both views go
  *  through this, so neither can end up resolving against a different folder. */
@@ -281,22 +335,43 @@ const resolveHere = (src) => state.resolveAsset(src, state.current?.dir || '')
 
 /* What the side pane can render: the two kinds that are a document on disk. A
    website is a live guest and has to have a tab and a process of its own. */
-const canShowBeside = (path) => !!path && !isTexPath(path) && !isSitePath(path) && !isWhiteboardPath(path)
+const canShowBeside = (path) =>
+  !!path && !isTexPath(path) && !isSitePath(path) && !isWhiteboardPath(path) &&
+  !isDataPath(path)
 const viewingPdf = () => state.current?.kind === 'pdf'
 const viewingTex = () => state.current?.kind === 'tex'
 const viewingSite = () => state.current?.kind === 'site'
 const viewingWhiteboard = () => state.current?.kind === 'whiteboard'
 const viewingLanguageTable = () => state.current?.kind === 'language'
-const isEditableTextPath = (path) => NOTE_EXT.test(path || '') || isTexPath(path)
+/* A source file is edited exactly as a note is — same editor, same autosave,
+   same history — and differs only in the grammar it is coloured with and in
+   having no prose views to switch between. A data file is not edited here at
+   all; it has a grid. */
+const viewingCode = () => state.current?.kind === 'code'
+const viewingData = () => state.current?.kind === 'data'
+const isEditableTextPath = (path) =>
+  NOTE_EXT.test(path || '') || isTexPath(path) || isCodePath(path)
 
 /** The name a document is shown under, wherever its own kind is already said
- *  by an icon or a toolbar: the file name with the extension taken off. */
+ *  by an icon or a toolbar: the file name with the extension taken off.
+ *
+ *  Source and data files keep theirs. Their kind is what the icon says, not
+ *  which language they are in, and `solve.py` next to `solve.jl` has to stay
+ *  two distinguishable rows — see the note beside the tree's own branch. */
 const docLabel = (path) =>
-  String(path || '').split('/').pop()
-    .replace(isTexPath(path)
-      ? TEX_EXT
-      : isPdfPath(path) ? PDF_EXT : (isWhiteboardPath(path) ? WHITEBOARD_EXT : SITE_EXT), '')
-    .replace(NOTE_EXT, '')
+  isCodePath(path) || isDataPath(path)
+    ? String(path || '').split('/').pop()
+    : String(path || '').split('/').pop()
+      .replace(isTexPath(path)
+        ? TEX_EXT
+        : isPdfPath(path) ? PDF_EXT : (isWhiteboardPath(path) ? WHITEBOARD_EXT : SITE_EXT), '')
+      .replace(NOTE_EXT, '')
+
+/** The tile a row is drawn with: the kind's own mark, tinted with the
+ *  language's colour where the kind is a source file and languages.js carries
+ *  one for it. Every other kind ignores the tint — see file-icons.js. */
+const docIcon = (kind, path) =>
+  fileIcon(kind, kind === 'code' ? { color: languageColor(codeToken(path)) } : {})
 
 /** The `{ path, name, dir, kind }` a document is identified by, from its path. */
 function noteRef (path) {
@@ -321,7 +396,13 @@ function noteRef (path) {
           ? 'tex'
       : isSitePath(path)
           ? 'site'
-          : isWhiteboardPath(path) ? 'whiteboard' : (language ? 'language' : 'note')
+          : isWhiteboardPath(path)
+              ? 'whiteboard'
+              : isDataPath(path)
+                  ? 'data'
+                  : isCodePath(path)
+                      ? 'code'
+                      : (language ? 'language' : 'note')
   }
 }
 
@@ -487,7 +568,8 @@ function noteEquations () {
  */
 function ensureEditor () {
   if (editor) return Promise.resolve(editor)
-  editorArriving ||= import('./editor.js').then((mod) => {
+  if (editorArriving) return editorArriving
+  editorArriving = import('./editor.js').then((mod) => {
     openSearchPanel = mod.openSearchPanel
     const built = mod.createEditor(editorDeps)
     editor = built
@@ -508,7 +590,19 @@ function ensureEditor () {
     if (state.current?.path && isLanguageTablePath(state.current.path)) {
       refreshLanguageHistory(state.current.path).catch(() => {})
     }
+    /* And the spelling pass the open note was given on the way in, which had
+       no parsed document to read and said so. This is the moment it does. */
+    if (state.current?.path) renderSpelling()
     return built
+  })
+  /* A failure here leaves `editor` null for the rest of the session, and every
+     caller that merely wanted to know what the note says would go on failing
+     one at a time and silently. Said once, plainly, and the promise is dropped
+     so a later deliberate act can try the import again. */
+  editorArriving.catch((error) => {
+    editorArriving = null
+    console.error('The editing stack could not be loaded', error)
+    toast('The editor could not be loaded. Reading still works; reopen Tulip to try again.')
   })
   return editorArriving
 }
@@ -752,6 +846,44 @@ function ensureWhiteboard () {
     }).finally(() => { whiteboardLoading = null })
   }
   return whiteboardLoading
+}
+
+/* Loaded when the first table opens, on the same reasoning as the whiteboard:
+   a session of notes and PDFs should not compile a grid it never shows. */
+let dataInstance = null
+let dataLoading = null
+
+function ensureData () {
+  if (dataInstance) return dataInstance
+  if (!dataLoading) {
+    dataLoading = import('./csv.js').then(({ mountCsv }) => {
+      dataInstance = mountCsv({
+        host: el.data,
+        file: api.file,
+        /* The same bargain the whiteboard makes: the viewer owns the document
+           and reports what it is doing with it, and the tab strip, the save
+           queue and the status line are the renderer's answer to that. */
+        onDirty: (isDirty) => {
+          const changed = state.dirty !== isDirty
+          state.dirty = isDirty
+          if (changed) renderTabs()
+          if (isDirty) queueSave()
+        },
+        onSaved: () => {
+          state.dirty = false
+          renderTabs()
+          setStatusRight('Saved')
+          updateStatus()
+        },
+        /* A grid says things a table cannot show for itself — what a sort
+           wrote, how many rows a delete took — and the status line is where
+           the rest of the app says them. */
+        onStatus: (message) => setStatusRight(message)
+      })
+      return dataInstance
+    }).finally(() => { dataLoading = null })
+  }
+  return dataLoading
 }
 
 /**
@@ -1006,12 +1138,16 @@ function lintBuffer () {
   // A PDF has no text to lint and a website file holds an address, not markdown.
   if (viewingTex() || viewingPdf() || viewingSite() || viewingWhiteboard()) return
 
+  /* Nothing to tidy without one: this runs on the way to a save, and a note
+     nobody has typed into is a note nobody can have made untidy. */
+  if (!editor) return
+
   const { selection } = editor.state
   const changes = lintEdits(editor.state.doc.toString()).filter(
     (edit) => !selection.ranges.some((range) => edit.from <= range.to && edit.to >= range.from))
   if (!changes.length) return
 
-  editor?.dispatch({ changes, userEvent: 'input.lint' })
+  editor.dispatch({ changes, userEvent: 'input.lint' })
 }
 
 async function saveNow () {
@@ -1020,6 +1156,12 @@ async function saveNow () {
   if (viewingWhiteboard()) {
     try { await whiteboardInstance?.save() } catch (err) {
       toast(err.message || 'Could not save this whiteboard.')
+    }
+    return
+  }
+  if (viewingData()) {
+    try { await dataInstance?.save({ flush: true }) } catch (err) {
+      toast(err.message || 'Could not save this table.')
     }
     return
   }
@@ -1078,11 +1220,48 @@ async function saveNow () {
  * saved is never linted either. This is asked for rather than incidental, so it
  * has no reason to hold anything back.
  */
-function lintFile () {
+/**
+ * Whether there is a newer Tulip, said once and acted on by hand.
+ *
+ * There is no updater, and the answer to a new version is still to download it
+ * and replace the app — see the README. What this removes is the part that was
+ * genuinely missing: a way to find out at all, short of visiting the repository
+ * and reading tags.
+ *
+ * Everything about the request is in main; this is the sentence it becomes.
+ */
+async function checkForUpdate () {
+  setStatusRight('Checking for updates…')
+  const answer = await api.checkForUpdate().catch(() => null)
+  setStatusRight('')
+
+  if (!answer?.ok) {
+    toast(`Could not check for updates — ${answer?.reason || 'the request failed'}.`)
+    return
+  }
+  if (!answer.newer) {
+    toast(`Tulip ${answer.current} is the latest version.`)
+    return
+  }
+
+  const go = await ask({
+    title: `Tulip ${answer.latest} is available.`,
+    detail: `This copy is ${answer.current}. Updating means downloading the new ` +
+      'version and replacing the app — Tulip does not update itself.',
+    go: 'Open the download page'
+  })
+  if (go && answer.url) api.openExternal(answer.url)
+}
+
+async function lintFile () {
   if (!state.current || viewingTex() || viewingPdf() || viewingSite() || viewingWhiteboard()) return
-  const changes = lintEdits(editor.state.doc.toString())
+  /* Asked for from the palette, which is open in the reading view as often as
+     anywhere else — and tidying a note is an edit, so it needs the editor that
+     holds the undo history the tidy should be undoable from. */
+  const view = await ensureEditor()
+  const changes = lintEdits(view.state.doc.toString())
   if (!changes.length) { setStatusRight('Already tidy'); return }
-  editor?.dispatch({ changes, userEvent: 'input.lint' })
+  view.dispatch({ changes, userEvent: 'input.lint' })
   saveNow()
 }
 
@@ -1487,7 +1666,7 @@ function buildLevel (nodes, depth) {
     row.append(svgIcon('<path d="M4.5 3 8 6l-3.5 3"/>',
       { viewBox: '0 0 12 12', className: 'twist', stroke: 1.4 }))
 
-    if (node.type !== 'folder') row.append(fileIcon(node.kind))
+    if (node.type !== 'folder') row.append(docIcon(node.kind, node.path))
 
     const label = document.createElement('span')
     label.className = 'label'
@@ -1793,7 +1972,7 @@ function wireDrag (row, node) {
  * space means the vault root.
  */
 async function importFrom (event, destDir) {
-  if (!state.vault) { pickVault(); return }
+  if (!state.vault) { connectVault(); return }
 
   const sources = [...(event.dataTransfer?.files || [])]
     .map((file) => api.pathForFile(file))
@@ -1994,6 +2173,10 @@ async function openNote (path, opts = {}) {
   if (isPdfPath(path)) return openPdf(path, opts)
   if (isSitePath(path)) return openSite(path, opts)
   if (isWhiteboardPath(path)) return openWhiteboard(path, opts)
+  if (isDataPath(path)) return openData(path, opts)
+  /* A source file goes down the same road as a note: it is text the vault owns
+     and edits. Only its grammar differs, and `openText` reads that off the
+     path. */
   return openText(path, opts)
 }
 
@@ -2070,6 +2253,7 @@ async function leaveDoc () {
   } else if (viewingPdf()) await pdf.close()
   else if (viewingSite()) site.close()
   else if (viewingWhiteboard()) await whiteboardInstance?.close()
+  else if (viewingData()) await dataInstance?.close()
 }
 
 async function openText (path, { focus = true, history = true, place = null, newTab = false, chat = true } = {}) {
@@ -2085,7 +2269,11 @@ async function openText (path, { focus = true, history = true, place = null, new
   }
 
   const tex = isTexPath(path)
-  if (!tex) await prepareMath(text).catch(() => {})
+  const code = isCodePath(path)
+  /* Maths is a Markdown feature. A `$` in a shell script is a variable and one
+     in a TeX file is the source's own, so neither is scanned for equations —
+     which also keeps a large source file off the slowest thing done on open. */
+  if (!tex && !code) await prepareMath(text).catch(() => {})
 
   if (isLanguageTablePath(path)) {
     const normalized = normalizeLanguageTable(text)
@@ -2100,7 +2288,11 @@ async function openText (path, { focus = true, history = true, place = null, new
      renders from this buffer, and a buffer still holding the last note — or
      nothing at all — is a blank page. Worse than blank: an editor built from an
      empty buffer will happily autosave that emptiness over the file. */
-  buffer.source = tex ? 'tex' : 'markdown'
+  /* The grammar to colour the file with: `tex`, the word behind a source
+     file's extension — `py`, `jl`, `cpp` — or Markdown for a note. The editor
+     resolves that word to a parser; an extension no parser is carried for
+     opens as plain text in the code face, which is still the file. */
+  buffer.source = tex ? 'tex' : (code ? codeToken(path) : 'markdown')
   buffer.text = text
 
   await leaveDoc()
@@ -2130,16 +2322,22 @@ async function openText (path, { focus = true, history = true, place = null, new
 
   if (place) {
     editor?.dispatch({ selection: { anchor: Math.min(place.at || 0, text.length) } })
-    editor.scrollDOM.scrollTop = place.top || 0
+    /* The editing view's own scroller, and only while it is the one showing:
+       restoring a pixel offset into a hidden editor moved nothing a reader
+       could see, and the line below is what the reading view answers to. */
+    if (editor && !reading()) editor.scrollDOM.scrollTop = place.top || 0
   }
 
   updateStatus()
   if (reading()) renderReading()
   if (focus && !reading()) editor?.focus()
+  /* After the page is built, because there is nothing to scroll until then. */
+  if (place?.line > 1 && reading()) restoreReadingPlace(place.line)
 
   settleDoc(path, { chat })
   if (tex) scheduleTexCompile(0)
-  else scheduleReadingWarmup()
+  // Nothing to warm: a source file has no reading view to build ahead of time.
+  else if (!code) scheduleReadingWarmup()
   return true
 }
 
@@ -2240,6 +2438,20 @@ function openWhiteboard (path, opts = {}) {
   })
 }
 
+/**
+ * A separated-values file, put on screen as its table.
+ *
+ * A viewed kind rather than a text one: there is nothing here for the editor
+ * to hold. The grid is the document — see the account at the top of csv.js.
+ */
+function openData (path, opts = {}) {
+  return openViewed(path, opts, {
+    show: async (p, place) => (await ensureData()).open(p, place),
+    failed: 'That table could not be opened.',
+    focus: () => dataInstance?.focus()
+  })
+}
+
 /* A raw preference, set aside while a language table is open. The grid has no
    raw source mode, so the view has to give way — but the preference is the one
    every other document opens in, and opening a table is not the user changing
@@ -2266,6 +2478,8 @@ function applyPanes () {
   const texOpen = viewingTex()
   const siteOpen = viewingSite()
   const whiteboardOpen = viewingWhiteboard()
+  const codeOpen = viewingCode()
+  const dataOpen = viewingData()
   // Enter the table's editable grid rather than briefly exposing the backing
   // pipes; take the held preference back the moment anything else is open.
   if (viewingLanguageTable()) {
@@ -2275,9 +2489,14 @@ function applyPanes () {
     heldView = null
     showView(held)
   }
-  // Whether the note's own panes are on screen at all. Neither of the other two
-  // kinds has any use for them, so they answer the same way.
-  const text = !pdfOpen && !siteOpen && !whiteboardOpen
+  /* Whether the note's own panes are on screen at all. None of the viewed
+     kinds has any use for them, so they all answer the same way. A source file
+     is not one of them — it uses the editor, and only its extra views are
+     withheld. */
+  const text = !pdfOpen && !siteOpen && !whiteboardOpen && !dataOpen
+  /* The kinds shown as source: the editor pane, and nothing else the note
+     chrome offers. TeX is the one of them that also has a preview beside it. */
+  const sourceOnly = texOpen || codeOpen
   el.stage.classList.toggle('is-tex', texOpen)
   el.texDivider.hidden = !texOpen
   el.texPreview.hidden = !texOpen
@@ -2288,11 +2507,12 @@ function applyPanes () {
   if (!pdfOpen) pdfFind.close()
   el.site.hidden = !siteOpen
   el.whiteboard.hidden = !whiteboardOpen
-  el.reading.hidden = !text || texOpen || state.view !== 'read'
-  el.editorHost.hidden = !text || (!texOpen && state.view === 'read')
+  el.data.hidden = !dataOpen
+  el.reading.hidden = !text || sourceOnly || state.view !== 'read'
+  el.editorHost.hidden = !text || (!sourceOnly && state.view === 'read')
   el.pdfTools.hidden = !pdfOpen
   el.siteTools.hidden = !siteOpen
-  el.viewSwitch.hidden = !text || texOpen
+  el.viewSwitch.hidden = !text || sourceOnly
   updateViewControl()
   el.studyStart.hidden = !viewingLanguageTable()
   paintKeyboard()
@@ -2567,7 +2787,19 @@ function settleTabOrder () {
 
 /** The open tabs, so a window comes back the way it was left. */
 function rememberTabs () {
-  api.config.set({ tabs: state.tabs.map((t) => t.path), tabIndex: state.tabIndex })
+  /* The active tab's place is only written down when something makes it leave,
+     and remembering the strip is the other moment it matters — a quit is a
+     leave nothing announced. The rest of the strip already carries the place
+     each tab was last marked at. */
+  markPlace()
+  api.config.set({
+    tabs: state.tabs.map((t) => t.path),
+    tabIndex: state.tabIndex,
+    /* Beside the paths rather than nested inside them: this config is
+       deliberately shallow, and a parallel list lets an older one — which has
+       no places in it at all — read as a strip of notes opened at the top. */
+    tabPlaces: state.tabs.map((t) => tabPlace(t)?.line || 1)
+  })
 }
 
 /** Reopen a tab where it was left off — at the note, and at the place in it. */
@@ -2768,7 +3000,25 @@ function markPlace () {
     entry.zoom = where.zoom
     return
   }
-  if (!editor) return
+  if (viewingData()) {
+    const where = dataInstance?.place()
+    if (!where) return
+    entry.top = where.top
+    entry.left = where.left
+    return
+  }
+  /* The line at the top of the page is the place both views understand, and
+     the only one the reading view can offer: it has no caret, and the two
+     views scroll different documents, so a pixel offset taken in one of them
+     means nothing in the other. `viewportLine` already answers for whichever
+     is showing, and `scrollToLine` already restores into it — this is the pair
+     the view switch has always used, borrowed for navigation.
+
+     Recorded before the editor check, because for a long time there was none:
+     the reading view is what a launch opens into, so a tab switch, a step back
+     and a reopened tab all used to land at the top of the note. */
+  entry.line = viewportLine()
+  if (!editor || reading()) return
   entry.at = editor.state.selection.main.head
   entry.top = editor.scrollDOM.scrollTop
 }
@@ -2894,9 +3144,22 @@ async function reloadCurrent () {
     return
   }
 
+  /* A table rewritten underneath is reread in place, scrolled where it was —
+     unless the reader has unsaved cells of their own, in which case theirs
+     stand and the disk's version is not pulled in over them. */
+  if (viewingData()) {
+    if (state.dirty) return
+    try { await dataInstance?.open(state.current.path, dataInstance.place()) } catch { /* gone */ }
+    updateStatus()
+    return
+  }
+
   let text
   try { text = await api.file.read(state.current.path) } catch { return }
-  if (text === editor.state.doc.toString()) return
+  /* The buffer answers when there is no editor — a note being read while a
+     sync client rewrites it is the ordinary case, not an unusual one, and
+     `patchDoc` below already knows how to apply the change to either. */
+  if (text === noteText()) return
 
   state.patching = true
   try {
@@ -2953,7 +3216,7 @@ function rememberAgentBefore (relPath, needle = '', tool = 'Edit') {
   if (!relPath || !isEditableTextPath(relPath)) return
   const onScreen = relPath === state.current?.path &&
     !viewingPdf() && !viewingSite() && !viewingWhiteboard()
-  const currentText = onScreen ? editor.state.doc.toString() : ''
+  const currentText = onScreen ? noteText() : ''
   const before = onScreen
     ? Promise.resolve(currentText)
     : api.file.read(relPath)
@@ -3043,6 +3306,11 @@ async function absorbAgentEdit (relPath) {
     return
   }
 
+  if (viewingData()) {
+    if (!state.dirty) await dataInstance?.open(relPath, dataInstance.place())
+    return
+  }
+
   /* Both sides wrote. The copilot's write is on disk and the reader has been
      typing into the same note while it worked — patching the file's text in
      would drop what they wrote with nothing said, leaving it only in the undo
@@ -3108,8 +3376,12 @@ async function showAgentReview (path, operationId = null) {
     if (change) pendingAgentDiffs.set(path, { before: change.before ?? '', after: change.after ?? '' })
   }
   if (!change || state.current?.path !== path || viewingPdf() || viewingSite() || viewingWhiteboard()) return
+  /* Before the view switch, which defers itself when there is no editor to
+     switch to. The `after` text below is an argument, so it was evaluated even
+     when the call it belongs to was skipped. */
+  const view = await ensureEditor()
   if (reading()) setView('edit')
-  editor?.showAgentDiff(change.before ?? '', change.after ?? editor.state.doc.toString())
+  view.showAgentDiff(change.before ?? '', change.after ?? view.state.doc.toString())
 }
 
 /** Accepting is the only action that dismisses the editor-side review. */
@@ -3261,7 +3533,13 @@ async function recheckOpenNote () {
   try { disk = await api.file.read(path) } catch { return }
   // The note may have been closed or switched while the read was in flight.
   if (state.current?.path !== path) return
-  if (disk === editor.state.doc.toString()) return
+  /* Through the buffer, not the editor: this runs on every window focus, and a
+     window focused in the first moments of a launch into the reading view has
+     no editor to ask — which used to throw here and take the whole check with
+     it, at exactly the moment it exists for. `state.dirty` cannot be true
+     without an editor (nothing else can type), so the conflict branch below is
+     safe to reach only from a state that has one. */
+  if (disk === noteText()) return
   if (state.dirty) { await handleDiskConflict(path) } else { await reloadCurrent() }
 }
 
@@ -3441,15 +3719,25 @@ codeAiInput.placeholder = 'Describe what to change…'
 codeAiInput.setAttribute('aria-label', 'Instructions for Copilot')
 const codeAiHint = node('span', 'code-ai-hint', '⌘ Enter to send')
 codeAiHint.setAttribute('aria-hidden', 'true')
-codeAiPop.append(codeAiInput, codeAiHint)
+/* The hint sits in the field's bottom corner, so it is measured from the field
+   and not from the form. The two are the same box in the reading view and are
+   not in the editing one, where the form carries the frame's border and inset
+   — position it against the form and it drifts onto the textarea's border on
+   one side and its scrollbar on the other, in that view only. */
+const codeAiField = node('div', 'code-ai-field')
+codeAiField.append(codeAiInput, codeAiHint)
+codeAiPop.append(codeAiField)
 
 let codeAiSession = null
 
 function closeCodeAi ({ restore = true } = {}) {
   const anchor = codeAiSession?.anchor
+  const connected = anchor?.isConnected
+  // The editor put it in the document; only the editor can take it out again.
+  if (codeAiSession?.inEditor) editor?.hideCodeForm()
   codeAiPop.remove()
   codeAiSession = null
-  if (restore) anchor?.focus()
+  if (restore && connected) anchor.focus()
 }
 
 el.app.addEventListener('tulip:code-copilot', (event) => {
@@ -3459,16 +3747,53 @@ el.app.addEventListener('tulip:code-copilot', (event) => {
     closeCodeAi()
     return
   }
+  /* Both views draw the same sparkle (blocks.js), but they hold it in very
+     different boxes. Reading builds the block itself, so the form goes straight
+     into it — under the header, above the source, pushing the code down.
+     Editing has no such box: the block is the editor's own lines. It gets the
+     same place all the same, by handing the form to the editor to carry as a
+     block widget between the fence and the first line of code — which is the
+     one thing that can put a node in there without the editor reading it back
+     as an edit to the note, and which makes room for it rather than covering
+     the code the request is about. */
   const body = anchor.closest('.code-wrap')?.querySelector('.code-body')
-  if (!body) return
+  const line = body ? null : anchor.closest('.cm-line')
+  if (!body && !line) return
+
+  codeAiInput.value = ''
+  /* Reading drops it into a block that already draws the frame; editing hands
+     it to lines that each draw their own, so out there the form paints that
+     surface itself rather than leaving a gap in the middle of the block. */
+  codeAiPop.classList.toggle('in-frame', !body)
+  if (body) body.before(codeAiPop)
+  else if (!editor?.showCodeForm(line, codeAiPop)) return
+
   codeAiSession = {
     anchor,
     code: String(code || ''),
-    lang: String(lang || '')
+    lang: String(lang || ''),
+    inEditor: Boolean(line)
   }
-  codeAiInput.value = ''
-  body.before(codeAiPop)
   codeAiInput.focus()
+})
+
+/* The reading view's copy goes wherever its block goes — it is rebuilt with the
+   note, and disappears with it. The editing view's is held by editor state,
+   which outlives the note on screen, so it needs telling. Losing focus is what
+   switching notes, switching views and clicking back into the text all have in
+   common, and is what a small prompt over a document should answer to anyway.
+   Restoring focus here would fight whatever just took it. */
+codeAiPop.addEventListener('focusout', (event) => {
+  if (!codeAiSession?.inEditor) return
+  /* Except to the sparkle itself, which is a request to close: closing here
+     first would leave its click looking at an empty screen and open the form
+     straight back up. */
+  if (event.relatedTarget === codeAiSession.anchor) return
+  queueMicrotask(() => {
+    if (codeAiSession?.inEditor && !codeAiPop.contains(document.activeElement)) {
+      closeCodeAi({ restore: false })
+    }
+  })
 })
 
 codeAiPop.addEventListener('keydown', (event) => {
@@ -3477,6 +3802,13 @@ codeAiPop.addEventListener('keydown', (event) => {
   if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
     event.preventDefault()
     codeAiPop.requestSubmit()
+  }
+  /* The way out. Kept off the app's global Escape so it cannot be swallowed by
+     whatever else is listening while the caret is in this field. */
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    event.stopPropagation()
+    closeCodeAi()
   }
 })
 codeAiPop.addEventListener('submit', (event) => {
@@ -3568,6 +3900,48 @@ async function copilotContext () {
     }
   }
 
+  /* A table has no text on screen to quote, so what goes over is the file's
+     own shape: its headings and enough rows to see what the columns hold. The
+     grid is showing it, and a model that cannot see the grid would otherwise
+     have to read the quoted source to learn the column names. */
+  if (viewingData()) {
+    const table = dataInstance?.context() || { text: '', rows: 0, columns: 0 }
+    return {
+      note: state.current.path,
+      kind: 'data',
+      selection: '',
+      text: cut(table.text),
+      rows: table.rows,
+      columns: table.columns,
+      truncated: table.rows > 50 || table.text.length > SELECTION_LIMIT
+    }
+  }
+
+  /* No editor, so no caret and no selection — a note being read, which is what
+     the copilot is most often asked about and, since the app opens into the
+     reading view, may be all there has ever been. Everything below that the
+     agent actually needs is in the text; the rest was already being reported
+     as absent whenever `reading()` was true. The head of the note stands in
+     for an excerpt around a cursor there is none of. */
+  if (!editor) {
+    const text = noteText()
+    return {
+      note: state.current?.path || '',
+      kind: viewingTex()
+        ? 'tex'
+        : viewingCode()
+            ? (languageLabel(codeToken(state.current?.path)) || 'source').toLowerCase()
+            : (viewingLanguageTable() ? 'language' : 'note'),
+      selection: '',
+      truncated: false,
+      line: 0,
+      heading: '',
+      excerpt: text.slice(0, NOTE_EXCERPT_LIMIT),
+      excerptCut: text.length > NOTE_EXCERPT_LIMIT,
+      noteChars: text.length
+    }
+  }
+
   const caret = editor.state.selection.main
   const selection = reading() ? '' : editor.state.sliceDoc(caret.from, caret.to)
   /* A bounded view of the note around the cursor. Without one the agent's
@@ -3582,7 +3956,14 @@ async function copilotContext () {
     : noteExcerpt(doc, caret.head, NOTE_EXCERPT_LIMIT)
   return {
     note: state.current?.path || '',
-    kind: viewingTex() ? 'tex' : (viewingLanguageTable() ? 'language' : 'note'),
+    /* A source file says which language it is in, not just that it is source:
+       "python" is the difference between the copilot reading the excerpt as a
+       script and guessing at it from the punctuation. */
+    kind: viewingTex()
+      ? 'tex'
+      : viewingCode()
+          ? (languageLabel(codeToken(state.current?.path)) || 'source').toLowerCase()
+          : (viewingLanguageTable() ? 'language' : 'note'),
     selection: cut(selection),
     truncated: selection.length > SELECTION_LIMIT,
     /* Where the reader is, when they have not said. The rendered view has no
@@ -3687,7 +4068,7 @@ const languageStudy = mountLanguageStudy({
   },
   /* The open note's text rather than the file's, so a word typed a second ago
      is in the deck: the buffer is what the reader can see. */
-  source: () => editor.state.doc.toString(),
+  source: () => noteText(),
   /* Which note the cards belong to: a card's identity begins with it, so this
      is what keeps one language's schedule apart from another's. */
   notePath: () => state.current?.path || '',
@@ -3805,6 +4186,19 @@ function updateStatus () {
      Notes already carry their counts in Info, alongside reading time, headings,
      links and tags. Repeating two of them across the foot of every page spends
      permanent chrome on information that has a proper home. */
+
+  /* A source file does say something here, and it is the one thing about it
+     that is not on screen: which language it is being read as. An extension
+     the app has no parser for still opens, coloured or not, and this line is
+     where that shows — "Plain text" under a `.zig` is the answer to why it is
+     grey. */
+  if (state.current && viewingCode()) {
+    text = languageLabel(codeToken(state.current.path)) || 'Plain text'
+  }
+
+  // A table is measured in its shape.
+  if (state.current && viewingData()) text = dataInstance?.summary() || ''
+
   el.statusLeft.textContent = text
   el.statusLeft.hidden = !text
 }
@@ -4027,10 +4421,10 @@ function bestLinkTarget (matches) {
  * heading at the *bottom* of the viewport rather than the top.
  */
 function goToLine (n, col = 0) {
-  if (!reading()) {
+  if (!reading() && editor) {
     const line = editor.state.doc.line(n)
-    editor?.dispatch({ selection: { anchor: Math.min(line.from + col, line.to) } })
-    editor?.focus()
+    editor.dispatch({ selection: { anchor: Math.min(line.from + col, line.to) } })
+    editor.focus()
   }
   scrollToLine(n)
   markOutlinePlace()
@@ -4038,7 +4432,7 @@ function goToLine (n, col = 0) {
 
 /** Put a named heading of the open note at the top of whichever view is up. */
 function jumpToHeading (anchor) {
-  const text = editor.state.doc.toString()
+  const text = noteText()
   const block = String(anchor || '').trim().startsWith('^')
   const found = block
     ? findBlock(text, anchor)
@@ -4178,7 +4572,11 @@ function syncSidebarPaneAvailability () {
 /** Whether a named pane is the one on show — what everything that draws into
  *  the sidebar asks before doing the work. */
 function paneOpen (name) {
-  return sidebarOpen() && state.pane === name
+  /* Either slot. Every panel asks this before doing the work of drawing
+     itself, so a panel that is on screen underneath another and is not counted
+     as open is a panel that stays empty — which is exactly what the outline did
+     the first time the sidebar was split. */
+  return sidebarOpen() && (state.pane === name || paneBelow() === name)
 }
 
 const outlineOpen = () => paneOpen('outline')
@@ -4187,15 +4585,67 @@ const outlineOpen = () => paneOpen('outline')
  * @param {'files'|'outline'|'links'|'info'} pane
  * @param {boolean} [remember]  false while restoring a stored setting
  */
+/* ------------------------------------------------------- the second panel
+
+   The sidebar showed one of its five panels at a time, because `state.pane` is
+   one name. Which meant the two people most often want together — the vault on
+   one side and the open note's outline on the other — were the two you could
+   not have: choosing the outline put the file tree away.
+
+   So there is now an optional second panel underneath the first, with its own
+   strip and its own share of the height. Deliberately *one* more and not a
+   general stacking system: two is the whole of the need, a third would be
+   forty pixels of list each, and every additional slot is another thing to
+   arrange rather than another thing to read.
+
+   The five bodies are siblings in the markup and stay so — a panel becomes the
+   lower one by being moved after the divider, which is why `.pane-split` sits
+   between them in index.html rather than wrapping anything. */
+
+/** Which panel is underneath, or null when the sidebar is one panel tall. */
+function paneBelow () {
+  const wanted = state.paneBelow
+  /* Never the same panel twice, and never one that does not apply to what is
+     open — a PDF has no backlinks, and the lower slot must not be the place
+     that fact is discovered. */
+  if (!wanted || wanted === state.pane) return null
+  if (!PANES[wanted] || !sidebarPaneAvailable(wanted)) return null
+  return wanted
+}
+
+function setPaneBelow (pane, remember = true) {
+  /* Asking for the panel that is already on top swaps them rather than doing
+     nothing: it is what the click meant, and the alternative is a click that
+     silently refuses. */
+  if (pane && pane === state.pane) {
+    const above = state.paneBelow || 'files'
+    state.paneBelow = state.pane
+    state.pane = above === pane ? 'files' : above
+  } else {
+    state.paneBelow = pane || null
+  }
+  /* Both keys in one write, and `setPane` called directly rather than through
+     `setSetting` — which re-applies the whole config, and would therefore put
+     the *old* `pane` back over the swap that has just been made. Two settings
+     that change together have to be written together. */
+  if (remember) {
+    state.cfg = { ...state.cfg, pane: state.pane, paneBelow: state.paneBelow || undefined }
+    api.config.set({ pane: state.pane, paneBelow: state.paneBelow || undefined })
+  }
+  setPane(state.pane, false)
+}
+
 function setPane (pane, remember = true) {
   state.pane = PANES[pane] && sidebarPaneAvailable(pane)
     ? pane
     : (viewingPdf() ? 'outline' : 'files')
 
+  const below = paneBelow()
+
   for (const [name, spec] of Object.entries(PANES)) {
     spec.tab().hidden = !sidebarPaneAvailable(name)
     const on = name === state.pane
-    spec.body().hidden = !on
+    spec.body().hidden = !on && name !== below
     spec.tab().classList.toggle('is-on', on)
     spec.tab().setAttribute('aria-selected', String(on))
     /* Roving tabindex: the strip is one stop on the way through the app, and
@@ -4206,11 +4656,97 @@ function setPane (pane, remember = true) {
   }
   el.savedSearches.classList.toggle('is-pane-hidden', state.pane !== 'files')
 
+  el.paneSplit.hidden = !below
+  el.paneSplitToggle.setAttribute('aria-pressed', String(!!below))
+  el.paneSplitToggle.title = below ? 'Hide the second panel' : 'Show a second panel below'
+  if (below) {
+    /* Moved rather than copied. The body element is the panel — it holds the
+       scroll position, the rendered rows and every listener bound to it — so
+       putting the same element in a new place is how it changes place. */
+    const body = PANES[below].body()
+    if (body.previousElementSibling !== el.paneSplit) el.sidebar.append(body)
+    for (const button of el.paneTabsBelow.querySelectorAll('.pane-tab')) {
+      const name = button.dataset.pane
+      const on = name === below
+      button.hidden = !sidebarPaneAvailable(name)
+      button.classList.toggle('is-on', on)
+      button.setAttribute('aria-selected', String(on))
+      button.tabIndex = on ? 0 : -1
+    }
+  }
+
   if (remember) setSetting('pane', state.pane)
   PANES[state.pane].paint()
+  if (below) PANES[below].paint()
   // The fold button belongs to the tree, so it comes and goes with it.
   paintFoldToggle()
 }
+
+el.paneSplitToggle.addEventListener('click', () => {
+  /* Opening it picks the most useful partner rather than asking: the outline
+     beside the files is the pairing this exists for, and the files beside
+     anything else is the other one. */
+  if (paneBelow()) { setPaneBelow(null); return }
+  setPaneBelow(state.pane === 'outline' ? 'files' : 'outline')
+})
+
+el.paneTabsBelow.addEventListener('click', (event) => {
+  const button = event.target.closest('.pane-tab')
+  if (button) setPaneBelow(button.dataset.pane)
+})
+
+/* How tall the lower panel is, as a share of the sidebar rather than pixels:
+   the sidebar's height is the window's, and a panel pinned at 240px is most of
+   a short window and a strip of a tall one. */
+const PANE_BELOW_DEFAULT = 0.4
+const PANE_BELOW_MIN = 0.15
+const PANE_BELOW_MAX = 0.75
+
+function setPaneBelowHeight (share, remember = true) {
+  const held = Math.min(PANE_BELOW_MAX, Math.max(PANE_BELOW_MIN, share))
+  el.sidebar.style.setProperty('--pane-below', String(held))
+  if (remember) setSetting('paneBelowHeight', held)
+}
+
+/* Its own handful of lines rather than a sixth case in panels.js: that module
+   is about the three columns and the arithmetic that keeps the note readable
+   between them, none of which is true of a divider inside one panel. */
+el.paneSplitGrip.addEventListener('pointerdown', (event) => {
+  if (event.button !== 0) return
+  event.preventDefault()
+  el.paneSplitGrip.setPointerCapture(event.pointerId)
+  el.paneSplitGrip.classList.add('is-dragging')
+
+  const shareAt = (clientY) => {
+    const box = el.sidebar.getBoundingClientRect()
+    // Measured from the bottom, because that is the edge the lower panel owns.
+    return box.height ? (box.bottom - clientY) / box.height : PANE_BELOW_DEFAULT
+  }
+  const move = (moved) => setPaneBelowHeight(shareAt(moved.clientY), false)
+  const done = (ended) => {
+    el.paneSplitGrip.releasePointerCapture(ended.pointerId)
+    el.paneSplitGrip.classList.remove('is-dragging')
+    el.paneSplitGrip.removeEventListener('pointermove', move)
+    el.paneSplitGrip.removeEventListener('pointerup', done)
+    el.paneSplitGrip.removeEventListener('pointercancel', done)
+    // Written once, at the end, rather than on every frame of the drag.
+    setPaneBelowHeight(shareAt(ended.clientY))
+  }
+  el.paneSplitGrip.addEventListener('pointermove', move)
+  el.paneSplitGrip.addEventListener('pointerup', done)
+  el.paneSplitGrip.addEventListener('pointercancel', done)
+})
+
+el.paneSplitGrip.addEventListener('dblclick', () => setPaneBelowHeight(PANE_BELOW_DEFAULT))
+
+el.paneSplitGrip.addEventListener('keydown', (event) => {
+  const step = event.shiftKey ? 0.08 : 0.02
+  const now = Number(el.sidebar.style.getPropertyValue('--pane-below')) || PANE_BELOW_DEFAULT
+  if (event.key === 'ArrowUp') setPaneBelowHeight(now + step)
+  else if (event.key === 'ArrowDown') setPaneBelowHeight(now - step)
+  else return
+  event.preventDefault()
+})
 
 /**
  * ⌘⇧E and ⌘⇧K, the menu, and the command palette all land here.
@@ -4294,7 +4830,12 @@ function renderOutline () {
      site — which is the one thing the fence around a guest exists to prevent.
      Saying there is nothing here beats a panel that silently shows the
      headings of whatever note was open before. */
-  if (viewingSite() || viewingWhiteboard()) {
+  /* The kinds with nothing this panel can list. A source file has structure,
+     but it is the language's and not the document's — reading it would mean a
+     definition scanner per language, which is a different feature from an
+     outline of headings. Saying so beats a panel silently showing the last
+     note's headings under a Python file. */
+  if (viewingSite() || viewingWhiteboard() || viewingCode() || viewingData()) {
     outlineSig = ''
     pdfOutlineRows = []
     outlineHeadings = []
@@ -4304,12 +4845,16 @@ function renderOutline () {
     empty.className = 'outline-empty'
     empty.textContent = viewingWhiteboard()
       ? 'Use frames on the canvas to organise this whiteboard.'
-      : 'A website has no outline here.'
+      : viewingCode()
+          ? 'A source file has no outline here.'
+          : viewingData()
+              ? 'A table has no outline here.'
+              : 'A website has no outline here.'
     el.outlineList.replaceChildren(empty)
     return
   }
 
-  const next = state.current ? headings(editor.state.doc.toString()) : []
+  const next = state.current ? headings(noteText()) : []
   const sig = (state.current?.path || 'none') + SHAPE_SEP +
     next.map((h) => `${h.level}${SHAPE_SEP}${h.line}${SHAPE_SEP}${h.text}`).join('\n')
   if (sig === outlineSig && el.outlineList.childElementCount) {
@@ -4623,10 +5168,13 @@ async function renderLinks () {
     linksMessage('A PDF has no backlinks.')
     return
   }
-  if (viewingWhiteboard() || viewingSite()) {
+  if (viewingWhiteboard() || viewingSite() || viewingCode() || viewingData()) {
     linksMessage(viewingWhiteboard()
       ? 'Whiteboard note cards link out to notes; boards are not backlink targets yet.'
-      : 'A website has no backlinks.')
+      : viewingCode() || viewingData()
+        // Nothing in the vault can write `[[…]]` at one — the same as a PDF.
+        ? 'This file has no backlinks.'
+        : 'A website has no backlinks.')
     return
   }
 
@@ -4824,7 +5372,10 @@ function textFacts (text) {
   return {
     words,
     characters: body.length,
-    headings: headingsFor(editor.state.doc).length,
+    /* From the text this was handed, not from the parsed document: the Info
+       pane is painted on the way into every note, and a note opened into the
+       reading view has no parsed document to count. */
+    headings: headings(text).length,
     links: links.size
   }
 }
@@ -4867,21 +5418,27 @@ function spellingMessage (text) {
 }
 
 /** Select one occurrence of a flagged word and put it on screen. */
-function goToSpelling (key) {
+async function goToSpelling (key) {
   const group = spellingGroups.get(key)
   if (!group?.at.length) return
   const step = ((spellingStep.get(key) ?? -1) + 1) % group.at.length
   spellingStep.set(key, step)
   const at = group.at[step]
 
+  /* Awaited before the view is switched, not after. `setView` defers itself
+     when there is no editor — it returns, fetches one and calls itself again —
+     so everything below it used to run in the reading view against an editor
+     that did not exist yet. With one already in hand the switch runs straight
+     through and the caret has somewhere to land. */
+  const view = await ensureEditor()
   // A misspelling is something to fix, and fixing happens in the editing view.
   if (reading()) setView('edit')
   /* Selected rather than merely scrolled to: the next thing after finding a
      typo is typing over it. The scroll is left to scrollToLine for the reason
      goToLine explains — two alignments in one gesture fight each other. */
-  editor?.dispatch({ selection: { anchor: at.from, head: at.to } })
-  editor?.focus()
-  scrollToLine(editor.state.doc.lineAt(at.from).number)
+  view.dispatch({ selection: { anchor: at.from, head: at.to } })
+  view.focus()
+  scrollToLine(view.state.doc.lineAt(at.from).number)
 }
 
 /**
@@ -4899,7 +5456,11 @@ function spellingBlank (why) {
  */
 async function renderSpelling () {
   if (!state.current) { spellingBlank('No note is open.'); return }
-  if (viewingPdf() || viewingSite() || viewingWhiteboard()) {
+  /* Source and data files are here for the same reason as the rest: prose is
+     what a spell checker is for, and underlining every identifier in a Python
+     file would be a panel of noise nobody can act on. */
+  if (viewingPdf() || viewingSite() || viewingWhiteboard() ||
+      viewingCode() || viewingData()) {
     spellingBlank('Spelling is checked in notes.')
     return
   }
@@ -4907,6 +5468,13 @@ async function renderSpelling () {
     spellingBlank('Spellcheck is off — turn it on in Settings.')
     return
   }
+  /* Spelling reads the *parsed* document, because what it must not underline —
+     code, maths, wikilink targets, the frontmatter block — is known from the
+     syntax tree and not from the text. There is no tree until the editing
+     stack arrives, and this runs on the way into every note, so on a launch
+     into the reading view it used to be reached with no editor at all and
+     throw. `ensureEditor` calls it again the moment there is one to ask. */
+  if (!editor) { spellingBlank('Checking the spelling…'); return }
 
   const text = editor.state.doc.toString()
   const groups = groupWords(wordsIn(text, editor.state))
@@ -5056,7 +5624,7 @@ function paintInfo (path, tags, stat) {
 
   const sections = [file]
   if (!viewingPdf() && !viewingSite() && !viewingWhiteboard()) {
-    const facts = textFacts(editor.state.doc.toString())
+    const facts = textFacts(noteText())
     const text = infoSection('Text')
     text.append(infoRow('Words', facts.words.toLocaleString()))
     text.append(infoRow('Characters', facts.characters.toLocaleString()))
@@ -5547,7 +6115,9 @@ function startReadingHighlights (root) {
  */
 function viewportLine () {
   if (!state.current || viewingPdf()) return 1
-  if (!reading()) return editor.topLine()
+  /* An editing view with no editor is the moment between asking for one and
+     its arriving; the top of the note is the truthful answer until then. */
+  if (!reading()) return editor ? editor.topLine() : 1
 
   const top = el.reading.getBoundingClientRect().top
   const nodes = placedLines()
@@ -5621,6 +6191,53 @@ function scrollToLine (line) {
       el.reading.getBoundingClientRect().top
     : 0
 }
+
+/**
+ * Put a reopened note back at the line it was left showing.
+ *
+ * Twice, a frame apart, and that is not belt-and-braces. The reading view is
+ * built with `content-visibility: auto`, so every block below the fold is an
+ * estimate — `contain-intrinsic-block-size: auto 44px` — until it is laid out
+ * for real. The first scroll therefore aims at a document whose height above
+ * the target is a guess; the moment it lands, the blocks it passed are measured
+ * properly, the page above shrinks or grows by the difference, and the reader
+ * arrives a block or so from where they left. Measured drift on a 200-section
+ * note was exactly one block, always late. The second pass aims at a page that
+ * has now been measured, which is why it lands.
+ *
+ * This does not apply to the view switch, which reuses the DOM it already laid
+ * out — see `renderReading({ reuse: true })` — and so has real heights from the
+ * first attempt.
+ */
+function restoreReadingPlace (line) {
+  let frames = 0
+  /* The last position this function put the pane at. Anything else is the
+     reader, and the reader wins: chasing a line somebody has already scrolled
+     past would take the page back off them mid-gesture. */
+  let mine = -1
+  const settle = () => {
+    if (!reading() || frames++ > READING_PLACE_FRAMES) return
+    if (mine >= 0 && Math.abs(el.reading.scrollTop - mine) > 1) return
+    const target = readingNodeAt(line)
+    if (!target) return
+    const off = target.getBoundingClientRect().top - el.reading.getBoundingClientRect().top
+    /* Corrected every frame rather than until it first lands. Landing is not
+       the end of the movement: the blocks just scrolled past are measured on
+       arrival, the page above the target grows or shrinks by the difference,
+       and a loop that stopped at the first good frame left the reader drifting
+       a block or two further down than where they were. */
+    if (Math.abs(off) > 0.5) el.reading.scrollTop += off
+    mine = el.reading.scrollTop
+    requestAnimationFrame(settle)
+  }
+  settle()
+}
+
+/* Half a second of frames. Long enough for a long note's estimated blocks to
+   be measured for real, short enough that a page which will never settle — an
+   image still loading, a diagram still drawing — stops being chased rather
+   than scrolling under the reader for as long as it takes. */
+const READING_PLACE_FRAMES = 30
 
 /* Language tables are purpose-built study documents, so their fixed grid has
    no raw source mode. Remove that inapplicable control while one is open; it
@@ -5704,8 +6321,14 @@ function setView (view) {
  * number in the rendered output valid — so the page never has to re-render and
  * the scroll position never jumps.
  */
-function toggleTaskAtLine (lineIndex, box) {
-  const { doc } = editor.state
+/* Ticking a box in the reading view is an edit to the note, and an edit has to
+   go through the editor: it is what marks the buffer dirty and so what gets the
+   change saved. On a launch into the reading view there may be none yet, so one
+   is asked for — the first tick of a session waits for it, and the rest do not.
+   Answering asynchronously is why the caller unticks the box on a promise. */
+async function toggleTaskAtLine (lineIndex, box) {
+  const view = await ensureEditor()
+  const { doc } = view.state
   const n = lineIndex + 1
   if (n < 1 || n > doc.lines) return false
 
@@ -5715,7 +6338,7 @@ function toggleTaskAtLine (lineIndex, box) {
 
   const wasChecked = match[1] !== ' '
   const at = line.from + match.index + 1
-  editor?.dispatch({ changes: { from: at, to: at + 1, insert: wasChecked ? ' ' : 'x' } })
+  view.dispatch({ changes: { from: at, to: at + 1, insert: wasChecked ? ' ' : 'x' } })
 
   box.closest('li')?.classList.toggle('is-done', !wasChecked)
   return true
@@ -5753,7 +6376,8 @@ el.reading.addEventListener('click', (e) => {
     // The native toggle is left to stand — calling preventDefault here would
     // make the browser revert the tick after this handler runs, leaving the box
     // disagreeing with the file. If the write fails, undo it by hand instead.
-    if (!toggleTaskAtLine(Number(box.dataset.line), box)) box.checked = !box.checked
+    toggleTaskAtLine(Number(box.dataset.line), box)
+      .then((done) => { if (!done) box.checked = !box.checked })
     return
   }
 
@@ -5794,11 +6418,26 @@ const COMMANDS = [
   { id: 'font-body', title: 'Change markdown font…' },
   { id: 'font-ui', title: 'Change interface font…' },
   { id: 'lint-file', title: 'Lint current file', scope: 'markdown' },
+  /* Spellcheck is the one setting people want to reach mid-sentence — a note
+     full of names underlined in red is a reason to turn it off for a minute,
+     and walking to Settings for that is the whole trip the palette exists to
+     save. It stays a vault-wide setting either way, so no scope. */
+  { id: 'toggle-spellcheck', title: 'Toggle spellcheck' },
   /* Passes the test above: a template has no key and no menu item, and the
      only other way to use one would be to open it and copy it out by hand. */
   { id: 'insert-template', title: 'Insert template…', scope: 'markdown' },
   { id: 'export-pdf', title: 'Export as PDF…', scope: 'markdown' },
   { id: 'settings', title: 'Settings…', key: '⌘,' },
+  /* Passes the palette's admission test the same way `insert-template` does:
+     there is no other way to reach it, and there is deliberately nothing
+     automatic behind it — Tulip asks about updates when it is asked to and
+     never otherwise. */
+  /* The vault's own study record, which until now was written and never
+     read — see review-panel.js. Vault-wide rather than about the open note,
+     so it has no scope. */
+  { id: 'open-recent-vault', title: 'Open recent vault…' },
+  { id: 'review-stats', title: 'Review statistics…' },
+  { id: 'check-for-updates', title: 'Check for updates…' },
   { id: 'copilot', title: 'Toggle copilot', key: '⌘⇧A' }
 ]
 
@@ -5809,6 +6448,11 @@ const COMMANDS = [
 const NEW_FILE_COMMANDS = [
   { id: 'new-note', title: 'Markdown note', kind: 'note' },
   { id: 'new-table', title: 'Table', kind: 'note' },
+  /* "Source file" opens a second picker rather than making one, because a
+     source file is not a kind until it has a language — the same arrangement
+     as a language table, which asks for a country first. */
+  { id: 'new-source', title: 'Source file', kind: 'code' },
+  { id: 'new-csv', title: 'CSV table', kind: 'data' },
   { id: 'new-tex', title: 'TeX document', kind: 'tex' },
   { id: 'new-website', title: 'Website', kind: 'site' },
   { id: 'new-whiteboard', title: 'Whiteboard', kind: 'whiteboard' }
@@ -5852,7 +6496,7 @@ const FONT_MODES = { 'font-body': 'body', 'font-ui': 'ui' }
 
 /* A typeface is a property of the app rather than of the vault, so both
    pickers open with no vault, the same way the theme picker does. */
-const VAULTLESS = new Set(['commands', 'themes', 'font-body', 'font-ui'])
+const VAULTLESS = new Set(['commands', 'themes', 'font-body', 'font-ui', 'vaults'])
 
 /* What the panel says it is, in the field and to a screen reader. Kept side by
    side so a new picker cannot gain a prompt without gaining an announcement. */
@@ -5861,12 +6505,14 @@ const OVERLAY_PROMPT = {
   search: 'Search notes, PDFs, and highlights…',
   commands: 'Run a command…',
   'new-files': 'Choose a file type…',
+  'new-source': 'Choose a language…',
   themes: 'Change the theme…',
   'font-body': 'Choose the font notes are written in…',
   'font-ui': 'Choose the font the app is drawn in…',
   countries: 'Choose a country flag…',
   'move-to': 'Move to a folder…',
-  templates: 'Insert a template…'
+  templates: 'Insert a template…',
+  vaults: 'Open a vault Tulip knows…'
 }
 
 const OVERLAY_LABEL = {
@@ -5874,11 +6520,13 @@ const OVERLAY_LABEL = {
   search: 'Search the vault',
   commands: 'Command palette',
   'new-files': 'New file',
+  'new-source': 'New source file',
   themes: 'Theme',
   'font-body': 'Markdown font',
   'font-ui': 'Interface font',
   countries: 'Country flag',
   'move-to': 'Move to a folder',
+  vaults: 'Recent vaults',
   templates: 'Insert a template'
 }
 
@@ -5931,18 +6579,20 @@ async function insertTemplate (path) {
     ? state.current.path.split('/').pop().replace(/\.md$/i, '')
     : ''
   const filled = fillTemplate(text, title)
-  const at = editor.state.selection.main
-  editor?.dispatch({
+  // Inserting is editing, and the palette is open in the reading view too.
+  const view = await ensureEditor()
+  const at = view.state.selection.main
+  view.dispatch({
     changes: { from: at.from, to: at.to, insert: filled },
     // The caret lands after what was inserted, where writing continues.
     selection: { anchor: at.from + filled.length },
     scrollIntoView: true
   })
-  editor?.focus()
+  view.focus()
 }
 
 function openOverlay (mode, meta = {}) {
-  if (!state.vault && !VAULTLESS.has(mode)) { pickVault(); return }
+  if (!state.vault && !VAULTLESS.has(mode)) { connectVault(); return }
   // One picker opening straight over another never reaches closeOverlay, so
   // the outgoing one's preview is undone here instead.
   revertPreview(state.overlay?.mode)
@@ -6005,6 +6655,7 @@ function closeOverlay () {
   el.overlay.hidden = true
   el.panel.classList.remove('is-search')
   if (viewingWhiteboard()) whiteboardInstance?.focus()
+  if (viewingData()) dataInstance?.focus()
   else if (!reading() && state.current) editor?.focus()
 }
 
@@ -6171,7 +6822,7 @@ async function runOverlayQuery (query) {
   if (mode === 'switcher' && query.startsWith('#')) {
     const wanted = query.slice(1)
     const scored = []
-    for (const heading of headings(editor.state.doc.toString())) {
+    for (const heading of headings(noteText())) {
       const match = wanted ? fuzzy(wanted, heading.text) : { score: 0, hits: [] }
       if (match) scored.push({ item: { ...heading, label: heading.text }, ...match })
     }
@@ -6183,9 +6834,12 @@ async function runOverlayQuery (query) {
   }
 
   if (mode === 'switcher' || mode === 'commands' || mode === 'new-files' ||
+      mode === 'new-source' ||
       mode === 'themes' || mode === 'countries' || mode === 'move-to' ||
-      mode === 'templates' || FONT_MODES[mode]) {
-    const source = mode === 'move-to'
+      mode === 'templates' || mode === 'vaults' || FONT_MODES[mode]) {
+    const source = mode === 'vaults'
+      ? (state.overlay.vaults || [])
+      : mode === 'move-to'
       ? moveDestinations(state.overlay.paths || [])
       : mode === 'templates'
       ? templateItems()
@@ -6200,8 +6854,10 @@ async function runOverlayQuery (query) {
                 ...country,
                 label: `${country.flag} ${country.name}`
               }))
-            : (mode === 'new-files' ? NEW_FILE_COMMANDS : commandList())
-                .map((c) => ({ ...c, label: c.title }))
+            : mode === 'new-source'
+              ? SOURCE_CHOICES.map((choice) => ({ ...choice, label: choice.label }))
+              : (mode === 'new-files' ? NEW_FILE_COMMANDS : commandList())
+                  .map((c) => ({ ...c, label: c.title }))
 
     const scored = []
     for (const item of source) {
@@ -6379,7 +7035,7 @@ function renderOverlayList (emptyMessage = 'Nothing matches.') {
           : '')
     if (fileKind) {
       li.classList.add('has-file-icon')
-      li.append(fileIcon(fileKind))
+      li.append(docIcon(fileKind, item.path))
     }
 
     const title = document.createElement('span')
@@ -6411,6 +7067,9 @@ function renderOverlayList (emptyMessage = 'Nothing matches.') {
       right.textContent = item.kind
     } else if (mode === 'countries') {
       right.textContent = item.code
+    } else if (mode === 'new-source') {
+      // The extension the file will actually get, so the choice is not a guess.
+      right.textContent = item.ext
     } else if (item.level) {
       // A heading, from the switcher's `#` mode: its depth is what tells one
       // "Notes" from another.
@@ -6463,6 +7122,7 @@ async function chooseOverlayItem (i) {
   closeOverlay()
 
   if (mode === 'move-to') { await moveInto(item.path, paths); return }
+  if (mode === 'vaults') { await openVaultAt(item.path); return }
   if (mode === 'templates') { await insertTemplate(item.path); return }
   if (mode === 'themes') { commitTheme(item.id); return }
   if (FONT_MODES[mode]) { commitFont(FONT_MODES[mode], item.id); return }
@@ -6470,6 +7130,10 @@ async function chooseOverlayItem (i) {
   if (mode === 'new-files') { runCommand(item.id, dir); return }
   if (mode === 'countries') {
     await createLanguageFor(dir, item)
+    return
+  }
+  if (mode === 'new-source') {
+    await createSource(dir, item.ext)
     return
   }
   // A heading is a place in the note already open, so nothing is opened.
@@ -6695,7 +7359,7 @@ async function removeEmbeddedImage (path) {
   })
   if (!yes) return
 
-  const matches = findEmbeds(editor.state.doc.toString()).filter((embed) =>
+  const matches = findEmbeds(noteText()).filter((embed) =>
     embedSpec(embed.src, { resolve: resolveHere }).path === path
   )
 
@@ -6707,7 +7371,11 @@ async function removeEmbeddedImage (path) {
   }
 
   if (matches.length) {
-    editor?.dispatch({
+    /* The picture is already in the Trash, so taking the embed out of the note
+       is not optional — an editor is asked for rather than the change being
+       quietly dropped when a reader did this from the reading view. */
+    const view = await ensureEditor()
+    view.dispatch({
       changes: matches.map(({ from, to }) => ({ from, to, insert: '' })),
       userEvent: viewingLanguageTable() ? 'input.table' : 'input'
     })
@@ -6794,7 +7462,7 @@ window.addEventListener('blur', hideContextMenu)
 /* ------------------------------------------------------ create / rename */
 
 async function createNote (dir = '') {
-  if (!state.vault) return pickVault()
+  if (!state.vault) return connectVault()
   const path = await api.file.create(dir, 'Untitled')
   await loadTree()
   await openNote(path)
@@ -6825,7 +7493,7 @@ async function createNote (dir = '') {
  * is something to name.
  */
 async function createWebsite (dir = '') {
-  if (!state.vault) return pickVault()
+  if (!state.vault) return connectVault()
   const path = await api.site.create(dir)
   await loadTree()
   await openNote(path)
@@ -6836,7 +7504,7 @@ async function createWebsite (dir = '') {
 }
 
 async function createWhiteboard (dir = '') {
-  if (!state.vault) return pickVault()
+  if (!state.vault) return connectVault()
   const path = await api.whiteboard.create(dir)
   if (dir) state.expanded.add(dir)
   await loadTree()
@@ -6847,7 +7515,7 @@ async function createWhiteboard (dir = '') {
 }
 
 async function createTex (dir = '') {
-  if (!state.vault) return pickVault()
+  if (!state.vault) return connectVault()
   const path = await api.tex.create(dir)
   if (dir) state.expanded.add(dir)
   await loadTree()
@@ -6858,13 +7526,41 @@ async function createTex (dir = '') {
 }
 
 function createLanguage (dir = '') {
-  if (!state.vault) return pickVault()
+  if (!state.vault) return connectVault()
   openOverlay('countries', { dir })
+}
+
+/**
+ * A new source or data file, created empty and opened.
+ *
+ * The inline rename is started on it the way it is for a new note, and it is
+ * the one kind where the name being edited carries its extension — so `.py`
+ * is on screen while the name is typed, and typing a different known one over
+ * it changes the file's kind rather than being ignored. See `renameDocument`.
+ */
+async function createSource (dir = '', ext = '.txt') {
+  if (!state.vault) return connectVault()
+  let path
+  try {
+    path = await api.source.create(dir, 'Untitled', ext)
+  } catch (err) {
+    toast(err.message || 'That file could not be created.')
+    return
+  }
+  if (dir) state.expanded.add(dir)
+  await loadTree()
+  await openNote(path)
+  /* A source file has no reading view to be caught in, but the preference is
+     shared with notes and a file just made is one about to be written. */
+  if (reading()) setView('edit')
+  revealInTree(path)
+  const row = el.tree.querySelector(`.row[data-path="${cssEscape(path)}"]`)
+  if (row) beginRename({ type: 'file', kind: noteRef(path).kind, path, name: `Untitled${ext}` }, row)
 }
 
 /** A table-only document with generic, editable headers. */
 async function createTable (dir = '') {
-  if (!state.vault) return pickVault()
+  if (!state.vault) return connectVault()
   const path = await api.table.create(dir, 'Untitled')
   if (dir) state.expanded.add(dir)
   await loadTree()
@@ -6891,7 +7587,7 @@ async function createLanguageFor (dir = '', country) {
 }
 
 async function createFolder (dir = '') {
-  if (!state.vault) return pickVault()
+  if (!state.vault) return connectVault()
   const path = await api.folder.create(dir, 'New folder')
   state.expanded.add(path)
   await loadTree()
@@ -6961,7 +7657,15 @@ function beginRename (node, row) {
   input.value = node.name
   label.replaceWith(input)
   input.focus()
-  input.select()
+  /* Source and data files are the one kind whose name carries its extension,
+     so selecting all of it would put `.py` under the first thing typed. The
+     stem alone is selected instead — the extension stays visible, and stays
+     the file's, unless it is deliberately typed over. */
+  const stem = (isCodePath(node.path) || isDataPath(node.path))
+    ? node.name.lastIndexOf('.')
+    : -1
+  if (stem > 0) input.setSelectionRange(0, stem)
+  else input.select()
 
   let done = false
   /* What counts as a non-rename — blank, unchanged, refused by the vault — is
@@ -7008,6 +7712,7 @@ function closeCurrentNote () {
   if (viewingPdf()) pdf.close()
   if (viewingSite()) site.close()
   if (viewingWhiteboard()) whiteboardInstance?.close()
+  if (viewingData()) dataInstance?.close()
   pdfContents = []
   state.current = null
   state.dirty = false
@@ -7062,6 +7767,9 @@ function runCommand (id, dir = state.current?.dir || '') {
   switch (id) {
     case 'new-file': openOverlay('new-files', { dir }); break
     case 'new-note': createNote(dir); break
+    // A language first, then a file: see the note beside NEW_FILE_COMMANDS.
+    case 'new-source': openOverlay('new-source', { dir }); break
+    case 'new-csv': createSource(dir, '.csv'); break
     case 'new-tex': createTex(dir); break
     case 'new-whiteboard': createWhiteboard(dir); break
     case 'new-website': createWebsite(dir); break
@@ -7103,6 +7811,15 @@ function runCommand (id, dir = state.current?.dir || '') {
       toast(on ? 'Headings centered.' : 'Headings left aligned.')
       break
     }
+    /* Same setting the Editor settings tab writes, so the two cannot disagree
+       about which way it points. `applySettings` is what actually clears the
+       underlines or asks for a fresh pass. */
+    case 'toggle-spellcheck': {
+      const on = state.cfg.spellcheck === false
+      setSetting('spellcheck', on)
+      toast(on ? 'Spellcheck on.' : 'Spellcheck off.')
+      break
+    }
     case 'fit-columns':
       toast(editor?.fitAllColumns()
         ? 'Columns fit their content again.'
@@ -7113,6 +7830,9 @@ function runCommand (id, dir = state.current?.dir || '') {
     case 'info': togglePane('info'); break
     case 'search': openOverlay('search'); break
     case 'lint-file': lintFile(); break
+    case 'open-recent-vault': openRecentVault(); break
+    case 'check-for-updates': checkForUpdate(); break
+    case 'review-stats': loadReviewStats().then((panel) => panel.show()); break
     case 'insert-template': {
       /* An empty templates folder is the ordinary state of a vault that has
          never used one, so it explains itself rather than opening a picker
@@ -7154,6 +7874,10 @@ function runCommand (id, dir = state.current?.dir || '') {
       // Nor inside a page, which is a guest and keeps its own text out of reach.
       if (viewingSite()) { setStatusRight('Find does not reach inside a web page'); break }
       if (viewingWhiteboard()) { whiteboardInstance?.find(); break }
+      /* A table's find is its own: the grid searches cells and can hide the
+         rows without a match, neither of which a text panel over a buffer of
+         quoted source could do. */
+      if (viewingData()) { dataInstance?.find(); break }
       // The find panel lives in the editor, so reading view steps across to the
       // editing view first — at the same place in the note, which setView keeps.
       // Asking to find something is asking to be taken to it, and that is a
@@ -7172,7 +7896,7 @@ function runCommand (id, dir = state.current?.dir || '') {
     case 'zoom-reset': zoomDoc('fit'); break
     case 'undo': stepHistory(false); break
     case 'redo': stepHistory(true); break
-    case 'open-vault': pickVault(); break
+    case 'open-vault': connectVault(); break
     case 'settings': settings.open(); break
     case 'export-pdf': exportPdf(); break
     case 'export-whiteboard-png':
@@ -7305,17 +8029,28 @@ function stepHistory (redo) {
     return
   }
 
+  /* The grid keeps its own history — cell patches and, for the structural
+     changes, snapshots of the row list — because the file underneath it is
+     not a text buffer with an edit log. */
+  if (viewingData()) {
+    dataInstance?.history(redo)
+    return
+  }
+
   /* Reading view has no cursor to put anything back at, so undoing there steps
      across to the editing view first — the same move ⌘F makes, for the same
      reason: you are being shown the thing you asked to change. Focus is only
      taken if it was somewhere else entirely; a cell of a table is already
      inside the editor, and its edits are the editor's transactions. */
+  /* Nothing to undo without an editor: it holds the history, and a session
+     that has only ever read has made no edits for it to hold. */
+  if (!editor) return
   if (!editor.dom.contains(document.activeElement)) {
     if (reading()) setView('edit')
-    editor?.focus()
+    editor.focus()
   }
-  if (redo) editor?.redo()
-  else editor?.undo()
+  if (redo) editor.redo()
+  else editor.undo()
 }
 
 /* --------------------------------------------------------------- settings
@@ -7368,6 +8103,10 @@ function applySettings (cfg) {
   /* `outline` was a boolean when there were two panes to choose between. It is
      still read, so an install that was left showing the outline opens showing
      it, and it is written over by `pane` the first time one is picked. */
+  /* The lower panel is set before the upper one, because `setPane` is what
+     draws both and it reads this. */
+  state.paneBelow = PANES[cfg.paneBelow] ? cfg.paneBelow : null
+  setPaneBelowHeight(Number(cfg.paneBelowHeight) || PANE_BELOW_DEFAULT, false)
   setPane(cfg.pane || (cfg.outline ? 'outline' : 'files'), false)
 }
 
@@ -7410,6 +8149,18 @@ const loadSettings = () => (settingsLoading ??= import('./settings.js').then(({ 
 const settings = {
   open: () => loadSettings().then((pane) => pane.open())
 }
+
+/* The review panel, fetched the first time it is asked for. It is a page about
+   studying, and a vault that studies nothing should never pay for it — the
+   same reasoning that keeps the editor, the copilot and the whiteboard off the
+   startup path. */
+let reviewStatsLoading = null
+const loadReviewStats = () => (reviewStatsLoading ??= import('./review-panel.js')
+  .then(({ mountReviewStats }) => mountReviewStats({
+    api,
+    toast,
+    openNote: (path) => openNote(path)
+  })))
 
 const savedSearches = mountSavedSearches({
   root: el.savedSearches,
@@ -7518,6 +8269,7 @@ const { restorePanelWidths } = mountPanels({
   onResize: () => {
     markTabOverflow()
     if (viewingWhiteboard()) whiteboardInstance?.resize()
+    if (viewingData()) dataInstance?.resize()
   },
   onResizeStart: (key) => {
     if (key !== 'railWidth' || !reading()) return false
@@ -7741,14 +8493,17 @@ async function attachFiles (files, insertIntoTable = null) {
     return
   }
 
-  const { from, to } = editor.state.selection.main
-  const line = editor.state.doc.lineAt(from)
+  /* Dropping a picture onto a note being read is an edit to it, so this is
+     where a reading-only session stops being one. */
+  const view = await ensureEditor()
+  const { from, to } = view.state.selection.main
+  const line = view.state.doc.lineAt(from)
   // An embed is a block-ish thing; dropping one into the middle of a sentence
   // is almost never what was meant, so it starts on its own line.
   const lead = line.from === from || !line.text.trim() ? '' : '\n'
   const insert = `${lead}${inserts.join('\n')}\n`
 
-  editor?.dispatch({
+  view.dispatch({
     changes: { from, to, insert },
     selection: { anchor: from + insert.length },
     scrollIntoView: true,
@@ -8050,6 +8805,54 @@ function paintBootError (error) {
    do this too. What is left here is the one thing that only follows from a
    folder chosen by hand: an empty vault is given a note to start writing in,
    rather than opening onto nothing. */
+/**
+ * The vaults Tulip has opened before, as a picker.
+ *
+ * Until now the only route between two vaults was the native folder dialog:
+ * every switch meant navigating a file browser to somewhere you had already
+ * been. The config held two scalar paths and no history, so nothing could
+ * offer a list even in principle.
+ *
+ * A folder that has gone away — an unmounted drive, a synced vault not yet
+ * downloaded — stays on the list and says so rather than disappearing from
+ * it, because a missing vault is nearly always a temporarily missing one.
+ */
+async function openRecentVault () {
+  const vaults = await api.vault.recent().catch(() => [])
+  if (!vaults.length) {
+    // Nothing to choose between yet, so offer the thing they would choose next.
+    connectVault()
+    return
+  }
+  openOverlay('vaults', {
+    vaults: [
+      /* First, because it is the one entry that is always right: a list of
+         places you have been is not much use the moment you want somewhere
+         new, and this used to be the only thing the button did. */
+      { path: null, label: 'Choose a folder…' },
+      ...vaults.map((vault) => ({
+        ...vault,
+        label: vault.missing ? `${vault.name} — not found` : vault.name,
+        // The full path, because two vaults are often two folders of one name.
+        detail: vault.path
+      }))
+    ]
+  })
+}
+
+async function openVaultAt (dir) {
+  // The picker's first row, which is the native dialog rather than a recent.
+  if (!dir) { connectVault(); return }
+  const answer = await api.vault.open(dir).catch(() => null)
+  /* Main refuses a folder that has gone rather than opening an empty vault
+     over the one that was working; the reason it gives is the useful half. */
+  if (!answer?.ok) {
+    toast(`That vault could not be opened — ${answer?.reason || 'the request failed'}.`)
+    return
+  }
+  // The rest follows from `vault:opened`, which main sends and the app obeys.
+}
+
 async function connectVault () {
   const recovering = !el.bootScreen.hidden
   if (recovering) paintBootLoading()
@@ -8071,7 +8874,7 @@ async function connectVault () {
 el.connectVault.addEventListener('click', connectVault)
 el.bootConnect.addEventListener('click', connectVault)
 el.bootRetry.addEventListener('click', () => boot())
-$('vault-name').addEventListener('click', connectVault)
+$('vault-name').addEventListener('click', openRecentVault)
 $('btn-new-note').addEventListener('click', () => createNote(state.current?.dir || ''))
 $('btn-new-folder').addEventListener('click', () => createFolder(state.current?.dir || ''))
 $('btn-search').addEventListener('click', () => openOverlay('search'))
@@ -8643,16 +9446,22 @@ async function boot () {
   await Promise.all([loadTree(), restoringCopilot])
 
   /* The strip comes back as it was left, minus any note that has since gone
-     away. Each restored tab is seeded with a one-entry history so back and
-     forward have somewhere to stand; where you were *in* each note is not
-     stored, which is the one thing a restart does not carry over. */
+     away — and each tab at the line it was left showing, which is what
+     `tabPlaces` carries beside the paths. Each is seeded with a one-entry
+     history so back and forward have somewhere to stand. */
   const known = new Set(state.files.map((f) => f.path))
+  const places = Array.isArray(cfg.tabPlaces) ? cfg.tabPlaces : []
+  /* Paired with its path before the filter, not read back by position after
+     it: a note deleted since the last session takes its own place out of the
+     list, and every place after it would otherwise shift onto a tab it was
+     never about. */
   const stored = (Array.isArray(cfg.tabs) ? cfg.tabs : [])
-    .filter((p) => p === null || known.has(p))
+    .map((path, at) => ({ path, line: Number(places[at]) || 1 }))
+    .filter(({ path }) => path === null || known.has(path))
 
-  state.tabs = stored.map((path) => ({
+  state.tabs = stored.map(({ path, line }) => ({
     path,
-    history: path ? [{ path, at: 0, top: 0 }] : [],
+    history: path ? [{ path, at: 0, top: 0, line }] : [],
     historyAt: path ? 0 : -1
   }))
 
@@ -8661,7 +9470,7 @@ async function boot () {
     // what every earlier version of Tulip did.
     const last = cfg.lastNote && known.has(cfg.lastNote) ? cfg.lastNote : null
     state.tabs = [last
-      ? { path: last, history: [{ path: last, at: 0, top: 0 }], historyAt: 0 }
+      ? { path: last, history: [{ path: last, at: 0, top: 0, line: 1 }], historyAt: 0 }
       : blankTab()]
   }
 
@@ -8686,7 +9495,12 @@ async function boot () {
   if (bootView !== 'read') await ensureEditor()
 
   if (opening) {
-    await openNote(opening, { focus: false, history: false })
+    // At the line it was left showing, the same way selecting a tab reopens it.
+    await openNote(opening, {
+      focus: false,
+      history: false,
+      place: tabPlace(state.tabs[state.tabIndex])
+    })
     revealInTree(opening)
   }
 

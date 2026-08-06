@@ -56,7 +56,7 @@
     <aside class="sidebar" id="sidebar">
       <span class="app-version" id="app-version" aria-label="Tulip version"></span>
       <header class="sidebar-head">
-        <button class="vault-name" id="vault-name" title="Open another vault">
+        <button class="vault-name" id="vault-name" title="Switch vault">
           <span id="vault-label">No vault</span>
         </button>
         <div class="sidebar-actions">
@@ -87,6 +87,11 @@
            of itself — a note's headings, or a PDF's contents and the passages
            marked in it; Links is the other direction, the notes that point at
            this one and the ones that say its name without pointing. -->
+      <!-- The strip scrolls sideways when the five names do not fit, so the
+           split control cannot live inside it: `margin-left: auto` in a
+           scroller pushes a thing past the edge rather than pinning it there.
+           A row holds the two, and only the tabs scroll. -->
+      <div class="pane-tabs-row">
       <nav class="pane-tabs" id="pane-tabs" role="tablist" aria-label="Sidebar">
         <button class="pane-tab is-on" id="pane-files-tab" role="tab" data-pane="files"
                 aria-selected="true">Files</button>
@@ -99,6 +104,15 @@
         <button class="pane-tab" id="pane-info-tab" role="tab" data-pane="info"
                 aria-selected="false">Info</button>
       </nav>
+        <!-- Not a tab, so it is outside both the tablist and the roving
+             tabindex the five share: it does not choose a panel, it decides
+             whether there is a second one. -->
+        <button class="pane-split-toggle" id="pane-split-toggle" type="button"
+                aria-pressed="false" title="Show a second panel below"
+                aria-label="Show a second panel below">
+          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><rect x="2.5" y="2.5" width="11" height="11" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M2.5 8h11" stroke="currentColor" stroke-width="1.2"/></svg>
+        </button>
+      </div>
 
       <section class="saved-searches" id="saved-searches" hidden></section>
       <nav class="tree pane" id="tree" role="tree" aria-label="Notes"></nav>
@@ -106,6 +120,24 @@
       <nav class="links-list pane" id="links-list" aria-label="Backlinks" hidden></nav>
       <nav class="spelling-list pane" id="spelling-list" aria-label="Spelling" hidden></nav>
       <div class="info-pane pane" id="info-pane" aria-label="Document info" hidden></div>
+
+      <!-- The second panel's header: a handle to size it by and a strip to
+           choose what is in it. The panel body itself is one of the five above,
+           moved below this block when it is the lower one — which is why this
+           sits between them in the markup rather than wrapping anything. -->
+      <div class="pane-split" id="pane-split" hidden>
+        <div class="pane-split-grip" id="pane-split-grip" role="separator" tabindex="0"
+             aria-orientation="horizontal" aria-label="Resize the lower panel"
+             title="Drag to resize · double-click to reset"></div>
+        <nav class="pane-tabs is-lower" id="pane-tabs-below" role="tablist"
+             aria-label="Lower panel">
+          <button class="pane-tab" role="tab" data-pane="files" aria-selected="false">Files</button>
+          <button class="pane-tab" role="tab" data-pane="outline" aria-selected="false">Outline</button>
+          <button class="pane-tab" role="tab" data-pane="links" aria-selected="false">Links</button>
+          <button class="pane-tab" role="tab" data-pane="spelling" aria-selected="false">Spelling</button>
+          <button class="pane-tab" role="tab" data-pane="info" aria-selected="false">Info</button>
+        </nav>
+      </div>
 
       <!-- Drag the panel's own edge. Arrow keys nudge it, double-click puts
            it back where it started. -->
@@ -289,6 +321,13 @@
              canvas inside this host; Tulip owns its tab, file, toolbar and
              persistence just as it does for PDF and website viewers. -->
         <div class="whiteboard" id="whiteboard" tabindex="-1" hidden></div>
+
+        <!-- A separated-values file, shown as the table it is rather than as
+             the quoted text it is stored as. Mounted lazily by src/csv.js,
+             which owns everything inside; Tulip owns the tab, the file and the
+             saving, exactly as it does for the whiteboard. Focusable because
+             it scrolls and is navigated with the arrow keys. -->
+        <div class="data" id="data" tabindex="-1" hidden></div>
 
         <!-- The letters a language has and a US keyboard does not, docked under
              the table. Which letters is decided from the folder's flag and

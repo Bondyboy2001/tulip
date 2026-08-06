@@ -23,6 +23,22 @@ const noteExtAlternation = VAULT_CONTRACT.noteExtensions
 export const NOTE_EXT =
   new RegExp(`\\.(${noteExtAlternation})$`, 'i')
 
+/* Source files and data files, from the same contract. Both are lists rather
+   than single extensions, so both are one alternation built once — a matcher
+   rebuilt per call would be run against every entry of every vault walk.
+
+   Anchored on a leading dot as well as the end, so `main.cpp` matches and a
+   file actually named `cpp` does not. */
+const extAlternation = (list) => list.map(escapeRe).join('|')
+
+export const CODE_EXT =
+  new RegExp(`(${extAlternation(VAULT_CONTRACT.codeExtensions)})$`, 'i')
+
+/* The delimiter is the value, so the matcher is built from the keys. */
+export const DATA_DELIMITERS = VAULT_CONTRACT.dataExtensions
+export const DATA_EXT =
+  new RegExp(`(${extAlternation(Object.keys(DATA_DELIMITERS))})$`, 'i')
+
 export const TEX_EXT = new RegExp(`${escapeRe(VAULT_CONTRACT.texExtension)}$`, 'i')
 export const PDF_EXT = new RegExp(`${escapeRe(VAULT_CONTRACT.pdfExtension)}$`, 'i')
 export const SITE_EXT = new RegExp(`${escapeRe(VAULT_CONTRACT.siteExtension)}$`, 'i')
@@ -33,6 +49,25 @@ export const WHITEBOARD_EXT = new RegExp(`${escapeRe(VAULT_CONTRACT.whiteboardEx
    contract because JSON has no regular expressions; `u` is what makes the
    \u{...} escapes mean codepoints rather than literal text. */
 export const LANGUAGE_FLAG = new RegExp(VAULT_CONTRACT.languageFlagPattern, 'u')
+
+export const isCodePath = (path) => CODE_EXT.test(path || '')
+export const isDataPath = (path) => DATA_EXT.test(path || '')
+
+/** How to split a row of the data file at `path` — the contract's delimiter for
+ *  its extension, and a comma for anything that reached here without one. */
+export const dataDelimiter = (path) => {
+  const match = DATA_EXT.exec(path || '')
+  return (match && DATA_DELIMITERS[match[1].toLowerCase()]) || ','
+}
+
+/** The word behind a source file's extension: `solve.py` → `py`, which is the
+ *  spelling languages.js already knows as Python. Kept here because the
+ *  extension is a path fact; what the word *means* is languages.js's business
+ *  and is not restated in the contract. */
+export const codeToken = (path) => {
+  const match = CODE_EXT.exec(path || '')
+  return match ? match[1].slice(1).toLowerCase() : ''
+}
 
 export const isTexPath = (path) => TEX_EXT.test(path || '')
 export const isPdfPath = (path) => PDF_EXT.test(path || '')

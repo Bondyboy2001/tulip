@@ -17,6 +17,7 @@ const { restoreConflicts } = require('./copilot-restore')
 const { createTexCompiler } = require('./tex-compile')
 const { TrustStore } = require('./trust-store')
 const { makeStore: makeReviewStore } = require('./review-store')
+const { makeIndexCache } = require('./index-cache')
 const {
   REQUEST_PATH: AI_RENAME_REQUEST,
   isRequestPath: isAiRenameRequest,
@@ -108,7 +109,9 @@ const DOCUMENT_EXT = new RegExp(
     VAULT_CONTRACT.texExtension,
     VAULT_CONTRACT.pdfExtension,
     VAULT_CONTRACT.siteExtension,
-    VAULT_CONTRACT.whiteboardExtension
+    VAULT_CONTRACT.whiteboardExtension,
+    ...VAULT_CONTRACT.codeExtensions,
+    ...Object.keys(VAULT_CONTRACT.dataExtensions)
   ]
     .map(escapeRe).join('|')})$`,
   'i'
@@ -153,6 +156,20 @@ const isSite = (p) => path.extname(p).toLowerCase() === SITE_EXT
 const WHITEBOARD_EXT = VAULT_CONTRACT.whiteboardExtension
 const isWhiteboard = (p) => path.extname(p).toLowerCase() === WHITEBOARD_EXT
 
+/* Source files and data files. Neither is a note — a `.py` is text the vault
+   edits but never reads as prose, and a `.csv` is a table rather than a
+   document at all — but both are text on disk that the vault owns, so unlike a
+   PDF they are written, versioned and searched exactly as a note is.
+
+   Sets rather than expressions: this is asked once per entry of every vault
+   walk, and the lists are long enough that a regular expression alternation
+   over sixty extensions is the wrong shape for the question. */
+const CODE_EXT = new Set(VAULT_CONTRACT.codeExtensions)
+const isCode = (p) => CODE_EXT.has(path.extname(String(p || '')).toLowerCase())
+
+const DATA_EXT = new Set(Object.keys(VAULT_CONTRACT.dataExtensions))
+const isData = (p) => DATA_EXT.has(path.extname(String(p || '')).toLowerCase())
+
 /* Highlights drawn on a PDF, mirroring the vault's own shape:
    `Papers/thesis.pdf` is annotated in `.annotations/Papers/thesis.pdf.json`.
 
@@ -187,6 +204,17 @@ const isSnapshotFile = (p) => {
   return MD_EXT.has(extension) || ASSET_EXT.has(extension) ||
     isTex(p) || isPdf(p) || isWhiteboard(p)
 }
+
+/* Source and data files are deliberately absent from that list. They reach the
+   tree — and through it the quick switcher, which is built from the tree and
+   not from here — so they are findable by name. What they are not is *indexed*:
+   every bucket the snapshot sorts this list into is Markdown-shaped, built
+   from headings, wikilinks, tags and frontmatter, and a Python file has none
+   of those. Retaining them here would be paying for a walk to filter them out
+   again at the end of it.
+
+   Searching inside them is a real thing to want and a different feature: it
+   needs an index that is about lines rather than about notes. */
 
 /* What each of those is served as. Only the range replies need this — see
    `_mime_comment` in the JSON — and anything not named there is a download
@@ -556,6 +584,41 @@ const MAX_WHITEBOARD_INDEX_BYTES = 32 * 1024 * 1024
 let indexDirty = true
 let syncing = null
 
+/* The same index, on disk, so a launch does not start from nothing — see
+   index-cache.js for what is and is not trusted about it. Rebuilt when the
+   vault changes; null until there is a vault to have one for. */
+let indexCache = null
+/* Whether this process has already tried to seed the index from that file. One
+   attempt per vault: after the first sync the Map in memory is the better copy
+   of the two, and reading the file again could only put back something older. */
+let indexCacheSeeded = false
+
+const INDEX_CACHE_DIR = () => path.join(app.getPath('userData'), 'index-cache')
+
+function useIndexCacheFor (dir) {
+  indexCache = dir ? makeIndexCache({ dir: INDEX_CACHE_DIR(), vaultPath: dir }) : null
+  indexCacheSeeded = false
+}
+
+/**
+ * Fill the empty index from the last session's copy.
+ *
+ * Nothing here is believed: `syncIndex` checks every entry against the real
+ * file's mtime and size before it uses one, exactly as it does for an entry it
+ * put there itself a moment ago. What this saves is the read, not the check.
+ */
+async function seedIndexFromCache () {
+  if (indexCacheSeeded || !indexCache || index.size) return
+  indexCacheSeeded = true
+  try {
+    for (const [key, entry] of await indexCache.load()) index.set(key, entry)
+  } catch (error) {
+    /* A cache that cannot be read is a cache that is not used. Worth a line in
+       the log, worth nothing else — the vault is still the source of truth. */
+    logCrash('indexCache', error)
+  }
+}
+
 /* Which state of the index an answer belongs to. Only the narrowed search
    below reads it: a result set held from the last keystroke describes the
    notes as they were, and one edit anywhere in the vault — the reader's own
@@ -573,6 +636,12 @@ async function syncIndex () {
   indexGeneration++
   if (!vaultPath) { index.clear(); whiteboardIndex.clear(); forgetLinkTables(); return }
   indexDirty = false
+
+  /* Before the walk, and only ever on the first sync of a vault: what the last
+     session read, so the walk below has something to compare against instead
+     of reading every note again. Each entry is still checked against the file
+     it claims to be — see the loop. */
+  await seedIndexFromCache()
 
   const { notes, whiteboards = [] } = await getVaultSnapshot()
 
@@ -629,6 +698,11 @@ async function syncIndex () {
   // Which notes exist may have changed, and that is the whole of what the link
   // tables are built from.
   forgetLinkTables()
+
+  /* And out to disk, coalesced, so the next launch starts from here. Not
+     awaited: the index in memory is already correct and every caller of this
+     is waiting on that, not on the copy. */
+  indexCache?.save(index)
 }
 
 function ensureIndex () {
@@ -821,6 +895,18 @@ async function scanVaultDirectory (dir, includeInTree = true) {
       node = {
         type: 'file', kind: 'whiteboard',
         name: path.basename(entry.name, path.extname(entry.name)), path: rel(abs)
+      }
+    } else if (includeInTree && (isCode(entry.name) || isData(entry.name))) {
+      /* The one kind whose extension stays in the label. Every other document
+         is named without one because its kind is already said by the icon
+         beside it — but `solve.py`, `solve.c` and `solve.jl` in one folder are
+         three files, and stripping the extension would show three rows all
+         called "solve". */
+      node = {
+        type: 'file',
+        kind: isData(entry.name) ? 'data' : 'code',
+        name: entry.name,
+        path: rel(abs)
       }
     }
     return { files: isSnapshotFile(entry.name) ? [abs] : [], evicted: 0, node }
@@ -1481,9 +1567,56 @@ async function migrateAttachments (dir) {
   }
 }
 
+/* The vaults connected before this one, newest first.
+   ⚠️ Written by main and never by the renderer, which is why `recentVaults` is
+   not in electron/config-keys.js: a list of folder paths is exactly the shape
+   of key that allowlist exists to keep out of the renderer's reach, and
+   nothing about a menu of past vaults requires it to be settable from there. */
+const MAX_RECENT_VAULTS = 8
+
+function rememberVault (dir) {
+  const cfg = readConfig()
+  const before = Array.isArray(cfg.recentVaults) ? cfg.recentVaults : []
+  /* Filtered by path, so reopening one moves it to the front rather than
+     appearing twice. Kept even when the folder has gone: the list is offered
+     through a picker that checks before it opens, and quietly dropping an
+     entry because a drive was unmounted is how a vault gets forgotten. */
+  const after = [dir, ...before.filter((seen) => seen !== dir)].slice(0, MAX_RECENT_VAULTS)
+  writeConfig({ recentVaults: after })
+}
+
+/** The recent vaults, and whether each is somewhere Tulip can still reach. */
+ipcMain.handle('vault:recent', () => {
+  const cfg = readConfig()
+  const seen = Array.isArray(cfg.recentVaults) ? cfg.recentVaults : []
+  return seen
+    .filter((dir) => typeof dir === 'string' && dir && dir !== vaultPath)
+    .map((dir) => ({ path: dir, name: path.basename(dir), missing: !fsSync.existsSync(dir) }))
+})
+
+/** Connect one of them. Refused rather than half-done if it has gone away. */
+ipcMain.handle('vault:open', async (_event, dir) => {
+  if (typeof dir !== 'string' || !dir) return { ok: false, reason: 'no folder was named' }
+  /* Only a folder this app has opened before. The renderer may not name an
+     arbitrary path here — choosing a *new* vault goes through `vault:pick`,
+     which is a native dialog and so is the reader's own choice by definition. */
+  const cfg = readConfig()
+  const known = Array.isArray(cfg.recentVaults) ? cfg.recentVaults : []
+  if (!known.includes(dir)) return { ok: false, reason: 'that folder is not a vault Tulip knows' }
+  if (!fsSync.existsSync(dir)) return { ok: false, reason: 'that folder is no longer there' }
+
+  /* The same handshake `pickVault` uses, and for the same reason: the buffer
+     has to reach disk while `vaultPath` still points at the vault it belongs
+     to. See the account there. */
+  await askRendererToFlush(mainWindow)
+  await openVault(dir)
+  return { ok: true }
+})
+
 async function openVault (dir) {
   vaultPath = dir
   fileTagsCache = null
+  rememberVault(dir)
   trust?.setVault(dir, readConfig().historyInVault === true)
   /* The vault open is the vault remembered — there is no second, separately
      chosen "default" any more, so connecting a folder here is the whole of
@@ -1496,6 +1629,9 @@ async function openVault (dir) {
   whiteboardIndex.clear()
   texSnapshotCache.clear()
   forgetLinkTables()
+  /* A different vault means a different cache file, and the index just emptied
+     is now allowed to be seeded from it again. */
+  useIndexCacheFor(dir)
   indexDirty = true
   invalidateVaultSnapshot()
   watchVault()
@@ -1520,6 +1656,93 @@ let quitting = false
 let flushReply = null
 let flushAsked = null
 ipcMain.handle('app:version', () => app.getVersion())
+
+/* ------------------------------------------------------------- updates
+
+   Tulip has no updater and is not getting one. What it did not have either was
+   any way to find out that a new version existed: the README said "pull and
+   re-run the build script", which is advice for the person who wrote it and
+   nobody else, and CI threw every build it made away.
+
+   So: asked for, never volunteered. Nothing here runs on a timer, at launch,
+   or in the background — the one caller is a command somebody typed, and if
+   nobody types it Tulip makes no network request in its life. That is the
+   whole of the design. An app whose entire premise is a folder of files on
+   your own disk should not be quietly talking to a server about it.
+
+   The answer names the newest tag and where to get it. Downloading, replacing
+   and relaunching stay the reader's, which is also what makes this safe to
+   have: there is no code path here that can install anything. */
+
+const RELEASES = 'https://api.github.com/repos/Bondyboy2001/tulip/releases/latest'
+
+/** `v0.1.26` and `0.1.26` alike, as numbers, so they can be compared. */
+function versionParts (text) {
+  return String(text).replace(/^v/, '').split('.').map((n) => parseInt(n, 10) || 0)
+}
+
+/** Whether `candidate` is a later version than `current`. */
+function isNewer (candidate, current) {
+  const a = versionParts(candidate)
+  const b = versionParts(current)
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) > (b[i] || 0)
+  }
+  return false
+}
+
+ipcMain.handle('app:update-check', async () => {
+  const current = app.getVersion()
+  let latest
+  try {
+    /* `net.fetch` rather than the global one: it goes through Chromium's stack,
+       which is what already knows about this machine's proxy and certificates. */
+    const res = await net.fetch(RELEASES, {
+      headers: {
+        accept: 'application/vnd.github+json',
+        'user-agent': `Tulip/${current}`
+      }
+    })
+    /* A repository with no releases yet answers 404, which is an answer and not
+       a failure — it means there is nothing newer, which is true. */
+    if (res.status === 404) return { ok: true, current, latest: null, newer: false }
+    if (!res.ok) return { ok: false, current, reason: `GitHub answered ${res.status}` }
+    latest = await res.json()
+  } catch (error) {
+    return { ok: false, current, reason: error.message || 'the network could not be reached' }
+  }
+
+  const tag = String(latest?.tag_name || '')
+  if (!tag) return { ok: true, current, latest: null, newer: false }
+  return {
+    ok: true,
+    current,
+    latest: tag.replace(/^v/, ''),
+    newer: isNewer(tag, current),
+    url: String(latest?.html_url || '')
+  }
+})
+
+/**
+ * Something went wrong in the window, and now somebody knows.
+ *
+ * Main has kept a crash log since it had a crash to log; the renderer had
+ * nothing at all, and an exception thrown there went to a DevTools console
+ * nobody had open. That is not a theoretical gap — three unhandled TypeErrors
+ * were being thrown on every single launch, quietly skipping the first note's
+ * spellcheck pass and the disk-conflict check that runs on window focus, and
+ * they were found by attaching a debugger rather than by using the app.
+ *
+ * Fire-and-forget on the renderer's side: the reporting of a failure must not
+ * be able to fail in a way that matters, least of all inside a handler that is
+ * already dealing with one.
+ */
+ipcMain.on('app:error', (_event, kind, detail) => {
+  /* Trusted for its shape, not its content: this crosses the same bridge as
+     everything else the renderer says, and it ends up in a file a person
+     reads. Bounded so a loop cannot fill the log with one message. */
+  logCrash(`renderer/${String(kind).slice(0, 40)}`, String(detail).slice(0, 4000))
+})
 
 /* The window's own reveal, set by createWindow and called from the renderer's
    `app:painted` — see the account there. A no-op before there is a window and
@@ -2105,7 +2328,12 @@ ipcMain.handle('file:write', async (_e, p, content, metadata = null) => {
      it is the last one that should be able to leave a half-written note behind
      if the power goes. */
   const isMarkdown = MD_EXT.has(path.extname(abs).toLowerCase())
-  const isTextDocument = isMarkdown || isTex(abs)
+  /* Source and data files are versioned like notes. They are the vault's own
+     text, edited in the vault's own editor and autosaved by it — which is
+     exactly the argument for keeping the copy that History restores from. A
+     `.py` overwritten by a stray keystroke is no more recoverable from the
+     filesystem than a note is. */
+  const isTextDocument = isMarkdown || isTex(abs) || isCode(abs) || isData(abs)
   const whiteboard = isWhiteboard(abs)
   /* The note as it stood before this write, read first: the snapshot has to be
      the same text the write is about to replace, and reading after would hand
@@ -2247,6 +2475,35 @@ ipcMain.handle('table:create', async (_e, dir, name) => {
   return rel(target)
 })
 
+/* A source or data file, empty apart from whatever the format needs to be
+   openable at all.
+ *
+ * One handler for both, because the only thing that differs between them is
+ * the extension — which the caller names, and which is checked against the
+ * contract's own lists rather than trusted. Without that check this would be
+ * "write a file of any extension anywhere in the vault", which is a wider door
+ * than the feature needs. */
+ipcMain.handle('source:create', async (_e, dir, name, ext) => {
+  const wanted = String(ext || '').toLowerCase()
+  if (!CODE_EXT.has(wanted) && !DATA_EXT.has(wanted)) {
+    throw new Error('That is not a file type Tulip creates.')
+  }
+  const target = freeName(await realSafePath(dir || ''), name || 'Untitled', wanted)
+  await fs.mkdir(path.dirname(target), { recursive: true })
+  noteSelfWrite(target)
+  /* A CSV with no header row opens as a grid with nothing to label its one
+     column, and the first thing anyone does is name the columns — so it starts
+     with a row to name them in. A source file starts genuinely empty: there is
+     no line that belongs in every Python file. */
+  const seed = DATA_EXT.has(wanted)
+    ? `column 1${VAULT_CONTRACT.dataExtensions[wanted]}column 2\n`
+    : ''
+  await fs.writeFile(target, seed, 'utf8')
+  trust?.creationTime(rel(target), Date.now())
+  invalidateVaultSnapshot()
+  return rel(target)
+})
+
 ipcMain.handle('folder:create', async (_e, dir, name) => {
   const target = freeName(await realSafePath(dir || ''), name || 'New folder')
   noteSelfWrite(target)
@@ -2262,12 +2519,22 @@ ipcMain.handle('folder:create', async (_e, dir, name) => {
 async function renameDocument (p, nextName) {
   const abs = await realSafeTargetPath(p)
   const language = isLanguageTable(abs)
-  const ext = fsSync.statSync(abs).isDirectory()
-    ? ''
-    : path.extname(abs)
   /* The extension is the file's, not the name's: the tree shows a document
      without one, so a name typed back with `.pdf` or `.md` on it would other-
      wise be filed as `Paper.pdf.pdf`. */
+  let ext = fsSync.statSync(abs).isDirectory()
+    ? ''
+    : path.extname(abs)
+  /* Source and data files are the exception, because they are the one kind the
+     tree labels *with* the extension. Someone renaming `notes.txt` to
+     `notes.py` in a box that was prefilled `notes.txt` means the change, and
+     keeping `.txt` would quietly ignore the only part they edited. Another
+     kind's extension is still not honoured — this cannot turn a script into a
+     PDF — so the answer is always a source file either way. */
+  if (isCode(abs) || isData(abs)) {
+    const typed = path.extname(String(nextName || '')).toLowerCase()
+    if (CODE_EXT.has(typed) || DATA_EXT.has(typed)) ext = typed
+  }
   /* Every rule about what a filename may be lives in safe-name.js — including
      the Windows ones, which a vault written here still has to keep to if it is
      ever going to open there. */
@@ -2417,16 +2684,28 @@ ipcMain.handle('file:import', async (_e, destDir, sources) => {
       return
     }
 
-    /* Notes, PDFs and whiteboards, because those are the portable documents
-       the vault can safely validate by extension. The
-       filter is what stops a drag from being a way to read arbitrary files in. */
+    /* Notes, PDFs, whiteboards, and now source and data files: the documents
+       the vault can validate by extension and then actually open. The filter
+       is the point — a drag is a copy *into* the vault, and one that accepted
+       anything would make the tree a place unopenable files accumulate.
+
+       Source and data files earn their place here by the same test as the
+       rest: the app opens them, edits them and versions them, so a dragged-in
+       `.py` is a document and not a stowaway. Anything outside these lists is
+       still skipped and still counted, which is what the "n skipped" in the
+       import's report is for. */
     if (!MD_EXT.has(path.extname(source).toLowerCase()) && !isTex(source) &&
-        !isPdf(source) && !isWhiteboard(source)) { skipped++; return }
+        !isPdf(source) && !isWhiteboard(source) &&
+        !isCode(source) && !isData(source)) { skipped++; return }
     const ext = path.extname(source)
     const target = freeName(dir, path.basename(source, ext), ext)
     noteSelfWrite(target)
     await fs.copyFile(source, target)
-    if (MD_EXT.has(path.extname(target).toLowerCase()) || isTex(target)) {
+    /* The creation date is kept for the kinds whose history the trust store
+       holds — which is now the same set that `file:write` versions, source and
+       data files included. */
+    if (MD_EXT.has(path.extname(target).toLowerCase()) || isTex(target) ||
+        isCode(target) || isData(target)) {
       trust?.creationTime(rel(target), Date.now())
     }
     imported++
@@ -6203,6 +6482,12 @@ app.whenReady().then(async () => {
       writeConfig({ vaultPath: savedVault, defaultVaultPath: undefined })
     }
     trust.setVault(vaultPath, cfg.historyInVault === true)
+    // Present in the list from the first launch, not only once it is left.
+    rememberVault(vaultPath)
+    /* And the index this vault was left holding. The launch that most needs it
+       is exactly this one — the vault still open from last time — so it is set
+       up on the same path as everything else `openVault` would have done. */
+    useIndexCacheFor(vaultPath)
     /* The same tidy-up `openVault` does, for the vault that is simply still
        open from last time — which is how the app is started nearly always, and
        so the path the migration actually runs on. */

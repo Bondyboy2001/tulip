@@ -48,7 +48,7 @@ body { margin: 0; }
 </script>
 <script type="module">
   window.__done = import('./agent-diff-page.js').then((mod) => mod.run())
-<\/script>`)
+</script>`)
 
 await writeFile('node_modules/.cache/agent-diff-main.mjs', `
 import electron from 'electron'

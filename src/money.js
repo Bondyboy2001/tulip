@@ -9,7 +9,6 @@
    ================================================================== */
 
 import { findMath } from './math.js'
-import { inCode } from './blocks.js'
 
 /**
  * A price is a `$` bound tightly to digits: `$5`, `$1,234.56`, `US$20`.

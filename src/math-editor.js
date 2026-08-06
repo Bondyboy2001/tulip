@@ -11,7 +11,7 @@
 import { EditorView, Decoration, WidgetType } from '@codemirror/view'
 import { StateField } from '@codemirror/state'
 import { syntaxTree } from '@codemirror/language'
-import { renderMathInto, mathSpans, equationsFor, docText, equationSource } from './math.js'
+import { renderMathInto, mathSpans, equationsFor, equationSource } from './math.js'
 import { inCode } from './blocks.js'
 
 class MathWidget extends WidgetType {

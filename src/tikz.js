@@ -18,7 +18,6 @@
    ================================================================== */
 
 import { embedSpec, renderEmbed } from './assets.js'
-import { el } from './dom.js'
 import { artefactRun, attachArtefactBlock } from './runcode.js'
 import { DRAWN } from './languages.js'
 

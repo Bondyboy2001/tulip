@@ -20,7 +20,7 @@ await writeFile('node_modules/.cache/reading-list-page.html', `<!doctype html>
 <link rel="stylesheet" href="${resolve('src/styles.css')}">
 <script type="module">
   window.__done = import('./reading-list-page.js').then((mod) => mod.run())
-<\/script>`)
+</script>`)
 
 await writeFile('node_modules/.cache/reading-list-main.mjs', `
 import electron from 'electron'

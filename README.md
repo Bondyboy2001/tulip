@@ -20,6 +20,8 @@ lock-in.
 - Search the whole vault and work with an optional AI copilot.
 - Build language-learning tables and review them with spaced repetition.
 - Start notes from a `templates/` folder, and click any `#tag` to find its notes.
+- Split the sidebar to keep the file tree and the outline on screen together.
+- See what studying adds up to under **Review statistics…** in the palette.
 
 ## Requirements
 
@@ -50,8 +52,25 @@ and `npm run dev` leave the version alone.
 
 ### Updating
 
-There is no auto-updater. Updating means pulling and re-running the build script
-above, which replaces the installed app in place.
+There is no auto-updater, and Tulip never checks for one on its own. **Check for
+updates…** in the command palette asks GitHub for the newest release and says
+whether this copy is behind it; nothing else in the app makes that request, and
+nothing installs anything.
+
+Updating itself means pulling and re-running the build script above, which
+replaces the installed app in place — or downloading a build (below) and
+replacing `Tulip.app` by hand.
+
+### Downloads
+
+Every push builds both platforms and keeps the result for 30 days: open the
+run under **Actions** and take `Tulip-macos` or `Tulip-windows` from its
+artifacts. Tagging a commit `v0.1.26` publishes the same two builds as a
+GitHub release.
+
+Those builds are ad-hoc signed unless the signing secrets are set, so see
+**Distributing a build** below for what the receiving machine will say about
+them.
 
 (The bundle does carry `Squirrel.framework`, `Mantle.framework` and
 `ReactiveObjC.framework`, which exist for an updater Tulip does not use. They
@@ -116,15 +135,30 @@ asks to run one, Tulip asks you first, and can remember the answer for that
 vault. Only trust vaults whose notes you wrote: notes that arrive shared, synced
 or downloaded can carry code you did not.
 
+## Switching vaults
+
+The vault name at the top of the sidebar opens a list of the vaults Tulip has
+opened before, with **Choose a folder…** at the top for one it has not. Only
+folders already on that list can be opened from it; anything new goes through
+the system's own folder dialog.
+
 ## Development
 
 ```bash
 npm run dev       # rebuild on source changes
 npm run app       # build and install the macOS app
+npm run lint      # ESLint — must stay clean; see eslint.config.mjs
 npm test          # run the test suite
-npm run verify    # tests, production build, and staging checks
+npm run verify    # lint, tests, production build, and staging checks
+npm run typecheck # tsc --checkJs, a report rather than a gate; see tsconfig.json
 npm audit         # must stay clean; see the overrides in package.json
 ```
+
+The lint rules are few and every one of them fires only on a defect — including
+one written for this codebase, `tulip/consistent-optional-chaining`, after three
+launch-time crashes got through. `npm run typecheck` is deliberately outside
+`verify`: it reports around two thousand findings today, of which the useful
+third are null-safety, and tsconfig.json says what to do about that.
 
 CI runs the suite, the production build and the audit on macOS and Windows, and
 packages both, on every push.
@@ -134,5 +168,9 @@ packages both, on every push.
 Tulip is deliberately smaller than the apps it resembles. There is no graph
 view, no kanban board, no calendar or daily notes, and no Markdown/HTML vault
 export (PDF export exists, under **Export as PDF…**).
+
+There is one window and one vault open at a time, and the sidebar splits in two
+and no further. Tulip makes no network request unless asked: the only one it can
+make on its own behalf is **Check for updates…**, and nothing runs it but you.
 
 Tulip is licensed under the [MIT License](LICENSE).

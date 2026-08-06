@@ -115,7 +115,7 @@ function needsQuotes (text, inList = false) {
   if (/^[-?:,[\]{}#&*!|>'"%@`]|["']$/.test(text)) return true
   if (/:([\s]|$)/.test(text)) return true
   if (/\s#/.test(text)) return true
-  if (inList && /[,\[\]#]/.test(text)) return true
+  if (inList && /[,[\]#]/.test(text)) return true
   return false
 }
 

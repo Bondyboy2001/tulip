@@ -18,7 +18,8 @@ import {
   insertTable, fitAllColumns
 } from '../src/table.js'
 import { propertiesPreview } from '../src/properties.js'
-import { slashEmbed, embedChoices as embedChoicesFacet } from '../src/slash.js'
+import { slashEmbed, slashCommands, embedChoices as embedChoicesFacet } from '../src/slash.js'
+import { CompletionContext } from '@codemirror/autocomplete'
 import { markdown } from '@codemirror/lang-markdown'
 
 const results = []
@@ -893,16 +894,23 @@ async function run () {
      with an inline ghost. The old suite for the completion-menu version of
      this (its options, /table, /tags) tested a surface this one removed. */
 
-  /** Type one character the way the browser would, so the slash filter sees a
-   *  real typed transaction and can rewrite it. */
+  /** Type one character the way the browser would. */
   const typeChar = (view, char) => view.dispatch({
     changes: { from: view.state.selection.main.head, insert: char },
     selection: { anchor: view.state.selection.main.head + char.length },
     userEvent: 'input.type'
   })
 
+  /** What the slash menu offers with the caret at the end of the document —
+   *  the labels in the order they would be listed, or null for no menu. */
+  const slashMenu = (view) => {
+    const result = slashCommands(
+      new CompletionContext(view.state, view.state.selection.main.head, false))
+    return result ? result.options.map((o) => o.label) : null
+  }
+
   /** The editor the slash behaviour lives in: the placeholder field, the
-   *  ghost, the slash filter, and a small vault to complete against. */
+   *  ghost, and a small vault to complete against. */
   function slashMount (parent, doc, choices = [], extra = []) {
     return new EditorView({
       doc,
@@ -921,68 +929,65 @@ async function run () {
   const ghostText = (view) =>
     view.dom.querySelector('.tk-embed-ghost')?.textContent ?? null
 
-  await test('typing / at the start of a line makes an embed placeholder', async (parent) => {
+  await test('typing / at the start of a line opens the menu', async (parent) => {
     const view = slashMount(parent, '')
     typeChar(view, '/')
     await frame()
-    equal(view.state.doc.toString(), '![[ ]]', 'the slash became the placeholder')
+    equal(view.state.doc.toString(), '/', 'the slash stayed in the text for the menu to filter')
+    const labels = slashMenu(view)
+    assert(labels?.includes('Table') && labels.includes('Code block'),
+      `the menu did not offer its commands: ${JSON.stringify(labels)}`)
+  })
+
+  await test('typing after the slash narrows the menu', async (parent) => {
+    const view = slashMount(parent, '')
+    for (const char of '/tab') typeChar(view, char)
+    await frame()
+    equal(slashMenu(view), ['Table'], 'the query left only the command it names')
+  })
+
+  await test('the menu answers to a command’s aliases', async (parent) => {
+    const view = slashMount(parent, '')
+    for (const char of '/img') typeChar(view, char)
+    equal(slashMenu(view), ['Image or file'], 'an alias found its command')
+    const warn = slashMount(parent, '/warn')
+    warn.dispatch({ selection: { anchor: warn.state.doc.length } })
+    equal(slashMenu(warn), ['Callout'], 'a callout kind found the Callout command')
+  })
+
+  await test('choosing a command replaces the slash and its query', async (parent) => {
+    const view = slashMount(parent, '')
+    for (const char of '/tab') typeChar(view, char)
+    const result = slashCommands(
+      new CompletionContext(view.state, view.state.selection.main.head, false))
+    equal(result.from, 0, 'the completion replaces from the slash itself')
+    result.options[0].apply(view, result.options[0], result.from, view.state.doc.length)
+    await frame()
+    assert(!view.state.doc.toString().includes('/'), 'the slash was left behind in the note')
+    assert(view.state.doc.toString().includes('|'), 'the table was not written')
+  })
+
+  await test('a slash mid-sentence opens nothing', async (parent) => {
+    const view = slashMount(parent, 'and/or')
+    view.dispatch({ selection: { anchor: 4 } })
+    equal(slashMenu(view), null, 'a prose slash is not a command')
+  })
+
+  await test('a slash inside a code fence opens nothing', async (parent) => {
+    const view = slashMount(parent, '```\n/usr', [], [markdown()])
+    view.dispatch({ selection: { anchor: 5 } })
+    equal(slashMenu(view), null, 'a code slash is not a command')
+  })
+
+  await test('an empty embed still renders its chip', async (parent) => {
+    const view = slashMount(parent, '![[ ]]')
+    await frame()
     assert(view.dom.querySelector('.tk-embed-placeholder'), 'no chip rendered for the placeholder')
   })
 
-  await test('a slash mid-sentence stays a slash', async (parent) => {
-    const view = slashMount(parent, 'and/or')
-    view.dispatch({ selection: { anchor: 3 } })
-    typeChar(view, '/')
-    equal(view.state.doc.toString(), 'and//or', 'a prose slash was not rewritten')
-  })
-
-  await test('a slash inside a code fence stays a slash', async (parent) => {
-    const view = slashMount(parent, '```\n/usr', [], [markdown()])
-    view.dispatch({ selection: { anchor: view.state.doc.length } })
-    typeChar(view, '/')
-    equal(view.state.doc.toString(), '```\n/usr/', 'a code slash was not rewritten')
-  })
-
-  await test('a slash typed over a selection replaces it', async (parent) => {
-    const view = slashMount(parent, 'pick this')
-    /* What the browser's input handler really dispatches: the selection is
-       the range the keystroke replaces. */
-    view.dispatch({
-      changes: { from: 0, to: 4, insert: '/' },
-      selection: { anchor: 1 },
-      userEvent: 'input.type'
-    })
-    await frame()
-    equal(view.state.doc.toString(), '![[ ]] this', 'the slash rewrote the selection, not just its start')
-    equal(view.state.selection.main.head, '![[ ]]'.length, 'the caret waits after the chip')
-  })
-
-  await test('an IME keystroke is not a slash gesture', async (parent) => {
-    const view = slashMount(parent, '')
-    view.dispatch({
-      changes: { from: 0, insert: '/' },
-      selection: { anchor: 1 },
-      userEvent: 'input.type.compose'
-    })
-    await frame()
-    equal(view.state.doc.toString(), '/', 'a composing slash stayed a literal slash')
-    assert(!view.dom.querySelector('.tk-embed-placeholder'), 'no chip for a composition event')
-  })
-
-  await test('the letter after the placeholder continues the embed', async (parent) => {
-    const view = slashMount(parent, '')
-    typeChar(view, '/')
-    typeChar(view, 'd')
-    await frame()
-    equal(view.state.doc.toString(), '![[d', 'the placeholder became the start of a target')
-    assert(!view.dom.querySelector('.tk-embed-placeholder'), 'the chip was replaced, not kept')
-  })
-
   await test('the ghost completes an embed target and Tab takes it', async (parent) => {
-    const view = slashMount(parent, '', [{ label: 'diagram.png', name: 'diagram.png' }])
-    typeChar(view, '/')
-    typeChar(view, 'd')
-    typeChar(view, 'i')
+    const view = slashMount(parent, '![[di', [{ label: 'diagram.png', name: 'diagram.png' }])
+    view.dispatch({ selection: { anchor: view.state.doc.length } })
     await frame()
     equal(view.state.doc.toString(), '![[di', 'the target so far')
     equal(ghostText(view), 'agram.png]]', 'the ghost shows the rest of the first match')
@@ -1000,19 +1005,18 @@ async function run () {
   })
 
   await test('backspace takes the whole placeholder in one press', async (parent) => {
-    const view = slashMount(parent, '')
-    typeChar(view, '/')
+    const view = slashMount(parent, '![[ ]]')
+    view.dispatch({ selection: { anchor: view.state.doc.length } })
     key(view.contentDOM, 'Backspace')
     await frame()
     equal(view.state.doc.toString(), '', 'one backspace removed the whole placeholder')
   })
 
   await test('the picker offers the vault’s files and a choice embeds it', async (parent) => {
-    const view = slashMount(parent, '', [
+    const view = slashMount(parent, '![[ ]]', [
       { label: 'img/diagram.png', name: 'img/diagram.png' },
       { label: 'Spanish', name: 'Spanish' }
     ])
-    typeChar(view, '/')
     await frame()
     view.dom.querySelector('.tk-embed-placeholder').click()
     await frame()
@@ -1029,8 +1033,7 @@ async function run () {
   })
 
   await test('the URL actions leave a skeleton to finish', async (parent) => {
-    const view = slashMount(parent, '')
-    typeChar(view, '/')
+    const view = slashMount(parent, '![[ ]]')
     await frame()
     view.dom.querySelector('.tk-embed-placeholder').click()
     await frame()

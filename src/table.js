@@ -16,8 +16,7 @@
 
 import { EditorView, Decoration, ViewPlugin, WidgetType } from '@codemirror/view'
 import { Facet, StateField } from '@codemirror/state'
-import { WIDTHS, MIN_COLUMN_WIDTH, parseColumnWidths, padWidths, columnWidth,
-         headerCells } from './table-widths.js'
+import { MIN_COLUMN_WIDTH, parseColumnWidths, padWidths, columnWidth } from './table-widths.js'
 import { undo, redo } from '@codemirror/commands'
 import { getSearchQuery, searchPanelOpen } from '@codemirror/search'
 import { escapeHtml } from './dom.js'

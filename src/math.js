@@ -14,7 +14,6 @@
  * still renders stretchy delimiters and spacing worse than KaTeX's own boxes.
  */
 
-import { inCode } from './blocks.js'
 
 /* ---------------------------------------------------------------- render */
 

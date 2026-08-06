@@ -7,6 +7,8 @@ name: CI
 on:
   push:
     branches: ['**']
+    # A tag is what turns a run into a release; see the `release` job.
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -37,6 +39,14 @@ jobs:
       # and a run that silently resolves a different tree proves nothing.
       - name: Install
         run: npm ci
+
+      # Before the suite, because it is the cheap half: a `no-undef` takes two
+      # seconds to find and a test run takes minutes to fail on the same thing.
+      # The rule set is small and every rule in it fires only on a defect —
+      # see the account in eslint.config.mjs, including the one rule written
+      # for this codebase after three launch-time crashes got through.
+      - name: Lint
+        run: npm run lint
 
       - name: Test
         run: npm test
@@ -82,6 +92,27 @@ jobs:
           test -f build/Tulip.app/Contents/Resources/app/dist/renderer.js
           codesign --verify --deep --strict --verbose=2 build/Tulip.app
 
+      # Zipped rather than uploaded as a directory: the upload action does not
+      # preserve the executable bit or the symlinks inside a .app, and a bundle
+      # that arrives without either is a bundle that will not launch. `ditto`
+      # is the tool that gets macOS bundles into an archive intact.
+      - name: Archive the bundle
+        run: ditto -c -k --keepParent build/Tulip.app build/Tulip-macos.zip
+
+      # Until now every build CI made was thrown away at the end of the job,
+      # and the only way to have Tulip was to clone it and build it yourself.
+      # This is still not a release — the bundle is ad-hoc signed, so another
+      # machine has to be told to trust it (see the README) — but it is a
+      # download, and a download is what makes a bug report reproducible.
+      - name: Keep it
+        uses: actions/upload-artifact@v4
+        with:
+          name: Tulip-macos
+          path: build/Tulip-macos.zip
+          # Long enough to bisect a regression across a few weeks of pushes,
+          # short enough that the account is not storing every build ever made.
+          retention-days: 30
+
   package-windows:
     name: package (Windows)
     runs-on: windows-latest
@@ -109,3 +140,55 @@ jobs:
           test -f build/Tulip-win32-x64/resources/app/electron/main.js
           test -f build/Tulip-win32-x64/resources/app/dist/renderer.js
           test ! -f build/Tulip-win32-x64/resources/default_app.asar
+
+      # A portable folder, so it goes up as it is — the upload action zips it,
+      # and Windows has no executable bit to lose on the way.
+      - name: Keep it
+        uses: actions/upload-artifact@v4
+        with:
+          name: Tulip-windows
+          path: build/Tulip-win32-x64
+          retention-days: 30
+
+  # A tagged commit becomes a downloadable release, built by the same two jobs
+  # that already prove the packaging works — so what is published is the thing
+  # CI verified, not a second build made specially for the occasion.
+  #
+  # `v0.1.26` is the shape of the tag. The version in package.json is advanced
+  # by the release scripts themselves (build-app.sh and build-win.mjs, behind
+  # `--release`), so tagging is the last step and not the first: tag the commit
+  # whose package.json already says what it is.
+  release:
+    name: release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [verify, package, package-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      # The only write this workflow asks for anywhere, and only on a tag.
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/Tulip-macos/Tulip-macos.zip
+            artifacts/Tulip-windows/**
+          # Both builds are ad-hoc signed unless the signing secrets are set,
+          # and a download that has to be argued past Gatekeeper should say so
+          # where somebody will read it rather than in a README they have not
+          # opened yet.
+          body: |
+            Built by CI from ${{ github.sha }}.
+
+            **macOS** — unzip and move `Tulip.app` to Applications. Unless this
+            build was signed with a Developer ID, macOS will refuse it as
+            "damaged" or from an "unidentified developer"; clear the quarantine
+            attribute with `xattr -cr /Applications/Tulip.app`.
+
+            **Windows** — a portable folder. Unzip it anywhere and run
+            `Tulip.exe`. SmartScreen will warn about an unsigned binary.
+          generate_release_notes: true

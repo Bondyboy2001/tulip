@@ -15,6 +15,41 @@
   "pdfExtension": ".pdf",
   "siteExtension": ".website",
   "whiteboardExtension": ".excalidraw",
+
+  "_code_comment": [
+    "Source files: text the vault opens and edits, but does not read as prose.",
+    "This list only says *that* a file is source. Which language it is written",
+    "in is not restated here — src/languages.js already carries every one of",
+    "these spellings as an alias of a language id, and src/highlight.js turns",
+    "that id into a parser. An extension added here without a matching alias",
+    "there opens as plain text rather than breaking, which is the right way",
+    "round for a list this long.",
+    "",
+    "Extensions only, and no dotfiles: the vault walk hides anything beginning",
+    "with a dot, so `.gitignore` could not appear in the tree even if it were",
+    "named here."
+  ],
+  "codeExtensions": [
+    ".py", ".jl", ".r", ".lua", ".sql",
+    ".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hh", ".cu", ".cuh",
+    ".rs", ".go", ".zig", ".nim", ".dart", ".swift", ".java", ".kt", ".scala",
+    ".cs", ".fs", ".ml", ".hs", ".erl", ".ex", ".exs", ".clj", ".cljs",
+    ".rb", ".pl", ".php", ".sol", ".nix", ".vim",
+    ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".vue", ".svelte",
+    ".html", ".htm", ".css", ".scss", ".sass", ".less",
+    ".json", ".yaml", ".yml", ".toml", ".xml", ".ini", ".conf", ".cfg",
+    ".sh", ".bash", ".zsh", ".fish", ".ps1",
+    ".graphql", ".gql", ".diff", ".patch", ".txt"
+  ],
+
+  "_data_comment": [
+    "Separated text — a table on disk rather than a document. Unlike the source",
+    "list above these do not open in the editor at all: they get a grid, the",
+    "way a PDF gets a page viewer. See src/csv.js. The delimiter each one is",
+    "read with is stated here so the reader never has to guess it."
+  ],
+  "dataExtensions": { ".csv": ",", ".tsv": "\t" },
+
   "languageTableSuffix": ".lang",
   "languageFlagPattern": "^([\\u{1F1E6}-\\u{1F1FF}]{2})\\s*",
   "languageTableTemplates": {

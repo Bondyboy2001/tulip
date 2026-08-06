@@ -97,6 +97,18 @@ export function clearHighlightCache () {
    note must not each pay for it, and must not each start their own request. */
 const loading = new Map()
 
+/**
+ * The parser for a language description, deduped and never caching a failure.
+ *
+ * Exported because the editor needs the same thing for a whole source file
+ * that this module needs for a fenced block: one map, so opening `solve.py`
+ * and reading a ```python fence in a note ask for the Python parser once
+ * between them.
+ *
+ * @returns the support object, or a promise for it the first time.
+ */
+export const languageSupportFor = (desc) => support(desc)
+
 function support (desc) {
   if (desc.support) return desc.support
   if (!loading.has(desc.name)) {

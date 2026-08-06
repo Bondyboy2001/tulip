@@ -41,14 +41,35 @@ const FILE_ICONS = {
           <path d="m10 8.3 5.2 3.7-5.2 3.7z" fill="#fff" fill-opacity=".9"/>`,
   audio: `<circle cx="12" cy="12" r="9" fill="#D88745"/>
           <path d="M7 12v2M10 9v6M13 7v10M16 10v4" stroke="#fff" stroke-width="1.5"
-            stroke-linecap="round" opacity=".92"/>`
+            stroke-linecap="round" opacity=".92"/>`,
+  /* A source file. `currentColor` rather than a fixed hue, because this is the
+     one mark that stands for sixty different things: the row sets the colour
+     to the language's own, so a folder of `.py` beside `.rs` reads as two
+     kinds of file. Unset, it inherits the tree's ink like any other glyph. */
+  code: `<path d="M9.1 8.2 4.9 12l4.2 3.8M14.9 8.2 19.1 12l-4.2 3.8"
+          fill="none" stroke="currentColor" stroke-width="1.8"
+          stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M13.3 5.6 10.7 18.4" fill="none" stroke="currentColor"
+          stroke-width="1.6" stroke-linecap="round" opacity=".55"/>`,
+  /* A data file: a table, not a document. Separated from the note mark on
+     purpose — a `.csv` opens in a grid and never in the editor. */
+  data: `<rect x="3.1" y="4.6" width="17.8" height="14.8" rx="2.2" fill="none"
+          stroke="#3F9E63" stroke-width="1.7"/>
+         <path d="M3.1 9.4h17.8M9.6 9.4v10M15.1 9.4v10M3.1 14.4h17.8"
+          fill="none" stroke="#3F9E63" stroke-width="1.35"/>`
 }
 
 /** The tile for a file of this kind, or the plain one when it is not a kind
  *  this list knows. A fresh element each time, so every caller is free to
  *  append what it gets — `svgIcon` parses each shape once and clones it, which
- *  is what makes a sidebar of a thousand rows cheap. */
-export function fileIcon (kind) {
-  return svgIcon(FILE_ICONS[kind] || FILE_ICONS.file,
+ *  is what makes a sidebar of a thousand rows cheap.
+ *
+ *  `color` tints the marks drawn in `currentColor` — only the source-file one,
+ *  which has no colour of its own because the language supplies it. Ignored by
+ *  every other kind, whose hues are part of the shape. */
+export function fileIcon (kind, { color = null } = {}) {
+  const icon = svgIcon(FILE_ICONS[kind] || FILE_ICONS.file,
     { viewBox: '0 0 24 24', className: 'file-ico' })
+  if (color) icon.style.color = color
+  return icon
 }

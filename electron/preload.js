@@ -15,6 +15,12 @@ contextBridge.exposeInMainWorld('tulip', {
     // answer "still that one" instead of sending the whole tree back.
     snapshot: (known) => ipcRenderer.invoke('vault:snapshot', known),
     notes: () => ipcRenderer.invoke('vault:notes'),
+    /* The vaults connected before this one, so switching between two of them
+       is a pick from a list rather than a walk through a file dialog. Main
+       keeps the list and will only open something already on it — choosing a
+       vault it has never seen is `pick`, which is a native dialog. */
+    recent: () => ipcRenderer.invoke('vault:recent'),
+    open: (dir) => ipcRenderer.invoke('vault:open', dir),
     // The other names notes answer to, for resolving `[[Alias]]`.
     aliases: () => ipcRenderer.invoke('vault:aliases')
   },
@@ -60,6 +66,14 @@ contextBridge.exposeInMainWorld('tulip', {
   /* A focused table document with editable generic headers. */
   table: {
     create: (dir, name) => ipcRenderer.invoke('table:create', dir, name)
+  },
+
+  /* A source or data file. The extension goes over separately rather than on
+     the end of the name: main checks it against the vault contract's lists,
+     and a name and an extension that have already been joined cannot be
+     checked without being taken apart again. */
+  source: {
+    create: (dir, name, ext) => ipcRenderer.invoke('source:create', dir, name, ext)
   },
   language: {
     create: (dir, name) => ipcRenderer.invoke('language:create', dir, name),
@@ -256,6 +270,17 @@ contextBridge.exposeInMainWorld('tulip', {
   // The answer to `app:flush`: the renderer has written what it had to write,
   // and the window may close. See the close handler in main.
   flushed: () => ipcRenderer.invoke('app:flushed'),
+
+  /* Is there a newer Tulip? Asked only when somebody asks — see the account
+     beside the handler in main. There is no updater behind this and nothing
+     that installs anything; the answer is a version number and a link. */
+  checkForUpdate: () => ipcRenderer.invoke('app:update-check'),
+
+  /* An exception nobody caught, on its way to main's crash log — the renderer
+     has no log of its own, and a DevTools console nobody has open is not a
+     place where failures get noticed. Sent rather than invoked: the caller is
+     an error handler, and it must not be given a promise it could reject. */
+  reportError: (kind, detail) => ipcRenderer.send('app:error', String(kind), String(detail)),
 
   on: (channel, fn) => {
     const allowed = [

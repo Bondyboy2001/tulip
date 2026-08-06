@@ -30,6 +30,7 @@ const string = (v) => typeof v === 'string'
 const boolean = (v) => typeof v === 'boolean'
 const number = (v) => typeof v === 'number' && Number.isFinite(v)
 const stringList = (v) => Array.isArray(v) && v.every(string)
+const numberList = (v) => Array.isArray(v) && v.every(number)
 /* A plain object of JSON scalars — the model catalogue and the saved searches.
    Deliberately shallow: nothing that reads these walks a nested structure. */
 const record = (v) => !!v && typeof v === 'object' && !Array.isArray(v)
@@ -50,6 +51,9 @@ const CONFIG_KEYS = {
   ai: string,
   sidebar: string,
   pane: orCleared(string),
+  /* The optional second sidebar panel, and how much of the height it takes. */
+  paneBelow: orCleared(string),
+  paneBelowHeight: number,
   sideDoc: orCleared(string),
   railWidth: number,
   sideWidth: number,
@@ -60,6 +64,8 @@ const CONFIG_KEYS = {
   view: string,
   lastNote: orCleared(string),
   tabs: stringList,
+  /* Where each tab was left, as a source line, one per entry of `tabs`. */
+  tabPlaces: numberList,
   tabIndex: number,
   expanded: stringList,
 

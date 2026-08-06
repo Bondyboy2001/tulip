@@ -6,6 +6,7 @@
    ================================================================== */
 
 import RUNNABLE from '../electron/runnable-languages.json'
+import VAULT_CONTRACT from '../electron/vault-contract.json'
 
 const DARK_INK = '#1A1815'
 
@@ -47,7 +48,7 @@ export const LANGUAGES = [
   { id: 'kotlin', label: 'Kotlin', short: 'KT', color: '#7F52FF', alias: ['kt'] },
   { id: 'java', label: 'Java', short: 'JV', color: '#E76F00' },
   { id: 'c', label: 'C', short: 'C', color: '#5C6BC0', alias: ['h'] },
-  { id: 'cpp', label: 'C++', short: 'C++', color: '#00599C', alias: ['c++', 'cc', 'hpp', 'cxx'] },
+  { id: 'cpp', label: 'C++', short: 'C++', color: '#00599C', alias: ['c++', 'cc', 'hpp', 'hh', 'cxx'] },
   /* CUDA blocks are C++ and highlight as it, but they are their own kind of
      block — what runs is a kernel on a GPU, not a program on this machine — so
      they get NVIDIA's own green rather than C++'s blue. */
@@ -75,7 +76,7 @@ export const LANGUAGES = [
   { id: 'svelte', label: 'Svelte', short: 'SVE', color: '#FF3E00' },
   { id: 'haskell', label: 'Haskell', short: 'HS', color: '#5E5086', alias: ['hs'] },
   { id: 'elixir', label: 'Elixir', short: 'EX', color: '#4B275F', alias: ['ex', 'exs'] },
-  { id: 'erlang', label: 'Erlang', short: 'ERL', color: '#A90533' },
+  { id: 'erlang', label: 'Erlang', short: 'ERL', color: '#A90533', alias: ['erl'] },
   { id: 'clojure', label: 'Clojure', short: 'CLJ', color: '#5881D8', alias: ['clj', 'cljs'] },
   { id: 'scala', label: 'Scala', short: 'SC', color: '#DC322F' },
   { id: 'zig', label: 'Zig', short: 'ZIG', color: '#F7A41D', ink: DARK_INK },
@@ -91,7 +92,7 @@ export const LANGUAGES = [
   { id: 'makefile', label: 'Makefile', short: 'MK', color: '#427819', alias: ['make', 'cmake'] },
   { id: 'vim', label: 'Vim', short: 'VIM', color: '#019733', alias: ['viml', 'vimscript'] },
   { id: 'diff', label: 'Diff', short: '±', color: '#5E7A5A', alias: ['patch'] },
-  { id: 'ini', label: 'Config', short: 'CFG', color: '#85807A', alias: ['conf', 'config', 'properties', 'env'] },
+  { id: 'ini', label: 'Config', short: 'CFG', color: '#85807A', alias: ['conf', 'cfg', 'config', 'properties', 'env'] },
   { id: 'text', label: 'Plain text', short: 'TXT', color: '#85807A', alias: ['txt', 'plain', 'plaintext'] }
 ]
 
@@ -122,6 +123,41 @@ function languageMark (token) {
  * comparison against a known one is still false rather than throwing.
  */
 export const languageId = (token) => languageMark(token)?.id || ''
+
+/** The language's own colour, or null where this list does not carry one — the
+ *  file-tree icon for a source file is tinted with it, so a folder of `.py`
+ *  and `.rs` reads as two kinds of thing at a glance rather than one. Null for
+ *  an unrecognised extension, which the caller draws in the neutral grey. */
+export const languageColor = (token) => languageMark(token)?.color || null
+
+/** The spelled-out name — `py` → `Python`. What the status bar says a source
+ *  file is written in, and the fallback is the token itself so an extension
+ *  this list does not know still names itself rather than going blank. */
+export const languageLabel = (token) => languageMark(token)?.label || ''
+
+/**
+ * The languages a new source file can be created as — what the New file
+ * picker offers.
+ *
+ * One entry per language rather than per extension, under the first extension
+ * the contract lists for it: `.cpp` and not also `.cc`, `.hpp`, `.cxx`. A
+ * picker with sixty rows, four of which say C++, is a worse way to choose a
+ * language than one with forty that each name a different one. Renaming
+ * reaches the rest — a rename honours any extension on these lists.
+ *
+ * Derived rather than written out, so a language added to the contract appears
+ * here without a second edit, and one removed cannot linger as an option that
+ * creates a file the app will not open.
+ */
+export const SOURCE_CHOICES = (() => {
+  const byLanguage = new Map()
+  for (const ext of VAULT_CONTRACT.codeExtensions) {
+    const info = languageMark(ext.slice(1))
+    if (!info || byLanguage.has(info.id)) continue
+    byLanguage.set(info.id, { id: info.id, label: info.label, ext, color: info.color })
+  }
+  return [...byLanguage.values()].sort((a, b) => a.label.localeCompare(b.label))
+})()
 
 /* The fences this app draws rather than runs, by the name each drawing module
    answers to. Re-exported from the shared contract rather than restated,

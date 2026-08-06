@@ -4,8 +4,8 @@
    otherwise drop the caret back to column zero on every line.
    ================================================================== */
 
-import { keymap, ViewPlugin, Decoration, WidgetType } from '@codemirror/view'
-import { Prec } from '@codemirror/state'
+import { keymap, ViewPlugin, Decoration, WidgetType, EditorView } from '@codemirror/view'
+import { Prec, StateEffect, StateField } from '@codemirror/state'
 import { syntaxTree, indentUnit } from '@codemirror/language'
 import { markdownLanguage } from '@codemirror/lang-markdown'
 
@@ -206,6 +206,63 @@ const codeLineNumbers = ViewPlugin.fromClass(
   },
   { decorations: (v) => v.decorations }
 )
+
+/* ------------------------------------------------ room for the copilot */
+
+/**
+ * The code block copilot's prompt, kept in the document's own layout.
+ *
+ * The reading view builds the block itself and simply puts the form in it, so
+ * the code moves down to make room. The editing view draws the block as editor
+ * lines, and a form floated over them covers the very code it is asking about —
+ * which is what a fixed overlay did before this. A block widget is the editing
+ * view's way of saying the same thing: the editor reserves the height, the
+ * lines below it move down, and the form scrolls with the block because it is
+ * part of the block.
+ *
+ * The form itself is the renderer's — one element, reused by both views, so the
+ * widget carries it rather than building one. Which means it must not be
+ * rebuilt for a redraw it did not cause: `eq` on the element and the position
+ * keeps the same node in place, and with it the caret and the half-typed
+ * request inside it.
+ */
+export const setCodeAiForm = StateEffect.define()
+
+class CodeFormWidget extends WidgetType {
+  constructor (form, pos) { super(); this.form = form; this.pos = pos }
+  eq (other) { return other.form === this.form && other.pos === this.pos }
+  toDOM () { return this.form }
+  /* Everything inside it — typing, the send chord, the resize handle — belongs
+     to the form, not to the document behind it. */
+  ignoreEvent () { return true }
+  get estimatedHeight () { return this.form.offsetHeight || 120 }
+  /* The element outlives the widget: it is the renderer's, and closing the
+     form is what takes it off screen. */
+  destroy () {}
+}
+
+export const codeAiForm = StateField.define({
+  create: () => null,
+
+  update (open, tr) {
+    for (const effect of tr.effects) if (effect.is(setCodeAiForm)) return effect.value
+    if (!open || !tr.docChanged) return open
+    /* The block can move under it — the copilot's own edit arrives as a change
+       to the note, and so does anything typed above it. */
+    const pos = tr.changes.mapPos(open.pos, -1)
+    return pos === open.pos ? open : { form: open.form, pos }
+  },
+
+  provide: (field) => EditorView.decorations.from(field, (open) => open
+    ? Decoration.set([
+      Decoration.widget({
+        widget: new CodeFormWidget(open.form, open.pos),
+        block: true,
+        side: -1
+      }).range(open.pos)
+    ])
+    : Decoration.none)
+})
 
 /* -------------------------------------------------- scrolling one block */
 

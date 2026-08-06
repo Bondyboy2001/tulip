@@ -3625,11 +3625,41 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
 .run-btn.is-running { color: var(--accent); background: var(--accent-dim); }
 
 /* A compact prompt under the header and above the source. It stays in the code
-   block's flow, so neither the source nor the preceding document is covered. */
+   block's flow, so neither the source nor the preceding document is covered.
+   One element, used by both views: reading puts it inside the block it built,
+   editing hands it to the editor to carry as a block widget between the fence
+   and the first line of code (codeAiForm in codeblock.js). In the editing view
+   it is a child of the editor's content, whose lines already carry the block's
+   own inline padding — hence the margins here rather than an inset. */
 .code-ai-popover {
-  position: relative;
   width: calc(100% - 20px);
   margin: 2px 10px 10px;
+}
+/* What the hint is measured from: the field's own box, which is the same in
+   both views even where the form's is not. */
+.code-ai-field { position: relative; }
+/* The editing view's copy of that place. There the block is not one element
+   with a surface — every line paints its own slice of --sunk between its own
+   side borders — so a widget dropped between two of them would show the page
+   through the middle of the block. It carries the same slice instead: the
+   frame's borders and fill on the outside, the reading view's 10px inset on
+   the inside, so the field lands on the same column in both views. */
+.code-ai-popover.in-frame {
+  width: auto;
+  margin: 0;
+  padding: 2px 10px 10px;
+  box-sizing: border-box;
+  background: var(--sunk);
+  border-inline: 1px solid var(--line-soft);
+}
+/* The header keeps 18px under it so the first line of code clears the tile.
+   With the form there instead, the gap wanted is the reading view's: measured
+   there, 13.7px of air between the bottom of the language tile and the top of
+   the field. The line's own leading under the tile accounts for ~4.9 of it and
+   the form's top padding for 2, which leaves this. */
+.cm-content .cm-line.tk-code-top:has(+ .code-ai-popover),
+.cm-content .cm-line.tk-code-top:has(+ .cm-widgetBuffer + .code-ai-popover) {
+  padding-bottom: 7px;
 }
 .code-ai-input {
   display: block;
@@ -8979,6 +9009,244 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
     width: 2rem;
     height: 2rem;
   }
+}
+
+/* ------------------------------------------------------------ data grid
+
+   The pane a `.csv` opens into. Laid out in pixels rather than with a real
+   `<table>`, because the rows in view are the only ones built — see the
+   account at the top of src/csv.js — and a table element cannot hold a
+   scrollbar for rows that do not exist.
+
+   Row height here has to agree with ROW_HEIGHT in that file. It is the number
+   the virtual window's arithmetic is built on, so a cell that grew to fit its
+   text would put every row below it in the wrong place; cells clip instead. */
+.data {
+  position: absolute;
+  inset: 0;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--paper);
+}
+.data[hidden] { display: none; }
+
+.csv-frame {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  font: 12.5px/1.4 var(--font-mono);
+  color: var(--ink);
+}
+/* A column being dragged wider must not select text on its way past. */
+.csv-frame.is-resizing { user-select: none; cursor: col-resize; }
+
+/* ------------------------------------------------------------ the strip
+
+   Find, filter, undo and the shape of the selection. Interface rather than
+   document, so it is the UI font and not the table's mono. */
+.csv-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+  font: 12px/1.4 var(--font-ui);
+}
+.csv-bar-gap { flex: 1 1 auto; }
+
+.csv-search {
+  width: 190px;
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+}
+.csv-search:focus { outline: none; border-color: var(--accent); }
+
+.csv-btn {
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--paper);
+  color: var(--ink-soft);
+  font: inherit;
+  cursor: pointer;
+}
+.csv-btn:hover:not(:disabled) { color: var(--ink); border-color: var(--line-strong, var(--line)); }
+.csv-btn:disabled { opacity: 0.4; cursor: default; }
+.csv-btn.is-on {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.csv-found, .csv-stats {
+  color: var(--ink-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.csv-found.is-empty { color: var(--warn, var(--ink-soft)); }
+.csv-stats { font-variant-numeric: tabular-nums; }
+
+/* The heading strip scrolls sideways with the body but never up: it is
+   translated by the scroller's own offset rather than being sticky, which a
+   virtualized body cannot be. */
+.csv-head {
+  flex: 0 0 auto;
+  display: flex;
+  height: 30px;
+  border-bottom: 1px solid var(--line);
+  background: var(--sunk);
+  overflow: hidden;
+}
+
+.csv-scroller {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  outline: none;
+}
+.csv-scroller:focus-visible { box-shadow: inset 0 0 0 2px var(--accent-dim); }
+
+.csv-canvas { position: relative; }
+.csv-window { position: relative; }
+
+.csv-row {
+  position: absolute;
+  left: 0;
+  display: flex;
+  height: 28px;
+}
+.csv-row.is-odd { background: color-mix(in srgb, var(--sunk) 45%, transparent); }
+
+.csv-cell {
+  flex: 0 0 auto;
+  height: 100%;
+  padding: 0 8px;
+  display: flex;
+  align-items: center;
+  border-right: 1px solid var(--line-soft);
+  white-space: pre;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.csv-th {
+  position: relative;
+  gap: 4px;
+  font-weight: 600;
+  color: var(--ink-soft);
+  border-right-color: var(--line);
+  cursor: pointer;
+  user-select: none;
+}
+.csv-th:hover { color: var(--ink); }
+.csv-th.is-active { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.csv-th-label { overflow: hidden; text-overflow: ellipsis; }
+.csv-sort {
+  margin-left: auto;
+  font-size: 9px;
+  color: var(--accent);
+}
+/* The divider between two headings, widened into something a mouse can catch
+   without making the heading itself hard to click. */
+.csv-grip {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  width: 7px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 2;
+}
+.csv-grip:hover { background: var(--accent); opacity: 0.45; }
+
+/* The frozen strip of file line numbers. Sticky rather than a separate
+   column, so it stays put while the rest of the row scrolls under it. */
+.csv-gutter {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  flex: 0 0 auto;
+  width: 58px;
+  min-width: 58px;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 0 8px;
+  border-right: 1px solid var(--line);
+  background: var(--sunk);
+  color: var(--ink-faint, var(--ink-soft));
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  cursor: default;
+  user-select: none;
+}
+.csv-gutter.is-active { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, var(--sunk)); }
+.csv-corner { cursor: pointer; }
+
+/* Numbers read as quantities when they line up, which means to the right and
+   in a figure that does not change width with the digit. */
+.csv-cell.csv-num { justify-content: flex-end; font-variant-numeric: tabular-nums; }
+.csv-th.csv-num .csv-sort { margin-left: 4px; }
+
+.csv-cell.is-sel { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+.csv-cell.is-match { box-shadow: inset 0 0 0 1px var(--accent-dim); }
+.csv-cell.is-cursor {
+  box-shadow: inset 0 0 0 2px var(--accent);
+  background: var(--sel);
+}
+
+/* The right-click menu. Inside the frame so it scrolls away with the pane it
+   belongs to rather than hanging over the window. */
+.csv-menu {
+  position: absolute;
+  z-index: 20;
+  min-width: 190px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 12px 34px #0005;
+  font: 12px/1.4 var(--font-ui);
+}
+.csv-menu[hidden] { display: none; }
+.csv-menu-item {
+  display: block;
+  width: 100%;
+  padding: 5px 9px;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.csv-menu-item:hover:not(:disabled) { background: var(--accent); color: #fff; }
+.csv-menu-item:disabled { opacity: 0.4; cursor: default; }
+.csv-menu-rule { height: 1px; margin: 4px 6px; background: var(--line); }
+
+/* The open cell. Sized to the cell it replaces so committing an edit does not
+   move the row under the caret. */
+.csv-input {
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
 }
 
 .whiteboard-note-dialog {

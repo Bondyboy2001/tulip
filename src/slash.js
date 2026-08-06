@@ -1,36 +1,35 @@
 /**
- * The slash key: `/` at the start of a line makes an embed, not a menu.
+ * The slash key: type `/` at the start of a line and keep typing to filter.
  *
- * The old slash menu is gone. Typing `/` with nothing but whitespace before it
- * on the line no longer opens the completion tooltip — instead the slash
- * becomes an embed placeholder, a chip standing in the text where `![[ ]]` is
- * written. Clicking the chip opens the vault's own picker: a searchable list
- * of the things a note can embed — its attachments and its notes, with "add a
- * website" and "add a YouTube video" at the top — and choosing one writes the
- * `![[…]]` that names it.
+ * `/` opens the completion tooltip — the same one the `[[` note list uses —
+ * with one row per thing worth inserting, and every letter after the slash
+ * narrows it. `/tab` finds Table, `/img` finds Image or file, `/warn` finds
+ * Callout. Choosing a row replaces the `/` and what was typed after it: the
+ * slash was an instruction to the editor, never text for the note.
  *
- * The same syntax is what autocomplete completes against. `![[` in the text
- * — written by hand, or left by the picker — answers keystrokes with an
- * inline ghost of the first matching name, greyed out right where the caret
- * is; Tab takes it. No tooltip, ever: the candidates live in the text itself,
- * and the grey suggestion is a decoration, never a word in the file.
+ * Two of those rows lead somewhere rather than writing markup. Image or file
+ * opens the vault's own picker — a searchable list of the note's attachments
+ * and notes — and Callout writes `> [!` and opens the kind list against it.
+ *
+ * `![[` in the text — written by hand, or left by the picker — answers
+ * keystrokes with an inline ghost of the first matching name, greyed out right
+ * where the caret is; Tab takes it. That one is a decoration, never a word in
+ * the file, and never a tooltip.
  *
  * The trigger is deliberately narrow — a `/` with nothing but whitespace
- * before it on the line — so writing "and/or" or a file path never makes an
- * embed. That is also Obsidian's rule, so hands trained there already know it.
- * Raw view empties the whole extension with the rest of the live preview: the
- * file as it is on disk keeps its `/` and shows the `![[ ]]` as the markup it
- * is.
+ * before it on the line — so writing "and/or" or a file path never opens the
+ * menu. That is also Obsidian's rule, so hands trained there already know it.
  */
 
-import { EditorState, Facet, Prec, StateEffect, StateField } from '@codemirror/state'
+import { Facet, Prec, StateEffect, StateField } from '@codemirror/state'
 import { Decoration, EditorView, ViewPlugin, WidgetType, keymap } from '@codemirror/view'
-import { snippetCompletion } from '@codemirror/autocomplete'
+import { snippetCompletion, startCompletion } from '@codemirror/autocomplete'
 import { syntaxTree } from '@codemirror/language'
 import { dropdown } from './dropdown.js'
 import { el, svgIcon } from './dom.js'
 import { CALLOUT_KINDS } from './callouts.js'
 import { LANGUAGES } from './languages.js'
+import { insertTable } from './table.js'
 
 /* The text a slash leaves in the file, and what the chip stands in for. */
 const PLACEHOLDER = '![[ ]]'
@@ -194,62 +193,127 @@ function applyEmbed (view, from, to, value) {
   view.focus()
 }
 
-/* ------------------------------------------------------ the slash key
+/* ------------------------------------------------------ the slash menu
 
-   A transaction filter, not a keymap: the keymap would have to guess at
-   composition and paste, while the filter sees every typed character and can
-   rewrite it before anything else reacts. Two rewrites:
+   A completion source rather than a popup of its own, so it gets CodeMirror's
+   keyboard handling and tooltip for free, and sits beside the `[[` note
+   completion in the same autocompletion() config. Templates are snippets: the
+   cursor lands in the first blank, and Tab walks the rest.
 
-   `/` alone at the start of a line becomes the placeholder — the menu it used
-   to open is replaced by a thing in the text to click.
+   Filtering is this module's own (label + hidden aliases, so `/img` finds
+   Image and `/error` finds Callout), which is why the result says
+   `filter: false`: CodeMirror's matcher would otherwise re-filter against the
+   text from `from` — which includes the `/` — and match nothing. */
 
-   The first letter typed right after a placeholder continues it: `![[ ]]` and
-   then `d` is really `![[d`, the start of a target the ghost completes. So
-   typing `/diagram` end to end just works. */
+/* The groups, in the order the menu shows them; within a group, commands stay
+   in the order written here. */
+const BLOCKS = { name: 'Blocks', rank: 0 }
+const EMBEDS = { name: 'Embeds', rank: 1 }
 
-const slashFilter = EditorState.transactionFilter.of((tr) => {
-  /* Typed keystrokes only — a paste or a programmatic change is the author's
-     own text, not a slash gesture. And not composition events: an IME's
-     intermediate keystrokes are `input.type.compose`, which `isUserEvent`
-     also counts as `input.type`. */
-  if (!tr.docChanged || !tr.isUserEvent('input.type') ||
-      tr.isUserEvent('input.type.compose')) return tr
+/** One command: what the menu shows, what it answers to, what it inserts.
+ *
+ * No detail column. Every row used to carry its own syntax on the right —
+ * ``` beside "Code block", `![[…]]` beside "Image or file" — which is the one
+ * thing a reader of this menu has already said they do not want to remember.
+ * The label is the whole row. */
+function command (label, aliases, section, template) {
+  const completion = snippetCompletion(template, { label, section, type: 'keyword' })
+  return { completion, haystack: `${label} ${aliases.join(' ')}`.toLowerCase() }
+}
 
-  const rewrites = []
-  let caret = null
-  tr.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
-    if (inserted.length !== 1) return
-    const char = inserted.sliceString(0)
-    const doc = tr.startState.doc
-
-    /* A `/` with nothing but whitespace before it on the line. */
-    if (char === '/') {
-      const line = doc.lineAt(fromA)
-      if (/\S/.test(doc.sliceString(line.from, fromA))) return
-      if (inFence(tr.startState, fromA)) return
-      rewrites.push({ from: fromA, to: toA, insert: PLACEHOLDER })
-      caret = fromA + PLACEHOLDER.length
-      return
-    }
-
-    /* A letter right after a placeholder keeps the embed going. */
-    if (/[\p{L}\p{N}_./-]/u.test(char)) {
-      const line = doc.lineAt(fromA)
-      if (fromA - PLACEHOLDER.length >= line.from &&
-          line.text.slice(fromA - PLACEHOLDER.length, fromA) === PLACEHOLDER) {
-        rewrites.push({ from: fromA - PLACEHOLDER.length, to: toA, insert: `![[${char}` })
-        caret = fromA - PLACEHOLDER.length + 4
-      }
-    }
-  })
-
-  if (!rewrites.length) return tr
+/** A command that does something to the view instead of writing a template.
+ *  The slash and whatever was typed after it go first, so the action starts
+ *  from a line with nothing on it. */
+function action (label, aliases, section, run) {
   return {
-    changes: rewrites,
-    ...(caret != null ? { selection: { anchor: caret } } : {}),
-    userEvent: 'input.type'
+    completion: {
+      label,
+      section,
+      type: 'keyword',
+      apply: (view, _completion, from, to) => {
+        view.dispatch({ changes: { from, to, insert: '' }, userEvent: 'input.complete' })
+        run(view, from)
+      }
+    },
+    haystack: `${label} ${aliases.join(' ')}`.toLowerCase()
   }
-})
+}
+
+/* Deliberately short — blocks with syntax worth not remembering, and the two
+   things that are more than syntax: a table, which is a grid rather than four
+   lines of pipes, and the note's properties, which go at the top of the file
+   however far down the `/` was typed. Headings, lists and quotes are quicker
+   to just type than to pick from a menu. */
+const COMMANDS = [
+  command('Code block', ['fence', 'snippet', 'source', 'run'], BLOCKS,
+    '```${language}\n${}\n```'),
+
+  /* A table is made the way ⌘⌥T makes one. Not a snippet: written as text it
+     would be four lines of pipes for the writer to line up by hand, and the
+     editor draws a grid over them the moment they are there. */
+  action('Table', ['grid', 'rows', 'columns', 'spreadsheet', 'csv'], BLOCKS,
+    (view) => insertTable(view)),
+
+  /* One entry for all thirteen kinds: thirteen rows differed only in a word,
+     and the writer still had to read them all. This writes `> [!` and opens
+     the kind list against it — the same two-step the code fence uses, where
+     `/code` writes the backticks and the language completes itself. Every
+     kind's name still matches here, so `/warn` and `/tip` find it. */
+  action('Callout', ['aside', 'admonition',
+    ...CALLOUT_KINDS.flatMap((k) => [k.id, ...(k.alias || [])])], BLOCKS,
+  (view, from) => {
+    view.dispatch({
+      changes: { from, insert: '> [!' },
+      selection: { anchor: from + 4 },
+      userEvent: 'input.complete'
+    })
+    /* On the next tick, because CodeMirror closes the open completion as part
+       of applying this one — asking for the kind list inside `apply` would be
+       asking for something that is about to be dismissed. */
+    setTimeout(() => startCompletion(view), 0)
+  }),
+
+  /* Straight to the vault's picker: the list of things this note can actually
+     embed beats a `${name}` blank the writer has to fill from memory. */
+  action('Image or file', ['embed', 'picture', 'attachment', 'img', 'photo', 'pdf', 'note'],
+    EMBEDS, (view, from) => openEmbedPicker(view, from, from)),
+
+  command('Website', ['embed', 'web', 'page', 'iframe', 'url', 'link'], EMBEDS,
+    '![[https://${example.com}]]'),
+  command('YouTube', ['embed', 'video', 'player', 'yt'], EMBEDS,
+    '![[https://www.youtube.com/watch?v=${id}]]'),
+
+  /* Opens the note's tag editor. No placeholder YAML is written: the head is
+     created only once the reader supplies an actual tag. */
+  action('Tags', ['labels', 'frontmatter', 'metadata', 'yaml', 'head'], BLOCKS,
+    (view) => view.dom.dispatchEvent(new CustomEvent('tulip:tags', { bubbles: true })))
+]
+
+/**
+ * The completion source. Returns null whenever the text before the cursor is
+ * not its trigger, so the sources beside it never fight. Re-consulted on each
+ * keystroke — the filter is an includes() over a handful of strings.
+ */
+export function slashCommands (context) {
+  const before = context.matchBefore(/\/[\w-]*/)
+  if (!before) return null
+
+  // Only a `/` that begins its line opens the menu. Everything before it must
+  // be whitespace — mid-sentence slashes are prose, not requests.
+  const line = context.state.doc.lineAt(before.from)
+  if (/\S/.test(context.state.sliceDoc(line.from, before.from))) return null
+  if (inFence(context.state, before.from)) return null
+
+  const query = before.text.slice(1).toLowerCase()
+  const options = COMMANDS
+    .filter((c) => !query || c.haystack.includes(query))
+    .map((c) => c.completion)
+  if (!options.length) return null
+
+  /* `from` includes the slash, so choosing a command replaces it — the `/`
+     was an instruction to the editor, not text for the note. */
+  return { from: before.from, options, filter: false }
+}
 
 /** Whether `pos` sits inside a fenced code block — a `/` or `![[` there is
  *  code, not an instruction to the editor. Same walk fenceLanguages makes. */
@@ -411,7 +475,6 @@ const ghostKeymap = Prec.high(keymap.of([
    (which empties that compartment) keeps the file exactly as it is on disk. */
 export const slashEmbed = [
   placeholderField,
-  slashFilter,
   chipKeymap,
   ghostField,
   ghostKeymap

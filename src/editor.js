@@ -7,7 +7,7 @@ import { syntaxTree, HighlightStyle, syntaxHighlighting, indentOnInput,
          unfoldEffect, foldedRanges, foldKeymap, StreamLanguage,
          LanguageDescription } from '@codemirror/language'
 import { stex } from '@codemirror/legacy-modes/mode/stex'
-import { codeTokens, languageFor, primeLanguageDescription } from './highlight.js'
+import { codeTokens, languageFor, languageSupportFor, primeLanguageDescription } from './highlight.js'
 import { languageChip } from './languages.js'
 import { primeSyntaxTree } from './spelling.js'
 
@@ -33,7 +33,7 @@ import { tags as t } from '@lezer/highlight'
 import { equationsFor } from './math.js'
 import { mathPreview } from './math-editor.js'
 import { moneyPreview } from './money-editor.js'
-import { codeBlockKeymap, proseBrackets, codeBlockView } from './codeblock.js'
+import { codeBlockKeymap, proseBrackets, codeBlockView, codeAiForm, setCodeAiForm } from './codeblock.js'
 import { runBlocks } from './runblocks.js'
 import { propertiesPreview } from './properties.js'
 import {
@@ -46,7 +46,7 @@ import {
 } from './assets.js'
 import { calloutHead, calloutIcon } from './callouts.js'
 import {
-  slashEmbed, openEmbedPicker, fenceLanguages, calloutKinds,
+  slashEmbed, openEmbedPicker, slashCommands, fenceLanguages, calloutKinds,
   embedChoices as embedChoicesFacet
 } from './slash.js'
 import { mermaidBlocks } from './mermaid-editor.js'
@@ -89,15 +89,17 @@ const tulipTheme = EditorView.theme({
     padding: '0 24px',
     caretColor: 'var(--accent)'
   },
-  /* TeX is source, not prose with live Markdown decorations. Give it the full
-     half-pane and the code face while keeping the ordinary note measure and
-     typography untouched. */
-  '&.is-tex .cm-scroller': {
+  /* A source file — TeX, or any of the code extensions in the vault contract —
+     is not prose with live Markdown decorations. Give it the full pane and the
+     code face while keeping the ordinary note measure and typography
+     untouched. `is-tex` is the older name for the same state and stays on the
+     TeX editor, because the stage's split-pane layout keys off it. */
+  '&.is-source .cm-scroller': {
     fontFamily: 'var(--font-mono)',
     fontSize: '13.5px',
     lineHeight: '1.62'
   },
-  '&.is-tex .cm-content': { maxWidth: 'none', marginInline: '0' },
+  '&.is-source .cm-content': { maxWidth: 'none', marginInline: '0' },
   // CodeMirror's base theme paints a black caret and injects itself after our
   // stylesheet, so on a dark background the cursor disappeared entirely. Theme
   // rules outrank the base theme, which is why these live here and not in CSS.
@@ -1093,11 +1095,10 @@ function buildDecorations (view, imageSource = null) {
 
         claimed.push([start, end])
 
-        /* An embed with no target is the slash placeholder — `![[ ]]`, the
-           chip the slash key leaves behind. It is an instruction to choose,
+        /* An embed with no target — `![[ ]]` — is an instruction to choose,
            not a missing picture, so the live preview stays off it; the slash
-           module's own field draws the chip. Claimed so the brackets are not
-           decorated as a link underneath it. */
+           module's own field draws the chip that opens the picker. Claimed so
+           the brackets are not decorated as a link underneath it. */
         if (!embed.src.trim()) continue
 
         const spec = specForEmbed(embed, { resolve, resolveNote })
@@ -2175,9 +2176,13 @@ export function createEditor ({
         // decorations standing between you and the markup.
         preview.of(RENDERED),
         codeBlockKeymap,
+        /* Outside `preview`, unlike the rest of a code block's rendering: raw
+           view empties that compartment, and a field that comes and goes is a
+           field the renderer cannot hand a form to. */
+        codeAiForm,
         proseBrackets,
         autocompletion({
-          override: [wikiCompletion, fenceLanguages, calloutKinds],
+          override: [wikiCompletion, slashCommands, fenceLanguages, calloutKinds],
           icons: false
         }),
         tulipTheme,
@@ -2307,21 +2312,60 @@ export function createEditor ({
   const destroy = view.destroy.bind(view)
   view.destroy = () => { columnObserver.disconnect(); destroy() }
 
+  /* Markdown is the only mode that is prose. Everything else — TeX, and every
+     source extension the vault contract names — is a file shown as itself: no
+     inline title, no live preview, no raw/read/edit choice, and always
+     coloured. Asked as a question rather than compared against a list, because
+     the list is open-ended now and every one of the five decisions below would
+     otherwise have to grow with it. */
+  const isProse = () => sourceMode === 'markdown'
+
+  /* A code file's parser, once its grammar has arrived. `languageFor` hands
+     back a description whose parser is fetched on demand and a compartment
+     cannot be reconfigured with a promise, so the file opens uncoloured for
+     the moment that takes and is reconfigured when it lands. Held against the
+     mode it was loaded for: switching tabs mid-fetch must not colour Julia
+     with the Python parser that was still on its way. */
+  let codeSource = null
+  let codeSourceFor = ''
+
+  const sourceParser = () => {
+    if (sourceMode === 'markdown') return MD_SOURCE
+    if (sourceMode === 'tex') return TEX_SOURCE
+    return codeSourceFor === sourceMode ? codeSource : []
+  }
+
+  /** Fetch the grammar for a code mode and put it on if it is still the one
+   *  open. A language with no parser — plain text, or an extension
+   *  language-data does not carry — settles as no parser at all, which is a
+   *  file shown in the code face without colour rather than a failure. */
+  const loadCodeSource = (mode) => {
+    const description = languageFor(mode)
+    if (!description) return
+    Promise.resolve(languageSupportFor(description)).then((support) => {
+      if (sourceMode !== mode || !support) return
+      codeSource = support
+      codeSourceFor = mode
+      view.dispatch({ effects: sourceEffects() })
+    }).catch(() => { /* uncoloured is a complete view of the file */ })
+  }
+
   const sourceEffects = () => [
-    sourceLanguage.reconfigure(sourceMode === 'tex' ? TEX_SOURCE : MD_SOURCE),
-    sourceTitle.reconfigure(sourceMode === 'tex'
-      ? []
-      : titleFor(noteTitle, onRename, noteFlag, titleEditable)),
-    sourceColor.reconfigure(raw && sourceMode !== 'tex' ? [] : syntaxHighlighting(highlight)),
+    sourceLanguage.reconfigure(sourceParser()),
+    sourceTitle.reconfigure(isProse()
+      ? titleFor(noteTitle, onRename, noteFlag, titleEditable)
+      : []),
+    sourceColor.reconfigure(raw && isProse() ? [] : syntaxHighlighting(highlight)),
     sourceAttributes.reconfigure(EditorView.editorAttributes.of({
-      class: sourceMode === 'tex' ? 'is-tex is-raw' : (raw ? 'is-raw' : '')
+      class: isProse() ? (raw ? 'is-raw' : '') : `is-source is-raw${sourceMode === 'tex' ? ' is-tex' : ''}`
     })),
-    preview.reconfigure(raw || sourceMode === 'tex' ? [] : RENDERED)
+    preview.reconfigure(raw || !isProse() ? [] : RENDERED)
   ]
 
   const markSourceMode = () => {
+    view.dom.classList.toggle('is-source', !isProse())
     view.dom.classList.toggle('is-tex', sourceMode === 'tex')
-    view.dom.classList.toggle('is-raw', raw || sourceMode === 'tex')
+    view.dom.classList.toggle('is-raw', raw || !isProse())
   }
 
   /**
@@ -2347,16 +2391,22 @@ export function createEditor ({
     markSourceMode()
   }
 
-  /** The file's grammar. TeX is always source; Markdown keeps its three views. */
+  /**
+   * The file's grammar: `markdown`, `tex`, or the word behind a source file's
+   * extension — `py`, `jl`, `cpp` — which languages.js resolves to a language
+   * and highlight.js to a parser. Markdown keeps its three views; everything
+   * else is always source.
+   */
   view.setSourceMode = (mode) => {
-    const next = mode === 'tex' ? 'tex' : 'markdown'
+    const next = String(mode || 'markdown').toLowerCase()
     if (sourceMode === next) return
     sourceMode = next
+    if (!isProse() && next !== 'tex') loadCodeSource(next)
     view.dispatch({ effects: sourceEffects() })
     markSourceMode()
-    // TeX is symbols, and the marks from the last Markdown note are not about
-    // it. The renderer's next pass will decline to check it at all.
-    if (sourceMode === 'tex') view.setMisspellings([])
+    // A source file is symbols, and the marks from the last Markdown note are
+    // not about it. The renderer's next pass will decline to check it at all.
+    if (!isProse()) view.setMisspellings([])
   }
 
   /** Redraw the parts that read from outside the document — the inline title. */
@@ -2623,6 +2673,33 @@ export function createEditor ({
     })
     if (effects.length) view.dispatch({ effects })
     return effects.length > 0
+  }
+
+  /**
+   * Open the code block copilot's prompt inside the block a line belongs to.
+   *
+   * The renderer owns the form and knows nothing about document positions; the
+   * editor knows nothing about the form. This is the sentence between them:
+   * given the opening fence's line element and the form, put the form in the
+   * block, under the fence and above the code — where the reading view's copy
+   * of it sits. Answers whether it managed to.
+   */
+  view.showCodeForm = (line, form) => {
+    const pos = view.posAtDOM(line)
+    const { doc } = view.state
+    if (pos == null || pos > doc.length) return false
+    const fence = doc.lineAt(pos)
+    // A fence with nothing under it yet: the form goes where the code would.
+    if (fence.number >= doc.lines) return false
+    view.dispatch({ effects: setCodeAiForm.of({ form, pos: doc.line(fence.number + 1).from }) })
+    return true
+  }
+
+  /** Take it out again. Silent when there is nothing open. */
+  view.hideCodeForm = () => {
+    if (view.state.field(codeAiForm, false)) {
+      view.dispatch({ effects: setCodeAiForm.of(null) })
+    }
   }
 
   /** Put that line back at the top. */

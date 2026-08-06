@@ -1,12 +1,12 @@
 {
   "name": "tulip",
-  "version": "0.1.22",
+  "version": "0.1.35",
   "description": "A minimal markdown editor and language-learning vault",
   "main": "electron/main.js",
   "type": "commonjs",
   "license": "MIT",
   "scripts": {
-    "test": "npm run test:srs && npm run test:study-match && npm run test:language-cards && npm run test:language-keyboard && npm run test:language-row && npm run test:lint && npm run test:ai && npm run test:ai-lifecycle && npm run test:pdf && npm run test:tex && npm run test:language-history && npm run test:optimizations && npm run test:renderer-optimizations && npm run test:codeblocks && npm run test:diff && npm run test:search-narrow && npm run test:config-keys && npm run test:safe-name && npm run test:whiteboard && npm run test:ui-contracts && npm run test:table && npm run test:export-print",
+    "test": "npm run test:srs && npm run test:study-match && npm run test:language-cards && npm run test:language-keyboard && npm run test:language-row && npm run test:lint && npm run test:ai && npm run test:ai-lifecycle && npm run test:pdf && npm run test:tex && npm run test:language-history && npm run test:optimizations && npm run test:renderer-optimizations && npm run test:codeblocks && npm run test:diff && npm run test:search-narrow && npm run test:ipc && npm run test:review-stats && npm run test:index-cache && npm run test:config-keys && npm run test:safe-name && npm run test:whiteboard && npm run test:ui-contracts && npm run test:table && npm run test:export-print && npm run test:csv && npm run test:grid",
     "build": "node build.mjs",
     "dev": "node build.mjs --watch",
     "start": "npm run build && electron .",
@@ -29,7 +29,7 @@
     "test:diff": "esbuild scripts/test-diff.mjs --bundle --format=esm --platform=node --outfile=node_modules/.cache/test-diff.mjs --log-level=error && node node_modules/.cache/test-diff.mjs",
     "test:table": "node scripts/test-table.mjs",
     "test:build-staging": "node scripts/test-build-staging.cjs",
-    "verify": "npm test && npm run build && npm run test:build-staging",
+    "verify": "npm run lint && npm test && npm run build && npm run test:build-staging",
     "bench": "node bench/bench.mjs",
     "bench:dom": "node bench/dom-bench.mjs",
     "bench:reading": "node bench/reading-bench.mjs",
@@ -43,7 +43,14 @@
     "test:reading-list": "node scripts/test-reading-list.mjs",
     "bench:table": "node bench/table-bench.mjs",
     "app:stage": "./scripts/build-app.sh --no-install",
-    "app:win": "node scripts/build-win.mjs"
+    "app:win": "node scripts/build-win.mjs",
+    "test:csv": "esbuild scripts/test-csv.mjs --bundle --format=esm --platform=node --loader:.svg=text --outfile=node_modules/.cache/test-csv.mjs --log-level=error && node node_modules/.cache/test-csv.mjs",
+    "test:grid": "node scripts/test-grid.mjs",
+    "lint": "eslint .",
+    "typecheck": "tsc -p tsconfig.json",
+    "test:index-cache": "node scripts/test-index-cache.cjs",
+    "test:review-stats": "esbuild scripts/test-review-stats.mjs --bundle --format=esm --platform=node --outfile=node_modules/.cache/test-review-stats.mjs --log-level=error && node node_modules/.cache/test-review-stats.mjs",
+    "test:ipc": "node scripts/test-ipc.mjs"
   },
   "_overrides": [
     "Two transitive packages arrive vulnerable and neither publisher has moved.",
@@ -66,8 +73,12 @@
     "electron": true
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "electron": "43.2.0",
-    "esbuild": "^0.28.1"
+    "esbuild": "^0.28.1",
+    "eslint": "^10.8.0",
+    "globals": "^17.9.0",
+    "typescript": "^7.0.2"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.3",
