@@ -6,7 +6,7 @@
   "type": "commonjs",
   "license": "MIT",
   "scripts": {
-    "test": "npm run test:srs && npm run test:study-match && npm run test:language-cards && npm run test:language-keyboard && npm run test:language-row && npm run test:lint && npm run test:ai && npm run test:ai-lifecycle && npm run test:pdf && npm run test:tex && npm run test:language-history && npm run test:optimizations && npm run test:renderer-optimizations && npm run test:codeblocks && npm run test:diff && npm run test:search-narrow && npm run test:ipc && npm run test:review-stats && npm run test:index-cache && npm run test:config-keys && npm run test:safe-name && npm run test:whiteboard && npm run test:ui-contracts && npm run test:table && npm run test:export-print && npm run test:csv && npm run test:grid",
+    "test": "npm run test:srs && npm run test:study-match && npm run test:language-cards && npm run test:language-keyboard && npm run test:language-row && npm run test:lint && npm run test:ai && npm run test:ai-lifecycle && npm run test:pdf && npm run test:tex && npm run test:language-history && npm run test:optimizations && npm run test:renderer-optimizations && npm run test:codeblocks && npm run test:diff && npm run test:search-narrow && npm run test:ipc && npm run test:review-stats && npm run test:index-cache && npm run test:config-keys && npm run test:safe-name && npm run test:whiteboard && npm run test:ui-contracts && npm run test:table && npm run test:export-print && npm run test:csv && npm run test:grid && npm run test:agent-diff && npm run test:reading-list",
     "build": "node build.mjs",
     "dev": "node build.mjs --watch",
     "start": "npm run build && electron .",

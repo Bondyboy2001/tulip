@@ -40,7 +40,6 @@ const orCleared = (check) => (v) => v === undefined || check(v)
 const CONFIG_KEYS = {
   /* Read by main, and so the ones where a wrong type reaches real logic. */
   durability: string,
-  extensionsEnabled: boolean,
   historyInVault: boolean,
   manimQuality: string,
   pdfText: boolean,

@@ -209,12 +209,6 @@ contextBridge.exposeInMainWorld('tulip', {
     to: (p) => ipcRenderer.invoke('links:to', p)
   },
 
-  /* Local extensions from `.tulip/extensions/`, as raw source — only when the
-     user has turned them on in Settings. What they can do is bounded by the
-     bridge in src/extensions.js. */
-  extensions: {
-    list: () => ipcRenderer.invoke('extensions:list')
-  },
   config: {
     get: () => ipcRenderer.invoke('config:get'),
     set: (patch) => ipcRenderer.invoke('config:set', patch)

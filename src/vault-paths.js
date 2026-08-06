@@ -35,7 +35,7 @@ export const CODE_EXT =
   new RegExp(`(${extAlternation(VAULT_CONTRACT.codeExtensions)})$`, 'i')
 
 /* The delimiter is the value, so the matcher is built from the keys. */
-export const DATA_DELIMITERS = VAULT_CONTRACT.dataExtensions
+const DATA_DELIMITERS = VAULT_CONTRACT.dataExtensions
 export const DATA_EXT =
   new RegExp(`(${extAlternation(Object.keys(DATA_DELIMITERS))})$`, 'i')
 

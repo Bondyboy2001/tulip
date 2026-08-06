@@ -79,7 +79,7 @@ function merge (ranges) {
  * @param {string} text          the whole document
  * @param {import('@codemirror/state').EditorState} [state]  for the syntax tree
  */
-export function proseRanges (text, state) {
+function proseRanges (text, state) {
   const skip = []
 
   if (state && syntaxTree) {

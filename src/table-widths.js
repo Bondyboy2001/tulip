@@ -92,4 +92,4 @@ export function columnWidthPlugin (md) {
 const padWidths = (widths, cols) =>
   Array.from({ length: cols }, (_, c) => widths[c] || 0)
 
-export { WIDTHS, MIN_COLUMN_WIDTH, columnWidth, parseColumnWidths, padWidths, headerCells }
+export { MIN_COLUMN_WIDTH, columnWidth, parseColumnWidths, padWidths }

@@ -117,7 +117,7 @@ const FOCUSABLE = [
 ].join(',')
 
 /** The things inside `root` that Tab can reach, in the order it reaches them. */
-export function focusableWithin (root) {
+function focusableWithin (root) {
   return [...root.querySelectorAll(FOCUSABLE)].filter((node) => {
     if (node.disabled || node.getAttribute('tabindex') === '-1') return false
     if (node.closest('[hidden]')) return false
