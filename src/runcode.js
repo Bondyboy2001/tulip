@@ -92,10 +92,33 @@ api.on('run:done', (payload) => {
     finishOutput(state)
     Object.assign(state, payload, { status: 'done' })
     renderNow(state)
+    settleRun(state)
     return
   }
   held(payload.id).done = payload
 })
+
+/**
+ * Tell whoever is waiting that this run is over.
+ *
+ * "Run all" awaits each block before starting the next, and a run that landed
+ * on `done` without saying so would leave the sweep waiting for the rest of the
+ * session — so every path that sets that status calls this, including the one
+ * where the run never started at all. A holding-pen box (see `held`) has no
+ * waiters, which is why the set is optional.
+ */
+function settleRun (state) {
+  if (!state.settlers?.size) return
+  const waiting = [...state.settlers]
+  state.settlers.clear()
+  for (const done of waiting) done()
+}
+
+/** A promise for the end of this run, resolved at once when it has already ended. */
+function whenSettled (state) {
+  if (state.status !== 'running') return Promise.resolve()
+  return new Promise((resolve) => state.settlers.add(resolve))
+}
 
 function held (id) {
   let box = inbox.get(id)
@@ -192,17 +215,41 @@ function warmRunner (lang) {
 }
 
 /**
+ * What a run looks like with nothing behind it yet, on whichever status the
+ * caller is putting it: `running` for one that is starting, `idle` for one whose
+ * output has just been thrown away.
+ *
+ * Written out once because those two callers have to agree about what "no
+ * output" is. They did not: clearing a panel by hand and starting a run cleared
+ * different fields, so a cleared block kept the exit code of the run before it
+ * and reported it again the moment anything repainted.
+ */
+function blankRun (status) {
+  return {
+    ...outputState(),
+    status,
+    code: null,
+    id: null,
+    ms: 0,
+    buildMs: 0,
+    stopRequested: false,
+    signal: null,
+    error: null,
+    timedOut: false,
+    truncated: false,
+    path: null
+  }
+}
+
+/**
  * A blank run state. Manim keeps its own view but streams through the same
  * machinery, so the two cannot drift over what "running" looks like.
  */
 function runState () {
   return {
-    ...outputState(),
-    status: 'idle',
-    code: null,
-    id: null,
-    stopRequested: false,
+    ...blankRun('idle'),
     painters: new Set(),
+    settlers: new Set(),
     render () { for (const paint of this.painters) paint() }
   }
 }
@@ -235,6 +282,7 @@ function adopt (id, state) {
       finishOutput(state)
       Object.assign(state, box.done, { status: 'done' })
       state.render()
+      settleRun(state)
       return
     }
   }
@@ -242,8 +290,13 @@ function adopt (id, state) {
   state.render()
 }
 
+/* The language and the body together — see the note over `results`. */
+function runKey (lang, code) {
+  return `${String(lang || '').trim().toLowerCase()}\n${code}`
+}
+
 function stateFor (lang, code) {
-  const key = `${String(lang || '').trim().toLowerCase()}\n${code}`
+  const key = runKey(lang, code)
   let state = results.get(key)
   if (state) {
     /* Re-entered so a block still on screen counts as recent. Insertion order
@@ -292,20 +345,7 @@ function reason (err) {
  * @returns {Promise<object|null>}  what start() said, or null if it threw
  */
 async function launch (state, start) {
-  Object.assign(state, {
-    status: 'running',
-    stdout: '',
-    stderr: '',
-    ansi: { stdout: ansiState(), stderr: ansiState() },
-    code: null,
-    id: null,
-    stopRequested: false,
-    signal: null,
-    error: null,
-    timedOut: false,
-    truncated: false,
-    path: null
-  })
+  Object.assign(state, blankRun('running'))
   state.render()
 
   try {
@@ -322,8 +362,79 @@ async function launch (state, start) {
   } catch (err) {
     Object.assign(state, { status: 'done', error: reason(err), ms: 0, stopRequested: false })
     state.render()
+    settleRun(state)
     return null
   }
+}
+
+/**
+ * Run these blocks one after another, and answer with what became of them.
+ *
+ * One at a time, and awaited: a note with twenty blocks in it would otherwise
+ * start twenty processes in the same instant, on a machine somebody is reading
+ * on — the same argument `AUTO_AT_ONCE` makes above, in its strictest form,
+ * because these are whole programs rather than drawings.
+ *
+ * A block that fails does not end the sweep. Every block here is its own
+ * process with its own state, so the one after it is unaffected — unlike a
+ * notebook, where the cell below a raised exception runs against a session that
+ * never happened (see runCells in notebook.js). A block stopped by hand does
+ * end it: while the sweep is going, Stop is the only way to say "enough".
+ *
+ * @param {{lang: string, code: string}[]} blocks
+ * @param {(done: number, total: number) => void} [onProgress]
+ * @returns {Promise<{ran: number, failed: number, stopped: boolean}>}
+ */
+export async function runBlocksInOrder (blocks, onProgress) {
+  const summary = { ran: 0, failed: 0, stopped: false }
+
+  for (const [index, block] of blocks.entries()) {
+    onProgress?.(index, blocks.length)
+    const state = stateFor(block.lang, block.code)
+    /* Already going — because the reader pressed its button a moment ago, or
+       because the same snippet appears twice in the note. Joined rather than
+       restarted: killing a run somebody started by hand to start the identical
+       run again is work for nothing. */
+    if (state.status !== 'running') {
+      await launch(state, () => api.run.start(block.lang, block.code))
+    }
+    await whenSettled(state)
+    summary.ran++
+    if (state.signal) { summary.stopped = true; break }
+    if (state.error || state.timedOut || state.code !== 0) summary.failed++
+  }
+
+  return summary
+}
+
+/**
+ * Throw away what these blocks last printed.
+ *
+ * The state object is emptied rather than dropped from `results`: every panel
+ * on screen is painting from the object it was handed, so a deleted entry would
+ * leave those panels showing the old output for ever while the next run built a
+ * fresh state nothing pointed at.
+ *
+ * A running block is left alone and counted, because clearing it would empty a
+ * panel that is about to fill again — and the caller has something to say about
+ * that.
+ *
+ * @param {{lang: string, code: string}[]} blocks
+ * @returns {{cleared: number, running: number}}
+ */
+export function clearBlockOutputs (blocks) {
+  const summary = { cleared: 0, running: 0 }
+
+  for (const { lang, code } of blocks) {
+    const state = results.get(runKey(lang, code))
+    if (!state || state.status === 'idle') continue
+    if (state.status === 'running') { summary.running++; continue }
+    Object.assign(state, blankRun('idle'))
+    state.render()
+    summary.cleared++
+  }
+
+  return summary
 }
 
 /**

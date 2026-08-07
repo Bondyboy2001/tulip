@@ -65,6 +65,18 @@ ok('a list of paths must be a list of strings', () => {
   assert.deepEqual(sanitizeConfigPatch({ tabs: ['a.md', 3] }).accepted, {})
 })
 
+ok('the locked files are a list of paths, and the CSV lattice a boolean', () => {
+  assert.deepEqual(
+    sanitizeConfigPatch({ lockedFiles: ['Notes/Done.md'] }).accepted,
+    { lockedFiles: ['Notes/Done.md'] })
+  // A lock that does not stick is a file that quietly starts taking edits
+  // again, so the wrong shape is refused rather than half-read.
+  assert.deepEqual(sanitizeConfigPatch({ lockedFiles: 'Notes/Done.md' }).accepted, {})
+  assert.deepEqual(sanitizeConfigPatch({ lockedFiles: ['a.md', 7] }).accepted, {})
+  assert.deepEqual(sanitizeConfigPatch({ csvBorders: true }).accepted, { csvBorders: true })
+  assert.deepEqual(sanitizeConfigPatch({ csvBorders: 'on' }).accepted, {})
+})
+
 ok('undefined clears the keys that are allowed to be cleared', () => {
   const { accepted } = sanitizeConfigPatch({ lastNote: undefined })
   assert.ok('lastNote' in accepted)

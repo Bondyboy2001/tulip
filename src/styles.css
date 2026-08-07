@@ -1082,10 +1082,13 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
 
 /* ------------------------------------------------------- sidebar panes */
 
-/* Two words rather than two icons: there are two of them, they are read once,
-   and a rail of glyphs for a choice this small is a puzzle to solve. The
-   underline is what carries the state — the same hairline the panel already
-   uses, moved to say something. */
+/* Words rather than icons: they are read once, and a rail of glyphs for a
+   choice this small is a puzzle to solve. The underline is what carries the
+   state — the same hairline the panel already uses, moved to say something.
+
+   One strip, at the top of the lower panel, naming what is in it. The file
+   tree above has none, because it is not one of the choices: it is what the
+   sidebar is. */
 .pane-tabs {
   display: flex;
   align-items: center;
@@ -1127,7 +1130,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
   background: var(--accent);
 }
 
-/* Only one pane is in the panel at a time, and each takes what is left of it. */
+/* Only one pane is in the lower panel at a time. */
 .pane[hidden] { display: none; }
 
 .tree {
@@ -1515,6 +1518,44 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
   margin-inline: auto;
   padding-inline: 24px;
 }
+
+/* Where an enormous note stops being rendered — see READING_LIMIT in
+   renderer.js. Styled as a card rather than as prose so it is plainly the
+   app talking and not the note's own last paragraph. */
+.reading-more {
+  margin: 28px 0 64px;
+  padding: 16px 18px;
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  background: var(--surface);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+.reading-more-text {
+  margin: 0;
+  flex: 1 1 100%;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.reading-more-go, .reading-more-edit {
+  font-family: var(--font-ui);
+  font-size: 12px;
+  padding: 6px 12px;
+  border-radius: 7px;
+  border: 1px solid var(--line-soft);
+  background: var(--paper);
+  color: var(--ink);
+  cursor: pointer;
+}
+.reading-more-go:hover, .reading-more-edit:hover { border-color: var(--line); }
+.reading-more-go:focus-visible, .reading-more-edit:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 /* Only the blocks near the viewport are laid out and painted. The editing view
    gets this for free from CodeMirror's virtual viewport; the reading view is
    the whole note as one DOM, and on a long note every style, layout and paint
@@ -1553,13 +1594,16 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
 .reading p, .reading ul, .reading ol, .reading blockquote { margin: 0 0 1.05em; }
 /* Numbered lists draw an explicit marker beside the item. The number comes from
    Markdown's token stream rather than a CSS counter, which keeps it correct when
-   the reading view lays out only part of a long note. */
-.reading ol.tk-ordered-list {
+   the reading view lays out only part of a long note. The marker travels with the
+   class, not with the view: anywhere this renderer's HTML lands — the reading
+   view, a notebook's markdown cell — the list's own marker has to go, or the
+   number is drawn twice. */
+ol.tk-ordered-list {
   list-style: none;
   padding-left: 2.3em;
 }
-.reading ol.tk-ordered-list > li { position: relative; }
-.reading ol.tk-ordered-list > li > .tk-olnum {
+ol.tk-ordered-list > li { position: relative; }
+ol.tk-ordered-list > li > .tk-olnum {
   position: absolute;
   left: -2.25em;
   top: .07em;
@@ -2686,6 +2730,15 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
   font-size: 12px;
   line-height: 1.45;
   color: var(--muted);
+  /* Written as lines by the one caller that has a list to show — the replace
+     preview, which names files and the line each would change. `textContent`
+     puts the newlines in; this is what makes them newlines. */
+  white-space: pre-wrap;
+  /* And a long list is scrolled rather than allowed to push the buttons off
+     the bottom of a short window. */
+  max-height: 40vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .ask-buttons {
@@ -4270,6 +4323,17 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
 .view-option:active:not(:disabled),
 .doc-tool:active { transform: scale(.94); }
 .view-option:disabled { opacity: .32; cursor: default; }
+
+/* The padlock beside a locked document's view switch. Muted rather than
+   coloured: it is the reason two buttons are greyed out, not an alarm. */
+.lock-mark {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 28px;
+  color: var(--muted);
+}
+.lock-mark[hidden] { display: none; }
 
 .doc-control-divider {
   width: 1px;
@@ -6011,6 +6075,59 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   color: var(--faint);
 }
 
+/* What can be done to a message that has already been said: copy an answer,
+   put a question back in the box. Out of the way until the pointer is on the
+   message — the transcript is for reading, and a row of controls beside every
+   line would compete with the words for it. Kept in the flow rather than
+   floated over the text, so a one-line reply is not covered by its own button.
+
+   Revealed by focus as well as hover, or the keyboard could tab to a control it
+   cannot see.
+
+   Against the right edge on every kind of message. Prose is read from the left,
+   so a control sitting under the first word is the thing the eye lands on after
+   the last line — and a question's controls were already over here. One edge
+   for all of them means the button is in the same place whichever row the
+   pointer is on. */
+.msg-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 2px;
+  margin-top: 3px;
+  opacity: 0;
+  transition: opacity .12s ease;
+}
+.msg:hover .msg-actions,
+.msg-actions:focus-within { opacity: 1; }
+@media (hover: none) { .msg-actions { opacity: 1; } }
+
+.msg-action {
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  color: var(--faint);
+}
+.msg-action svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.msg-action:hover { color: var(--ink); background: var(--hover); }
+
+/* A copy that landed, said on the control itself and only for a moment — see
+   `copyMessage`. The tick replaces the mark rather than joining it, so the
+   button does not change width under the pointer. */
+.msg-action.is-done { color: var(--accent); }
+.msg-action.is-done svg { display: none; }
+.msg-action.is-done::after {
+  content: "✓";
+  font: 12px/1 var(--font-ui);
+}
+
 .msg-bot { padding: 1px 0; }
 .msg-bot h1, .msg-bot h2, .msg-bot h3 {
   font-size: 13.5px;
@@ -6796,11 +6913,27 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   font: 600 10px/1 var(--font-ui);
   letter-spacing: .02em;
 }
-.ai-mode[data-mode="ask"] { color: var(--accent); }
-.ai-mode[data-mode="auto"] { color: var(--strong); }
-.ai-mode[data-mode="auto"][aria-pressed="true"] {
-  border-color: color-mix(in srgb, var(--strong) 55%, transparent);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--strong) 16%, transparent);
+/* Three modes, three hues, one tint each: the colour is the fastest way to see
+   which permission is standing, and it has to say *which* rather than merely
+   "not the default". Cool for the mode that only reads, the accent for the one
+   that asks first, the warm end for the one that acts on its own — the same
+   warm/cool split bold and italic use, so the escalation reads as heat.
+   All three tokens are defined by every theme, so no theme loses the
+   distinction. */
+.ai-mode[data-mode="read"] { --mode-tint: var(--emph); }
+.ai-mode[data-mode="ask"]  { --mode-tint: var(--accent); }
+.ai-mode[data-mode="auto"] { --mode-tint: var(--strong); }
+.ai-mode[data-mode] { color: var(--mode-tint); }
+.ai-mode[data-mode]:hover {
+  color: var(--mode-tint);
+  background: color-mix(in srgb, var(--mode-tint) 12%, transparent);
+}
+/* Read is tinted but unringed: nothing has been granted, so there is no
+   standing condition to ring. */
+.ai-mode[data-mode][aria-pressed="true"] {
+  color: var(--mode-tint);
+  border-color: color-mix(in srgb, var(--mode-tint) 55%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--mode-tint) 16%, transparent);
 }
 
 /* A pressed control is ringed rather than filled: the copilot being allowed
@@ -7919,6 +8052,10 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
    the app opens. Callers that want a different button — the copilot's
    popover does — restyle `.dd-button` and leave the popup alone. */
 .dd { display: inline-flex; min-width: 0; }
+/* `display` here beats the browser's own rule for the attribute, so a caller
+   that hides the control — the grid's delimiter, which is on the bar only when
+   the answer is surprising — needs this to mean anything. */
+.dd[hidden] { display: none; }
 .dd-button {
   display: flex;
   align-items: center;
@@ -7950,6 +8087,11 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 }
 /* Nothing chosen: the placeholder reads like a prompt, not a value. */
 .dd-button.is-empty { color: var(--faint); }
+/* What an option draws in front of its name, in the button and in its row. It
+   holds its width against a name long enough to ellipsise, and takes no space
+   at all in a list where no option has one. */
+.dd-lead, .dd-option > .lang-chip { display: inline-flex; align-items: center; flex: none; }
+.dd-lead:empty { display: none; }
 
 /* Fixed to the window, because both of its homes clip: the settings pane
    scrolls and the copilot popover has a composer under it. */
@@ -9233,6 +9375,69 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
    whole summary carries it rather than a banner: it is one sentence about the
    thing the summary already names, and it is in the title attribute. */
 .nb-shape.is-notice { color: var(--danger, #c0392b); cursor: help; }
+/* The kernel and what it is doing, with the separator drawn between them
+   rather than joined into a string. A part with nothing to say goes, and takes
+   its separator with it — the second rule, or a bar with no kernel yet would
+   open on a leading dot. */
+.nb-shape { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.nb-shape > *:empty { display: none; }
+.nb-shape > * + *::before { content: '·'; margin-right: 7px; color: var(--faint); }
+.nb-shape > *:empty + *::before { content: none; margin-right: 0; }
+/* What the kernel is doing, as a light and only as a light: no word beside it,
+   because three colours are the whole of the message and the state is on the
+   dot's own tooltip for anyone who wants it spelled out. It answers "can I run
+   something now" — green once the kernel is up, whether it is idle or mid-cell;
+   amber for everything before that; red for the notice. Red is `currentColor`
+   because the summary is already danger-coloured when there is one, and two
+   ways of spelling the same red drift apart.
+
+   The green is `--stem`, which every theme already spends on growth, so this
+   is themed without thirteen new variables. Only the amber is new, and
+   `light-dark()` reads the `color-scheme` the themes already declare.
+
+   Two things these rules have to beat, which is why they sit last: the
+   `:empty` rule above — a dot has no text, so it is always empty and would
+   always be hidden — and the suppressed separator, since the dot is a status
+   light rather than a mark between two things and stands whether or not there
+   is a kernel named to its left. Both are decided by order rather than by
+   weight: the specificity is a tie. */
+.nb-shape > .nb-shape-state { display: inline-flex; align-items: center; }
+.nb-shape > .nb-shape-state::before {
+  content: '';
+  flex: none;
+  width: 9px;
+  height: 9px;
+  margin-right: 0;
+  border-radius: 50%;
+  background: var(--faint);
+}
+.nb-shape > .nb-shape-state.is-ready::before { background: var(--stem); }
+.nb-shape > .nb-shape-state.is-waiting::before { background: light-dark(#B5761F, #E0A458); }
+.nb-shape > .nb-shape-state.is-error::before { background: currentColor; }
+/* The kernel's language, wearing the mark a fenced block of it wears — a shade
+   smaller, because the bar's text is smaller than a fence's chip. Unscoped by
+   the bar on purpose: the same mark is drawn in the menu's rows, and the menu
+   is a layer on the body rather than a child of anything here. */
+.nb-kernel-mark { flex: none; }
+.nb-kernel-mark .lang-mark { height: 13px; font-size: 9px; }
+.nb-kernel-mark .lang-logo { width: 13px; height: 13px; }
+.nb-shape-kernel { display: flex; align-items: center; gap: 6px; min-width: 0; }
+/* The kernel reads as part of the sentence until it is pointed at: no border,
+   no fill, and the caret only close up. It is a menu, not a form field. */
+.nb-kernel-pick {
+  min-width: 0;
+  gap: 4px;
+  padding: 1px 4px;
+  border-color: transparent;
+  background: none;
+  color: inherit;
+  font: inherit;
+}
+.nb-kernel-pick:hover { border-color: var(--line); background: var(--hover); }
+.nb-kernel-pick > svg { opacity: 0; transition: opacity .12s, transform .14s; }
+.nb-shape:hover .nb-kernel-pick > svg,
+.nb-kernel-pick:focus-visible > svg,
+.nb-kernel-pick[aria-expanded="true"] > svg { opacity: 1; }
 
 .nb-scroll {
   flex: 1;
@@ -9269,6 +9474,38 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 .nb-cell:hover, .nb-cell:focus-within { border-color: var(--line-soft); }
 .nb-cell:focus-within { background: var(--active-line); }
 
+/* The cell the keyboard means. A bar down the left rather than a border,
+   because the border is already saying "the mouse is here" and these are
+   different facts — the chosen cell stays chosen while the pointer wanders.
+   Drawn on the padding edge so it does not move the content by a pixel. */
+.nb-cell.is-at::before {
+  content: "";
+  position: absolute;
+  inset-block: 2px;
+  left: -1px;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+.nb-cell.is-at { border-color: var(--line-soft); }
+
+/* Where a dragged cell would land. A line in the gap, which is the gap it
+   would go into — nothing moves until it is dropped. */
+.nb-cell.is-drop-before::after,
+.nb-cell.is-drop-after::after {
+  content: "";
+  position: absolute;
+  left: 3.4rem;
+  right: 6px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+.nb-cell.is-drop-before::after { top: -4px; }
+.nb-cell.is-drop-after::after { bottom: -4px; }
+.nb-grip { cursor: grab; }
+.nb-grip:active { cursor: grabbing; }
+
 .nb-gutter {
   display: flex;
   flex-direction: column;
@@ -9282,6 +9519,24 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   color: var(--faint);
   white-space: nowrap;
 }
+/* How long the cell took, under the number of the run it took it. Quieter
+   than the prompt: it is worth knowing and never worth reading first. */
+.nb-took {
+  font: 10.5px/1.4 var(--font-mono);
+  color: var(--faint);
+  white-space: nowrap;
+  opacity: 0.75;
+}
+/* The fold, on the same terms as Run — there when the cell is pointed at,
+   and always there once the cell is shut, because a fold you cannot see is a
+   cell that has silently lost its output. */
+.nb-fold {
+  opacity: 0;
+  transition: opacity 90ms ease, transform 120ms ease;
+}
+.nb-cell:hover .nb-fold, .nb-cell:focus-within .nb-fold { opacity: 0.5; }
+.nb-fold:hover { opacity: 1 !important; }
+.nb-fold.is-shut { opacity: 0.8; transform: rotate(-90deg); }
 /* A running cell's prompt is the one thing on screen someone watching a slow
    cell is actually looking at, so it gets the accent and a pulse — `[*]` in
    the same grey as `[ ]` is a state change nobody notices. */
@@ -9307,16 +9562,23 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 .nb-cell.is-running .nb-run { color: var(--accent); }
 .nb-body { min-width: 0; }
 
-/* Laid over the cell's top corner rather than given a row of its own: a
-   toolbar in the flow would put a strip of furniture between every pair of
-   cells in the notebook, which is most of what you would be looking at.
+/* Above the cell rather than over it, and still out of the flow: a toolbar
+   given a row of its own would put a strip of furniture between every pair of
+   cells in the notebook, which is most of what you would be looking at — but
+   laid over the top corner it covered the cell's first line, which in a code
+   cell is the line you read to know what the cell is. So it overhangs the top
+   edge into the gap between cells, which is space nothing else is using.
 
-   Inside the border box, not overhanging it. `content-visibility` above brings
-   paint containment with it, and a box that hangs over the edge of a contained
-   element is a box clipped in half. */
+   Overhanging means escaping the paint containment `content-visibility` brings
+   with it, which clips to the border box. So the containment is lifted from
+   the one cell being pointed at: it is there for the hundreds of cells that
+   are not, and the one under the cursor is already laid out and painted. */
+.nb-cell:hover, .nb-cell:focus-within { content-visibility: visible; }
 .nb-cell-tools {
   position: absolute;
-  top: 3px;
+  /* The cell's 4px of top padding, so the toolbar's underside sits exactly on
+     top of the source box rather than a hair over it. */
+  bottom: calc(100% - 4px);
   right: 5px;
   z-index: 2;
   display: none;
@@ -9342,9 +9604,11 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 .nb-cell-btn:hover { color: var(--ink); background: var(--hover); }
 .nb-cell-ico { width: 15px; height: 15px; }
 .nb-cell-type {
+  min-width: 84px;
+  gap: 4px;
   margin-right: 2px;
   padding: 1px 4px;
-  border: 1px solid var(--line-soft);
+  border-color: var(--line-soft);
   border-radius: 5px;
   background: var(--surface);
   color: var(--ink-soft);
@@ -9434,7 +9698,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 }
 .nb-elided { color: var(--faint); font-style: italic; }
 
-.nb-out-image { display: flex; }
+.nb-out-image { display: flex; align-items: flex-start; }
 .nb-out-image img {
   max-width: 100%;
   border-radius: 4px;
@@ -9443,7 +9707,16 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   background: #fff;
 }
 
-.nb-out-html { overflow-x: auto; font: 13px/1.5 var(--font-ui); color: var(--ink); }
+/* The same ceiling the text outputs get, for the same reason: one wide
+   DataFrame or one tall figure owning the whole page is not showing you the
+   notebook, it is showing you one cell of it. Both scroll inside themselves,
+   and the fold in the gutter is there when a reader wants the cell shut
+   entirely. */
+.nb-out-html, .nb-out-image, .nb-out-json, .nb-out-latex {
+  max-height: 32em;
+  overflow: auto;
+}
+.nb-out-html { font: 13px/1.5 var(--font-ui); color: var(--ink); }
 .nb-out-html table { border-collapse: collapse; font-size: 12.5px; }
 .nb-out-html th, .nb-out-html td {
   padding: 3px 10px;
@@ -9451,6 +9724,153 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   text-align: right;
 }
 .nb-out-html th { background: var(--sunk); font-weight: 600; }
+
+/* ------------------------------------------------------------ JSON outputs
+
+   A tree that opens, rather than forty lines of it spelled out. `<details>`
+   does the opening, so it is keyboard-reachable and findable by the browser's
+   own find for free. */
+.nb-out-json {
+  padding: 4px 10px;
+  font: 12.5px/1.6 var(--font-mono);
+  color: var(--ink-soft);
+}
+.nb-json-node > * { margin-left: 1.1em; }
+.nb-json-node > summary { margin-left: 0; cursor: pointer; list-style-position: outside; }
+.nb-json-node > summary::marker { color: var(--faint); }
+.nb-json-key { color: var(--muted); }
+.nb-json-brace { color: var(--faint); }
+.nb-json-string { color: var(--code-added, var(--accent)); }
+.nb-json-number, .nb-json-boolean { color: var(--accent); }
+.nb-json-null { color: var(--faint); font-style: italic; }
+
+/* --------------------------------------------------------- folds and tags */
+
+/* A folded cell says what it is and opens on a click. Drawing nothing would
+   be a notebook that had quietly lost a cell. */
+.nb-folded, .nb-outputs-shut {
+  align-self: start;
+  max-width: 100%;
+  overflow: hidden;
+  padding: 3px 10px;
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font: 12px/1.5 var(--font-mono);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  text-align: left;
+  cursor: pointer;
+}
+.nb-outputs-shut { margin-top: 6px; font-family: var(--font-ui); }
+.nb-folded:hover, .nb-outputs-shut:hover { color: var(--ink); border-color: var(--line-strong, var(--line)); }
+
+.nb-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 4px; }
+.nb-tag {
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--sunk);
+  color: var(--muted);
+  font: 10.5px/1.6 var(--font-ui);
+}
+.nb-tag-edit {
+  width: 100%;
+  margin-bottom: 4px;
+  padding: 3px 8px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  font: 11.5px/1.5 var(--font-ui);
+  outline: none;
+}
+
+/* ------------------------------------------------------------------ stdin
+
+   The line a cell blocked on `input()` is answered on, under the prompt it is
+   answering — which is where it is in a terminal, and the only arrangement in
+   which the two read as one conversation. */
+.nb-stdin { margin-top: 6px; }
+.nb-stdin-label {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 4px 10px;
+  border-left: 2px solid var(--accent);
+  border-radius: 0 6px 6px 0;
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  color: var(--ink-soft);
+  font: 12.5px/1.5 var(--font-mono);
+  white-space: pre-wrap;
+}
+.nb-stdin-input {
+  flex: 1;
+  min-width: 4rem;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  outline: none;
+}
+.nb-stdin-input:focus { border-bottom-color: var(--accent); }
+
+/* --------------------------------------------- completion and inspection
+
+   One popup for both questions, positioned at the caret. `fixed` because it is
+   measured against the viewport — the caret's rectangle comes from a range in
+   the mirrored `<pre>`, which is already in viewport coordinates. */
+.nb-hint {
+  position: fixed;
+  z-index: 40;
+  max-width: min(46rem, 90vw);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 4px 18px rgb(0 0 0 / 0.16);
+  overflow: hidden;
+}
+.nb-hint-list { max-height: 16em; overflow-y: auto; }
+.nb-hint-row {
+  padding: 3px 12px;
+  font: 12.5px/1.6 var(--font-mono);
+  color: var(--ink-soft);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.nb-hint-row:hover { background: var(--hover); }
+.nb-hint-row.is-at { background: var(--selected); color: var(--ink); }
+.nb-hint-doc { max-width: 46rem; max-height: 22em; overflow: auto; }
+.nb-hint-text {
+  margin: 0;
+  padding: 8px 12px;
+  font: 12px/1.5 var(--font-mono);
+  color: var(--ink-soft);
+  white-space: pre-wrap;
+}
+
+/* ------------------------------------------------------------ bar controls */
+
+/* How far through a Run all is, beside the button that started it. */
+.nb-progress {
+  padding: 0 4px;
+  color: var(--muted);
+  font: 11.5px/1.4 var(--font-mono);
+  white-space: nowrap;
+}
+/* The two command menus. Sized and coloured as the buttons beside them, so
+   the bar reads as one row of controls rather than two kinds of thing. */
+.nb-run-pick, .nb-export-pick {
+  gap: 4px;
+  padding: 3px 8px;
+  border-color: var(--line-soft);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink-soft);
+  font: 11.5px/1.4 var(--font-ui);
+}
+.nb-run-pick:hover, .nb-export-pick:hover { border-color: var(--line); background: var(--hover); }
 
 /* ------------------------------------------------------- markdown cells
 
@@ -9477,6 +9897,9 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 .nb-md h3 { font-size: 1.1em; color: var(--h3, var(--ink)); }
 .nb-md p, .nb-md ul, .nb-md ol, .nb-md blockquote, .nb-md table { margin: .6em 0; }
 .nb-md ul, .nb-md ol { padding-left: 1.5em; }
+/* Except a numbered list, whose padding is the room its circled marker hangs
+   in — see ol.tk-ordered-list. */
+.nb-md ol.tk-ordered-list { padding-left: 2.3em; }
 .nb-md li { margin: .2em 0; }
 .nb-md a { color: var(--accent); }
 .nb-md code {
@@ -9596,15 +10019,17 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
    bar only when the answer is not the one the extension implies — so a comma
    `.csv`, which is nearly all of them, never shows this at all. */
 .csv-delimiter {
+  min-width: 0;
+  gap: 5px;
   padding: 3px 6px;
-  border: 1px solid var(--accent);
+  border-color: var(--accent);
   border-radius: 6px;
   background: color-mix(in srgb, var(--accent) 10%, var(--paper));
   color: var(--accent);
   font: inherit;
-  cursor: pointer;
 }
-.csv-delimiter[hidden] { display: none; }
+.csv-delimiter:hover { border-color: var(--accent); }
+.csv-delimiter > svg { color: currentColor; }
 .csv-btn.is-on {
   color: var(--accent);
   border-color: var(--accent);
@@ -9689,6 +10114,23 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   font-size: 9px;
   color: var(--accent);
 }
+/* The way into the column's filter. Invisible until the heading is hovered —
+   a funnel on every one of thirty headings is thirty pieces of furniture in a
+   strip whose job is to be read — and permanent once the column is hiding
+   rows, since that is a state the reader has to be able to see they are in. */
+.csv-funnel {
+  margin-left: 4px;
+  padding: 0 2px;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--ink-soft);
+  opacity: 0;
+  cursor: pointer;
+}
+.csv-th:hover .csv-funnel { opacity: 0.7; }
+.csv-funnel:hover { opacity: 1; color: var(--ink); }
+.csv-th.is-filtered .csv-funnel { opacity: 1; color: var(--accent); }
+.csv-th.is-filtered .csv-th-label { color: var(--accent); }
 /* The divider between two headings, widened into something a mouse can catch
    without making the heading itself hard to click. */
 .csv-grip {
@@ -9808,6 +10250,32 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 .csv-frame.is-reading .csv-th { border-right-color: var(--line-soft); }
 .csv-frame.is-reading .csv-gutter { color: var(--ink-faint, var(--ink-soft)); opacity: 0.75; }
 
+/* ------------------------------------------------------- the full lattice
+
+   Off by default — see the CSV tab in settings. The grid already draws rules
+   between the columns, and the striped rows are what keep the rows apart; this
+   closes the boxes for people who are aiming at cells rather than reading down
+   a column, which is the difference between a table and a spreadsheet.
+
+   Drawn from the shell's `data-csv-borders` rather than a class on each cell:
+   the body is virtualized, so cells come and go as it scrolls and every one of
+   them would have to be told. It also has to outrank the reading view's rule
+   above, which takes the column rules away — hence the frame in the selector,
+   not just the cell. */
+[data-csv-borders="on"] .csv-frame .csv-cell,
+[data-csv-borders="on"] .csv-frame .csv-gutter {
+  border-bottom: 1px solid var(--line-soft);
+}
+[data-csv-borders="on"] .csv-frame .csv-cell {
+  border-right: 1px solid var(--line-soft);
+}
+/* The heading strip keeps its own heavier line under it, and the gutter its
+   own heavier line beside it: both are edges of the frozen chrome rather than
+   part of the lattice. */
+[data-csv-borders="on"] .csv-frame .csv-gutter { border-right: 1px solid var(--line); }
+[data-csv-borders="on"] .csv-frame .csv-head .csv-cell,
+[data-csv-borders="on"] .csv-frame .csv-head .csv-gutter { border-bottom: 0; }
+
 /* The right-click menu. Inside the frame so it scrolls away with the pane it
    belongs to rather than hanging over the window. */
 .csv-menu {
@@ -9837,6 +10305,79 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 .csv-menu-item:hover:not(:disabled) { background: var(--accent); color: #fff; }
 .csv-menu-item:disabled { opacity: 0.4; cursor: default; }
 .csv-menu-rule { height: 1px; margin: 4px 6px; background: var(--line); }
+
+/* The column filter. Shaped like the menu because it comes from the same
+   place, but it is a panel: it stays open while boxes are ticked, and the list
+   inside it scrolls rather than growing a popover taller than the window. */
+.csv-filter {
+  position: absolute;
+  z-index: 21;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 260px;
+  max-height: min(360px, 70%);
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 12px 34px #0005;
+  font: 12px/1.4 var(--font-ui);
+}
+.csv-filter[hidden] { display: none; }
+.csv-filter-head {
+  overflow: hidden;
+  color: var(--ink);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.csv-filter-search {
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+}
+.csv-filter-search:focus { outline: none; border-color: var(--accent); }
+.csv-filter-picks { display: flex; align-items: center; gap: 6px; }
+.csv-filter-kept { margin-left: auto; color: var(--ink-soft); }
+.csv-filter-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 2px;
+  background: var(--paper);
+}
+.csv-filter-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 5px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.csv-filter-row:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.csv-filter-row input { margin: 0; accent-color: var(--accent); }
+.csv-filter-value {
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: var(--ink);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* A cell with nothing in it is still a value to tick, so it is named rather
+   than shown as the emptiness it is. */
+.csv-filter-value.is-blank { color: var(--ink-soft); font-style: italic; }
+.csv-filter-count {
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+.csv-filter-note { color: var(--ink-soft); }
+.csv-filter-note[hidden] { display: none; }
 
 /* The open cell. Sized to the cell it replaces so committing an edit does not
    move the row under the caret. */

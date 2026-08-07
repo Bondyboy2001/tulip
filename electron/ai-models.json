@@ -11,7 +11,9 @@
         "list"
       ],
       "grants": {
-        "read": "read and search your notes",
+        "read": "read and search your notes, and fetch web pages",
+        "ask": "read, edit and create notes, run shell commands inside the vault, and fetch web pages",
+        "auto": "read, edit and create notes, run shell commands anywhere on this Mac, and fetch web pages",
         "write": "read, edit and create notes, run shell commands inside the vault, and fetch web pages"
       }
     }

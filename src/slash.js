@@ -527,6 +527,50 @@ export function fenceLanguages (context) {
   return { from: before.from + 3, options, filter: false }
 }
 
+/* ------------------------------------------------------------ hashtags */
+
+/** The vault's tags, handed in by the renderer as a function so the list is
+ *  read at keystroke time. May answer with a promise — the tags live in the
+ *  main process — and the autocompletion machinery waits for it. */
+export const tagChoices = Facet.define({ combine: (v) => v[0] || (() => []) })
+
+/**
+ * Completes a `#tag` against every tag the vault already carries.
+ *
+ * The trigger mirrors the vault's own hashtag grammar — a `#` after
+ * whitespace or at the start of a line, then word characters — with one
+ * refusal on top: a bare `#` with nothing typed yet offers nothing unless
+ * asked (⌃Space). A heading begins with exactly that character, and a list
+ * of every tag popping up on the way to `# Introduction` would make the
+ * completion a nuisance on the syntax it shares.
+ */
+export async function hashTags (context) {
+  const before = context.matchBefore(/#[\p{L}\p{N}/_-]*$/u)
+  if (!before) return null
+
+  const line = context.state.doc.lineAt(before.from)
+  const lead = context.state.sliceDoc(line.from, before.from)
+  // `word#` is prose and `##` is a heading; both leave the tag grammar.
+  if (/[^\s]$/.test(lead)) return null
+  if (inFence(context.state, before.from)) return null
+
+  const query = before.text.slice(1).toLowerCase()
+  if (!query && !context.explicit) return null
+
+  const list = await context.state.facet(tagChoices)()
+  const options = (list || [])
+    .filter((t) => !query || t.tag.includes(query))
+    .map((t) => ({
+      label: `#${t.tag}`,
+      detail: `${t.notes} ${t.notes === 1 ? 'note' : 'notes'}`,
+      type: 'constant'
+    }))
+  if (!options.length) return null
+
+  // From the `#`, so the option's label replaces the whole half-typed tag.
+  return { from: before.from, options, filter: false }
+}
+
 /* -------------------------------------------------------- callout kinds */
 
 /* The nested list: what `> [!` completes to. Each kind answers to its own

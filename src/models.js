@@ -199,19 +199,26 @@ export const providerLabel = (provider) => PROVIDER[provider]?.label || provider
 /**
  * What this CLI may actually do in this mode, in words.
  *
- * One switch, several blast radii: none of these CLIs takes a per-tool
- * allowlist, so each is fenced only by a mode — which leaves them able to run
- * commands in the vault, and opencode to fetch web pages besides. The toggle
- * used to promise the same thing for all of them. It now says which one it is
- * handing over; the words are the catalogue's, beside the command they
- * describe.
+ * One switch, several blast radii — and for a long time the same words for
+ * both write modes, because the fence was the mode and nothing else. It is now
+ * a tool policy per mode (see `TOOL_POLICY` in electron/ai.js): every mode
+ * fetches web pages, Ask adds the notes and a shell the vault is the extent of,
+ * and Auto is the tier whose commands may leave it. Three grants, then, and the
+ * words are the catalogue's, beside the command they describe.
+ *
+ * A boolean still works, and still means the conservative of the two write
+ * modes: an old caller asking "may it write?" is not asking for the shell.
  */
-export const providerGrant = (provider, write) =>
-  PROVIDER[provider]?.grants?.[write ? 'write' : 'read'] || ''
+export const providerGrant = (provider, mode) => {
+  const grants = PROVIDER[provider]?.grants
+  if (!grants) return ''
+  const key = mode === true ? 'write' : (mode === false ? 'read' : mode)
+  return grants[key] || grants[key === 'auto' ? 'write' : 'read'] || ''
+}
 
-/* Permission is a UI choice with two provider capabilities underneath it:
-   read-only, or write-capable. Ask and Auto differ in when the first one is
-   handed over, not in what the provider can do once a turn starts. */
+/* Permission is a UI choice with three provider capabilities underneath it:
+   read-only, notes-only, or notes plus a shell. Ask and Auto differ both in
+   when write access is handed over and in what comes with it. */
 export const COPILOT_MODES = Object.freeze({
   READ: 'read',
   ASK: 'ask',

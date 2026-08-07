@@ -14,7 +14,7 @@ import {
   RECOGNISE, PRODUCE, DICTATE, CLOZE, UNLOCK_STABILITY, NEW_PER_DAY,
   languageCards, buildQueue, unlocked, clozeOf, studyColumns, dueCount,
   sessionGrade, studyFeedback, recordFirstTry,
-  normalizeLanguageTable, isLanguageTablePath
+  normalizeLanguageTable, isLanguageTablePath, importCards
 } from '../src/language-table.js'
 import { AGAIN, GOOD, DAY, newCard } from '../src/srs.js'
 import { EXACT, CLOSE, WRONG } from '../src/study-match.js'
@@ -235,6 +235,49 @@ check('queue: a card due tonight is not withheld until tomorrow',
 
 check('due: the count is what the session will actually offer',
   dueCount(cards, {}, T0, { newPerDay: 2 }) === buildQueue(cards, {}, T0, { newPerDay: 2 }).length)
+
+/* ------------------------------------------------------------- importing */
+
+{
+  const apply = (text, edit) => text.slice(0, edit.at) + edit.insert + text.slice(edit.at)
+
+  // Headerless rows land word-first in the note's own columns.
+  const plain = importCards(TABLE, [['νερό', 'water', 'Πίνω νερό.', ''], ['ψωμί', 'bread']])
+  check('headerless import adds every new word', plain.added === 2, String(plain.added))
+  const grown = apply(TABLE, plain)
+  check('imported words are studyable cards', languageCards(grown, PATH)
+    .some((card) => card.kind === RECOGNISE && card.prompt === 'νερό' && card.answer === 'water'))
+  check('the example column travels', grown.includes('Πίνω νερό.'))
+
+  // A named header maps by name, whatever its order.
+  const namedEdit = importCards(TABLE, [
+    ['English', 'Word'],
+    ['water', 'νερό'],
+    ['bread', 'ψωμί']
+  ])
+  const namedGrown = apply(TABLE, namedEdit)
+  check('a named header maps columns by name', languageCards(namedGrown, PATH)
+    .some((card) => card.kind === RECOGNISE && card.prompt === 'ψωμί' && card.answer === 'bread'))
+
+  // Words the table already holds are skipped, so a re-import is a no-op.
+  const again = importCards(grown, [['νερό', 'water'], ['γάλα', 'milk']])
+  check('a word already in the table is skipped', again.added === 1 && again.skipped === 1,
+    `added ${again.added}, skipped ${again.skipped}`)
+
+  // A pipe in a cell must not become a column.
+  const piped = apply(TABLE, importCards(TABLE, [['α|β', 'a or b']]))
+  check('a pipe in a value is escaped', piped.includes('α\\|β'))
+
+  // A note with no table yet gains the template's.
+  const fresh = importCards('Just a heading\n', [['νερό', 'water']])
+  const freshGrown = apply('Just a heading\n', fresh)
+  check('a bare note gains the template table', languageCards(freshGrown, PATH)
+    .some((card) => card.prompt === 'νερό' && card.answer === 'water'))
+
+  // Nothing worth adding says so rather than editing.
+  const empty = importCards(TABLE, [])
+  check('an empty file adds nothing', empty.added === 0 && empty.insert === '')
+}
 
 console.log(failures ? `\n${failures} failed` : 'language cards: all checks passed')
 process.exit(failures ? 1 : 0)

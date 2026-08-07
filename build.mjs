@@ -103,6 +103,77 @@ const leanKatex = {
   }
 }
 
+/* markdown-it reaches for `entities`, and takes two things from it: decodeHTML
+   and decodeHTMLStrict. The package's barrel re-exports its *encoder* as well,
+   whose generated table is 23KB, and esbuild will not shake that back out —
+   `sideEffects: false` in entities' manifest notwithstanding, a bundle whose
+   only import is decodeHTML still carries encode-html.js in full. markdown-it
+   is on the eager startup path (the reading view is the view a launch opens
+   in), so those 23KB were compiled before every first paint, to encode text
+   that nothing here encodes.
+
+   Pointed at the decode-only entry the package publishes instead. Which names
+   markdown-it actually wants is read out of markdown-it rather than assumed,
+   and checked against what that entry exports, so the release that starts
+   wanting an encoder fails this build rather than shipping a reading view that
+   throws "decodeHTML is not a function" on the first `&amp;`. */
+const ENTITIES_DECODE = path.resolve('node_modules/entities/lib/esm/decode.js')
+
+async function checkEntitiesDecodeCovers () {
+  const dir = 'node_modules/markdown-it/lib'
+  const sources = []
+  const walk = async (at) => {
+    for (const entry of await readdir(at, { withFileTypes: true })) {
+      const abs = path.join(at, entry.name)
+      if (entry.isDirectory()) await walk(abs)
+      else if (/\.(mjs|js)$/.test(entry.name)) sources.push(abs)
+    }
+  }
+  await walk(dir)
+
+  const wanted = new Set()
+  for (const file of sources) {
+    const source = await readFile(file, 'utf8')
+    const imports = /import\s*\{([^}]*)\}\s*from\s*['"]entities['"]/g
+    for (let m = imports.exec(source); m; m = imports.exec(source)) {
+      for (const part of m[1].split(',')) {
+        // `a as b` is imported as `a`; the local name is markdown-it's business.
+        const name = part.trim().split(/\s+as\s+/)[0].trim()
+        if (name) wanted.add(name)
+      }
+    }
+  }
+  if (!wanted.size) throw new Error('markdown-it no longer imports entities; drop leanEntities.')
+
+  const decode = await readFile(ENTITIES_DECODE, 'utf8')
+  const has = (name) =>
+    new RegExp(`export\\s+(?:function|const|let|var)\\s+${name}\\b`).test(decode) ||
+    new RegExp(`export\\s*\\{[^}]*\\b${name}\\b[^}]*\\}`).test(decode)
+
+  const missing = [...wanted].filter((name) => !has(name))
+  if (missing.length) {
+    throw new Error(
+      `markdown-it imports ${missing.join(', ')} from entities, which its decode ` +
+      'entry does not export; update leanEntities.'
+    )
+  }
+}
+
+const leanEntities = {
+  name: 'lean-entities',
+  setup (build) {
+    let checked = null
+    build.onResolve({ filter: /^entities$/ }, async ({ importer }) => {
+      // Only markdown-it's. Anything else that wants the whole package keeps
+      // it — and everything else that does is behind a dynamic import anyway.
+      if (!/[\\/]node_modules[\\/]markdown-it[\\/]/.test(importer)) return null
+      checked ||= checkEntitiesDecodeCovers()
+      await checked
+      return { path: ENTITIES_DECODE }
+    })
+  }
+}
+
 if (!watch) await rm(output, { recursive: true, force: true })
 await mkdir(output, { recursive: true })
 /* Chunk names carry a content hash, so a chunk that changes is written under a
@@ -129,9 +200,23 @@ const options = {
      Its stylesheet used to arrive through math.js's static import, which put
      the whole of KaTeX on renderer.css's startup path anyway. Build it as a
      named sibling instead, and math.js links it in beside the runtime. */
+  /* Excalidraw's stylesheet had the same problem, and it was the larger half
+     of it: 141KB of the 326KB renderer.css, on the render-blocking <link> in
+     index.html, for a drawing engine whose *code* is already behind a dynamic
+     import. esbuild hoists CSS reached through a dynamic import into the entry
+     point's stylesheet — splitting applies to modules, not to their styles —
+     so the lazy chunk was lazy and its 141KB of CSS was not.
+
+     Named here so it lands at `dist/whiteboard.css`, and linked in by
+     whiteboard.js beside the runtime. It has to stay the *last* stylesheet the
+     document holds: bundled, it sorted after styles.css, so Tulip's own rules
+     lose ties to Excalidraw's today and must keep losing them. A <link>
+     appended to <head> at mount time is after renderer.css, which is the same
+     order by another route. */
   entryPoints: {
     renderer: 'src/renderer.js',
-    katex: 'node_modules/katex/dist/katex.min.css'
+    katex: 'node_modules/katex/dist/katex.min.css',
+    whiteboard: `node_modules/@excalidraw/excalidraw/dist/${watch ? 'dev' : 'prod'}/index.css`
   },
   bundle: true,
   outdir: output,
@@ -166,7 +251,7 @@ const options = {
      comes up whenever that number moves. Off by default: it is analysis
      output, not part of the app. */
   metafile: process.argv.includes('--metafile'),
-  plugins: [leanExcalidraw, leanKatex]
+  plugins: [leanExcalidraw, leanKatex, leanEntities]
 }
 
 /* pdf.js parses documents in a worker, which has to be a file of its own: the
@@ -345,7 +430,7 @@ if (watch) {
    *  one. This catches a successful-looking partial build and makes stale maps
    *  impossible to carry into the packaged app. */
   const required = [
-    'index.html', 'renderer.js', 'renderer.css', 'katex.css',
+    'index.html', 'renderer.js', 'renderer.css', 'katex.css', 'whiteboard.css',
     'pdf.worker.js', 'pdf-text.cjs', ...(mac ? ['pdf-ocr'] : []), 'lint.cjs', 'three.js',
     'pdfjs/standard_fonts', 'pdfjs/cmaps', 'pdfjs/iccs', 'pdfjs/wasm'
   ]

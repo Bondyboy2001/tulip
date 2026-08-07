@@ -17,6 +17,8 @@ import {
   compareCells,
   sortedOrder,
   filterOrder,
+  columnValues,
+  filteredOrder,
   normalRect,
   sniffDelimiter,
   delimiterName,
@@ -296,6 +298,70 @@ ok('an empty query is not a filter', () => {
 
 ok('the filter narrows what it is given rather than the whole file', () => {
   assert.deepEqual(filterOrder(TABLE, [2], 'maths'), [2])
+})
+
+/* ------------------------------------------------------ the column filter */
+
+/* The question this is for: a column of categories, and one of them wanted.
+   Blanks are a category too — the rows the export left empty. */
+const CATALOGUE = [
+  ['Arrival', 'Movie', '2016'],
+  ['Severance', 'TV Show', '2022'],
+  ['Dune', 'Movie', '2021'],
+  ['Andor', 'TV Show', '2022'],
+  ['Unknown', '', '']
+]
+const every = [0, 1, 2, 3, 4]
+
+ok('a column reports its values with how many rows hold each', () => {
+  assert.deepEqual(columnValues(CATALOGUE, every, 1), [
+    { value: 'Movie', count: 2 },
+    { value: 'TV Show', count: 2 },
+    { value: '', count: 1 }
+  ])
+})
+
+ok('values come out in the order the column sorts, blanks last', () => {
+  // Numbers as numbers, so 2016 is not filed between 20 and 21 by its digits.
+  assert.deepEqual(columnValues(CATALOGUE, every, 2).map((v) => v.value),
+    ['2016', '2021', '2022', ''])
+})
+
+ok('a filter hides the values it names and keeps the rest', () => {
+  const only = new Map([[1, new Set(['Movie', ''])]])
+  assert.deepEqual(filteredOrder(CATALOGUE, every, only).map((i) => CATALOGUE[i][0]),
+    ['Severance', 'Andor'])
+})
+
+ok('blanks are hidden by naming the empty value, not by anything special', () => {
+  const noBlanks = new Map([[1, new Set([''])]])
+  assert.deepEqual(filteredOrder(CATALOGUE, every, noBlanks), [0, 1, 2, 3])
+})
+
+ok('filters on two columns are both applied', () => {
+  const both = new Map([[1, new Set(['Movie'])], [2, new Set(['2022'])]])
+  assert.deepEqual(filteredOrder(CATALOGUE, every, both), [4])
+})
+
+ok('an empty hidden set is no filter at all', () => {
+  assert.deepEqual(filteredOrder(CATALOGUE, every, new Map([[1, new Set()]])), every)
+  assert.deepEqual(filteredOrder(CATALOGUE, every, new Map()), every)
+})
+
+ok('the filter narrows what it is given, and can be sorted after', () => {
+  const only = new Map([[1, new Set(['Movie'])]])
+  const kept = filteredOrder(CATALOGUE, [0, 1, 2], only)
+  assert.deepEqual(kept, [1])
+  assert.deepEqual(sortedOrder(CATALOGUE, filteredOrder(CATALOGUE, every, only), 0, 'asc')
+    .map((i) => CATALOGUE[i][0]), ['Andor', 'Severance', 'Unknown'])
+})
+
+ok('a value that appears after the filter was set is shown, not hidden', () => {
+  /* The reason the filter is a set of hidden values rather than kept ones: a
+     row typed in later cannot be in a list made before it existed. */
+  const only = new Map([[1, new Set(['Movie'])]])
+  const grown = [...CATALOGUE, ['Fallout', 'Series', '2024']]
+  assert.deepEqual(filteredOrder(grown, [...every, 5], only).at(-1), 5)
 })
 
 /* ---------------------------------------------------------- the selection */

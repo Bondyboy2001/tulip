@@ -1,12 +1,12 @@
 {
   "name": "tulip",
-  "version": "0.1.49",
+  "version": "0.1.79",
   "description": "A minimal markdown editor and language-learning vault",
   "main": "electron/main.js",
   "type": "commonjs",
   "license": "MIT",
   "scripts": {
-    "test": "npm run test:srs && npm run test:study-match && npm run test:language-cards && npm run test:language-keyboard && npm run test:language-row && npm run test:lint && npm run test:ai && npm run test:ai-lifecycle && npm run test:pdf && npm run test:tex && npm run test:language-history && npm run test:optimizations && npm run test:renderer-optimizations && npm run test:codeblocks && npm run test:diff && npm run test:search-narrow && npm run test:ipc && npm run test:review-stats && npm run test:index-cache && npm run test:config-keys && npm run test:safe-name && npm run test:whiteboard && npm run test:ui-contracts && npm run test:table && npm run test:export-print && npm run test:csv && npm run test:grid && npm run test:agent-diff && npm run test:reading-list && npm run test:tabstrip && npm run test:notebook && npm run test:kernel",
+    "test": "node scripts/run-tests.mjs",
     "build": "node build.mjs",
     "dev": "node build.mjs --watch",
     "start": "npm run build && electron .",
@@ -27,13 +27,16 @@
     "test:renderer-optimizations": "esbuild scripts/test-renderer-optimizations.mjs --bundle --format=esm --platform=node --outfile=node_modules/.cache/test-renderer-optimizations.mjs --log-level=error && node node_modules/.cache/test-renderer-optimizations.mjs",
     "test:codeblocks": "esbuild scripts/test-codeblock-performance.mjs --bundle --format=esm --platform=node --loader:.svg=text --outfile=node_modules/.cache/test-codeblock-performance.mjs --log-level=error && node node_modules/.cache/test-codeblock-performance.mjs",
     "test:diff": "esbuild scripts/test-diff.mjs --bundle --format=esm --platform=node --outfile=node_modules/.cache/test-diff.mjs --log-level=error && node node_modules/.cache/test-diff.mjs",
+    "test:runblocks": "esbuild scripts/test-runblocks.mjs --bundle --format=esm --platform=node --loader:.svg=text --outfile=node_modules/.cache/test-runblocks.mjs --log-level=error && node node_modules/.cache/test-runblocks.mjs",
     "test:table": "node scripts/test-table.mjs",
     "test:build-staging": "node scripts/test-build-staging.cjs",
     "verify": "npm run lint && npm test && npm run build && npm run test:build-staging",
     "bench": "node bench/bench.mjs",
+    "bench:boot": "node bench/boot-bench.mjs",
     "bench:dom": "node bench/dom-bench.mjs",
     "bench:reading": "node bench/reading-bench.mjs",
     "test:search-narrow": "node scripts/test-search-narrow.cjs",
+    "test:frontmatter": "node scripts/test-frontmatter.cjs",
     "test:config-keys": "node scripts/test-config-keys.cjs",
     "test:safe-name": "node scripts/test-safe-name.cjs",
     "test:whiteboard": "node scripts/test-whiteboard.cjs",
@@ -53,7 +56,9 @@
     "test:ipc": "node scripts/test-ipc.mjs",
     "test:tabstrip": "esbuild scripts/test-tabstrip.mjs --bundle --format=esm --platform=node --outfile=node_modules/.cache/test-tabstrip.mjs --log-level=error && node node_modules/.cache/test-tabstrip.mjs",
     "test:notebook": "esbuild scripts/test-notebook.mjs --bundle --format=esm --platform=node --loader:.svg=text --outfile=node_modules/.cache/test-notebook.mjs --log-level=error && node node_modules/.cache/test-notebook.mjs",
-    "test:kernel": "node scripts/test-kernel.mjs"
+    "test:kernel": "node scripts/test-kernel.mjs",
+    "test:notebook-view": "node scripts/test-notebook-view.mjs",
+    "test:reading-split": "esbuild scripts/test-reading-split.mjs --bundle --format=esm --platform=node --outfile=node_modules/.cache/test-reading-split.mjs --log-level=error && node node_modules/.cache/test-reading-split.mjs"
   },
   "_overrides": [
     "Two transitive packages arrive vulnerable and neither publisher has moved.",
@@ -64,12 +69,16 @@
     "  which return predictable ids for a non-integer size. 3.3.17 is the patched",
     "  end of the line that both of those API generations are compatible with;",
     "  the alternative npm offers is downgrading excalidraw a whole major.",
+    "katex: mermaid pins ^0.16, which npm nests as a second near-identical",
+    "  268KB copy in the bundle. 0.18 is what the app itself renders maths with,",
+    "  and mermaid only calls renderToString, whose signature has not moved.",
     "Recheck on every mermaid/excalidraw bump — an override outliving its reason",
     "is how a tree ends up pinned to something older than the dependency wants."
   ],
   "overrides": {
     "lodash-es": "4.18.1",
-    "nanoid": "3.3.17"
+    "nanoid": "3.3.17",
+    "katex": "^0.18.1"
   },
   "allowScripts": {
     "esbuild": true,

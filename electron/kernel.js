@@ -35,6 +35,7 @@
 'use strict'
 
 const { spawn } = require('child_process')
+const { killTree } = require('./kill-tree')
 const crypto = require('crypto')
 const net = require('net')
 const path = require('path')
@@ -53,6 +54,37 @@ const LAUNCHERS = [
   { cmd: 'jupyter', args: ['server'] },
   { cmd: process.platform === 'win32' ? 'python' : 'python3', args: ['-m', 'jupyter_server'] }
 ]
+
+/**
+ * Where kernels are installed, for a server told to look somewhere else.
+ *
+ * `JUPYTER_PLATFORM_DIRS=1` below is what silences Jupyter's deprecation
+ * warning about its own paths, and it moves the user data directory: on this
+ * Mac from `~/Library/Jupyter` to `~/Library/Application Support/jupyter`. But
+ * a kernel is installed by whoever packaged it — IJulia, evcxr, xeus-cling —
+ * and those write to the legacy directory, because they run without the flag.
+ * So the server started here saw ipykernel (which lives beside the Python that
+ * imports it, not in either) and nothing else: a machine with three kernels
+ * offered one, and the picker was telling the truth about a server that had
+ * been pointed away from the answer.
+ *
+ * `JUPYTER_PATH` is the documented way to add data directories to the search,
+ * so both are searched and it no longer matters which convention installed
+ * what. The reader's own value is kept ahead of ours — it is a deliberate
+ * instruction about where their kernels are, and this is a guess.
+ */
+function kernelSearchPath () {
+  const home = process.env.HOME || process.env.USERPROFILE || ''
+  const legacy = process.platform === 'darwin'
+    ? path.join(home, 'Library', 'Jupyter')
+    : process.platform === 'win32'
+      ? path.join(process.env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'jupyter')
+      : path.join(home, '.local', 'share', 'jupyter')
+
+  const parts = [...String(process.env.JUPYTER_PATH || '').split(path.delimiter), legacy]
+  // Deduplicated and emptied of blanks, which a trailing delimiter leaves.
+  return [...new Set(parts.filter(Boolean))].join(path.delimiter)
+}
 
 /** A port nothing is listening on, asked of the OS and handed straight over.
  *  There is a gap between letting go and jupyter binding it; `port_retries=0`
@@ -86,7 +118,14 @@ class KernelHost {
     this.rootDir = rootDir
     this.onEvent = onEvent
     this.server = null          // the promise of { port, token, child }
+    /* And the same server's child process the moment it exists, reachable
+       without awaiting anything. `before-quit` does not wait, and a promise is
+       no use to it: quitting while the server is still starting used to leave
+       a `jupyter server` running for as long as the machine was up, because
+       the only handle on it was a `.then` that the process exit beat. */
+    this.serverChild = null
     this.kernels = new Map()    // notebook path -> Kernel
+    this.starting = new Map()   // notebook path -> the in-flight start
   }
 
   /** Point the next server at a different vault. An already-running server
@@ -98,13 +137,44 @@ class KernelHost {
 
   async ensureServer () {
     if (this.server) return this.server
-    this.server = this.#startServer().catch((err) => {
-      // A failed start must not be remembered as the running server, or the
-      // reader gets one chance to have jupyter installed.
-      this.server = null
-      throw err
+    const mine = this.#startServer().then(
+      (host) => { this.#watchServer(host, mine); return host },
+      (err) => {
+        // A failed start must not be remembered as the running server, or the
+        // reader gets one chance to have jupyter installed.
+        if (this.server === mine) { this.server = null; this.serverChild = null }
+        throw err
+      }
+    )
+    this.server = mine
+    return mine
+  }
+
+  /**
+   * Notice when the server we are holding is no longer running.
+   *
+   * `this.server` is a resolved promise for the life of the app, so a server
+   * that is OOM-killed, crashes, or is killed by hand from a terminal leaves
+   * every later `ensureServer` handing back a dead `{ port, token, child }`.
+   * Each call then fails with ECONNREFUSED, reported as "Could not read the
+   * list of kernels", and the only cure was to restart Tulip. Forgetting it
+   * here means the next ask starts a new one, which is what the reader
+   * expected the first failure to do.
+   */
+  #watchServer (host, promise) {
+    host.child.once('exit', () => {
+      /* Only if it is still *the* server: a vault switch may already have
+         replaced it, and clearing that one would strand a live process. */
+      if (this.server === promise) { this.server = null; this.serverChild = null }
+      /* The kernels it was hosting died with it. Dropping them stops a later
+         shutdown from waiting on sockets that will never answer, and makes the
+         next run start cleanly rather than fail against a stale id. */
+      for (const [path, kernel] of this.kernels) {
+        this.kernels.delete(path)
+        try { kernel.closeSocket() } catch { /* nothing to close */ }
+        this.onEvent({ path, kind: 'notice', text: 'The Jupyter server stopped. Run a cell to start it again.' })
+      }
     })
-    return this.server
   }
 
   async #startServer () {
@@ -129,8 +199,17 @@ class KernelHost {
     ]
     if (this.rootDir) args.push(`--ServerApp.root_dir=${this.rootDir}`)
 
-    const env = { ...process.env, PATH: this.pathFor(), JUPYTER_PLATFORM_DIRS: '1' }
+    const env = {
+      ...process.env,
+      PATH: this.pathFor(),
+      JUPYTER_PLATFORM_DIRS: '1',
+      JUPYTER_PATH: kernelSearchPath()
+    }
     const child = await this.#spawnFirstThatStarts(args, env)
+    /* Named the moment it exists, and not when it is ready: the sixty seconds
+       this may spend polling below are sixty seconds in which ⌘Q would
+       otherwise have nothing to kill. See `serverChild`. */
+    this.serverChild = child
 
     /* Readiness is the API answering, not the process existing. Jupyter is
        listening some seconds after exec, and a POST sent into that gap fails
@@ -196,14 +275,20 @@ class KernelHost {
       child.tail = () => said.join('').trim().slice(-1200)
 
       child.once('error', reject)
-      /* Nothing has gone wrong yet at this point — the readiness poll above is
-         what decides whether it actually works. This only gets past the
-         "command not found" case, which arrives as an `error` event. */
-      setTimeout(() => {
+      /* `spawn` fires once the process actually exists, and is the answer to
+         the only question asked here: did this command run at all. The
+         readiness poll above is what decides whether it works.
+
+         It used to be a 120ms timer, which is a guess at how long an ENOENT
+         takes to arrive. Lose that race on a loaded machine and a missing
+         `jupyter` resolves as a running server: the fallback launcher is never
+         tried, and the poll spends its full sixty seconds on a process that
+         does not exist before reporting the wrong failure. */
+      child.once('spawn', () => {
         child.removeListener('error', reject)
         child.once('error', () => {})
         resolve(child)
-      }, 120)
+      })
     })
   }
 
@@ -231,11 +316,25 @@ class KernelHost {
    * kernel this machine does not have gets the server's default rather than an
    * error: a notebook written on someone else's laptop is still worth running,
    * and saying which kernel actually ran is what `language_info` is for.
+   *
+   * Two asks while one is starting wait on that one. Starting a kernel is
+   * several round trips long, and two callers that both looked and both saw
+   * nothing built two of them: the second took the map, and the first became a
+   * Python process nothing could name, shut down or interrupt again.
    */
-  async kernelFor (notebookPath, wanted = '') {
+  kernelFor (notebookPath, wanted = '') {
     const existing = this.kernels.get(notebookPath)
-    if (existing) return existing
+    if (existing) return Promise.resolve(existing)
+    const inflight = this.starting.get(notebookPath)
+    if (inflight) return inflight
 
+    const start = this.#startKernel(notebookPath, wanted)
+      .finally(() => { this.starting.delete(notebookPath) })
+    this.starting.set(notebookPath, start)
+    return start
+  }
+
+  async #startKernel (notebookPath, wanted) {
     const host = await this.ensureServer()
     const { specs, default: fallback } = await this.kernelSpecs()
     const asked = String(wanted || '').trim()
@@ -256,6 +355,13 @@ class KernelHost {
       await kernel.start()
     } catch (err) {
       this.kernels.delete(notebookPath)
+      /* `start` creates the kernel on the server and *then* opens a socket to
+         it. A connect that fails after the POST succeeded leaves a live Python
+         process the server knows about and this app no longer names — so it
+         could not be shut down, interrupted or restarted, and it sat there
+         holding its memory until the whole server was torn down. `dispose`
+         knows the id if there is one and issues the DELETE. */
+      await kernel.dispose().catch(() => {})
       throw err
     }
     return kernel
@@ -266,6 +372,13 @@ class KernelHost {
   }
 
   async shutdown (notebookPath) {
+    /* A kernel that is still starting is one this would otherwise walk past,
+       leaving the process it is about to become running for a notebook that
+       has been closed — or, when the reader is swapping kernels, alongside its
+       replacement. */
+    const starting = this.starting.get(notebookPath)
+    if (starting) await starting.catch(() => {})
+
     const kernel = this.kernels.get(notebookPath)
     if (!kernel) return false
     this.kernels.delete(notebookPath)
@@ -276,34 +389,37 @@ class KernelHost {
   /** Everything, for quitting and for closing a window. Kernels first so the
    *  server is not torn down under a live execute. */
   async dispose () {
+    /* Claimed up front, before the first await. This runs on a vault switch,
+       and a vault switch is immediately followed by windows reopening their
+       documents — so a `kernel:start` can land while the two awaits below are
+       in flight and put a *new* server promise in `this.server`. Reading the
+       field afterwards then killed the new one and left the old process, the
+       one this was called to stop, running against a folder nobody is looking
+       at any more with no handle on it anywhere. */
+    const mine = this.server
+    this.server = null
+    this.serverChild = null
+
     const all = [...this.kernels.values()]
     this.kernels.clear()
     await Promise.all(all.map((kernel) => kernel.dispose().catch(() => {})))
-    const host = this.server ? await this.server.catch(() => null) : null
-    this.server = null
-    if (host?.child) {
-      try {
-        if (process.platform !== 'win32') process.kill(-host.child.pid, 'SIGTERM')
-        else host.child.kill()
-      } catch {
-        try { host.child.kill() } catch { /* already gone */ }
-      }
-    }
+    const host = mine ? await mine.catch(() => null) : null
+    if (host?.child) killTree(host.child, 'SIGTERM')
   }
 
   /** Synchronous and best-effort, for `before-quit`, which does not wait. */
   disposeSync () {
     for (const kernel of this.kernels.values()) kernel.closeSocket()
     this.kernels.clear()
-    const pending = this.server
+    /* The child itself, not the promise of it. A server still working through
+       its startup poll has no resolved promise to hand anything over, and the
+       `.then` this used to rely on never ran before the process went — which
+       is exactly the case that leaked, because quitting during a slow first
+       start is what people do when it feels stuck. */
+    const child = this.serverChild
     this.server = null
-    if (!pending) return
-    pending.then((host) => {
-      try {
-        if (process.platform !== 'win32') process.kill(-host.child.pid, 'SIGKILL')
-        else host.child.kill()
-      } catch { /* already gone */ }
-    }).catch(() => {})
+    this.serverChild = null
+    if (child) killTree(child, 'SIGKILL')
   }
 }
 
@@ -311,8 +427,18 @@ class KernelHost {
 
 /* The messages worth forwarding. Everything else on the iopub channel is
    bookkeeping the viewer has no use for — `execute_input` is echoed back to
-   us, comm traffic belongs to widgets this app does not draw. */
-const OUTPUT_TYPES = new Set(['stream', 'display_data', 'execute_result', 'error', 'clear_output'])
+   us, comm traffic belongs to widgets this app does not draw.
+
+   `update_display_data` is not an output the file records, but it is an
+   instruction about one: "the thing you drew under this id is now this". A
+   library that redraws in place — sympy stepping through a derivation, a
+   progress display that is not a widget, an animation frame — sends its first
+   frame as `display_data` and every frame after it as an update. Dropping
+   those left the first frame on screen for ever, which is the wrong answer
+   told confidently. The viewer turns it back into the output it replaces. */
+const OUTPUT_TYPES = new Set([
+  'stream', 'display_data', 'update_display_data', 'execute_result', 'error', 'clear_output'
+])
 
 class Kernel {
   constructor ({ host, name, displayName, notebookPath, rootDir, substituted, onEvent }) {
@@ -327,7 +453,27 @@ class Kernel {
     this.socket = null
     this.session = crypto.randomUUID()
     this.pending = new Map()    // msg_id -> { resolve, reject }
+    /* Shell questions that are not cells: completion and inspection. Their own
+       map because they settle on their reply rather than on the kernel going
+       idle, and because failing them when the kernel dies must not look like a
+       cell that finished. */
+    this.asks = new Map()       // msg_id -> { replyType, settle, fail }
+    /* The one `input_request` a kernel can have outstanding, and the header to
+       answer it with. One, not a queue: a kernel blocked on `input()` is not
+       running anything else, so a second request cannot exist until this one
+       is answered. */
+    this.stdin = null           // { parent, msgId }
     this.state = 'starting'
+  }
+
+  /** Everything anyone is waiting on, told that it is not coming. Three kinds
+   *  of waiting, and a socket that goes takes all three with it. */
+  #failEverything (err) {
+    for (const [, waiter] of this.pending) waiter.reject(err)
+    this.pending.clear()
+    for (const [, ask] of this.asks) ask.fail(err)
+    this.asks.clear()
+    this.stdin = null
   }
 
   #url (suffix = '') {
@@ -388,10 +534,7 @@ class Kernel {
         /* Whatever was mid-flight will never be answered now. Failing them is
            the difference between a cell that says what happened and a cell
            that says "Running…" until the app is restarted. */
-        for (const [, waiter] of this.pending) {
-          waiter.reject(new Error('The kernel stopped.'))
-        }
-        this.pending.clear()
+        this.#failEverything(new Error('The kernel stopped.'))
         this.#setState('dead')
       }
       socket.onmessage = (event) => {
@@ -421,8 +564,28 @@ class Kernel {
       return
     }
 
+    const ask = this.asks.get(parent)
+    if (ask) {
+      if (type === ask.replyType) ask.settle(content)
+      return
+    }
+
     const waiter = this.pending.get(parent)
     if (!waiter) return
+
+    /* `input()` reached. The kernel is now blocked until something answers it,
+       which is why this is forwarded rather than refused: the viewer draws a
+       line to type into, and `respondInput` below is where the answer goes. */
+    if (type === 'input_request') {
+      this.stdin = { parent: message.header, msgId: parent }
+      this.onEvent({
+        kind: 'input',
+        msgId: parent,
+        prompt: String(content.prompt ?? ''),
+        password: content.password === true
+      })
+      return
+    }
 
     if (type === 'execute_input') {
       waiter.executionCount = content.execution_count ?? null
@@ -449,6 +612,24 @@ class Kernel {
     }
   }
 
+  /** One wire message, in the envelope every channel wants. */
+  #envelope (msgType, content, { channel = 'shell', parent = {}, msgId = null } = {}) {
+    return {
+      header: {
+        msg_id: msgId || crypto.randomUUID(),
+        session: this.session,
+        username: 'tulip',
+        date: new Date().toISOString(),
+        msg_type: msgType,
+        version: '5.3'
+      },
+      parent_header: parent,
+      metadata: {},
+      channel,
+      content
+    }
+  }
+
   /**
    * Run one cell.
    *
@@ -462,31 +643,20 @@ class Kernel {
   execute (code) {
     if (!this.socket) throw new Error('The kernel is not running.')
     const msgId = crypto.randomUUID()
-    const message = {
-      header: {
-        msg_id: msgId,
-        session: this.session,
-        username: 'tulip',
-        date: new Date().toISOString(),
-        msg_type: 'execute_request',
-        version: '5.3'
-      },
-      parent_header: {},
-      metadata: {},
-      channel: 'shell',
-      content: {
-        code: String(code ?? ''),
-        silent: false,
-        store_history: true,
-        user_expressions: {},
-        /* No stdin. There is nowhere in this viewer to type an answer to
-           `input()`, and a kernel left waiting on one that never comes is a
-           cell that hangs with no way to see why. Refused, it raises instead,
-           which at least says so. */
-        allow_stdin: false,
-        stop_on_error: true
-      }
-    }
+    const message = this.#envelope('execute_request', {
+      code: String(code ?? ''),
+      silent: false,
+      store_history: true,
+      user_expressions: {},
+      /* Allowed, because there is now somewhere to type the answer: an
+         `input_request` becomes a line under the running cell, and
+         `respondInput` sends back what was typed. Refusing it used to be the
+         honest thing to do — a kernel waiting on an answer that could never
+         come is a cell that hangs for no visible reason — but the honest
+         answer to `input()` is a prompt, not an exception. */
+      allow_stdin: true,
+      stop_on_error: true
+    }, { msgId })
 
     const done = new Promise((resolve, reject) => {
       this.pending.set(msgId, { resolve, reject, status: 'ok', executionCount: null })
@@ -500,8 +670,80 @@ class Kernel {
     return { msgId, done }
   }
 
+  /**
+   * Answer the `input()` a cell is blocked on.
+   *
+   * Nothing is remembered about the answer here: the prompt and what was typed
+   * belong in the cell's output, which is the viewer's to write — and which is
+   * what the kernel itself echoes to stdout anyway.
+   */
+  respondInput (value) {
+    if (!this.socket || !this.stdin) return false
+    const { parent } = this.stdin
+    this.stdin = null
+    this.socket.send(JSON.stringify(
+      this.#envelope('input_reply', { value: String(value ?? '') }, { channel: 'stdin', parent })
+    ))
+    return true
+  }
+
+  /**
+   * A question with one answer: what completes here, and what is this.
+   *
+   * Unlike `execute` these are wanted whole and wanted quickly — nothing is
+   * drawn until the reply lands — so the reply content comes straight back
+   * rather than through the event stream. Bounded by a timeout because a wedged
+   * kernel must not leave a Tab key hanging for ever; a completion that does
+   * not arrive is simply no completion.
+   */
+  #askShell (msgType, content, timeoutMs = 4000) {
+    if (!this.socket) return Promise.reject(new Error('The kernel is not running.'))
+    const msgId = crypto.randomUUID()
+    const replyType = msgType.replace('_request', '_reply')
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.asks.delete(msgId)
+        reject(new Error(`The kernel did not answer the ${msgType}.`))
+      }, timeoutMs)
+      this.asks.set(msgId, {
+        replyType,
+        settle: (reply) => { clearTimeout(timer); this.asks.delete(msgId); resolve(reply) },
+        fail: (err) => { clearTimeout(timer); this.asks.delete(msgId); reject(err) }
+      })
+      try {
+        this.socket.send(JSON.stringify(this.#envelope(msgType, content, { msgId })))
+      } catch (err) {
+        clearTimeout(timer)
+        this.asks.delete(msgId)
+        reject(err)
+      }
+    })
+  }
+
+  complete (code, cursorPos) {
+    return this.#askShell('complete_request', {
+      code: String(code ?? ''),
+      cursor_pos: Number(cursorPos) || 0
+    })
+  }
+
+  /** `detail_level: 0` is the one-screen summary — a signature and the first
+   *  paragraph of the docstring. Level 1 is the source, which is a different
+   *  question than the one ⇧Tab asks. */
+  inspect (code, cursorPos) {
+    return this.#askShell('inspect_request', {
+      code: String(code ?? ''),
+      cursor_pos: Number(cursorPos) || 0,
+      detail_level: 0
+    })
+  }
+
   async interrupt () {
     if (!this.id) return false
+    /* A kernel blocked on `input()` is interrupted out of the read, so the
+       request it was blocked on is answered by nobody and must not be left
+       looking answerable. */
+    this.stdin = null
     const reply = await fetch(this.#url('/interrupt'), { method: 'POST', headers: this.host.headers })
     return reply.ok
   }
@@ -513,8 +755,7 @@ class Kernel {
     if (!this.id) return false
     const reply = await fetch(this.#url('/restart'), { method: 'POST', headers: this.host.headers })
     if (!reply.ok) return false
-    for (const [, waiter] of this.pending) waiter.reject(new Error('The kernel was restarted.'))
-    this.pending.clear()
+    this.#failEverything(new Error('The kernel was restarted.'))
     /* The old socket belongs to the old process. Reconnecting is not optional
        tidiness: messages sent down it after a restart are answered by nobody. */
     this.closeSocket()
@@ -535,8 +776,7 @@ class Kernel {
 
   async dispose () {
     this.closeSocket()
-    for (const [, waiter] of this.pending) waiter.reject(new Error('The kernel was shut down.'))
-    this.pending.clear()
+    this.#failEverything(new Error('The kernel was shut down.'))
     if (!this.id) return
     const id = this.id
     this.id = null

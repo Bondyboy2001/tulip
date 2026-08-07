@@ -77,4 +77,4 @@ function safeFileName (typed, options = {}) {
   return { ok: true, name }
 }
 
-module.exports = { safeFileName, RESERVED, ILLEGAL }
+module.exports = { safeFileName }

@@ -21,6 +21,7 @@
 const path = require('node:path')
 const fs = require('node:fs')
 const { spawn, execFile } = require('node:child_process')
+const { killTree } = require('./kill-tree.js')
 const { systemPrompt, promptFor, nothingSent } = require('./prompt.js')
 
 /* The CLI and what it offers before it is asked. Shared with the renderer
@@ -47,6 +48,72 @@ const OPENCODE_TOOLS = {
 
 /** Which of the shared tool names mean the file on disk has changed. */
 const wrote = (name) => name === 'Edit' || name === 'Write'
+
+/**
+ * What the agent may reach for, as a fact about the process.
+ *
+ * `--agent plan` makes read-only read-only, and that was once the whole of the
+ * fence — which left every other question to whatever opencode defaulted to.
+ * opencode has no per-tool flag on `run`, but it does read a whole config out
+ * of the environment, so the policy is spelled there and travels with the
+ * spawn rather than being a file written into somebody's vault.
+ *
+ * What the three modes are actually about is the vault: whether notes change,
+ * and how far a command may reach. Reading the web is not one of the questions
+ * — every mode fetches — and the shell is drawn between looking and doing,
+ * not between doing and doing it anywhere.
+ *
+ * Every grant is allow or deny, never ask. `run` is headless, so a question has
+ * nowhere to go and comes back as "the user rejected permission to use this
+ * specific tool call" — a refusal the panel then shows for a permission nobody
+ * was ever offered. Whatever a mode does not decide here is decided against it.
+ *
+ * Which is how auto came to refuse the thing it is named for. Leaving the
+ * working directory is a grant of its own, separate from `bash` and asked
+ * about by default, so `cd /tmp && curl …` died on the step out of the vault
+ * while the shell it ran in was allowed.
+ */
+const TOOL_POLICY = {
+  /* Reading the web is reading. What read mode is a promise about is the vault
+     — that nothing in it changes — and a page fetched into the reply changes
+     nothing. */
+  read: { bash: 'deny', webfetch: 'allow', external_directory: 'deny' },
+  /* Ask has the shell, and the vault is the extent of it: `external_directory`
+     is what makes "inside the vault" a fact about the process rather than a
+     line in the prompt, and it is the whole of the difference from auto. */
+  ask: {
+    bash: 'allow', webfetch: 'allow', edit: 'allow', write: 'allow',
+    external_directory: 'deny'
+  },
+  auto: {
+    bash: 'allow', webfetch: 'allow', edit: 'allow', write: 'allow',
+    external_directory: 'allow'
+  }
+}
+
+/**
+ * The policy, as the environment opencode reads it out of.
+ *
+ * Merged into whatever the user already has rather than replacing it —
+ * `OPENCODE_CONFIG_CONTENT` is the inline config, so a user's own
+ * `opencode.json` still applies and only these keys are stated on top. A name
+ * that is not a mode states nothing and passes the variable through untouched.
+ */
+function policyEnv (mode) {
+  const permission = TOOL_POLICY[mode]
+  if (!permission) return {}
+  let base = {}
+  try {
+    const had = process.env.OPENCODE_CONFIG_CONTENT
+    if (had) base = JSON.parse(had) || {}
+  } catch { /* an inline config we cannot read is one we do not extend */ }
+  return {
+    OPENCODE_CONFIG_CONTENT: JSON.stringify({
+      ...base,
+      permission: { ...(base.permission || {}), ...permission }
+    })
+  }
+}
 
 /* How much of what a tool said travels to the panel. Enough to read why a
    command failed or what a search turned up; not so much that a Read of a long
@@ -161,11 +228,11 @@ function publish (event, owner = session) {
  * character streamed back is added up here instead, and a turn ending with no
  * figure of the CLI's own reports this one, marked as the estimate it is.
  *
- * Characters over four is a rough token, and rough is the point: it is a
- * reading to watch climb, not a bill.
+ * The reading is rough, and rough is the point: it is a number to watch climb,
+ * not a bill. See `tokensIn` for what "rough" is worth here.
  */
 function account (text) {
-  if (session && text) session.chars += String(text).length
+  if (session && text) session.tokens += tokensIn(text)
 }
 
 /**
@@ -173,25 +240,58 @@ function account (text) {
  *
  * A CLI reports output in the same three shapes `detailOf` flattens, and only
  * the string one was ever counted — so a provider handing back blocks filled
- * the context with the ring reading as if nothing had been sent. Measured
- * rather than joined: the length is the whole of what is wanted here, and
- * building the string to throw it away is the copy `detailOf` already avoids.
+ * the context with the ring reading as if nothing had been sent. Weighed
+ * rather than joined: what is wanted here is a number, and building the string
+ * to throw it away is the copy `detailOf` already avoids.
  */
-function measure (value) {
-  if (typeof value === 'string') return value.length
-  if (Array.isArray(value)) {
-    let total = 0
-    for (const block of value) total += typeof block === 'string' ? block.length : (block?.text || '').length
-    return total
-  }
-  return String(value?.text ?? value?.output ?? '').length
-}
 
 function accountOutput (value) {
-  if (session) session.chars += measure(value)
+  if (session) session.tokens += tokensOf(value)
 }
 
-const estimated = (owner) => Math.round((owner?.chars || 0) / 4)
+/**
+ * Characters to tokens, weighted by what the characters actually were.
+ *
+ * Four to a token is the English prose rule, and this ring is the only warning
+ * a model whose CLI publishes no count ever gets — so being wrong by half in
+ * the direction of "plenty of room left" is the one failure that costs a turn.
+ * CJK runs closer to one character per token, and code and heavily punctuated
+ * text closer to two and a half, both of which a vault has a great deal of.
+ *
+ * So the wide characters are counted apart and the rest is divided by a figure
+ * that leans towards code rather than prose. Still an estimate, and still shown
+ * with a `≈` beside it — the point is that it now errs towards saying the
+ * conversation is fuller than it is, which is the harmless direction.
+ */
+const WIDE = /[ᄀ-ᇿ⺀-꓏가-퟿豈-﫿︰-﹏＀-｠￠-￦]|[\uD840-\uD87F][\uDC00-\uDFFF]/g
+
+/** Roughly how many tokens this text is worth. Kept beside `account`, which is
+ *  what feeds it, and exported for the tests that pin the ratios. */
+function tokensIn (text) {
+  const source = String(text || '')
+  if (!source) return 0
+  const wide = (source.match(WIDE) || []).length
+  // A wide character is about a token on its own; the rest is nearer three
+  // characters to a token once code and punctuation are in the mix.
+  return Math.round(wide + (source.length - wide) / 3)
+}
+
+/** The same weighting over the three shapes a tool reports in — see `measure`.
+ *  Summed per block rather than over a join, for the same reason `detailOf`
+ *  does not build the whole string either. */
+function tokensOf (value) {
+  if (typeof value === 'string') return tokensIn(value)
+  if (Array.isArray(value)) {
+    let total = 0
+    for (const block of value) total += tokensIn(typeof block === 'string' ? block : block?.text || '')
+    return total
+  }
+  return tokensIn(String(value?.text ?? value?.output ?? ''))
+}
+
+/* Already in tokens: the weighting is applied as each piece of text arrives,
+   which is the only point at which what kind of text it was is still known. */
+const estimated = (owner) => Math.round(owner?.tokens || 0)
 
 /* A GUI app inherits a PATH that has never seen a login shell, and the CLI
    installs somewhere only a profile knows about. Main lends us the one it
@@ -227,7 +327,31 @@ function relative (abs) {
  * which is the whole of the answer to "whose turn is this?" — the handlers
  * underneath never have to ask.
  */
-function launch (provider, args, onMessage, { prompt = null } = {}) {
+/* How long a turn may say nothing at all — no stream event, not even a line of
+   logging — before it is taken as wedged. Generous, because the quietest
+   legitimate stretch is a long-running shell command that opencode only
+   reports once it finishes. */
+const TURN_WATCHDOG_MS = 10 * 60 * 1000
+
+/**
+ * The graceful kill, in one place: the exit is flagged as ordered, stdin is
+ * closed, and the signal lands on the whole tree, escalating for a process
+ * that will not go. `stop` and the turn-failed path below both end processes,
+ * and two spellings of the escalation is how the grace window drifts.
+ */
+function reap (proc, signal = 'SIGTERM') {
+  // Said before the signal lands, so the exit is read as the one we ordered.
+  proc.ending = true
+  proc.stdin?.end()
+  /* The whole tree, not the process: what was spawned is `npx`, and the CLI
+     doing the work is its child. See electron/kill-tree.js. */
+  killTree(proc, signal)
+  if (signal !== 'SIGKILL') {
+    setTimeout(() => killTree(proc, 'SIGKILL'), 2000).unref?.()
+  }
+}
+
+function launch (provider, args, onMessage, { prompt = null, isRetry = false } = {}) {
   const self = session
   const proc = spawn(PROVIDERS[provider].command, args, {
     cwd: vault,
@@ -235,7 +359,10 @@ function launch (provider, args, onMessage, { prompt = null } = {}) {
     // Its own process group, so `stop` can take the CLI's tool subprocesses
     // with it rather than leaving them orphaned.
     detached: true,
-    env: { ...process.env, PATH: resolvePath() }
+    // The tool fence rides the environment — see `policyEnv`. Taken from the
+    // session rather than from an argument, so every turn a session spawns is
+    // fenced the same way the mode it was started in says it should be.
+    env: { ...process.env, PATH: resolvePath(), ...policyEnv(self?.mode) }
   })
 
   const mine = () => session === self && self.proc === proc
@@ -258,7 +385,8 @@ function launch (provider, args, onMessage, { prompt = null } = {}) {
   }
 
   // A line of JSON at a time.
-  readLines(proc.stdout, (msg) => { if (mine()) onMessage(msg) })
+  let spoke = false
+  readLines(proc.stdout, (msg) => { spoke = true; if (mine()) onMessage(msg) })
 
   /* Writing to a CLI that has already died is an EPIPE on stdin, and an
      unhandled stream error takes the whole main process down. Treated as the
@@ -289,7 +417,43 @@ function launch (provider, args, onMessage, { prompt = null } = {}) {
   proc.stderr.setEncoding('utf8')
   proc.stderr.on('data', (chunk) => { stderr = (stderr + chunk).slice(-4096) })
 
+  /* The watchdog, for a CLI that neither answers nor exits. Nothing else here
+     can end that turn: `stop` waits on a button nobody may be at, and every
+     other closing path starts from something the process said or did. Fed by
+     both pipes rather than by parsed events, because a wedged process is
+     defined by its silence — a long tool call that is getting anywhere still
+     logs, streams, or finishes inside this window. A timestamp and a slow
+     patrol rather than a timer re-armed per chunk: a streaming reply delivers
+     many chunks a second, and each would have cancelled and rebuilt a
+     ten-minute timer that all but never fires. */
+  let lastHeard = Date.now()
+  const alive = () => { lastHeard = Date.now() }
+  const starved = setInterval(() => {
+    if (!mine()) { clearInterval(starved); return }
+    if (Date.now() - lastHeard < TURN_WATCHDOG_MS) return
+    clearInterval(starved)
+    publish({
+      k: 'error',
+      message: `The copilot went quiet for ${Math.round(TURN_WATCHDOG_MS / 60000)} minutes and was stopped.`
+    }, self)
+    stop()
+  }, 30000)
+  starved.unref?.()
+  proc.stdout.on('data', alive)
+  proc.stderr.on('data', alive)
+
   proc.on('exit', (code) => {
+    clearInterval(starved)
+    /* One silent retry for a CLI that died before saying anything at all — a
+       crash at startup, a transient network refusal — which is the failure
+       shape where trying again is free: no tool has run, no text has
+       streamed, so nothing can happen twice. A process that spoke and then
+       died gets no retry, because whatever it did may already have happened.
+       Once, because a second identical death is an answer, not bad luck. */
+    if (!proc.ending && code && !spoke && !isRetry && mine() && self.busy) {
+      self.proc = launch(provider, args, onMessage, { prompt, isRetry: true })
+      return
+    }
     endTurn()
     // A kill we asked for is not a failure. Without this the stop button
     // answers itself with "The copilot exited (143)" — 143 being the SIGTERM
@@ -317,10 +481,12 @@ function launch (provider, args, onMessage, { prompt = null } = {}) {
  */
 function startOpencodeTurn (text) {
   const args = ['run', '--format', 'json', '--dir', vault,
-                '--model', session.model,
-                // Without this the reasoning arrives as nothing at all, and a
-                // model that thinks for a minute looks hung.
-                '--thinking']
+                '--model', session.model]
+  /* `--thinking` only *shows* the reasoning stream — the spend is `--variant`'s
+     to decide. Without it the reasoning arrives as nothing at all, and a model
+     that thinks for a minute looks hung; at `none` there is no reasoning to
+     show and the flag is noise on the command line. */
+  if (session.effort !== 'none') args.push('--thinking')
   if (!session.write) args.push('--agent', 'plan')
   // Spelled as a model variant here. The level came from this model's own
   // `variants`, so it is a name opencode gave us rather than one we invented.
@@ -394,7 +560,7 @@ function onOpencodeMessage (msg) {
       break
     }
 
-    case 'error':
+    case 'error': {
       session.busy = false
       publish({
         k: 'turn-end',
@@ -402,7 +568,16 @@ function onOpencodeMessage (msg) {
         estimated: !session.used,
         error: msg.error?.data?.message || msg.error?.name || 'The turn failed.'
       })
+      /* The CLI has said the turn failed; it is not also trusted to exit. Left
+         alone, one that lingered kept running behind the next turn's process —
+         `stop` only ever reaches the newest — so the failed turn's tree goes
+         now. Let go of before the kill: the exit handler must not read this
+         process as the session's and report the death a second time. */
+      const proc = session.proc
+      session.proc = null
+      if (proc) reap(proc)
       break
+    }
   }
 }
 
@@ -716,8 +891,9 @@ function start ({
        thread, and everything quoted into it is still in front of the model. */
     sent: memoFor(resume || null),
     /* Where the conversation had got to, so a resumed thread's ring starts from
-       what it was reading rather than from zero. */
-    chars: Math.max(0, Math.round(Number(used) || 0)) * 4,
+       what it was reading rather than from zero. Already a token count — the
+       panel sends back the figure it was last shown. */
+    tokens: Math.max(0, Math.round(Number(used) || 0)),
     turnId: String(turnId || '') || null
   }
 
@@ -794,18 +970,7 @@ function send (text, context, turnId = null) {
  */
 function stop (signal = 'SIGTERM') {
   const proc = session?.proc
-  if (proc) {
-    // Said before the signal lands, so the exit is read as the one we ordered.
-    proc.ending = true
-    proc.stdin?.end()
-    const kill = (sig) => {
-      try { process.kill(-proc.pid, sig) } catch {
-        try { proc.kill(sig) } catch { /* already gone */ }
-      }
-    }
-    kill(signal)
-    if (signal !== 'SIGKILL') setTimeout(() => kill('SIGKILL'), 2000).unref?.()
-  }
+  if (proc) reap(proc, signal)
   session = null
   return { ok: true }
 }
@@ -824,5 +989,5 @@ module.exports = {
   send,
   stop,
   canWrite,
-  parsers: { detailOf, measure, readLines, parseOpencode, contextSize }
+  parsers: { detailOf, tokensIn, tokensOf, readLines, parseOpencode, contextSize, policyEnv }
 }

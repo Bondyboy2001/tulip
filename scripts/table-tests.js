@@ -25,6 +25,10 @@ import { markdown } from '@codemirror/lang-markdown'
 const results = []
 
 async function test (name, run) {
+  /* What the harness watches to tell a stalled test from a starved renderer,
+     and what it names when it gives up. Without it a suite that stops has
+     nothing to say but "never finished". */
+  window.__tableProgress = { name, done: results.length }
   const parent = document.createElement('div')
   document.body.append(parent)
   try {
@@ -71,6 +75,23 @@ function mount (parent, doc, {
 
 const frame = () => new Promise((resolve) =>
   requestAnimationFrame(() => requestAnimationFrame(resolve)))
+
+/**
+ * Wait for something to become true, rather than for a fixed number of frames.
+ *
+ * Two frames is how long CodeMirror's measure phase takes when the machine is
+ * idle, and a test that assumes it will always be two fails on a loaded one for
+ * no better reason than that the redraw had not happened yet — which is a
+ * flake, not a finding. Frames are still what is waited on, so this stays in
+ * step with the redraw; only the number of them is allowed to vary.
+ *
+ * @param {() => any} ready  checked after every frame
+ * @param {number} frames    how many to allow before giving up
+ */
+async function until (ready, frames = 60) {
+  for (let i = 0; i < frames && !ready(); i++) await frame()
+  return ready()
+}
 
 const cellAt = (view, r, c) =>
   view.dom.querySelector(`.tk-table-wrap [data-row="${r}"][data-col="${c}"]`)
@@ -420,7 +441,11 @@ async function run () {
       `the break reached the note: ${view.state.doc.line(4).text}`
     )
     cell.blur()
-    await frame()
+    /* Blurring hands the cell back to the renderer, which draws the break as a
+       <br>. Waited for rather than counted in frames: on a loaded machine that
+       redraw is late, not absent, and the difference is what a flake is made
+       of. */
+    await until(() => cellAt(view, 2, 1)?.querySelector('br'))
     assert(
       cellAt(view, 2, 1).querySelector('br'),
       `and renders as a break, not as text: ${cellAt(view, 2, 1).innerHTML}`

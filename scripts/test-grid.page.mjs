@@ -64,6 +64,16 @@ export async function run () {
   const selected = () => document.querySelectorAll('.csv-cell.is-sel, .csv-cell.is-cursor').length
   const button = (act) => document.querySelector(`.csv-btn[data-act="${act}"]`)
 
+  /* Sorting's writing half lives in the heading's menu now that the bar has
+     no chips, so the test reaches it the way a person does. */
+  const headMenuItem = (label, c = 1) => {
+    heading(c).dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true, cancelable: true, clientX: 40, clientY: 10
+    }))
+    return [...document.querySelectorAll('.csv-menu-item')]
+      .find((item) => item.textContent === label)
+  }
+
   const result = {}
 
   /* -------------------------------------------------------- the sorting */
@@ -88,7 +98,8 @@ export async function run () {
   result.fileAfterSorting = onDisk
 
   /* Until it is asked for, and then it is an edit like any other. */
-  button('apply-sort').click()
+  headMenuItem('Write this order into the file').click()
+  await wait()
   await grid.save({ flush: true })
   result.fileAfterApply = onDisk
   result.summaryAfterApply = grid.summary()
@@ -220,6 +231,26 @@ export async function run () {
   await wait()
   result.rowsAfterDelete = rowsOnScreen().length
 
+  /* A row inserted under a sort belongs in the file beside the row it was
+     asked for, not at the end of it: the gutter is the file's own line number
+     and has to stay true for every row below the new one. */
+  click(heading(1))
+  await wait()
+  click(cell(0, 0))
+  button('add-row').click()
+  await wait()
+  result.sortedInsertNames = shown()
+  result.sortedInsertGutters = gutters()
+  await grid.save({ flush: true })
+  result.fileAfterSortedInsert = onDisk
+
+  grid.history(false)
+  click(heading(1))
+  click(heading(1))
+  await wait()
+  await grid.save({ flush: true })
+  result.fileAfterSortedInsertUndone = onDisk
+
   button('add-col').click()
   await wait()
   result.columnsAfterInsert = document.querySelectorAll('.csv-head .csv-th').length
@@ -230,22 +261,16 @@ export async function run () {
   await grid.save({ flush: true })
   result.fileAfterColumnUndone = onDisk
 
-  /* ---------------------------------------------------------- the filter */
+  /* ------------------------------------------------------------ the find */
 
   search.value = 'a'
   search.dispatchEvent(new Event('input', { bubbles: true }))
   await wait()
   result.matchesShown = document.querySelector('.csv-found').textContent
   result.highlighted = document.querySelectorAll('.csv-cell.is-match').length
+  // Finding marks; it never takes a row off the screen.
+  result.rowsWhileFinding = rowsOnScreen().length
 
-  button('filter').click()
-  await wait()
-  result.filteredRows = shown()
-  result.filteredGutters = gutters()
-  result.summaryFiltered = grid.summary()
-  result.contextFiltered = grid.context().text
-
-  button('filter').click()
   search.value = ''
   search.dispatchEvent(new Event('input', { bubbles: true }))
   await wait()
@@ -366,12 +391,14 @@ export async function run () {
   result.fileAfterReadingAttempts = onDisk
   result.readingWroteNothing = onDisk === fileBeforeReading
 
-  // A sort is a view, so it still sorts — and the button that would write it
-  // into the file is not there to be pressed.
+  // A sort is a view, so it still sorts — and the menu item that would write
+  // it into the file is not there to be pressed.
   click(heading(1))
   await wait()
   result.readingSorts = shown()
-  result.readingApplySortHidden = button('apply-sort').hidden
+  result.readingApplySortHidden = !headMenuItem('Write this order into the file')
+  mouse(scroller, 'mousedown')
+  await wait()
   click(heading(1))
   click(heading(1))
   await wait()
@@ -456,17 +483,16 @@ export async function run () {
   result.raggedColumns = document.querySelectorAll('.csv-head .csv-th').length
   result.raggedSummary = grid.summary()
 
-  /* And the field is reachable, not merely counted: filtering to the one row
-     that carries it has to put it on screen in the fourth column. */
+  /* And the field is reachable, not merely counted: finding the one row that
+     carries it has to put it on screen in the fourth column. */
   search.value = 'late'
   search.dispatchEvent(new Event('input', { bubbles: true }))
-  button('filter').click()
+  search.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
   await wait()
-  const lateRow = rowsOnScreen()[0]
-  result.raggedFiltered = rowsOnScreen().length
+  const lateRow = rowsOnScreen().find((row) => row.dataset.row === '380')
+  result.raggedFound = document.querySelector('.csv-found').textContent
   result.raggedLateCell = lateRow?.querySelector('.csv-cell[data-col="3"]')?.textContent
 
-  button('filter').click()
   search.value = ''
   search.dispatchEvent(new Event('input', { bubbles: true }))
   await wait()
@@ -482,12 +508,14 @@ export async function run () {
   await grid.open('Data/euro.csv')
   await wait()
 
+  /* The picker is the app's own menu rather than a `<select>`, so what it says
+     is the button's text and whether it is shown is its wrapper's. */
   const picker = document.querySelector('.csv-delimiter')
   result.semiHeadings = [...document.querySelectorAll('.csv-head .csv-th .csv-th-label')]
     .map((label) => label.textContent)
   result.semiFirstRow = shown(2)
-  result.semiPickerShown = !!picker && !picker.hidden
-  result.semiPickerValue = picker?.value
+  result.semiPickerShown = !!picker && !picker.closest('.dd').hidden
+  result.semiPickerValue = picker?.querySelector('.dd-value')?.textContent
 
   /* And the file is written back with the delimiter it came with. A semicolon
      file resaved as a comma file is every line of it rewritten, and the
@@ -504,7 +532,7 @@ export async function run () {
   onDisk = FIXTURE
   await grid.open('Data/people.csv')
   await wait()
-  result.commaPickerShown = !document.querySelector('.csv-delimiter').hidden
+  result.commaPickerShown = !document.querySelector('.csv-delimiter').closest('.dd').hidden
 
   /* ------------------------------------------------------- a wide export
 
@@ -591,6 +619,139 @@ export async function run () {
   result.ariaSorted = heading(1)?.getAttribute('aria-sort')
   click(heading(1)); click(heading(1))
   await wait()
+
+  /* ------------------------------------------------- a selection in pieces
+
+     ⌘-click: a second column that is nowhere near the first, two rows with
+     another between them, and what a copy of either comes out as. Opened
+     afresh so the section stands on its own, whatever the sorting above left
+     behind. */
+
+  onDisk = FIXTURE
+  await grid.open('Data/people.csv')
+  await wait()
+
+  const gutterOf = (r) => document.querySelector(`.csv-row[data-row="${r}"] .csv-gutter`)
+
+  /** What the grid puts on the clipboard for what is selected right now. */
+  const copied = () => {
+    const data = new DataTransfer()
+    scroller.dispatchEvent(new ClipboardEvent('copy', {
+      bubbles: true, cancelable: true, clipboardData: data
+    }))
+    return data.getData('text/plain')
+  }
+
+  // The first column, then the third — with the second left out of it.
+  click(cell(0, 0))
+  key(' ', { ctrlKey: true })
+  click(heading(2), { metaKey: true })
+  await settle()
+  result.twoColumns = selected()
+  result.twoColumnsSummary = grid.summary()
+  result.twoColumnsCopied = copied()
+
+  // A ⌘-click on a column already picked is that column being put back.
+  click(heading(2), { metaKey: true })
+  await wait()
+  result.afterUnpicking = selected()
+
+  /* Two rows with one between them: Ada and Alan, and not Grace. The gutter is
+     how a person takes a whole row, so it is how the test does. */
+  click(gutterOf(0))
+  click(gutterOf(2), { metaKey: true })
+  await settle()
+  result.twoRows = selected()
+  result.twoRowsSummary = grid.summary()
+  result.twoRowsCopied = copied()
+
+  /* And the row operations act on every row picked, rather than on the block
+     the cursor happens to be in. */
+  key('Backspace', { metaKey: true })
+  await wait()
+  result.afterDeletingPickedRows = shown()
+  grid.history(false)
+  await wait()
+  result.afterDeletingUndone = shown()
+
+  /* Two cells nowhere near each other still total. Scores of 10 and 9, and
+     nothing of the blank one between them. */
+  click(cell(0, 1))
+  click(cell(3, 1), { metaKey: true })
+  await settle()
+  result.twoCellsSummary = grid.summary()
+
+  /* A plain click is still "this instead": the blocks go, rather than piling
+     up until something clears them. */
+  click(cell(2, 0))
+  await settle()
+  result.afterPlainClick = selected()
+  result.afterPlainClickSummary = grid.summary()
+
+  /* ---------------------------------------------------------- the filter
+
+     The question a column of categories is asked: show me only these. Reached
+     the way a person reaches it — the funnel in the heading, and the tick
+     boxes under it. */
+
+  const panel = () => document.querySelector('.csv-filter')
+  const funnel = (c) => heading(c).querySelector('.csv-funnel')
+  const filterRows = () => [...document.querySelectorAll('.csv-filter-row')]
+  const valueOf = (row) => row.querySelector('.csv-filter-value').textContent
+  const untick = (text) => {
+    const box = filterRows().find((row) => valueOf(row) === text).querySelector('input')
+    box.checked = false
+    box.dispatchEvent(new Event('change', { bubbles: true }))
+  }
+
+  click(funnel(0))
+  await wait()
+  result.filterOpened = !panel().hidden
+  result.filterValues = filterRows()
+    .map((row) => `${valueOf(row)} ${row.querySelector('.csv-filter-count').textContent}`)
+
+  const beforeFiltering = onDisk
+  untick('Grace')
+  untick('Bob')
+  await wait()
+  result.filtered = shown()
+  /* The gutter still says where each row came from: filtering is a way of
+     looking, and a row that was line 4 is line 4 with two rows hidden. */
+  result.filteredGutters = gutters()
+  result.filteredSummary = grid.summary()
+  result.filteredHeading = heading(0).classList.contains('is-filtered')
+
+  /* The whole point: hiding rows is not an edit. */
+  await grid.save({ flush: true })
+  result.fileAfterFiltering = onDisk === beforeFiltering
+  result.dirtyAfterFiltering = grid.dirty()
+
+  key('Escape')
+  await wait()
+  result.filterClosed = panel().hidden
+  /* Closing the panel is not clearing the filter — the rows stay hidden. */
+  result.stillFiltered = shown()
+
+  button('clear-filters').click()
+  await wait()
+  result.afterClearing = shown()
+
+  /* And the find box, which normally only marks what it found, hiding the
+     rest when it is asked to. */
+  search.value = 'ada'
+  search.dispatchEvent(new Event('input', { bubbles: true }))
+  await wait()
+  result.whileFinding = shown()
+  button('only-matches').click()
+  await wait()
+  result.onlyMatches = shown()
+  result.onlyMatchesSummary = grid.summary()
+
+  button('only-matches').click()
+  search.value = ''
+  search.dispatchEvent(new Event('input', { bubbles: true }))
+  await wait()
+  result.afterOnlyMatchesOff = shown()
 
   return result
 }

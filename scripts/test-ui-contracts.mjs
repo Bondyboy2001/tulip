@@ -51,6 +51,17 @@ if (source) {
   assert.match(math, /new URL\('katex\.css', document\.baseURI\)/)
   assert.doesNotMatch(math, /new URL\('katex\.css', import\.meta\.url\)/)
 }
+
+/* The window's own bundle is served over `tulip-app` for one reason: it is the
+   only way Chromium will keep a V8 code cache for it, and `codeCache` is
+   ignored unless `standard` is set beside it. Both are asserted because losing
+   either has NO visible symptom — the app opens, everything works, and every
+   launch quietly recompiles 570KB from source again. Measured with
+   bench/boot-bench.mjs; the numbers are in the comment beside the handler. */
+assert.match(main, /scheme:\s*'tulip-app'/)
+assert.match(main, /codeCache:\s*true/)
+assert.match(main, /standard:\s*true/)
+assert.match(main, /loadURL\(`\$\{APP_ORIGIN\}\/index\.html`\)/)
 assert.match(styles, /width:\s*min\(320px/)
 
 if (source) {
@@ -67,6 +78,23 @@ if (source) {
   }
   assert.match(renderer, /id: 'note-history', title: [^\n]+scope: 'text'/)
   assert.match(renderer, /COMMANDS\.filter\(\(\{ scope \}\)/)
+  /* A locked file is held in its reading view, and the hold is written in one
+     place each: `setView` refuses to leave reading, and `applyPanes` puts a
+     locked document back into it however it was opened. Both are one line to
+     lose and neither shows up in a screenshot of an unlocked note. */
+  assert.match(renderer, /if \(lockedHere\(\)\) \{[\s\S]{0,320}if \(view !== 'read'\)/)
+  assert.match(renderer, /const show = lockedHere\(\) \? 'read' :/)
+  /* The palette offers whichever of the two the file is not, and both run the
+     same command — a row that cannot act on what is open is not offered. */
+  assert.match(renderer, /id: 'unlock-file'[\s\S]{0,80}id: 'lock-file'/)
+  assert.match(renderer, /case 'lock-file':\s*\n\s*case 'unlock-file': toggleLock\(\)/)
+  // Locking and unlocking are both asked about before they happen.
+  assert.match(renderer, /await ask\(locking[\s\S]{0,400}go: 'Unlock'/)
+  // The lock survives a rename, which is the one move nobody checks afterwards.
+  assert.match(renderer, /state\.locked\]\.map\(moved\)/)
+  // The `.csv` lattice is a fact about the shell — the grid is virtualized.
+  assert.match(renderer, /dataset\.csvBorders = cfg\.csvBorders === true \? 'on' : 'off'/)
+  assert.match(read('src', 'styles.css'), /\[data-csv-borders="on"\] \.csv-frame \.csv-cell/)
   /* A command that cannot act on what is open is not offered: the study record
      belongs to the language tables, and there is no file to move with nothing
      open. Both are scopes rather than checks inside the handler, so the row
@@ -134,6 +162,30 @@ if (source) {
     /el\.viewSwitch\.hidden = \(!text && !dataOpen && !notebookOpen\) \|\| sourceOnly/)
   assert.match(renderer, /if \(dataOpen\) dataInstance\?\.setReadonly\(state\.view === 'read'\)/)
   assert.match(renderer, /if \(notebookOpen\) notebookInstance\?\.setReadonly\(state\.view === 'read'\)/)
+  /* A notebook's run commands are the only things in the app that need a live
+     kernel, and they were an API nothing called: `mountNotebook` returned a
+     `run` object and no menu, palette or key ever reached it. All three legs
+     are asserted — the menu item, the command the renderer answers it with,
+     and the bridge the viewer runs it over — because any one of them missing
+     is a menu entry that silently does nothing. */
+  for (const [item, command] of [
+    ['Run All Above', 'nb-run-above'],
+    ['Run All Below', 'nb-run-below'],
+    ['Restart and Run All…', 'nb-restart-all']
+  ]) {
+    assert.match(main, new RegExp(`label: '${item}'[^\\n]*'${command}'`), `${item} is in the menu`)
+    assert.match(renderer, new RegExp(`case '${command}': if \\(viewingNotebook\\(\\)\\)`),
+      `${command} is answered only while a notebook is open`)
+  }
+  /* Completion, inspection and the answer to an `input()` all need the live
+     kernel, so all three cross the bridge rather than being guessed at here. */
+  for (const call of ['input', 'complete', 'inspect']) {
+    assert.match(preload, new RegExp(`ipcRenderer\\.invoke\\('kernel:${call}'`))
+    assert.match(main, new RegExp(`ipcMain\\.handle\\('kernel:${call}'`))
+  }
+  /* The one thing a notebook has to stop and ask about — a restart throws away
+     every variable in the session — asked in the app's own dialog. */
+  assert.match(renderer, /\n\s*ask,\n\s*notify: \(text\) => toast\(text\),/)
   /* Auto-resize is offered for both grids and routed to whichever is open —
      the palette row and the thing it calls, which are easy to add one of. */
   assert.match(renderer,
@@ -153,6 +205,17 @@ if (source) {
   assert.match(copilot, /box\.value = box\.value\.slice\(0, from\) \+ box\.value\.slice\(to\)/)
   assert.match(copilot, /addAttachments\(\[path\], true\)/)
   assert.match(copilot, /function attachmentKind \(path\)/)
+  /* Fenced code in a reply is coloured by the reading view's own painter, from
+     the class markdown-it's fence rule leaves the language in — and on every
+     path that writes prose into the panel, including the settled half of a
+     reply still streaming. A block dressed on one of them and not the others is
+     a reply whose colours come and go as the log is rebuilt. */
+  assert.match(copilot, /import \{ highlightInto \} from '\.\/highlight\.js'/)
+  assert.match(copilot,
+    /querySelectorAll\('pre > code\[class\*="language-"\]'\)[\s\S]{0,220}highlightInto\(code, code\.textContent, lang\)/)
+  // The four call sites: repaint, first draw, a question's own copy, and the
+  // settled head of a stream. (The definition writes `dressCode (root)`.)
+  assert.equal(copilot.match(/\bdressCode\(/g)?.length, 4)
   assert.match(copilot, /preview\.append\(fileIcon\(kind\)\)/)
   assert.match(copilot, /element\('button', 'icon-btn ai-attachment-remove'\)/)
   assert.match(read('src', 'file-icons.js'), /export function fileIcon \(kind, \{ color = null \} = \{\}\)/)
@@ -185,7 +248,7 @@ if (source) {
   assert.match(baseStyles, /\.app\[data-ai="closed"\] \.ai\s*\{\s*overflow:\s*hidden;/)
   assert.match(baseStyles, /\.ai-pop\s*\{[\s\S]{0,500}max-height:\s*min\(/)
   assert.match(baseStyles, /\.ai-effort-range::-webkit-slider-thumb\s*\{[\s\S]{0,260}border:\s*2px solid var\(--surface\)/)
-  assert.match(renderer, /spec\.tab\(\)\.scrollIntoView\(\{ inline: 'nearest', block: 'nearest' \}\)/)
+  assert.match(renderer, /tab\.scrollIntoView\(\{ inline: 'nearest', block: 'nearest' \}\)/)
   assert.match(baseStyles, /--tex-source/)
   assert.match(texSplit, /setPointerCapture/)
   assert.match(texSplit, /ArrowLeft[\s\S]*ArrowRight/)
@@ -201,7 +264,21 @@ if (source) {
   assert.match(ask, /el\.askGo\.focus\(\)/)
   assert.match(renderer, /if \(e\.key === 'Enter'\) \{ e\.preventDefault\(\); answer\(true\) \}/)
   assert.doesNotMatch(renderer, /e\.key === 'Enter' && document\.activeElement === el\.askGo/)
-  assert.match(renderer, /if \(!wrapsCode\)[\s\S]{0,150}pre\.scrollLeft = 0/)
+  /* The dormant horizontal scroll is still reset when wrapping is turned off —
+     but only on that transition. Writing `scrollLeft` forces layout on the
+     element written to, so doing it for every code block on every applyConfig
+     (which includes boot, with wrapping off by default) walked and laid out
+     the whole page: on a note with 13,000 fenced blocks the window wedged and
+     never came back. The `wasWrappingCode &&` is the whole fix, so it is what
+     is pinned here. */
+  assert.match(renderer, /if \(wasWrappingCode && !wrapsCode\)[\s\S]{0,150}pre\.scrollLeft = 0/)
+  assert.match(renderer, /const wasWrappingCode = el\.app\.dataset\.codeWrap === 'on'/)
+  /* And the same class of mistake in the reading view's place-keeping, which
+     is what found it: `viewportLine` must bisect the raw NodeList, never a
+     copy filtered by `offsetParent` — that filter cannot be answered without
+     laying out every block it asks about. */
+  assert.doesNotMatch(renderer, /querySelectorAll\('\[data-line\]'\)\)\s*\n?\s*\.filter/)
+  assert.match(renderer, /function laidOutNear \(nodes, mid, lo, hi\)/)
   assert.match(whiteboard, /whiteboardElementsText\(latest\.elements\)/)
   assert.match(whiteboard, /revision === writingRevision/)
   assert.match(whiteboard, /saveScene\(\{ flush: true \}\)/)

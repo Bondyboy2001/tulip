@@ -9,7 +9,13 @@ globalThis.document = {
     innerHTML: '', classList: { add () {} }, style: {}, dataset: {}, append () {}, remove () {}
   }),
   documentElement: { style: {} },
-  head: { append () {} }
+  head: { append () {} },
+  /* src/math.js resolves katex.css against `document.baseURI`, because that is
+     the one base esbuild's splitting cannot move the module away from. A stub
+     without one made `new URL('katex.css', undefined)` throw, and this whole
+     benchmark stopped running — silently, because the other three still did.
+     Any value parses; nothing here ever fetches it. */
+  baseURI: 'file:///tulip-benchmark/'
 }
 globalThis.navigator ||= { userAgent: 'Tulip benchmark', platform: 'MacIntel' }
 

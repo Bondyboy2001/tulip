@@ -55,7 +55,10 @@ import electron from 'electron'
 const { app, BrowserWindow } = electron
 const say = (payload) => { console.log(JSON.stringify(payload)); app.exit(payload.error ? 1 : 0) }
 app.whenReady().then(async () => {
-  const win = new BrowserWindow({ width: 520, height: 400, show: true })
+  /* Not throttled behind another window — see the note in test-grid.mjs. */
+  const win = new BrowserWindow({
+    width: 520, height: 400, show: true, webPreferences: { backgroundThrottling: false }
+  })
   try {
     await win.loadFile(${JSON.stringify(await import('node:path').then((m) => m.resolve('node_modules/.cache/agent-diff-page.html')))})
     for (let wait = 0; wait < 120; wait++) {

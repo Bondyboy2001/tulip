@@ -6,10 +6,10 @@
  * ends up on screen and — the part that matters — what ends up in the file.
  *
  * The rule the whole viewer is built on is the one most worth a test: sorting
- * and filtering are ways of looking at a file, not edits to it. A hundred
- * thousand lines must not be rewritten because somebody wanted to see the
- * largest first, and the one case where they did mean it (Apply sort) has to
- * be an ordinary undoable edit.
+ * is a way of looking at a file, not an edit to it. A hundred thousand lines
+ * must not be rewritten because somebody wanted to see the largest first, and
+ * the one case where they did mean it — the heading menu's "Write this order
+ * into the file" — has to be an ordinary undoable edit.
  *
  * A small window appears for a moment: headless Electron pauses the frames a
  * layout needs. Same harness as test-agent-diff.mjs.
@@ -64,7 +64,14 @@ import electron from 'electron'
 const { app, BrowserWindow } = electron
 const say = (payload) => { console.log(JSON.stringify(payload)); app.exit(payload.error ? 1 : 0) }
 app.whenReady().then(async () => {
-  const win = new BrowserWindow({ width: 760, height: 460, show: true })
+  /* backgroundThrottling off because this window will not always be the one in
+     front: the suite runs in parallel now (scripts/run-tests.mjs), and Chromium
+     stops servicing rAF and clamps timers in a window that is behind another.
+     A grid measuring its own layout in a throttled window measures a paused
+     one — it does not fail cleanly, it waits out the poll below. */
+  const win = new BrowserWindow({
+    width: 760, height: 460, show: true, webPreferences: { backgroundThrottling: false }
+  })
   try {
     await win.loadFile(${JSON.stringify(path.resolve('node_modules/.cache/grid-page.html'))})
     for (let wait = 0; wait < 120; wait++) {
@@ -242,6 +249,21 @@ ok('a column can be added, and it is a column in the file', () => {
   assert.equal(r.fileAfterColumnUndone, FIXTURE)
 })
 
+ok('a row inserted under a sort lands beside the row it was asked for', () => {
+  // Ascending by score: Grace 2, Bob 9, Ada 10, then the blank. The new row
+  // goes below Grace on screen *and* below her line in the file, so the line
+  // numbers below it all move up by one rather than the new row claiming the
+  // last number in the file.
+  assert.deepEqual(r.sortedInsertNames, ['Grace', '', 'Bob', 'Ada', 'Alan'])
+  assert.deepEqual(r.sortedInsertGutters, ['3', '4', '6', '2', '5'])
+  assert.equal(r.fileAfterSortedInsert,
+    'name,score,when\nAda,10,2026-01-02\nGrace,2,2025-12-31\n,,\nAlan,,2026-03-04\nBob,9,2026-02-01\n')
+})
+
+ok('and undoing it takes the line back out', () => {
+  assert.equal(r.fileAfterSortedInsertUndone, FIXTURE)
+})
+
 /* ------------------------------------------------------------ the finding */
 
 ok('the find box counts the rows holding what was typed', () => {
@@ -249,18 +271,11 @@ ok('the find box counts the rows holding what was typed', () => {
   assert.ok(r.highlighted > 0, 'and marks the cells themselves')
 })
 
-ok('hiding the other rows leaves only the matches', () => {
-  assert.deepEqual(r.filteredRows, ['Ada', 'Grace', 'Alan'])
-  assert.deepEqual(r.filteredGutters, ['2', '3', '4'])
-  assert.match(r.summaryFiltered, /showing 3/)
+ok('finding marks the matches without taking a row off the screen', () => {
+  assert.equal(r.rowsWhileFinding, 4)
 })
 
-ok('the copilot is handed the table as it is being looked at', () => {
-  assert.equal(r.contextFiltered,
-    'name,score,when\nAda,10,2026-01-02\nGrace,2,2025-12-31\nAlan,,2026-03-04\n')
-})
-
-ok('turning the filter off brings the file back', () => {
+ok('clearing the box leaves the file as it was', () => {
   assert.equal(r.unfilteredRows, 4)
 })
 
@@ -319,7 +334,7 @@ ok('a field no sample would have seen still gets a column', () => {
 })
 
 ok('and that field can be reached, not merely counted', () => {
-  assert.equal(r.raggedFiltered, 1, 'the filter should leave the one row that matches')
+  assert.match(r.raggedFound, /1 matching row/, 'the one row holding it should be counted')
   assert.equal(r.raggedLateCell, 'late', 'the late field never made it onto the screen')
 })
 
@@ -336,7 +351,7 @@ ok('a semicolon .csv opens as a table rather than one long column', () => {
 
 ok('and the grid says what it decided, because the extension disagreed', () => {
   assert.equal(r.semiPickerShown, true, 'nothing said why the file split that way')
-  assert.equal(r.semiPickerValue, ';')
+  assert.equal(r.semiPickerValue, 'Semicolon')
 })
 
 ok('a file is written back with the delimiter it came with', () => {
@@ -414,6 +429,97 @@ ok('and which cell is selected, and which one the keyboard is on', () => {
 ok('a sorted column says which way it is pointed', () => {
   // The mark beside the label is a triangle, and a triangle reads as nothing.
   assert.equal(r.ariaSorted, 'ascending')
+})
+
+/* -------------------------------------------------- a selection in pieces
+
+   The thing a rectangle cannot say: these two columns, out of thirty, and not
+   the twenty-eight between them. */
+
+ok('⌘-clicking a heading adds the column to the one already picked', () => {
+  assert.equal(r.twoColumns, 10, 'two columns of four rows, each with a heading')
+  assert.ok(r.twoColumnsSummary.includes('10 selected in 2 blocks'), r.twoColumnsSummary)
+})
+
+ok('the picked columns copy as columns, side by side', () => {
+  /* The one that was skipped is not on the clipboard. A selection in pieces
+     that pasted the pieces back with the gap filled in would be handing over
+     data nobody asked for. */
+  assert.equal(r.twoColumnsCopied, [
+    'name\twhen',
+    'Ada\t2026-01-02',
+    'Grace\t2025-12-31',
+    'Alan\t2026-03-04',
+    'Bob\t2026-02-01'
+  ].join('\n'))
+})
+
+ok('⌘-clicking it again puts the column back', () => {
+  assert.equal(r.afterUnpicking, 5, 'the second column left, the first stayed')
+})
+
+ok('two rows with another between them select and copy as the two of them', () => {
+  assert.equal(r.twoRows, 6, 'two rows of three columns')
+  assert.ok(r.twoRowsSummary.includes('6 selected in 2 blocks'), r.twoRowsSummary)
+  assert.equal(r.twoRowsCopied, 'Ada\t10\t2026-01-02\nAlan\t\t2026-03-04')
+})
+
+ok('deleting rows takes every row picked, not the block the cursor is in', () => {
+  assert.deepEqual(r.afterDeletingPickedRows, ['Grace', 'Bob'])
+  assert.deepEqual(r.afterDeletingUndone, ['Ada', 'Grace', 'Alan', 'Bob'],
+    'undo did not put both rows back')
+})
+
+ok('cells nowhere near each other still add up', () => {
+  // 10 and 9, with the blank score between them left out of it.
+  assert.ok(r.twoCellsSummary.includes('2 selected in 2 blocks'), r.twoCellsSummary)
+  assert.ok(r.twoCellsSummary.includes('sum 19'), r.twoCellsSummary)
+  assert.ok(r.twoCellsSummary.includes('avg 9.5'), r.twoCellsSummary)
+})
+
+ok('a plain click is still "this one instead"', () => {
+  assert.equal(r.afterPlainClick, 1, 'the blocks outlived the click that replaced them')
+  assert.ok(!r.afterPlainClickSummary.includes('selected'), r.afterPlainClickSummary)
+})
+
+/* ------------------------------------------------------------- filtering
+
+   Show me only these — the question a column of categories is for, and the one
+   thing a find box that highlights cannot answer. */
+
+ok('a column offers its values, counted, with the funnel in its heading', () => {
+  assert.equal(r.filterOpened, true, 'the funnel opened nothing')
+  assert.deepEqual(r.filterValues, ['Ada 1', 'Alan 1', 'Bob 1', 'Grace 1'])
+})
+
+ok('unticking values takes their rows off the screen', () => {
+  assert.deepEqual(r.filtered, ['Ada', 'Alan'])
+  // The rows that are left still say which lines of the file they are.
+  assert.deepEqual(r.filteredGutters, ['2', '4'])
+  assert.equal(r.filteredHeading, true, 'the filtered column did not say so')
+  assert.ok(r.filteredSummary.includes('showing 2 of 4, filtered by name'), r.filteredSummary)
+})
+
+ok('filtering is a way of looking, so it writes nothing', () => {
+  assert.equal(r.fileAfterFiltering, true, 'a filter rewrote the file')
+  assert.equal(r.dirtyAfterFiltering, false, 'a filter marked the file unsaved')
+})
+
+ok('Escape closes the panel and leaves the filter as the ticks left it', () => {
+  assert.equal(r.filterClosed, true)
+  assert.deepEqual(r.stillFiltered, ['Ada', 'Alan'])
+})
+
+ok('Clear filters brings every row back', () => {
+  assert.deepEqual(r.afterClearing, ['Ada', 'Grace', 'Alan', 'Bob'])
+})
+
+ok('the find box hides what it does not match, but only when asked', () => {
+  assert.deepEqual(r.whileFinding, ['Ada', 'Grace', 'Alan', 'Bob'],
+    'finding took rows away on its own')
+  assert.deepEqual(r.onlyMatches, ['Ada'])
+  assert.ok(r.onlyMatchesSummary.includes('showing 1 of 4'), r.onlyMatchesSummary)
+  assert.deepEqual(r.afterOnlyMatchesOff, ['Ada', 'Grace', 'Alan', 'Bob'])
 })
 
 console.log(`\n${passed} checks passed`)

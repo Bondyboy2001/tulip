@@ -217,6 +217,130 @@ export function studyColumns (markdown) {
   return null
 }
 
+/* ------------------------------------------------------------- importing */
+
+/* What a CSV column may call itself and still be recognised. `front` is the
+   word being learned, `back` its meaning — the same vocabulary `columnsFor`
+   resolves table headers with, so a file exported from another flashcard app
+   lands in the columns the cards will be built from. */
+const CSV_NAMES = {
+  front: ['word', 'term', 'front'],
+  back: ['english', 'meaning', 'translation', 'back', 'definition'],
+  example: ['example', 'sentence', 'usage', 'in context'],
+  notes: ['notes', 'note', 'remark', 'gender']
+}
+
+/**
+ * Rows from a CSV or TSV, as an edit that appends them to the note's table.
+ *
+ * Pure: takes the note's text and the parsed rows, answers with where to
+ * insert and what — the caller owns the editor. The first row is treated as a
+ * header when it names any column this module knows; otherwise the columns
+ * are positional, word first, in the order flashcard exports use. Rows whose
+ * word the table already holds are skipped, so importing the same file twice
+ * adds nothing the second time.
+ *
+ * A note with no table yet gains the vocabulary template's, which keeps the
+ * shape identical to a table made in the app.
+ *
+ * @returns {{at: number, insert: string, added: number, skipped: number}}
+ */
+export function importCards (markdown, rows) {
+  const src = String(markdown || '')
+  const records = (Array.isArray(rows) ? rows : [])
+    .map((row) => (Array.isArray(row) ? row.map((cell) => String(cell ?? '').trim()) : []))
+    .filter((row) => row.some(Boolean))
+  if (!records.length) return { at: src.length, insert: '', added: 0, skipped: 0 }
+
+  /* The CSV's own column plan, by name when it has one. */
+  const head = records[0].map((cell) => cell.toLowerCase())
+  const csvAt = (want) => indexOfAny(head, want)
+  const named = Object.values(CSV_NAMES).some((names) => csvAt(names) >= 0)
+  const plan = named
+    ? {
+        front: csvAt(CSV_NAMES.front),
+        back: csvAt(CSV_NAMES.back),
+        example: csvAt(CSV_NAMES.example),
+        notes: csvAt(CSV_NAMES.notes)
+      }
+    : { front: 0, back: 1, example: 2, notes: 3 }
+  if (named && plan.front < 0) plan.front = head.findIndex((_cell, i) => !Object.values(plan).includes(i))
+  const body = named ? records.slice(1) : records
+
+  /* The table the rows join: the first one the note holds, read by the same
+     rules the cards are. */
+  const lines = src.split('\n')
+  const options = frontmatterOf(src)
+  let table = null
+  for (let at = 0; at < lines.length - 1; at++) {
+    if (!delimiter(lines[at + 1])) continue
+    const header = cells(lines[at])
+    const columns = columnsFor(header, {
+      front: options['study-front'],
+      back: options['study-back'],
+      example: options['study-example']
+    })
+    if (!columns) break
+    let last = at + 1
+    while (last + 1 < lines.length && cells(lines[last + 1]).length && lines[last + 1].includes('|')) last++
+    table = { header, columns, last }
+    break
+  }
+
+  const escapeCell = (value) => String(value ?? '').replace(/\|/g, '\\|')
+  const width = table ? table.header.length : cells(LANGUAGE_TABLE_TEMPLATE.split('\n')[0]).length
+  const columns = table
+    ? table.columns
+    : columnsFor(cells(LANGUAGE_TABLE_TEMPLATE.split('\n')[0]))
+
+  /* Already-known words, so a re-import is a no-op rather than a duplicate. */
+  const known = new Set()
+  if (table) {
+    for (let at = table.last; cells(lines[at]).length && at > 0; at--) {
+      const word = cells(lines[at])[columns.front]
+      if (word) known.add(word.toLowerCase())
+    }
+  }
+
+  const made = []
+  let skipped = 0
+  for (const record of body) {
+    const word = record[plan.front] || ''
+    const meaning = plan.back >= 0 ? (record[plan.back] || '') : ''
+    if (!word) { skipped++; continue }
+    if (known.has(word.toLowerCase())) { skipped++; continue }
+    known.add(word.toLowerCase())
+    const out = Array.from({ length: width }, () => '')
+    out[columns.front] = escapeCell(word)
+    out[columns.back] = escapeCell(meaning)
+    if (columns.example >= 0 && plan.example >= 0) out[columns.example] = escapeCell(record[plan.example] || '')
+    if (columns.notes >= 0 && plan.notes >= 0) out[columns.notes] = escapeCell(record[plan.notes] || '')
+    made.push(`| ${out.join(' | ')} |`)
+  }
+  if (!made.length) return { at: src.length, insert: '', added: 0, skipped }
+
+  if (table) {
+    /* After the table's last row: the end of that line, newline included when
+       one follows. */
+    let at = 0
+    for (let n = 0; n <= table.last; n++) at += lines[n].length + 1
+    const insert = made.join('\n') + '\n'
+    // The offset above assumes a newline ends the last row; when the row is
+    // the end of the file, it does not have one yet.
+    if (at > src.length) return { at: src.length, insert: '\n' + made.join('\n'), added: made.length, skipped }
+    return { at, insert, added: made.length, skipped }
+  }
+
+  const templateHead = LANGUAGE_TABLE_TEMPLATE.split('\n').slice(0, 2).join('\n')
+  const lead = src.trim() === '' ? '' : (src.endsWith('\n') ? '\n' : '\n\n')
+  return {
+    at: src.length,
+    insert: `${lead}${templateHead}\n${made.join('\n')}\n`,
+    added: made.length,
+    skipped
+  }
+}
+
 /* --------------------------------------------------------- kinds of card */
 
 /** Read it and know what it means. The first sight of every word. */
@@ -550,6 +674,8 @@ export function mountLanguageStudy ({
   const state = {
     queue: [], done: 0, states: {}, pending: [], open: false,
     firstTrySeen: new Set(), firstTryCorrect: 0, firstTryWrong: 0,
+    lastAnswer: null,                    // what undo puts back — one step only
+    undone: new Set(),                   // entries taken back; flush skips them
     tags: {},                            // deck path -> the voice to speak it in
     ...blank()
   }
@@ -642,9 +768,12 @@ export function mountLanguageStudy ({
 
     el.progress.textContent = `${state.done + 1} of ${state.done + state.queue.length}`
     if (el.hint) {
+      const undoHint = state.lastAnswer
+        ? ` · ${typeof navigator !== 'undefined' && /Mac/i.test(navigator.platform) ? '⌘Z' : 'Ctrl+Z'} takes back the last answer`
+        : ''
       el.hint.textContent = answered
-        ? ''
-        : 'Type the answer · Enter checks it'
+        ? undoHint.replace(/^ · /, '')
+        : `Type the answer · Enter checks it${undoHint}`
     }
   }
 
@@ -708,10 +837,25 @@ export function mountLanguageStudy ({
     if (!card || !state.revealed) return
 
     const now = Date.now()
+    /* Everything undo has to put back, taken before anything moves: the
+       card's scheduled state, the session tallies, and whether this id had
+       been seen at all — `recordFirstTry` is about to decide that. */
+    state.lastAnswer = {
+      card,
+      prevState: state.states[card.id],
+      wasAgain: grade === AGAIN,
+      firstTry: {
+        seen: state.firstTrySeen.has(card.id),
+        correct: state.firstTryCorrect,
+        wrong: state.firstTryWrong
+      }
+    }
     recordFirstTry(state, card.id, grade === GOOD)
     const next = gradeCard(state.states[card.id], grade, now, prefs().retention)
     state.states[card.id] = next
-    state.pending.push({ id: card.id, at: now, grade, state: next })
+    const entry = { id: card.id, at: now, grade, state: next }
+    state.lastAnswer.entry = entry
+    state.pending.push(entry)
 
     state.queue.shift()
     state.done++
@@ -741,13 +885,56 @@ export function mountLanguageStudy ({
     else el.card.focus()
   }
 
+  /**
+   * Take back the last answer — one step, because the step just taken is the
+   * one a slipped Enter or a mistyped accent graded wrongly; anything further
+   * back has been read, considered and left behind.
+   *
+   * The answer may be anywhere on its journey to disk: still in `pending`,
+   * mid-write, or already recorded. Marking the entry undone covers all
+   * three — `flush` skips marked entries wherever it finds them, and the
+   * store is told to put the card's state back in case the write already
+   * happened. Both are idempotent, so racing the in-flight write is safe.
+   */
+  function undo () {
+    const last = state.lastAnswer
+    if (!last || !state.open) return
+    state.lastAnswer = null
+
+    state.undone.add(last.entry)
+    const held = state.pending.indexOf(last.entry)
+    if (held !== -1) state.pending.splice(held, 1)
+    else api.review.unrecord({ id: last.card.id, at: last.entry.at, state: last.prevState || null }).catch(() => {})
+
+    if (last.wasAgain) {
+      const at = state.queue.lastIndexOf(last.card)
+      if (at !== -1) state.queue.splice(at, 1)
+    }
+    state.queue.unshift(last.card)
+    state.done--
+
+    if (last.prevState === undefined) delete state.states[last.card.id]
+    else state.states[last.card.id] = last.prevState
+    state.firstTryCorrect = last.firstTry.correct
+    state.firstTryWrong = last.firstTry.wrong
+    if (!last.firstTry.seen) state.firstTrySeen.delete(last.card.id)
+
+    Object.assign(state, blank())
+    paint()
+    const card = current()
+    if (card?.kind === DICTATE) say(card)
+    focusInput()
+  }
+
   /* ------------------------------------------------------------ the deck */
 
   /** Everything answered since the last write, to the vault. */
   async function flush () {
-    if (!state.pending.length) return
-    const batch = state.pending
+    // An entry undone while it waited — or while an earlier failed write held
+    // it — is not owed to anyone.
+    const batch = state.pending.filter((one) => !state.undone.has(one))
     state.pending = []
+    if (!batch.length) return
     try {
       await api.review.record(batch)
     } catch (err) {
@@ -862,6 +1049,8 @@ export function mountLanguageStudy ({
     state.firstTrySeen = new Set()
     state.firstTryCorrect = 0
     state.firstTryWrong = 0
+    state.lastAnswer = null
+    state.undone = new Set()
     Object.assign(state, blank())
     state.open = true
     el.root.hidden = false
@@ -911,12 +1100,24 @@ export function mountLanguageStudy ({
   el.input?.addEventListener('input', () => { state.typed = el.input.value })
   // Quitting mid-session must not lose the answers already given.
   window.addEventListener('beforeunload', () => {
-    if (state.pending.length) api.review.record(state.pending)
+    const owed = state.pending.filter((one) => !state.undone.has(one))
+    if (owed.length) api.review.record(owed)
   })
 
   window.addEventListener('keydown', (event) => {
     if (el.root.hidden) return
     if (event.key === 'Escape') { event.preventDefault(); close(); return }
+
+    /* Before the typing branch on purpose: the moment undo matters most is
+       when the next card is already up and the input has the keyboard —
+       which is also why it is the application chord and not a bare letter,
+       since a bare letter there is an answer being typed. */
+    if ((event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey &&
+        event.key.toLowerCase() === 'z') {
+      event.preventDefault()
+      undo()
+      return
+    }
 
     const card = current()
     const typing = !!card && !state.revealed

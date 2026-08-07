@@ -73,46 +73,23 @@
                the one that applies — chevrons drawn together to shut the tree,
                apart to open it. Which it is now is read from the tree itself in
                paintFoldToggle, so it can never offer the thing that just
-               happened. Only on the Files pane; the other two have no folders. -->
+               happened. The tree is always on screen now, so it always is. -->
           <button class="icon-btn" id="btn-fold-all" title="Collapse all folders"
                   aria-label="Collapse all folders">
             <svg class="fold-ico-collapse" viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M4.8 2.8 8 5.6l3.2-2.8M4.8 13.2 8 10.4l3.2 2.8" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/></svg>
            <svg class="fold-ico-expand" viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M4.8 5.6 8 2.8l3.2 2.8M4.8 10.4 8 13.2l3.2-2.8" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/></svg>
            </button>
+          <!-- Not a pane control: it does not choose what the sidebar shows,
+               it decides whether there is a second panel under the tree at
+               all. Which is why it sits with the header's other verbs rather
+               than in the strip below, where it would read as a sixth tab. -->
+          <button class="icon-btn" id="pane-split-toggle" type="button"
+                  aria-pressed="false" title="Show a second panel below"
+                  aria-label="Show a second panel below">
+            <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><rect x="2.5" y="2.5" width="11" height="11" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M2.5 8h11" stroke="currentColor" stroke-width="1.2"/></svg>
+          </button>
          </div>
        </header>
-
-      <!-- The sidebar holds more than one thing now, so it says which. Files
-           is the vault; Outline is whatever the open document offers as a map
-           of itself — a note's headings, or a PDF's contents and the passages
-           marked in it; Links is the other direction, the notes that point at
-           this one and the ones that say its name without pointing. -->
-      <!-- The strip scrolls sideways when the five names do not fit, so the
-           split control cannot live inside it: `margin-left: auto` in a
-           scroller pushes a thing past the edge rather than pinning it there.
-           A row holds the two, and only the tabs scroll. -->
-      <div class="pane-tabs-row">
-      <nav class="pane-tabs" id="pane-tabs" role="tablist" aria-label="Sidebar">
-        <button class="pane-tab is-on" id="pane-files-tab" role="tab" data-pane="files"
-                aria-selected="true">Files</button>
-        <button class="pane-tab" id="pane-outline-tab" role="tab" data-pane="outline"
-                aria-selected="false">Outline</button>
-        <button class="pane-tab" id="pane-links-tab" role="tab" data-pane="links"
-                aria-selected="false">Links</button>
-        <button class="pane-tab" id="pane-spelling-tab" role="tab" data-pane="spelling"
-                aria-selected="false">Spelling</button>
-        <button class="pane-tab" id="pane-info-tab" role="tab" data-pane="info"
-                aria-selected="false">Info</button>
-      </nav>
-        <!-- Not a tab, so it is outside both the tablist and the roving
-             tabindex the five share: it does not choose a panel, it decides
-             whether there is a second one. -->
-        <button class="pane-split-toggle" id="pane-split-toggle" type="button"
-                aria-pressed="false" title="Show a second panel below"
-                aria-label="Show a second panel below">
-          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><rect x="2.5" y="2.5" width="11" height="11" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M2.5 8h11" stroke="currentColor" stroke-width="1.2"/></svg>
-        </button>
-      </div>
 
       <section class="saved-searches" id="saved-searches" hidden></section>
       <nav class="tree pane" id="tree" role="tree" aria-label="Notes"></nav>
@@ -122,20 +99,29 @@
       <div class="info-pane pane" id="info-pane" aria-label="Document info" hidden></div>
 
       <!-- The second panel's header: a handle to size it by and a strip to
-           choose what is in it. The panel body itself is one of the five above,
+           choose what is in it. The panel body itself is one of the four above,
            moved below this block when it is the lower one — which is why this
-           sits between them in the markup rather than wrapping anything. -->
+           sits between them in the markup rather than wrapping anything.
+
+           Files is not among them. The tree is the upper panel and always is,
+           so offering it here would be offering to show the vault twice — and
+           it is the reason the strip that used to sit above the tree, naming
+           the same five panels, is gone.
+
+           Outline is whatever the open document offers as a map of itself — a
+           note's headings, or a PDF's contents and the passages marked in it;
+           Links is the other direction, the notes that point at this one and
+           the ones that say its name without pointing. -->
       <div class="pane-split" id="pane-split" hidden>
         <div class="pane-split-grip" id="pane-split-grip" role="separator" tabindex="0"
              aria-orientation="horizontal" aria-label="Resize the lower panel"
              title="Drag to resize · double-click to reset"></div>
         <nav class="pane-tabs is-lower" id="pane-tabs-below" role="tablist"
              aria-label="Lower panel">
-          <button class="pane-tab" role="tab" data-pane="files" aria-selected="false">Files</button>
-          <button class="pane-tab" role="tab" data-pane="outline" aria-selected="false">Outline</button>
-          <button class="pane-tab" role="tab" data-pane="links" aria-selected="false">Links</button>
-          <button class="pane-tab" role="tab" data-pane="spelling" aria-selected="false">Spelling</button>
-          <button class="pane-tab" role="tab" data-pane="info" aria-selected="false">Info</button>
+          <button class="pane-tab" id="pane-outline-tab" role="tab" data-pane="outline" aria-selected="false">Outline</button>
+          <button class="pane-tab" id="pane-links-tab" role="tab" data-pane="links" aria-selected="false">Links</button>
+          <button class="pane-tab" id="pane-spelling-tab" role="tab" data-pane="spelling" aria-selected="false">Spelling</button>
+          <button class="pane-tab" id="pane-info-tab" role="tab" data-pane="info" aria-selected="false">Info</button>
         </nav>
       </div>
 
@@ -198,6 +184,15 @@
                 <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M5.9 4.3 2.6 8l3.3 3.7M10.1 4.3 13.4 8l-3.3 3.7" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
               </button>
             </div>
+            <!-- Why the two editing views are greyed out. An indicator, not a
+                 control: the lock is put on and taken off from the command
+                 palette, which asks first, and a padlock you could click would
+                 be a way past it that never asks. -->
+            <span class="lock-mark" id="lock-mark" hidden role="img"
+                  aria-label="Locked — unlock it from the command palette"
+                  title="This file is locked — unlock it from the command palette to edit it">
+              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><rect x="3.4" y="7" width="9.2" height="6.2" rx="1.4" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M5.6 7V5.4a2.4 2.4 0 0 1 4.8 0V7" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+            </span>
             <!-- The ⌘⇧A the command palette carries, as a button — the panel
                  can be opened without its chord being remembered. -->
             <span class="doc-control-divider" aria-hidden="true"></span>
@@ -409,7 +404,16 @@
         </div>
       </header>
 
-      <div class="ai-log" id="ai-log" role="log" aria-live="polite"></div>
+      <!-- A log, but deliberately not a live region. A reply is written into
+           this element token by token and re-rendered once a frame, and
+           `aria-live` over that is not an announcement but a firehose: the
+           whole growing answer, read again from the top on every frame, over
+           the top of whatever the reader was actually listening to. The busy
+           strip inside it is the live region instead — one short line, changing
+           a handful of times a turn, saying which phase the turn is in and when
+           it ends. Screen-reader users read the reply by navigating into it,
+           the way they would any other document. -->
+      <div class="ai-log" id="ai-log" role="log" aria-live="off"></div>
 
       <form class="ai-compose">
         <!-- Slash commands, the past conversations /history offers, and the

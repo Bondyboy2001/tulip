@@ -22,13 +22,14 @@ import { readFileSync } from 'node:fs'
 
 import ai from '../electron/ai.js'
 import prompt from '../electron/prompt.js'
+import VAULT_CONTRACT from '../electron/vault-contract.json'
 import { citePlugin } from '../src/cite.js'
 import {
   DEFAULT_CATALOGUE, modelFromConfig, offeredModels,
   COPILOT_MODES, copilotModeFromConfig
 } from '../src/models.js'
 
-const { detailOf, measure, readLines, parseOpencode, contextSize } = ai.parsers
+const { detailOf, tokensIn, tokensOf, readLines, parseOpencode, contextSize, policyEnv } = ai.parsers
 const { systemPrompt, turnRules, promptFor, nothingSent } = prompt
 
 let failures = 0
@@ -121,6 +122,35 @@ check('the open whiteboard reaches Copilot as structured context',
       boardTurn.includes('The board has 2 elements.') &&
       boardTurn.includes('Board text:'))
 
+/* The two kinds that used to fall through to an empty <open-note>: the grid
+   and the notebook both build real context in the renderer, and the prompt
+   dropped it on the floor. */
+const dataTurn = promptFor('Which column drifts?', {
+  note: 'Data/readings.csv', kind: 'data', selection: '',
+  text: 'when,volts\n2026-01-01,3.31', rows: 1200, columns: 2, truncated: true
+})
+check('the open data file reaches Copilot with its shape and headings',
+      dataTurn.includes('<open-data-file>Data/readings.csv') &&
+      dataTurn.includes('1,200 rows in 2 columns') &&
+      dataTurn.includes('when,volts') &&
+      dataTurn.includes('cut short'))
+
+const notebookTurn = promptFor('Why does cell 3 fail?', {
+  note: 'Lab/analysis.ipynb', kind: 'notebook', selection: '',
+  text: '# Cell 1\nimport numpy as np', cells: 4, language: 'python', truncated: false
+})
+check('the open notebook reaches Copilot as cells, not as an empty note',
+      notebookTurn.includes('<open-notebook>Lab/analysis.ipynb') &&
+      notebookTurn.includes('It has 4 cells, in python.') &&
+      notebookTurn.includes('import numpy as np') &&
+      !notebookTurn.includes('<open-note>'))
+/* Spelled from the contract, not by hand: the prompt renders these lists from
+   vault-contract.json, and a test that hardcodes today's rendering breaks the
+   day an extension is added even though nothing regressed. */
+check('the briefing names notebooks and data files',
+      briefing.includes(`Notebooks (${VAULT_CONTRACT.notebookExtension}):`) &&
+      briefing.includes(`Data files (${Object.keys(VAULT_CONTRACT.dataExtensions).join(', ')}):`))
+
 const pdfTurn = promptFor('What time is the cruise?', {
   attachments: ['.attachments/Chat/ticket.pdf', '.attachments/Chat/photo.png'],
   pdfDocuments: [{
@@ -167,10 +197,20 @@ check('an attachment with nothing read for it behaves as it always did',
 /* What a tool put in front of the model, for the context ring. Only the string
    shape was ever counted, so a provider answering in blocks filled the context
    with the ring reading as though nothing had been sent. */
-same('a string output is its own length', measure('twelve chars'), 12)
-same('blocks are counted through', measure([{ text: 'ab' }, 'cde']), 5)
-same('an output on a field of its own is counted', measure({ output: 'abcd' }), 4)
-same('nothing said is nothing counted', measure(null), 0)
+same('blocks are counted through', tokensOf([{ text: 'abc' }, 'def']), 2)
+same('an output on a field of its own is counted', tokensOf({ output: 'abcdef' }), 2)
+same('nothing said is nothing counted', tokensOf(null), 0)
+
+/* The ring is the only warning a model whose CLI publishes no count ever gets,
+   so the estimate has to err towards "fuller than you think". Four characters
+   to a token is the English prose rule and is roughly twice wrong for the two
+   things a vault is full of. */
+same('prose is about three characters to a token', tokensIn('x'.repeat(300)), 100)
+check('CJK counts far nearer one character to a token',
+      tokensIn('日本語のテキスト') >= 8)
+check('and is not counted as though it were English',
+      tokensIn('日本語のテキスト') > tokensIn('x'.repeat(8)))
+same('nothing is nothing', tokensIn(''), 0)
 
 const noteTurn = promptFor('What does the introduction say?', {
   note: 'notes/lecture.md', kind: 'note', line: 12, heading: 'Introduction',
@@ -238,8 +278,9 @@ check('a note that changed is quoted again',
       edited.includes('The introduction was rewritten.'))
 
 /* A long note is quoted once. Edited after that, quoting it again would cost
-   its whole length for the sake of one changed line, so the agent is told the
-   copy is stale instead — and keeps being told until it sees the new text. */
+   its whole length for the sake of one changed line — so what goes instead is
+   the changed line itself, which is both smaller than the note and more use
+   than being told the copy is stale. */
 const bookText = 'x'.repeat(60000)
 const book = { note: 'notes/book.md', kind: 'note', line: 1,
                excerpt: bookText, excerptCut: false, noteChars: bookText.length }
@@ -248,15 +289,40 @@ check('a long note is quoted whole the first time',
       promptFor('Summarise this.', book, reading).includes(bookText))
 const rewritten = { ...book, excerpt: `${bookText}y` }
 const afterEdit = promptFor('And now?', rewritten, reading)
-check('an edit to a long note names the file rather than re-quoting it',
+check('an edit to a long note sends the change, not the note',
       !afterEdit.includes(bookText) &&
       afterEdit.includes('notes/book.md has changed since the copy quoted earlier'))
-check('and keeps saying so while the copy the model holds is stale',
+/* A note with no line breaks has no boundary to widen the run out to, and the
+   search for one runs to both ends of the file. The change is one character and
+   what goes must be about one character. */
+check('the change is the change, even in a note with no line breaks',
+      afterEdit.length < 400)
+
+/* Having been told what changed, the model holds the current text — so the next
+   turn names it rather than describing the same edit again. */
+check('a note patched once is current from then on',
       promptFor('Still?', rewritten, reading)
-        .includes('has changed since the copy quoted earlier'))
-check('a long note back to the version already quoted is named as current',
-      promptFor('Reverted?', book, reading)
         .includes('The copy of notes/book.md quoted earlier'))
+
+/* And a revert is just another change, described the same way: the copy the
+   model holds is the rewritten one, so going back to the original is a diff
+   against that rather than a return to something it still has. */
+check('a revert is described against what the model actually holds',
+      promptFor('Reverted?', book, reading)
+        .includes('notes/book.md has changed since the copy quoted earlier'))
+
+/* A rewrite is not an edit. Where the change is most of the note, describing it
+   says less than sending the reader to the file. */
+const wholesale = { ...book, excerpt: 'y'.repeat(60000) }
+check('a wholesale rewrite still falls back to reading the file',
+      promptFor('Rewritten?', wholesale, nothingSent2(book))
+        .includes('too long to quote again'))
+
+function nothingSent2 (seed) {
+  const memo = nothingSent()
+  promptFor('Seed.', seed, memo)
+  return memo
+}
 
 const pages = { pdfContext: '--- book.pdf page 4 of 90 ---\nTIME: 16:00' }
 const askedOnce = nothingSent()
@@ -433,6 +499,77 @@ check('two citations in one paragraph both render',
    and past the bound this is prose in brackets like any other. */
 check('an over-long name is not a document',
       !cited(`See [${'a'.repeat(130)}.pdf p. 4].`).includes('ai-cite'))
+
+/* ------------------------------------------------------------ the fence */
+
+/* What the agent may reach for is a fact about the process, not a request in
+   the prompt — and not a CLI default either. Every mode states its whole grant,
+   so a default cannot move underneath the toggle in either direction: handing a
+   shell to the mode that asked only for the notes, or withholding one from the
+   mode whose label promises it. */
+const policy = (mode) => {
+  const inline = policyEnv(mode).OPENCODE_CONFIG_CONTENT
+  return inline ? JSON.parse(inline).permission : null
+}
+
+check('read mode denies the shell', policy('read').bash === 'deny')
+check('ask mode allows the shell', policy('ask').bash === 'allow')
+check('ask mode still allows the notes',
+      policy('ask').edit === 'allow' && policy('ask').write === 'allow')
+
+/* Not one of the questions the switch is about. Reading a page changes nothing
+   in the vault, which is what the modes are a promise about, so the mode that
+   promises not to touch the notes can still go and read one. */
+for (const mode of ['read', 'ask', 'auto']) {
+  check(`${mode} mode fetches the web`, policy(mode).webfetch === 'allow')
+}
+
+/* Where the line between ask and auto actually falls. Both have the shell; only
+   auto's may leave the vault, and `external_directory` is what makes "inside
+   the vault" a fact about the process rather than a line in the prompt. */
+check('read mode keeps out of other directories',
+      policy('read').external_directory === 'deny')
+check('ask mode keeps its shell in the vault',
+      policy('ask').external_directory === 'deny')
+/* Auto is the tier whose own label calls itself dangerous, and every capability
+   the label names is granted here rather than left to the CLI. */
+check('auto mode allows the shell', policy('auto').bash === 'allow')
+check('auto mode allows the web', policy('auto').webfetch === 'allow')
+check('auto mode allows the notes',
+      policy('auto').edit === 'allow' && policy('auto').write === 'allow')
+/* Its own grant, separate from the shell: `cd /tmp && curl …` is a command auto
+   was refused on the step out of the vault, not on the shell it ran in. */
+check('auto mode allows a command that leaves the vault',
+      policy('auto').external_directory === 'allow')
+
+/* The general form of that bug. A headless `run` has nowhere to put a question,
+   so anything left to be asked about is refused — see the note on TOOL_POLICY. */
+for (const mode of ['read', 'ask', 'auto']) {
+  check(`${mode} mode asks nothing it cannot be answered on`,
+        Object.values(policy(mode)).every((e) => e === 'allow' || e === 'deny'))
+}
+check('an unknown mode is left alone', policy(undefined) === null)
+
+/* A user's own inline config is extended, not replaced: only the keys the fence
+   is about are stated on top of it. */
+process.env.OPENCODE_CONFIG_CONTENT = JSON.stringify({
+  model: 'mine/own', permission: { external_directory: 'allow', edit: 'ask' }
+})
+const merged = JSON.parse(policyEnv('ask').OPENCODE_CONFIG_CONTENT)
+check('the user’s own config survives the fence', merged.model === 'mine/own')
+check('the fence wins on the keys it is about',
+      merged.permission.external_directory === 'deny')
+
+/* The same in the other direction: the mode grants as well as withholds, so a
+   config that would put the shell behind a prompt does not get to do that to
+   the mode whose whole point is not being asked. */
+process.env.OPENCODE_CONFIG_CONTENT = JSON.stringify({
+  permission: { bash: 'ask', webfetch: 'ask' }
+})
+const opened = JSON.parse(policyEnv('auto').OPENCODE_CONFIG_CONTENT)
+check('auto’s grant wins over a config that would prompt',
+      opened.permission.bash === 'allow' && opened.permission.webfetch === 'allow')
+delete process.env.OPENCODE_CONFIG_CONTENT
 
 /* ----------------------------------------------------------------- report */
 

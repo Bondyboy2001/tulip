@@ -40,7 +40,7 @@
     ".html", ".htm", ".css", ".scss", ".sass", ".less",
     ".json", ".yaml", ".yml", ".toml", ".xml", ".ini", ".conf", ".cfg",
     ".sh", ".bash", ".zsh", ".fish", ".ps1",
-    ".graphql", ".gql", ".diff", ".patch", ".txt"
+    ".graphql", ".gql", ".diff", ".patch", ".txt", ".bib"
   ],
 
   "_data_comment": [

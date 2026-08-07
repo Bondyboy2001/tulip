@@ -192,6 +192,11 @@ export function mountPdf ({
   const state = {
     path: '',
     doc: null,
+    /* The loading task the document came out of, kept because it is the only
+       thing that can take the document away again: a document proxy has no
+       `destroy` of its own, and destroying the task takes the document, its
+       worker and the buffer with it. Same reasoning as src/pdf-text.js. */
+    loading: null,
     pages: [],          // one entry per page, in order
     scale: 1,           // what pages are currently drawn at
     zoom: 'fit',        // 'fit' or a number from ZOOM_STEPS
@@ -1348,9 +1353,10 @@ export function mountPdf ({
         ? 'That PDF is password-protected.'
         : 'That PDF could not be read.')
     }
-    if (epoch !== state.epoch) { doc.destroy(); return null }
+    if (epoch !== state.epoch) { loading.destroy().catch(() => {}); return null }
 
     state.doc = doc
+    state.loading = loading
     /* From here on, every await is re-checked. Loading the marks, fetching the
        first page and walking a big outline are all slow enough for the reader
        to have opened something else meanwhile — and an open that settles late
@@ -1473,10 +1479,10 @@ export function mountPdf ({
        its settle would fire against the next one — holding that document's
        first pages back, and then refreshing a viewer that had moved on. */
     release()
-    const doc = state.doc
+    const loading = state.loading
 
     Object.assign(state, {
-      path: '', doc: null, pages: [], marks: [], base: null, at: 1, quote: null, flashing: null,
+      path: '', doc: null, loading: null, pages: [], marks: [], base: null, at: 1, quote: null, flashing: null,
       // Not the tool or the pen — those are the reader's, not the document's.
       past: [], future: []
     })
@@ -1484,7 +1490,7 @@ export function mountPdf ({
     sheet.replaceChildren()
     // The words belonged to that document; the next one has its own.
     pageText.clear()
-    try { await doc.destroy() } catch { /* going away regardless */ }
+    try { await loading?.destroy() } catch { /* going away regardless */ }
   }
 
   /* ------------------------------------------------------------ moving about */

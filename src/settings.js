@@ -125,6 +125,21 @@ const SECTIONS = [
       }
     ]
   },
+  /* The `.csv` grid. One question so far, and it is a real one: rules between
+     the columns are enough to read a table by, and a full lattice is what you
+     want when you are aiming at cells rather than reading rows. */
+  {
+    id: 'csv',
+    label: 'CSV',
+    rows: [
+      {
+        key: 'csvBorders',
+        type: 'toggle',
+        name: 'Border every cell',
+        fallback: false
+      }
+    ]
+  },
   {
     id: 'pdf',
     label: 'PDF',
@@ -302,9 +317,11 @@ export function mountSettings ({ el, api, values, onChange }) {
 
     let words = []
     function paint () {
+      /* An empty dictionary shows an empty list. The field above it already
+         says what to type and the chips say what happens to it, so the
+         paragraph explaining both was a wall of text over nothing. */
       if (!words.length) {
-        list.replaceChildren(node('span', 'settings-hint',
-          'Nothing yet. Right-click an underlined word and choose “Add to Dictionary”, or type one above.'))
+        list.replaceChildren()
         return
       }
       const hit = matcher(input.value)

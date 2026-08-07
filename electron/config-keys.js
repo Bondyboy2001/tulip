@@ -50,6 +50,9 @@ const CONFIG_KEYS = {
   /* The window and its panels. */
   ai: string,
   sidebar: string,
+  /* No longer written: the sidebar's upper panel is the file tree and nothing
+     else. Still accepted, so a config left by an older version loads rather
+     than being rejected, and `paneBelow` is read out of it once. */
   pane: orCleared(string),
   /* The optional second sidebar panel, and how much of the height it takes. */
   paneBelow: orCleared(string),
@@ -71,8 +74,17 @@ const CONFIG_KEYS = {
   tabIndex: number,
   expanded: stringList,
 
+  /* The documents held in reading view until they are unlocked again, as
+     vault-relative paths. A preference about particular files rather than
+     about the app, but it is stored the same way the tab strip is and for the
+     same reason: it has to survive a relaunch. */
+  lockedFiles: stringList,
+
   /* Appearance. */
   theme: string,
+  /* A lattice around every cell of a `.csv` grid, rather than rules between
+     the columns only. */
+  csvBorders: boolean,
   fontBody: string,
   fontUi: string,
   centerHeadings: boolean,

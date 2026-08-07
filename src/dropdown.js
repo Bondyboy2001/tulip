@@ -30,52 +30,62 @@ const TICK = 'm3.5 8.3 3 3 6-6.4'
  * and both stop it; a listener added later would never see the key, and Escape
  * over an open menu would close the pane underneath it instead of the menu.
  * Imports run before either of them is mounted, so this one is first.
+ *
+ * Guarded on there being a document at all, because the modules that hold a
+ * menu also hold the file formats — a notebook, a `.csv` — and the tests import
+ * those under Node to read one, where nothing here has anything to listen to.
  */
 let live = null
 
-document.addEventListener('keydown', (event) => {
-  if (!live) return
-  const run = live.keys[event.key]
-  if (!run) return
-  event.preventDefault()
-  event.stopPropagation()
-  run()
-}, true)
-
-document.addEventListener('click', () => live?.close())
-window.addEventListener('resize', () => live?.close())
-/* Scrolling moves the control the menu is hanging from, so the menu follows
-   rather than closing: something else on the page scrolling — the copilot's
-   own log settling as its panel opens — is not a reason to take the menu
-   away. Capture, because the scroll that matters is the settings pane's own,
-   and that one does not bubble.
-
-   The menu's own scrolling is exempt, and that exemption is what makes a long
-   list usable at all: `place` clears the height cap to measure, which for a
-   list of several hundred momentarily makes the menu taller than its own
-   scroller — and an element that no longer overflows has its scroll position
-   reset to the top. Re-placing on every wheel tick therefore pinned the list to
-   its first entry. */
 /* Coalesced onto a frame: `place` interleaves style writes with height reads,
    so each call is three forced reflows, and a scroll gesture delivers events
    faster than the page can be laid out. Once per frame is as often as the
    result could be seen anyway. */
 let placing = 0
 
-window.addEventListener('scroll', (event) => {
-  if (!live) return
-  if (event.target instanceof Node && live.holds(event.target)) return
-  if (placing) return
-  placing = requestAnimationFrame(() => { placing = 0; live?.place() })
-}, true)
+if (typeof document !== 'undefined') {
+  document.addEventListener('keydown', (event) => {
+    if (!live) return
+    const run = live.keys[event.key]
+    if (!run) return
+    event.preventDefault()
+    event.stopPropagation()
+    run()
+  }, true)
+
+  document.addEventListener('click', () => live?.close())
+  window.addEventListener('resize', () => live?.close())
+
+  /* Scrolling moves the control the menu is hanging from, so the menu follows
+     rather than closing: something else on the page scrolling — the copilot's
+     own log settling as its panel opens — is not a reason to take the menu
+     away. Capture, because the scroll that matters is the settings pane's own,
+     and that one does not bubble.
+
+     The menu's own scrolling is exempt, and that exemption is what makes a long
+     list usable at all: `place` clears the height cap to measure, which for a
+     list of several hundred momentarily makes the menu taller than its own
+     scroller — and an element that no longer overflows has its scroll position
+     reset to the top. Re-placing on every wheel tick therefore pinned the list
+     to its first entry. */
+  window.addEventListener('scroll', (event) => {
+    if (!live) return
+    if (event.target instanceof Node && live.holds(event.target)) return
+    if (placing) return
+    placing = requestAnimationFrame(() => { placing = 0; live?.place() })
+  }, true)
+}
 
 const icon = (path, size) => svgIcon(`<path d="${path}"/>`, { size, stroke: 1.6 })
 
 /**
  * A menu of named values.
  *
- * @param options   [{ value, label }] — values are compared with ===, so a
- *                  numeric setting keeps its numbers and hands them back
+ * @param options   [{ value, label, icon }] — values are compared with ===, so
+ *                  a numeric setting keeps its numbers and hands them back.
+ *                  `icon` is a function returning a node, called afresh for the
+ *                  button and for each row: one node cannot be in two places,
+ *                  and the chosen option is drawn in both at once.
  * @param value     the one currently chosen
  * @param onChange  (value) => void, only for a value that is actually new
  * @param label     what the control is called, for a screen reader
@@ -90,6 +100,11 @@ const icon = (path, size) => svgIcon(`<path d="${path}"/>`, { size, stroke: 1.6 
  *                  click, or a pick. A caller that built the control around a
  *                  transient anchor (the embed picker stands on an invisible
  *                  button at the chip's position) takes it down here.
+ * @param onOpen  called as the menu opens, for a list that costs something to
+ *                  learn — the notebook's kernels are a question for a Jupyter
+ *                  server that is not running until someone asks. It may fill
+ *                  the list in later with `set`, which re-filters and re-places
+ *                  a menu that is already up.
  *
  * @returns { root, set, value } — `set` replaces the options and the choice at
  *          once, which is what a catalogue arriving late needs.
@@ -115,7 +130,7 @@ export function matcher (query) {
   }
 }
 
-export function dropdown ({ options = [], value, onChange, label, className = '', search = false, placeholder = '', onClose } = {}) {
+export function dropdown ({ options = [], value, onChange, label, className = '', search = false, placeholder = '', onClose, onOpen } = {}) {
   let items = options
   /* What the menu is actually showing — `items` until something is typed. Every
      index below is into this, not into `items`, or picking the third row of a
@@ -144,7 +159,11 @@ export function dropdown ({ options = [], value, onChange, label, className = ''
   if (label) button.setAttribute('aria-label', label)
 
   const text = node('span', 'dd-value')
-  button.append(text, icon(CARET, 11))
+  /* Whatever the chosen option draws in front of its name — a language's brand
+     mark, for the notebook's kernels. Its own element rather than a child of
+     `text`, which ellipsises. */
+  const lead = node('span', 'dd-lead')
+  button.append(lead, text, icon(CARET, 11))
   root.append(button)
 
   const menu = node('div', 'dd-menu')
@@ -165,11 +184,13 @@ export function dropdown ({ options = [], value, onChange, label, className = ''
   const matching = (hit) => (item) => hit(item.label)
   const filtering = () => search || items.length > FILTER_FROM
 
-  const labelOf = (v) => items.find((item) => item.value === v)?.label
+  const itemOf = (v) => items.find((item) => item.value === v)
   const paintButton = () => {
-    const label = labelOf(chosen)
-    text.textContent = label ?? placeholder
-    button.classList.toggle('is-empty', !label)
+    const item = itemOf(chosen)
+    text.textContent = item?.label ?? placeholder
+    button.classList.toggle('is-empty', !item)
+    const drawn = item?.icon?.()
+    lead.replaceChildren(...(drawn ? [drawn] : []))
   }
 
   function refilter () {
@@ -201,7 +222,9 @@ export function dropdown ({ options = [], value, onChange, label, className = ''
       row.setAttribute('aria-selected', String(item.value === chosen))
       row.dataset.at = String(index)
       row.classList.toggle('is-at', index === at)
-      row.append(icon(TICK, 13), node('span', 'dd-option-name', item.label))
+      const drawn = item.icon?.()
+      row.append(icon(TICK, 13), ...(drawn ? [drawn] : []),
+        node('span', 'dd-option-name', item.label))
       return row
     }))
     if (!visible.length) list.append(node('div', 'dd-empty', NO_MATCH))
@@ -268,6 +291,10 @@ export function dropdown ({ options = [], value, onChange, label, className = ''
 
   function open () {
     live?.close()
+    /* Before the list is measured, so a caller that already has the answer can
+       hand it over synchronously and open at the right size; one that has to go
+       and ask calls `set` when it comes back. */
+    onOpen?.()
     query = ''
     field.value = ''
     at = Math.max(0, items.findIndex((item) => item.value === chosen))

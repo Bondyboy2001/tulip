@@ -21,19 +21,23 @@
      makes the mapping from scroll position to row index exact rather than
      measured.
 
-   - Sorting and filtering are ways of *looking* at the file, not edits to it.
-     They live in `order`, a list of source row indices, and every read and
-     write goes through it. Sorting a hundred-thousand-row export and saving
-     must not rewrite all hundred thousand lines because you wanted to see the
-     largest first — so it doesn't, and the one case where you did mean it
-     (Apply sort) is a button that says so and can be undone.
+   - Sorting is a way of *looking* at the file, not an edit to it. It lives in
+     `order`, a list of source row indices, and every read and write goes
+     through it. Sorting a hundred-thousand-row export and saving must not
+     rewrite all hundred thousand lines because you wanted to see the largest
+     first — so it doesn't, and the one case where you did mean it (the
+     heading menu's "Write this order into the file") says so and can be undone.
 
    What the grid can do, beyond showing the file:
 
      sorting       click a heading; asc → desc → off, blanks last either way
-     filtering     one box that highlights matches, or hides the rows without
-     selection     a rectangle — drag, shift-click, shift-arrows, whole rows
-                   and columns, and the sum/average of whatever is in it
+     finding       one box that highlights every cell holding what you typed
+     filtering     per column, by ticking the values to keep — and the find box
+                   can hide what it does not match, for the times the question
+                   is about the whole row rather than one column
+     selection     rectangles — drag, shift-click, shift-arrows, whole rows
+                   and columns, several at once and not necessarily touching
+                   (⌘-click), and the sum/average of whatever is in them
      clipboard     copy, cut and paste a rectangle as TSV, which is what a
                    spreadsheet puts on the clipboard and expects back
      structure     insert and delete rows and columns, rename headings, resize
@@ -43,6 +47,7 @@
    ================================================================== */
 
 import { dataDelimiter } from './vault-paths.js'
+import { dropdown } from './dropdown.js'
 
 /* Fixed, and in one place, because the virtual window's arithmetic depends on
    it: scroll position divided by this is the first row to build. A row that
@@ -87,6 +92,18 @@ const CELL_PADDING = 18
    memory, so far fewer of those are kept. */
 const HISTORY_LIMIT = 250
 const SNAPSHOT_LIMIT = 30
+
+/* Where the platform is a Mac, because one gesture depends on it: Ctrl-click
+   *is* the right-click here, so taking Ctrl as "and this one too" would add a
+   block to the selection every time somebody opened a context menu. ⌘ is what
+   a Mac presses for that anyway; everywhere else there is no ⌘ to press and
+   Ctrl is what every list in the system uses. */
+const MAC = typeof navigator !== 'undefined' &&
+  /Mac|iPhone|iPad/i.test(navigator.platform || navigator.userAgent || '')
+
+/** Does this click mean "add to what is already selected" rather than
+ *  "select this instead"? */
+const addsToSelection = (event) => event.metaKey || (event.ctrlKey && !MAC)
 
 /* ------------------------------------------------------------- the format */
 
@@ -524,6 +541,67 @@ export function filterOrder (rows, base, query) {
   })
 }
 
+/* ------------------------------------------------------ the column filter
+
+   Finding highlights; filtering takes rows away. They answer different
+   questions — "where does it say TV Show" against "show me only the TV shows"
+   — and the second one is the question a column of categories is usually being
+   asked, so it gets a control of its own rather than a mode on the find box.
+
+   A filter is per column and is a set of *hidden* values, not kept ones. That
+   way round for two reasons: a value typed into the column after the filter
+   was set is shown rather than silently swallowed by a list that could not
+   have known about it, and unticking one category out of forty is one entry
+   rather than thirty-nine. Filters on different columns are all applied — type
+   is TV Show *and* year is not blank — which is what picking in two columns
+   reads as. */
+
+/**
+ * Every distinct value in one column, with how many of `base`'s rows hold it.
+ *
+ * Ordered the way sorting that column orders it — numbers as numbers, blanks
+ * last — because this list is read by scanning it for the one you want, and
+ * `10` filed between `1` and `2` is a list you cannot scan. Blank is a value
+ * like any other here: rows with nothing in the column are a group a person
+ * means to keep or drop, and no other control in the grid can name them.
+ *
+ * @returns [{ value, count }] — `value` is the cell's text, blanks as ''
+ */
+export function columnValues (rows, base, col) {
+  const counts = new Map()
+  for (const index of base) {
+    const text = String(rows[index]?.[col] ?? '')
+    counts.set(text, (counts.get(text) ?? 0) + 1)
+  }
+  const list = [...counts].map(([value, count]) => ({ value, count }))
+  list.sort((p, q) => {
+    const pBlank = p.value.trim() === ''
+    const qBlank = q.value.trim() === ''
+    if (pBlank || qBlank) return pBlank && qBlank ? 0 : (pBlank ? 1 : -1)
+    return compareCells(p.value, q.value)
+  })
+  return list
+}
+
+/**
+ * The rows of `base` that every column filter lets through.
+ *
+ * @param filters a Map from column index to the Set of values hidden in it. An
+ *                empty set is no filter at all, so clearing one by unticking
+ *                its last box does not have to remember to delete the entry.
+ */
+export function filteredOrder (rows, base, filters) {
+  const live = [...(filters ?? new Map())].filter(([, hidden]) => hidden?.size)
+  if (!live.length) return base.slice()
+  return base.filter((index) => {
+    const row = rows[index] || []
+    for (const [col, hidden] of live) {
+      if (hidden.has(String(row[col] ?? ''))) return false
+    }
+    return true
+  })
+}
+
 /** Two corners as the rectangle between them. */
 export function normalRect (a, b) {
   return {
@@ -675,15 +753,21 @@ export function mountCsv ({
   search.placeholder = 'Find in table'
   search.spellcheck = false
 
-  const filterToggle = button('Hide other rows', 'filter', 'Show only the rows that match')
-  filterToggle.classList.add('csv-toggle')
   const found = document.createElement('span')
   found.className = 'csv-found'
 
-  const sortChip = button('Apply sort to file', 'apply-sort', 'Write the rows in this order — undoable, and saved')
-  sortChip.hidden = true
-  const clearSort = button('Clear sort', 'clear-sort', 'Back to the file’s own order')
-  clearSort.hidden = true
+  /* The find box, promoted to a filter. Hidden until something is typed,
+     because a toggle for a box with nothing in it is a control that cannot do
+     anything. See `setOnlyMatches`. */
+  const onlyBtn = button('Only matches', 'only-matches',
+    'Hide the rows that do not match what you typed')
+
+  /* The column filter's way in from the keyboard and from a bar that can be
+     read, since the funnel in a heading only shows on hover. It acts on the
+     column the cursor is in — see `openFilter`. */
+  const filterBtn = button('Filter…', 'filter', 'Filter this column by its values (⇧⌘F)')
+  const clearFilters = button('Clear filters', 'clear-filters',
+    'Show every row again')
 
   /* What the file is separated by, shown only when that is worth saying —
      see `paintBar`. Reading a file with the wrong delimiter is the one failure
@@ -691,16 +775,16 @@ export function mountCsv ({
      rather than in a menu, and it is a control rather than a label because a
      guess that went wrong has to be correctable by the person who can see it
      went wrong. */
-  const delimiterPick = document.createElement('select')
-  delimiterPick.className = 'csv-delimiter'
-  delimiterPick.title = 'What separates the values in this file'
-  for (const candidate of DELIMITER_CANDIDATES) {
-    const option = document.createElement('option')
-    option.value = candidate
-    option.textContent = delimiterName(candidate)
-    delimiterPick.append(option)
-  }
-  delimiterPick.hidden = true
+  const delimiterPick = dropdown({
+    label: 'Delimiter',
+    className: 'csv-delimiter',
+    options: DELIMITER_CANDIDATES.map((candidate) => ({
+      value: candidate, label: delimiterName(candidate)
+    })),
+    onChange: (candidate) => { useDelimiter(candidate) }
+  })
+  delimiterPick.root.title = 'What separates the values in this file'
+  delimiterPick.root.hidden = true
 
   /* A way of looking rather than an edit, so it sits with the sort chips and
      stays on the bar in Reading view. */
@@ -714,8 +798,8 @@ export function mountCsv ({
   const gap = document.createElement('span')
   gap.className = 'csv-bar-gap'
 
-  bar.append(search, filterToggle, found, sortChip, clearSort, gap,
-    delimiterPick, fitAll, undoBtn, redoBtn, addRow, addCol)
+  bar.append(search, onlyBtn, found, gap,
+    delimiterPick.root, filterBtn, clearFilters, fitAll, undoBtn, redoBtn, addRow, addCol)
 
   function button (label, act, title) {
     const element = document.createElement('button')
@@ -755,6 +839,14 @@ export function mountCsv ({
   menu.className = 'csv-menu'
   menu.hidden = true
 
+  /* The column filter's panel. A sibling of the menu and positioned the same
+     way, but it is not a menu: it stays open while boxes are ticked, because
+     picking three categories out of a column is three decisions and a menu
+     that closed after each of them would be three trips back to the heading. */
+  const filterPanel = document.createElement('div')
+  filterPanel.className = 'csv-filter'
+  filterPanel.hidden = true
+
   /* The grid, to anything reading the page rather than looking at it.
    *
    * All of this was bare `div`s, which is to say a screen reader was told
@@ -775,9 +867,12 @@ export function mountCsv ({
   const table = document.createElement('div')
   table.className = 'csv-table'
   table.setAttribute('role', 'grid')
+  /* More than one cell can be selected at a time, and — since ⌘-click — more
+     than one block of them. `aria-selected` on the cells says which. */
+  table.setAttribute('aria-multiselectable', 'true')
   table.append(headRow, scroller)
 
-  frame.append(bar, table, menu)
+  frame.append(bar, table, menu, filterPanel)
   host.replaceChildren(frame)
 
   let current = null          // { path, delimiter, newline }
@@ -790,12 +885,27 @@ export function mountCsv ({
   let order = []
   let sort = null             // { col, dir }
   let query = ''
-  let filtering = false
+  /* Column index → the Set of values hidden in that column. A way of looking,
+     like the sort: it lives in `order` and never touches `rows`, so filtering
+     a two-hundred-thousand-row export and saving writes the file it opened. */
+  let filters = new Map()
+  /* Whether the find box hides what it does not match, rather than only
+     marking it. Off by default: finding is the more common thing to want from
+     a box you can type into without meaning to lose your place. */
+  let onlyMatches = false
   let dirty = false
   let saving = null
   let flushRequested = false
+  /* Counts edits rather than describing them. A write is not instant and a
+     hundred-thousand-row file takes a real fraction of a second to format and
+     put on disk; anything typed during one belongs to a version of the file
+     that is not the version being written. See `saveFile`. */
+  let revision = 0
   let cursor = { r: 0, c: 0 } // view coordinates; -1 row means the header
   let anchor = { r: 0, c: 0 }
+  /* The blocks a ⌘-click added, which the anchor and the cursor cannot hold
+     because they describe one rectangle. See "the selection". */
+  let extras = []
   /* Whether the cursor is being *shown*. Escape puts it away, which is what
      "deselect" means in a grid — but the coordinates stay, so an arrow key
      picks up where the selection was rather than jumping back to A1. Anything
@@ -832,10 +942,10 @@ export function mountCsv ({
      thousand of them would be a worse view of the file rather than a calmer
      one. What it takes out is the editing: no cell opens, no structure
      changes, and the bar keeps only the controls that are ways of *looking* —
-     find, filter, sort. Sorting and filtering stay for the reason they are
-     `order` and not edits at all; Apply sort goes, because it is the one that
-     writes. Copy stays, cut and paste do not: reading a table and taking a
-     column out of it is reading. */
+     find, fit, sort. Sorting stays for the reason it is `order` and not an
+     edit at all; writing that order into the file goes, because it is the one
+     that writes. Copy stays, cut and paste do not: reading a table and taking
+     a column out of it is reading. */
   let readonly = false
 
   /** The one guard, on every path that would change the file. It says why
@@ -880,9 +990,17 @@ export function mountCsv ({
   const viewRows = () => order.length
   const bodyWidth = () => widths.reduce((sum, w) => sum + w, GUTTER)
   const sourceOf = (r) => (r === -1 ? -1 : order[r] ?? -1)
-  const plainOrder = () => !sort && !(filtering && query.trim())
+  /** Is anything hiding rows? The find box counts only while it is a filter. */
+  const filtering = () =>
+    [...filters.values()].some((hidden) => hidden.size) || (onlyMatches && !!query.trim())
+  /* True when `order` is the file's own order, front to back — which is what
+     lets an insert splice `rows` and rebuild rather than patch. A filter makes
+     it false for the same reason a sort does: a rebuild would drop the blank
+     row that was just asked for, since a blank matches nothing. */
+  const plainOrder = () => !sort && !filtering()
 
   const setDirty = (next) => {
+    if (next) revision++
     if (dirty === next) return
     dirty = next
     onDirty(next)
@@ -1003,10 +1121,12 @@ export function mountCsv ({
   }
 
   /** The width one column wants: its widest cell, and never narrower than the
-   *  heading, which carries the sort mark and the grip beside its label. */
+   *  heading, which carries the sort mark, the funnel and the grip beside its
+   *  label. */
   const fittedWidth = (c) => {
-    // +22 for the sort mark and the grip, which sit beside the heading's text.
-    let wanted = textWidth(String(header[c] ?? '')) + 22
+    // +34 for the sort mark, the funnel and the grip, which sit beside the
+    // heading's text.
+    let wanted = textWidth(String(header[c] ?? '')) + 34
     const limit = Math.min(order.length, FIT_SCAN)
     for (let i = 0; i < limit; i++) {
       wanted = Math.max(wanted, textWidth(String(rows[order[i]]?.[c] ?? '')))
@@ -1063,11 +1183,16 @@ export function mountCsv ({
 
   /* ------------------------------------------------------------- the view */
 
-  /** Recompute `order` from the filter and the sort. Everything structural
-   *  ends here, because both of them are functions of the rows. */
+  /** Recompute `order` from the filters and the sort. Everything structural
+   *  ends here, because both are functions of the rows.
+   *
+   *  Filtering first and sorting what is left, rather than the other way
+   *  round: the sort is the expensive half and there is no reason to order
+   *  rows that are about to be dropped. */
   const rebuildOrder = ({ keepSource = null } = {}) => {
     let next = rows.map((_, i) => i)
-    if (filtering && query.trim()) next = filterOrder(rows, next, query)
+    next = filteredOrder(rows, next, filters)
+    if (onlyMatches && query.trim()) next = filterOrder(rows, next, query)
     if (sort && sort.col < columns()) next = sortedOrder(rows, next, sort.col, sort.dir)
     order = next
     if (keepSource !== null) {
@@ -1087,6 +1212,18 @@ export function mountCsv ({
     anchor = {
       r: Math.max(-1, Math.min(lastRow, anchor.r)),
       c: Math.max(0, Math.min(lastCol, anchor.c))
+    }
+    /* The extra blocks are view coordinates too, and a shorter table leaves one
+       hanging over the end. Most things that change the shape of the table
+       collapse the selection outright — see `collapse` — so this is the belt to
+       that braces: undo is the one path that puts a whole view back. */
+    if (extras.length) {
+      extras = extras.map((box) => ({
+        r0: Math.max(-1, Math.min(lastRow, box.r0)),
+        r1: Math.max(-1, Math.min(lastRow, box.r1)),
+        c0: Math.max(0, Math.min(lastCol, box.c0)),
+        c1: Math.max(0, Math.min(lastCol, box.c1))
+      }))
     }
   }
 
@@ -1193,6 +1330,8 @@ export function mountCsv ({
       cell.title = readonly
         ? 'Click to sort · ⌘-click to select the column'
         : 'Click to sort · ⌘-click to select the column · double-click to rename'
+      const hiding = filters.get(c)?.size ?? 0
+      cell.classList.toggle('is-filtered', hiding > 0)
 
       const label = document.createElement('span')
       label.className = 'csv-th-label'
@@ -1200,12 +1339,24 @@ export function mountCsv ({
       const mark = document.createElement('span')
       mark.className = 'csv-sort'
       mark.textContent = sort && sort.col === c ? (sort.dir === 'asc' ? '▲' : '▼') : ''
+      /* Faint until the heading is hovered, and lit for good once the column
+         is filtered — a funnel on every heading of a thirty-column export is
+         thirty pieces of furniture, and a column that is hiding rows has to
+         say so whether or not anything is under the pointer. */
+      const funnel = document.createElement('span')
+      funnel.className = 'csv-funnel'
+      funnel.dataset.funnel = String(c)
+      funnel.textContent = '⌄'
+      funnel.setAttribute('aria-hidden', 'true')
+      funnel.title = hiding
+        ? `Filtered — hiding ${hiding.toLocaleString()} ${hiding === 1 ? 'value' : 'values'}`
+        : 'Filter this column by its values'
       const grip = document.createElement('span')
       grip.className = 'csv-grip'
       grip.dataset.grip = String(c)
       grip.title = 'Drag to resize · double-click to fit'
 
-      cell.append(label, mark, grip)
+      cell.append(label, mark, funnel, grip)
       cellStyle(cell, c)
       frag.append(cell)
     }
@@ -1354,51 +1505,103 @@ export function mountCsv ({
 
   /* ---------------------------------------------------------- the selection
 
-     One rectangle, from an anchor to the cursor. A whole column is that
-     rectangle with the heading at one corner and the last row at the other,
-     which is why `-1` is a row here rather than a special case. */
+     A list of rectangles. Nearly always one — from an anchor to the cursor,
+     grown by a drag or a shift-click. A whole column is that rectangle with the
+     heading at one corner and the last row at the other, which is why `-1` is a
+     row here rather than a special case.
+
+     ⌘-click is what makes it a list: a second column, a fourth row, a block
+     somewhere else entirely. The question a person asks by picking three
+     columns out of thirty is the same one they ask by dragging across two — how
+     much, on average, and give me those — so a picked-apart selection totals
+     and copies exactly as a dragged one does.
+
+     The live rectangle is `anchor`→`cursor` and is always the last of them, so
+     a drag or a shift-arrow goes on growing whichever block was started most
+     recently. `extras` holds the ones already finished, in view coordinates —
+     which is why anything that moves rows out from under them (a sort, a
+     delete, a paste that grows the table) collapses the selection back to one
+     rather than leaving blocks pointing at rows that have moved. */
 
   const rect = () => normalRect(anchor, cursor)
-  const singleCell = () => anchor.r === cursor.r && anchor.c === cursor.c
+  /** Every block, the live one last. */
+  const ranges = () => (extras.length ? [...extras, rect()] : [rect()])
+  const singleCell = () =>
+    !extras.length && anchor.r === cursor.r && anchor.c === cursor.c
+
+  const holds = (box, r, c) => r >= box.r0 && r <= box.r1 && c >= box.c0 && c <= box.c1
+  const sameBox = (a, b) => a.r0 === b.r0 && a.r1 === b.r1 && a.c0 === b.c0 && a.c1 === b.c1
+
+  /** Is this cell selected by any of the blocks? The list is passed in where
+   *  the caller is walking every visible cell, so it is built once. */
+  const inSelection = (r, c, boxes = ranges()) => {
+    for (const box of boxes) if (holds(box, r, c)) return true
+    return false
+  }
+
+  /** Back to one rectangle, at the cursor. What every structural change ends
+   *  with, because the blocks name view positions and the change moved them. */
+  const collapse = () => { anchor = { ...cursor }; extras = [] }
+
+  /**
+   * The view rows the selection touches, ascending and without repeats — what
+   * "delete the selected rows" means when the selection is in pieces. The
+   * header is not one of them: it is a row on screen but not a row of the file.
+   */
+  const selectedRows = () => {
+    const seen = new Set()
+    for (const box of ranges()) {
+      for (let r = Math.max(0, box.r0); r <= box.r1; r++) seen.add(r)
+    }
+    return [...seen].sort((a, b) => a - b)
+  }
 
   /** Selection, cursor and search-match classes over whatever is built. Cheap
    *  because only the visible band exists to walk. */
   function decorate () {
-    const box = rect()
+    const boxes = ranges()
+    const picked = (r, c) => shown && inSelection(r, c, boxes)
     const needle = query.trim().toLowerCase()
     for (const cell of frame.querySelectorAll('.csv-cell')) {
       const r = Number(cell.dataset.row)
       const c = Number(cell.dataset.col)
-      const inside = shown && r >= box.r0 && r <= box.r1 && c >= box.c0 && c <= box.c1
+      const inside = picked(r, c)
       const isCursor = shown && r === cursor.r && c === cursor.c
       cell.classList.toggle('is-sel', inside && !isCursor)
       cell.classList.toggle('is-cursor', isCursor)
       // The same fact the highlight carries, for a reader who cannot see it.
       cell.setAttribute('aria-selected', String(inside))
-      /* The four sides of the rectangle, drawn on the cells that sit against
+      /* The four sides of the selection, drawn on the cells that sit against
          them. A range reads as one block with a line round it, the way every
          other grid draws one — a wash with no edge leaves the reader counting
          cells to find where the selection stops, and says nothing at all about
          where it ends off the bottom of the window. The band is the cell's own
          box-shadow, so nothing is positioned over the grid and a row scrolling
-         into view brings its share of the outline with it. */
-      cell.classList.toggle('is-edge-t', inside && r === box.r0)
-      cell.classList.toggle('is-edge-b', inside && r === box.r1)
-      cell.classList.toggle('is-edge-l', inside && c === box.c0)
-      cell.classList.toggle('is-edge-r', inside && c === box.c1)
+         into view brings its share of the outline with it.
+
+         An edge is where the selection *stops*, rather than the side of any one
+         block: two columns ⌘-clicked that happen to be neighbours are one shape
+         to the eye, and drawing the seam between them would say they were two
+         things when the only thing that made them two is how they were picked. */
+      cell.classList.toggle('is-edge-t', inside && !picked(r - 1, c))
+      cell.classList.toggle('is-edge-b', inside && !picked(r + 1, c))
+      cell.classList.toggle('is-edge-l', inside && !picked(r, c - 1))
+      cell.classList.toggle('is-edge-r', inside && !picked(r, c + 1))
       cell.classList.toggle('is-match',
-        !!needle && !filtering && cell.textContent.toLowerCase().includes(needle))
+        !!needle && cell.textContent.toLowerCase().includes(needle))
     }
     /* The heading and the line number light up to say which column and which
        row the selection is in — so with nothing selected there is nothing for
        them to say either. */
     for (const cell of frame.querySelectorAll('.csv-gutter')) {
       const r = Number(cell.dataset.row)
-      cell.classList.toggle('is-active', shown && r >= box.r0 && r <= box.r1)
+      cell.classList.toggle('is-active',
+        shown && boxes.some((box) => r >= box.r0 && r <= box.r1))
     }
     for (const cell of headRow.querySelectorAll('.csv-th')) {
       const c = Number(cell.dataset.col)
-      cell.classList.toggle('is-active', shown && c >= box.c0 && c <= box.c1)
+      cell.classList.toggle('is-active',
+        shown && boxes.some((box) => c >= box.c0 && c <= box.c1))
     }
     /* Which cell the keyboard is on. The focus never leaves the scroller — it
        is the thing that scrolls, and moving focus cell to cell would fight it
@@ -1418,21 +1621,44 @@ export function mountCsv ({
      not responding. */
   const STATS_CELL_LIMIT = 1000000
 
-  /** The selection's cells, walked rather than collected: at the limit above
-   *  the array alone would be a million strings. */
-  function * rectCells () {
-    const box = rect()
-    for (let r = box.r0; r <= box.r1; r++) {
-      for (let c = box.c0; c <= box.c1; c++) yield valueAt(r, c)
+  /**
+   * Where the selection's cells are, walked rather than collected: at the limit
+   * above the array alone would be a million pairs.
+   *
+   * A cell already covered by an earlier block is skipped, so two blocks that
+   * cross do not count — or total, or clear — the cells they share twice. The
+   * check costs nothing in the ordinary case, where there is one block and
+   * nothing earlier to compare against.
+   */
+  function * selectionCoords () {
+    const boxes = ranges()
+    for (let i = 0; i < boxes.length; i++) {
+      const box = boxes[i]
+      for (let r = box.r0; r <= box.r1; r++) {
+        for (let c = box.c0; c <= box.c1; c++) {
+          let already = false
+          for (let j = 0; j < i && !already; j++) already = holds(boxes[j], r, c)
+          if (!already) yield [r, c]
+        }
+      }
     }
   }
 
+  function * selectionCells () {
+    for (const [r, c] of selectionCoords()) yield valueAt(r, c)
+  }
+
+  /** How much is selected, before it is walked — an overlap counted twice, so
+   *  it can only overstate, which is what a cap wants. */
+  const selectionArea = () => ranges().reduce(
+    (sum, box) => sum + (box.r1 - box.r0 + 1) * (box.c1 - box.c0 + 1), 0)
+
   const computeStats = () => {
-    const box = rect()
-    const cells = (box.r1 - box.r0 + 1) * (box.c1 - box.c0 + 1)
+    const blocks = ranges().length
+    const cells = selectionArea()
     stats = cells > STATS_CELL_LIMIT
-      ? { cells, filled: 0, numbers: 0, sum: 0, average: 0, min: 0, max: 0, capped: true }
-      : selectionStats(rectCells())
+      ? { cells, filled: 0, numbers: 0, sum: 0, average: 0, min: 0, max: 0, capped: true, blocks }
+      : { ...selectionStats(selectionCells()), blocks }
     onSelection()
   }
 
@@ -1447,8 +1673,9 @@ export function mountCsv ({
    * the last.
    */
   const noteSelection = () => {
-    const box = rect()
-    const key = shown && !singleCell() ? `${box.r0}:${box.r1}:${box.c0}:${box.c1}` : ''
+    const key = shown && !singleCell()
+      ? ranges().map((box) => `${box.r0}:${box.r1}:${box.c0}:${box.c1}`).join('|')
+      : ''
     if (key === statsFor) return
     statsFor = key
     stats = null
@@ -1469,7 +1696,13 @@ export function mountCsv ({
   /** What the status line says about the selection, or nothing. */
   const statsSummary = () => {
     if (!stats) return ''
-    const shape = `${stats.cells.toLocaleString()} selected`
+    /* How many blocks, when there is more than one. A selection in pieces is
+       mostly off screen — three columns picked out of thirty, on a file of a
+       hundred thousand rows — and the count is how the reader checks that what
+       is being totalled is what they meant to pick. */
+    const shape = stats.blocks > 1
+      ? `${stats.cells.toLocaleString()} selected in ${stats.blocks} blocks`
+      : `${stats.cells.toLocaleString()} selected`
     if (stats.capped) return shape
     if (!stats.numbers) return shape
     const parts = [shape, `sum ${formatStat(stats.sum)}`, `avg ${formatStat(stats.average)}`]
@@ -1480,17 +1713,43 @@ export function mountCsv ({
     return parts.join(' · ')
   }
 
-  /** Every value in the selection, row by row. The header counts as a row when
-   *  the selection reaches it, so copying a column copies its name. */
-  const rectValues = () => {
-    const box = rect()
-    const grid = []
-    for (let r = box.r0; r <= box.r1; r++) {
-      const line = []
-      for (let c = box.c0; c <= box.c1; c++) line.push(valueAt(r, c))
-      grid.push(line)
+  /** The positions a set of blocks covers along one axis, ascending and without
+   *  repeats — the rows the clipboard grid has, or the columns. */
+  const axisOf = (boxes, from, to) => {
+    const seen = new Set()
+    for (const box of boxes) for (let i = box[from]; i <= box[to]; i++) seen.add(i)
+    return [...seen].sort((a, b) => a - b)
+  }
+
+  /**
+   * Every value in the selection, row by row. The header counts as a row when
+   * the selection reaches it, so copying a column copies its name.
+   *
+   * Several blocks come out as one rectangle: every row any of them touches, by
+   * every column any of them touches, with a blank wherever nothing was picked.
+   * For the two shapes a ⌘-click is nearly always making — a few whole columns,
+   * or a few whole rows — that is exactly those columns side by side or those
+   * rows stacked, which is what a spreadsheet puts on the clipboard for the same
+   * gesture and the whole reason for picking them. For a ragged pick it is the
+   * honest reading: the shape is kept, and the cells nobody chose are empty
+   * rather than quietly filled in with the ones between them.
+   */
+  const selectionValues = () => {
+    const boxes = ranges()
+    if (boxes.length === 1) {
+      const box = boxes[0]
+      const grid = []
+      for (let r = box.r0; r <= box.r1; r++) {
+        const line = []
+        for (let c = box.c0; c <= box.c1; c++) line.push(valueAt(r, c))
+        grid.push(line)
+      }
+      return grid
     }
-    return grid
+    const wantRows = axisOf(boxes, 'r0', 'r1')
+    const wantCols = axisOf(boxes, 'c0', 'c1')
+    return wantRows.map((r) =>
+      wantCols.map((c) => (inSelection(r, c, boxes) ? valueAt(r, c) : '')))
   }
 
   const paintBar = () => {
@@ -1501,25 +1760,38 @@ export function mountCsv ({
        `.csv` that really is comma-separated says nothing, because there is
        nothing to say. */
     if (current) {
-      delimiterPick.hidden = current.delimiter === current.declared && columns() > 1
-      delimiterPick.value = current.delimiter
+      delimiterPick.root.hidden = current.delimiter === current.declared && columns() > 1
+      delimiterPick.set(null, current.delimiter)
     } else {
-      delimiterPick.hidden = true
+      delimiterPick.root.hidden = true
     }
-    filterToggle.classList.toggle('is-on', filtering)
-    filterToggle.disabled = !active && !filtering
-    /* Clear sort stays in Reading view and Apply sort does not: one puts the
-       file's own order back on screen, the other writes the screen's order
-       into the file. */
-    sortChip.hidden = !sort || readonly
-    clearSort.hidden = !sort
     for (const element of [undoBtn, redoBtn, addRow, addCol]) element.hidden = readonly
     undoBtn.disabled = !history.length
     redoBtn.disabled = !future.length
-    if (!active) {
+    /* Filtering is a way of looking, so both of its controls stay in Reading
+       view — see the note on `readonly`. */
+    onlyBtn.hidden = !active
+    onlyBtn.classList.toggle('is-on', onlyMatches)
+    onlyBtn.setAttribute('aria-pressed', String(onlyMatches))
+    const columnFilters = [...filters.values()].filter((hidden) => hidden.size).length
+    filterBtn.classList.toggle('is-on', columnFilters > 0)
+    clearFilters.hidden = !filtering()
+    /* One line, saying whichever of the two is the answer to what was just
+       done. How many rows are left comes first when rows are being hidden,
+       because that is the number a filter is read for; the match count is what
+       a find that only highlights has to offer instead. */
+    if (filtering()) {
+      const left = viewRows()
+      const parts = []
+      if (columnFilters) {
+        parts.push(`${columnFilters} column ${columnFilters === 1 ? 'filter' : 'filters'}`)
+      }
+      parts.push(`${left.toLocaleString()} of ${rows.length.toLocaleString()} rows`)
+      found.textContent = parts.join(' · ')
+      found.classList.toggle('is-empty', !left)
+    } else if (!active) {
       found.textContent = ''
-    } else if (filtering) {
-      found.textContent = `${viewRows().toLocaleString()} of ${rows.length.toLocaleString()} rows`
+      found.classList.remove('is-empty')
     } else {
       const hits = countMatches()
       found.textContent = hits ? `${hits.toLocaleString()} matching ${hits === 1 ? 'row' : 'rows'}` : 'no matches'
@@ -1560,10 +1832,14 @@ export function mountCsv ({
    *
    * @param extend  keep the anchor where it is — a shift-click or shift-arrow,
    *                which is what turns a cursor into a rectangle
+   * @param add     keep the whole selection and start another block here — a
+   *                ⌘-click, which is what turns a rectangle into a list of them
    */
-  const moveTo = (r, c, { extend = false } = {}) => {
+  const moveTo = (r, c, { extend = false, add = false } = {}) => {
     if (editing) commitEdit()
     shown = true
+    if (add) extras = [...extras, rect()]
+    else if (!extend) extras = []
     cursor = {
       r: Math.max(-1, Math.min(viewRows() - 1, r)),
       c: Math.max(0, Math.min(columns() - 1, c))
@@ -1576,14 +1852,16 @@ export function mountCsv ({
 
   const selectAll = () => {
     shown = true
+    extras = []
     anchor = { r: -1, c: 0 }
     cursor = { r: viewRows() - 1, c: Math.max(0, columns() - 1) }
     paintRows()
     decorate()
   }
 
-  const selectColumn = (c) => {
+  const selectColumn = (c, { add = false } = {}) => {
     shown = true
+    extras = add ? [...extras, rect()] : []
     anchor = { r: -1, c }
     cursor = { r: Math.max(-1, viewRows() - 1), c }
     revealCursor()
@@ -1591,13 +1869,61 @@ export function mountCsv ({
     decorate()
   }
 
-  const selectRow = (r) => {
+  const selectRow = (r, { add = false } = {}) => {
     shown = true
+    extras = add ? [...extras, rect()] : []
     anchor = { r, c: 0 }
     cursor = { r, c: Math.max(0, columns() - 1) }
     revealCursor()
     paintRows()
     decorate()
+  }
+
+  /**
+   * Take a block back out of the selection.
+   *
+   * A ⌘-click on a heading that is already a column of its own means "not that
+   * one after all" — the same click that added it, taking it away, which is how
+   * every list of things that can be picked apart behaves. Only an exact match
+   * counts: a column ⌘-clicked while it happens to sit inside a drag is a
+   * column being added, not the drag being unpicked.
+   *
+   * The last block standing stays. A click that emptied the selection would
+   * leave nothing selected and no sign of why; Escape already says that, and
+   * says it about the whole selection at once.
+   *
+   * @return whether the click was answered by taking something away
+   */
+  const dropRange = (want) => {
+    const boxes = ranges()
+    const at = boxes.findIndex((box) => sameBox(box, want))
+    if (at < 0) return false
+    if (boxes.length === 1) return true
+    const kept = boxes.filter((_, i) => i !== at)
+    /* Whichever is left last becomes the live one, so a shift-arrow after this
+       carries on from a block that is still there. */
+    const live = kept[kept.length - 1]
+    extras = kept.slice(0, -1)
+    anchor = { r: live.r0, c: live.c0 }
+    cursor = { r: live.r1, c: live.c1 }
+    paintRows()
+    decorate()
+    return true
+  }
+
+  /** ⌘-click on a heading. Answers whether a *new* block was made, because only
+   *  then does the drag that may follow have one to grow. */
+  const toggleColumn = (c) => {
+    if (dropRange({ r0: -1, r1: Math.max(-1, viewRows() - 1), c0: c, c1: c })) return false
+    selectColumn(c, { add: true })
+    return true
+  }
+
+  /** ⌘-click on a line number, the same way round. */
+  const toggleRow = (r) => {
+    if (dropRange({ r0: r, r1: r, c0: 0, c1: Math.max(0, columns() - 1) })) return false
+    selectRow(r, { add: true })
+    return true
   }
 
   /* ------------------------------------------------------------- the file */
@@ -1649,7 +1975,8 @@ export function mountCsv ({
     numeric: numeric.slice(),
     sort: sort && { ...sort },
     cursor: { ...cursor },
-    anchor: { ...anchor }
+    anchor: { ...anchor },
+    extras: extras.map((box) => ({ ...box }))
   })
 
   const record = (patch) => {
@@ -1687,6 +2014,7 @@ export function mountCsv ({
     sort = patch.sort && { ...patch.sort }
     cursor = { ...patch.cursor }
     anchor = { ...patch.anchor }
+    extras = (patch.extras || []).map((box) => ({ ...box }))
     rebuildOrder()
     paint()
     return inverse
@@ -1749,8 +2077,9 @@ export function mountCsv ({
         setDirty(true)
         /* A sorted column whose cell just changed has moved that row. Rebuild
            the view and follow the row rather than the position: the cursor
-           belongs to the thing that was edited. */
-        if (sort && sort.col === c) { rebuildOrder({ keepSource: src }); paint() }
+           belongs to the thing that was edited. Any other blocks are positions
+           and the rows under them have just moved, so they go. */
+        if (sort && sort.col === c) { extras = []; rebuildOrder({ keepSource: src }); paint() }
       }
     }
     /* A heading's cell holds its label, its sort mark and its resize grip, and
@@ -1778,12 +2107,27 @@ export function mountCsv ({
         if (editing) commitEdit()
         if (!current || !dirty) break
         clearTimeout(saveTimer)
+        /* What is about to be written, named. Formatting and writing a large
+           file is not instant, and a cell typed during one belongs to a
+           version that is not on disk. Calling the grid clean regardless marks
+           that edit as saved: the save it queued for itself then finds
+           `!dirty` here and writes nothing, and the edit lives only in memory
+           until the tab is closed and it goes. */
+        const writingRevision = revision
         /* `rows` and not the view: a sort is a way of looking at the file, and
            saving one must not rewrite every line of it. */
         const text = formatSeparated([header, ...rows], current.delimiter, current.newline)
         await file.write(current.path, text)
-        setDirty(false)
-        onSaved()
+        const clean = revision === writingRevision
+        if (clean) setDirty(false)
+        /* Only a clean write is a saved file. Saying otherwise puts the status
+           line and the tab's dot at odds with what is on disk — and the host
+           reads `onSaved` as permission to stop tracking the buffer. */
+        if (clean) onSaved()
+        /* Still dirty means something arrived mid-write. Its own `queueSave`
+           is already pending — armed after the `clearTimeout` above, because
+           it happened after it — so the debounced path picks it up. A flush
+           has no later to wait for and goes round again here. */
       } while (flushRequested && dirty)
       flushRequested = false
       return true
@@ -1795,6 +2139,15 @@ export function mountCsv ({
 
   const blankRow = () => new Array(Math.max(1, columns())).fill('')
 
+  /** Move every filter at or after `from` by `by` columns, which is what an
+   *  insert or a delete does to the indices they are keyed by. */
+  const shiftFilters = (from, by) => {
+    if (!filters.size) return
+    const next = new Map()
+    for (const [col, hidden] of filters) next.set(col >= from ? col + by : col, hidden)
+    filters = next
+  }
+
   const insertRows = (atView, count = 1) => {
     if (!editable()) return
     record(snapshot())
@@ -1805,34 +2158,45 @@ export function mountCsv ({
       rebuildOrder()
       cursor = { r: at, c: cursor.c }
     } else {
-      /* Sorted or filtered, a new row has no place in the file's order to be
-         born into, so it goes at the end of the file and where you asked for
-         it on screen — and stays there until the next re-sort. */
-      const start = rows.length
-      rows.push(...made)
-      order.splice(Math.max(0, Math.min(order.length, atView)), 0,
-        ...made.map((_, i) => start + i))
-      cursor = { r: atView, c: cursor.c }
+      /* Sorted, a new row still belongs in the file beside the row it was
+         asked for — the gutter shows the file's own line number, and a row
+         inserted below line 2 that came back numbered 1,345 is that number
+         made meaningless. So it goes into `rows` after the row above it on
+         screen, every later source index shifts up to match, and `order` is
+         patched rather than rebuilt: re-sorting would send a blank row
+         straight to the bottom, away from where it was asked for. It stays
+         put until the next re-sort. */
+      const where = Math.max(0, Math.min(order.length, atView))
+      const at = where > 0 ? order[where - 1] + 1 : (order[0] ?? rows.length)
+      rows.splice(at, 0, ...made)
+      order = order.map((i) => (i >= at ? i + count : i))
+      order.splice(where, 0, ...made.map((_, i) => at + i))
+      cursor = { r: where, c: cursor.c }
     }
-    anchor = { ...cursor }
+    collapse()
     setDirty(true)
     paint()
     revealCursor()
     queueSave()
   }
 
-  const deleteRows = (fromView, toView) => {
+  /** The view rows of a list, in order, with the ones that are not rows of the
+   *  file left out — what every row operation takes now that a selection can be
+   *  a handful of rows picked out of a long file rather than a span of them. */
+  const rowList = (wanted) => [...new Set(wanted)]
+    .filter((r) => r >= 0 && r < viewRows())
+    .sort((a, b) => a - b)
+
+  const deleteRows = (wanted) => {
     if (!editable()) return
-    const first = Math.max(0, Math.min(fromView, toView))
-    const last = Math.min(viewRows() - 1, Math.max(fromView, toView))
-    if (last < first || !viewRows()) return
+    const list = rowList(wanted)
+    if (!list.length) return
     record(snapshot())
-    const kill = new Set()
-    for (let r = first; r <= last; r++) kill.add(order[r])
+    const kill = new Set(list.map((r) => order[r]))
     rows = rows.filter((_, i) => !kill.has(i))
     rebuildOrder()
-    cursor = { r: Math.min(first, viewRows() - 1), c: cursor.c }
-    anchor = { ...cursor }
+    cursor = { r: Math.min(list[0], viewRows() - 1), c: cursor.c }
+    collapse()
     clampCursor()
     setDirty(true)
     paint()
@@ -1856,8 +2220,12 @@ export function mountCsv ({
     })
     widths.splice(where, 0, MIN_COL)
     numeric.splice(where, 0, false)
+    /* A filter is keyed by column index, and a column inserted to the left of
+       a filtered one moves it. Without this, filtering "type" and then adding
+       a column before it leaves the grid hiding rows by the wrong column. */
+    shiftFilters(where, 1)
     cursor = { r: cursor.r, c: where }
-    anchor = { ...cursor }
+    collapse()
     setDirty(true)
     paint()
     revealCursor()
@@ -1882,12 +2250,15 @@ export function mountCsv ({
     })
     widths.splice(at, 1)
     numeric.splice(at, 1)
+    // The deleted column's filter goes with it; the ones after it move up.
+    filters.delete(at)
+    shiftFilters(at, -1)
     if (sort) {
       if (sort.col === at) sort = null
       else if (sort.col > at) sort = { ...sort, col: sort.col - 1 }
     }
     clampCursor()
-    anchor = { ...cursor }
+    collapse()
     rebuildOrder()
     setDirty(true)
     paint()
@@ -1895,14 +2266,17 @@ export function mountCsv ({
     queueSave()
   }
 
-  const duplicateRows = (fromView, toView) => {
+  const duplicateRows = (wanted) => {
     if (!editable()) return
-    const first = Math.max(0, Math.min(fromView, toView))
-    const last = Math.min(viewRows() - 1, Math.max(fromView, toView))
-    if (last < first) return
+    const list = rowList(wanted)
+    if (!list.length) return
     record(snapshot())
-    const copies = []
-    for (let r = first; r <= last; r++) copies.push((rows[order[r]] || []).slice())
+    /* The copies land together, below the last of the rows they came from, in
+       the order they were picked up. Rows chosen apart from each other are
+       being copied as a set — putting each copy back beside its original would
+       be interleaving the file with itself. */
+    const last = list[list.length - 1]
+    const copies = list.map((r) => (rows[order[r]] || []).slice())
     if (plainOrder()) {
       rows.splice(order[last] + 1, 0, ...copies)
       rebuildOrder()
@@ -1912,7 +2286,7 @@ export function mountCsv ({
       order.splice(last + 1, 0, ...copies.map((_, i) => start + i))
     }
     cursor = { r: last + 1, c: cursor.c }
-    anchor = { ...cursor }
+    collapse()
     setDirty(true)
     paint()
     revealCursor()
@@ -1944,7 +2318,7 @@ export function mountCsv ({
   const sortBy = (col, dir) => {
     sort = dir ? { col, dir } : null
     rebuildOrder()
-    anchor = { ...cursor }
+    collapse()
     paint()
   }
 
@@ -1970,7 +2344,7 @@ export function mountCsv ({
     rows = full.map((i) => rows[i])
     sort = null
     if (keep >= 0 && moved.has(keep)) cursor = { ...cursor, r: moved.get(keep) }
-    anchor = { ...cursor }
+    collapse()
     rebuildOrder()
     setDirty(true)
     paint()
@@ -1981,25 +2355,39 @@ export function mountCsv ({
 
   /* ------------------------------------------------------- the find box */
 
-  const setQuery = (text, { rebuild = true } = {}) => {
+  /* The find box highlights; it never changes which rows are on screen, so
+     `order` is untouched and only the marks are repainted — unless "Only
+     matches" is on, which makes it a filter and puts it in `order` with the
+     column ones. */
+  const setQuery = (text) => {
     query = text
-    if (rebuild && filtering) {
+    if (onlyMatches) {
       const keep = sourceOf(cursor.r)
-      rebuildOrder({ keepSource: keep >= 0 ? keep : null })
+      rebuildOrder({ keepSource: keep })
+      collapse()
       paint()
-    } else {
-      paintBar()
-      decorate()
+      return
     }
+    paintBar()
+    decorate()
   }
 
-  const toggleFilter = () => {
-    filtering = !filtering
+  const setOnlyMatches = (flag) => {
+    const next = !!flag
+    if (next === onlyMatches) return
+    onlyMatches = next
     const keep = sourceOf(cursor.r)
-    rebuildOrder({ keepSource: keep >= 0 ? keep : null })
-    anchor = { ...cursor }
+    rebuildOrder({ keepSource: keep })
+    collapse()
     paint()
-    revealCursor()
+    /* Said out loud because the grid is about to lose most of its rows and the
+       one control that did it is a button the reader may not have been looking
+       at. The count is of rows, not cells: a row is what went. */
+    if (query.trim()) {
+      onStatus(next
+        ? `Showing ${viewRows().toLocaleString()} of ${rows.length.toLocaleString()} rows`
+        : 'Showing every row')
+    }
   }
 
   /** The next cell holding the query, wrapping once. Enter in the find box,
@@ -2022,10 +2410,193 @@ export function mountCsv ({
     onStatus('No match')
   }
 
+  /* ---------------------------------------------------- the column filter */
+
+  /* How many value rows the panel puts in the document. A column of free text
+     has as many distinct values as it has rows, and a panel that tried to list
+     two hundred thousand tick boxes would be a window that stopped responding
+     on the way to a list nobody could read anyway. The rest are reachable by
+     typing into the panel's own box, which is what a list that long is
+     searched rather than scanned. */
+  const FILTER_ROWS = 400
+
+  const closeFilter = () => {
+    filterPanel.hidden = true
+    filterPanel.replaceChildren()
+  }
+
+  /** Hide `hidden` in column `c`, or clear the column's filter if that set is
+   *  empty. The one way `filters` is written to. */
+  const setColumnFilter = (c, hidden) => {
+    if (hidden && hidden.size) filters.set(c, new Set(hidden))
+    else filters.delete(c)
+    /* The cursor keeps its *row* rather than its position, which is the
+       opposite of what a sort does and for the reason given at `sortBy`: rows
+       have gone, so a position means something different than it did. */
+    const keep = sourceOf(cursor.r)
+    rebuildOrder({ keepSource: keep })
+    collapse()
+    paint()
+  }
+
+  const clearAllFilters = () => {
+    if (!filtering()) return
+    const keep = sourceOf(cursor.r)
+    filters = new Map()
+    onlyMatches = false
+    rebuildOrder({ keepSource: keep })
+    collapse()
+    paint()
+    onStatus(`Showing all ${rows.length.toLocaleString()} rows`)
+  }
+
+  /**
+   * The panel for one column: every value it holds, ticked or not.
+   *
+   * Ticks apply as they are made rather than on a Done button. A filter is a
+   * way of looking and the table behind the panel is the answer — untick
+   * "Movie" and the shows are there to see, which is the whole gesture. There
+   * is nothing to commit and so nothing to cancel; Escape closes the panel and
+   * leaves the view as the ticks left it.
+   *
+   * The values are counted over the whole file rather than over what the other
+   * columns' filters leave, so the list does not change under the reader as
+   * they work across columns — and a value that is ticked but currently shows
+   * nothing is still the truth about the column.
+   */
+  const openFilter = (x, y, c) => {
+    closeMenu()
+    if (!current || c < 0 || c >= columns()) return
+    const every = rows.map((_, i) => i)
+    const values = columnValues(rows, every, c)
+    const hidden = new Set(filters.get(c) ?? [])
+    let needle = ''
+
+    const panelHead = document.createElement('div')
+    panelHead.className = 'csv-filter-head'
+    panelHead.textContent = header[c] || `Column ${c + 1}`
+
+    const box = document.createElement('input')
+    box.className = 'csv-filter-search'
+    box.type = 'search'
+    box.placeholder = 'Find a value'
+    box.spellcheck = false
+
+    const picks = document.createElement('div')
+    picks.className = 'csv-filter-picks'
+    const allBtn = button('All', 'filter-all', 'Tick everything listed')
+    const noneBtn = button('None', 'filter-none', 'Untick everything listed')
+    const kept = document.createElement('span')
+    kept.className = 'csv-filter-kept'
+    picks.append(allBtn, noneBtn, kept)
+
+    const list = document.createElement('div')
+    list.className = 'csv-filter-list'
+    list.setAttribute('role', 'group')
+    list.setAttribute('aria-label', `Values in ${header[c] || `column ${c + 1}`}`)
+
+    const note = document.createElement('div')
+    note.className = 'csv-filter-note'
+
+    /** The values the panel's own box leaves, which is what All and None act
+     *  on: narrowing to `TV` and pressing None means "not those", and having
+     *  it mean "not anything" would be a different sentence. */
+    const listed = () => (needle
+      ? values.filter((v) => v.value.toLowerCase().includes(needle))
+      : values)
+
+    const apply = () => {
+      setColumnFilter(c, hidden)
+      drawFoot()
+    }
+
+    const drawFoot = () => {
+      const showing = values.length - hidden.size
+      kept.textContent = `${showing.toLocaleString()} of ${values.length.toLocaleString()} kept`
+    }
+
+    const drawList = () => {
+      const shown = listed()
+      const frag = document.createDocumentFragment()
+      for (const { value, count } of shown.slice(0, FILTER_ROWS)) {
+        const row = document.createElement('label')
+        row.className = 'csv-filter-row'
+        const tick = document.createElement('input')
+        tick.type = 'checkbox'
+        tick.checked = !hidden.has(value)
+        tick.addEventListener('change', () => {
+          if (tick.checked) hidden.delete(value)
+          else hidden.add(value)
+          apply()
+        })
+        const name = document.createElement('span')
+        name.className = 'csv-filter-value'
+        /* A blank cell is a value a person filters on — the rows where nothing
+           was exported — and it needs a name to be tickable at all. Marked as
+           a label rather than shown as emptiness, which would read as a
+           rendering fault. */
+        if (value.trim() === '') {
+          name.textContent = '(blank)'
+          name.classList.add('is-blank')
+        } else {
+          name.textContent = value
+        }
+        const many = document.createElement('span')
+        many.className = 'csv-filter-count'
+        many.textContent = count.toLocaleString()
+        row.append(tick, name, many)
+        frag.append(row)
+      }
+      list.replaceChildren(frag)
+      list.scrollTop = 0
+      const over = shown.length - FILTER_ROWS
+      if (!shown.length) note.textContent = 'Nothing here matches that'
+      else if (over > 0) note.textContent = `${over.toLocaleString()} more — type to narrow the list`
+      else note.textContent = ''
+      note.hidden = !note.textContent
+    }
+
+    box.addEventListener('input', () => {
+      needle = box.value.trim().toLowerCase()
+      drawList()
+    })
+    allBtn.addEventListener('click', () => {
+      for (const { value } of listed()) hidden.delete(value)
+      apply()
+      drawList()
+    })
+    noneBtn.addEventListener('click', () => {
+      for (const { value } of listed()) hidden.add(value)
+      apply()
+      drawList()
+    })
+
+    drawList()
+    drawFoot()
+    filterPanel.replaceChildren(panelHead, box, picks, list, note)
+    filterPanel.hidden = false
+
+    const bounds = frame.getBoundingClientRect()
+    const width = filterPanel.offsetWidth || 240
+    const height = filterPanel.offsetHeight || 300
+    filterPanel.style.left = `${Math.max(4, Math.min(x - bounds.left, bounds.width - width - 8))}px`
+    filterPanel.style.top = `${Math.max(4, Math.min(y - bounds.top, bounds.height - height - 8))}px`
+    box.focus()
+  }
+
+  /** The funnel in a heading, the bar's button and ⇧⌘F all end here. Anchored
+   *  under the heading when there is one on screen, so the panel opens beside
+   *  the column it is about rather than wherever the pointer last was. */
+  const filterColumn = (c) => {
+    const cell = headRow.querySelector(`.csv-th[data-col="${c}"]`)
+    const at = (cell || headRow).getBoundingClientRect()
+    openFilter(at.left, at.bottom + 2, c)
+  }
+
   /* ------------------------------------------------------- the clipboard */
 
   const copySelection = async ({ cut = false } = {}) => {
-    const grid = rectValues()
+    const grid = selectionValues()
     const text = gridToClipboard(grid)
     try {
       await navigator.clipboard.writeText(text)
@@ -2041,15 +2612,11 @@ export function mountCsv ({
 
   const clearSelection = () => {
     if (!editable()) return
-    const box = rect()
     const edits = []
-    for (let r = box.r0; r <= box.r1; r++) {
-      const src = sourceOf(r)
-      for (let c = box.c0; c <= box.c1; c++) {
-        const before = valueAt(r, c)
-        if (before === '') continue
-        edits.push({ src, c, before, after: '' })
-      }
+    for (const [r, c] of selectionCoords()) {
+      const before = valueAt(r, c)
+      if (before === '') continue
+      edits.push({ src: sourceOf(r), c, before, after: '' })
     }
     if (!edits.length) return
     for (const edit of edits) writeSource(edit.src, edit.c, '')
@@ -2103,6 +2670,8 @@ export function mountCsv ({
     }
     if (!grows && edits.length) record({ kind: 'cells', edits })
     if (edits.length || grows) setDirty(true)
+    // What was pasted is what is selected, and only that.
+    extras = []
     anchor = { r: startRow, c: cursor.c }
     cursor = {
       r: Math.min(viewRows() - 1, startRow + grid.length - 1),
@@ -2126,20 +2695,29 @@ export function mountCsv ({
     pasteGrid(parseClipboardGrid(text))
   }
 
-  /** ⌘D: the top row of the selection, copied over the rest of it. */
+  /** ⌘D: the top row of the selection, copied over the rest of it — of each
+   *  block of it, since each has a top row of its own. */
   const fillDown = () => {
     if (!editable()) return
-    const box = rect()
-    if (box.r1 <= box.r0) return
     const edits = []
-    for (let c = box.c0; c <= box.c1; c++) {
-      const value = valueAt(box.r0, c)
-      for (let r = box.r0 + 1; r <= box.r1; r++) {
-        const src = sourceOf(r)
-        const before = valueAt(r, c)
-        if (before === value) continue
-        edits.push({ src, c, before, after: value })
-        writeSource(src, c, value)
+    /* One edit per cell, whatever the blocks do. Two that overlap would
+       otherwise record the shared cell twice, and undo replays a patch
+       forwards: the second entry's "before" is what the first one wrote, so
+       putting them both back leaves the cell holding the filled value. */
+    const written = new Set()
+    for (const box of ranges()) {
+      if (box.r1 <= box.r0) continue
+      for (let c = box.c0; c <= box.c1; c++) {
+        const value = valueAt(box.r0, c)
+        for (let r = box.r0 + 1; r <= box.r1; r++) {
+          if (written.has(`${r}:${c}`)) continue
+          written.add(`${r}:${c}`)
+          const src = sourceOf(r)
+          const before = valueAt(r, c)
+          if (before === value) continue
+          edits.push({ src, c, before, after: value })
+          writeSource(src, c, value)
+        }
       }
     }
     if (!edits.length) return
@@ -2181,8 +2759,13 @@ export function mountCsv ({
   }
 
   const cellMenu = (event, r, c) => {
-    const box = rect()
-    const many = box.r1 > box.r0
+    /* Worked out once, here, rather than inside each item: the list is what the
+       labels count and what the items act on, so a menu that says "Delete 3
+       rows" deletes those three and no others. */
+    const picked = selectedRows()
+    const many = picked.length > 1
+    const first = picked[0] ?? Math.max(0, r)
+    const last = picked[picked.length - 1] ?? Math.max(0, r)
     /* Reading view's menu is the reading half of the editing one, rather than
        the same list with two thirds of it greyed out: a menu of disabled items
        is a menu that has to be read to learn it does nothing. */
@@ -2201,17 +2784,17 @@ export function mountCsv ({
       { label: 'Paste', run: () => pasteFromClipboard() },
       { label: 'Clear contents', run: () => clearSelection() },
       '-',
-      { label: 'Insert row above', run: () => insertRows(Math.max(0, box.r0)) },
-      { label: 'Insert row below', run: () => insertRows(Math.max(0, box.r1) + 1) },
+      { label: 'Insert row above', run: () => insertRows(first) },
+      { label: 'Insert row below', run: () => insertRows(last + 1) },
       {
-        label: many ? `Duplicate ${box.r1 - box.r0 + 1} rows` : 'Duplicate row',
-        disabled: r < 0,
-        run: () => duplicateRows(box.r0, box.r1)
+        label: many ? `Duplicate ${picked.length.toLocaleString()} rows` : 'Duplicate row',
+        disabled: !picked.length,
+        run: () => duplicateRows(picked)
       },
       {
-        label: many ? `Delete ${box.r1 - box.r0 + 1} rows` : 'Delete row',
-        disabled: r < 0,
-        run: () => deleteRows(Math.max(0, box.r0), box.r1)
+        label: many ? `Delete ${picked.length.toLocaleString()} rows` : 'Delete row',
+        disabled: !picked.length,
+        run: () => deleteRows(picked)
       },
       '-',
       { label: 'Insert column left', run: () => insertColumn(c) },
@@ -2225,11 +2808,24 @@ export function mountCsv ({
   }
 
   const headMenu = (event, c) => {
+    /* Filtering is a way of looking, so it is in both menus and worded the
+       same in each. */
+    const filterItems = [
+      { label: 'Filter this column…', run: () => filterColumn(c) },
+      {
+        label: 'Clear this column’s filter',
+        disabled: !filters.get(c)?.size,
+        run: () => setColumnFilter(c, null)
+      },
+      { label: 'Clear all filters', disabled: !filtering(), run: () => clearAllFilters() }
+    ]
     if (readonly) {
       openMenu(event.clientX, event.clientY, [
         { label: 'Sort A → Z', run: () => sortBy(c, 'asc') },
         { label: 'Sort Z → A', run: () => sortBy(c, 'desc') },
         { label: 'Clear sort', disabled: !sort, run: () => sortBy(c, null) },
+        '-',
+        ...filterItems,
         '-',
         { label: 'Fit column width', run: () => fitColumn(c) },
         { label: 'Fit all columns', run: () => fitAllColumns() },
@@ -2242,6 +2838,8 @@ export function mountCsv ({
       { label: 'Sort Z → A', run: () => sortBy(c, 'desc') },
       { label: 'Clear sort', disabled: !sort, run: () => sortBy(c, null) },
       { label: 'Write this order into the file', disabled: !sort, run: () => applySort() },
+      '-',
+      ...filterItems,
       '-',
       { label: 'Rename heading', run: () => { moveTo(-1, c); beginEdit() } },
       { label: 'Fit column width', run: () => fitColumn(c) },
@@ -2303,17 +2901,21 @@ export function mountCsv ({
   bar.addEventListener('click', (event) => {
     const act = event.target.closest?.('.csv-btn')?.dataset.act
     switch (act) {
-      case 'filter': toggleFilter(); break
-      case 'apply-sort': applySort(); break
-      case 'clear-sort': sortBy(sort?.col ?? 0, null); break
       case 'undo': stepHistory(false); break
       case 'redo': stepHistory(true); break
       case 'add-row': insertRows(Math.max(0, cursor.r) + 1); break
       case 'add-col': insertColumn(cursor.c + 1); break
       case 'fit': fitAllColumns(); break
+      // A toggle keeps the focus it was given: the next thing the reader does
+      // is likely to be turning it back off, or typing more into the box.
+      case 'only-matches': setOnlyMatches(!onlyMatches); return
+      case 'clear-filters': clearAllFilters(); break
+      /* The panel takes the focus itself and keeps it while boxes are ticked,
+         so this one does not hand it back to the grid. */
+      case 'filter': filterColumn(cursor.c); return
       default: return
     }
-    if (act !== 'filter') scroller.focus({ preventScroll: true })
+    scroller.focus({ preventScroll: true })
   })
 
   /**
@@ -2343,8 +2945,6 @@ export function mountCsv ({
     }
   }
 
-  delimiterPick.addEventListener('change', () => { useDelimiter(delimiterPick.value) })
-
   search.addEventListener('input', () => setQuery(search.value))
   search.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') { event.preventDefault(); findNext(event.shiftKey) }
@@ -2359,11 +2959,27 @@ export function mountCsv ({
   headRow.addEventListener('mousedown', (event) => {
     const grip = event.target.closest?.('.csv-grip')
     if (grip) { startResize(event, Number(grip.dataset.grip)); return }
+    /* Before the sort, and swallowing the click: the funnel sits inside the
+       heading, and a click on it that also cycled the sort would reorder the
+       table every time somebody went to filter it. */
+    const funnel = event.target.closest?.('.csv-funnel')
+    if (funnel) {
+      event.preventDefault()
+      filterColumn(Number(funnel.dataset.funnel))
+      return
+    }
     const cell = event.target.closest?.('.csv-th')
     if (!cell) return
     const c = Number(cell.dataset.col)
     event.preventDefault()
-    if (event.metaKey || event.ctrlKey) { selectColumn(c); return }
+    /* ⌘-click on a heading picks the column out without disturbing the columns
+       already picked — and a second one puts it back. Never a sort: the click
+       that adds a column to a selection is not a click about order. */
+    if (addsToSelection(event)) {
+      toggleColumn(c)
+      scroller.focus({ preventScroll: true })
+      return
+    }
     if (event.shiftKey) { moveTo(cursor.r, c, { extend: true }); return }
     if (event.detail > 1) return  // the double-click handler renames it
     sortBeforeClick = sort && { ...sort }
@@ -2420,7 +3036,12 @@ export function mountCsv ({
     const gutter = event.target.closest?.('.csv-gutter')
     if (gutter) {
       const r = Number(gutter.dataset.row)
-      if (event.shiftKey) moveTo(r, columns() - 1, { extend: true })
+      if (addsToSelection(event)) {
+        /* A ⌘-click that took a row back out has nothing to drag; one that
+           added a row starts a block there, so a drag from it picks up the
+           rows below as any other drag on the gutter does. */
+        if (!toggleRow(r)) { scroller.focus({ preventScroll: true }); return }
+      } else if (event.shiftKey) moveTo(r, columns() - 1, { extend: true })
       else selectRow(r)
       dragging = 'rows'
       scroller.focus({ preventScroll: true })
@@ -2430,7 +3051,8 @@ export function mountCsv ({
     if (!cell) return
     const r = Number(cell.dataset.row)
     const c = Number(cell.dataset.col)
-    moveTo(r, c, { extend: event.shiftKey })
+    if (addsToSelection(event)) moveTo(r, c, { add: true })
+    else moveTo(r, c, { extend: event.shiftKey })
     dragging = 'cells'
     scroller.focus({ preventScroll: true })
   })
@@ -2461,10 +3083,12 @@ export function mountCsv ({
     const gutter = event.target.closest?.('.csv-gutter')
     if (gutter) {
       const r = Number(gutter.dataset.row)
-      // Right-clicking outside the selection moves it there first, the way
-      // every list in the app does.
-      const box = rect()
-      if (r < box.r0 || r > box.r1) selectRow(r)
+      /* Right-clicking outside the selection moves it there first, the way
+         every list in the app does — and inside it, whichever block it is in,
+         leaves it alone: a menu about three picked rows has to open on all
+         three. */
+      const boxes = ranges()
+      if (!boxes.some((box) => r >= box.r0 && r <= box.r1)) selectRow(r)
       event.preventDefault()
       cellMenu(event, r, cursor.c)
       return
@@ -2472,14 +3096,18 @@ export function mountCsv ({
     if (!cell) return
     const r = Number(cell.dataset.row)
     const c = Number(cell.dataset.col)
-    const box = rect()
-    if (r < box.r0 || r > box.r1 || c < box.c0 || c > box.c1) moveTo(r, c)
+    if (!inSelection(r, c)) moveTo(r, c)
     event.preventDefault()
     cellMenu(event, r, c)
   })
 
   frame.addEventListener('mousedown', (event) => {
     if (!menu.hidden && !event.target.closest?.('.csv-menu')) closeMenu()
+    /* The panel outlives a click inside itself and a click on the funnel that
+       would only reopen it; anything else is the reader going back to the
+       table, which is what closes it. */
+    if (!filterPanel.hidden && !event.target.closest?.('.csv-filter') &&
+        !event.target.closest?.('.csv-funnel')) closeFilter()
   }, true)
 
   /* Keys on the frame rather than on each cell: the cells come and go with the
@@ -2488,6 +3116,19 @@ export function mountCsv ({
   frame.addEventListener('keydown', (event) => {
     // The find box is a text field and owns everything typed into it.
     if (event.target.closest?.('.csv-bar')) return
+
+    /* So does the filter panel's box — without this, typing `TV` into it would
+       reach the grid below and be taken for typing over a cell. Escape is the
+       one key the panel hands back, because closing it is what Escape means
+       everywhere else in here too. */
+    if (event.target.closest?.('.csv-filter')) {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        closeFilter()
+        scroller.focus({ preventScroll: true })
+      }
+      return
+    }
 
     // While a cell is open, the input owns almost everything typed into it.
     if (editing) {
@@ -2533,7 +3174,14 @@ export function mountCsv ({
         case 'x': event.preventDefault(); fromKey('cut', () => copySelection({ cut: true })); return
         case 'v': event.preventDefault(); fromKey('paste', () => pasteFromClipboard()); return
         case 'd': event.preventDefault(); fillDown(); return
-        case 'f': event.preventDefault(); search.focus(); search.select(); return
+        /* ⇧⌘F filters the column the cursor is in; ⌘F alone is the find box.
+           The two questions a table is asked about what is in it, a shift
+           apart. */
+        case 'f':
+          event.preventDefault()
+          if (extend) filterColumn(cursor.c)
+          else { search.focus(); search.select() }
+          return
         case 'g': event.preventDefault(); findNext(extend); return
         case 'z': event.preventDefault(); fromKey(extend ? 'redo' : 'undo', () => stepHistory(extend)); return
         case 'y': event.preventDefault(); fromKey('redo', () => stepHistory(true)); return
@@ -2576,19 +3224,17 @@ export function mountCsv ({
       case 'Backspace':
       case 'Delete': {
         event.preventDefault()
-        if (mod) {
-          const box = rect()
-          deleteRows(Math.max(0, box.r0), Math.max(0, box.r1))
-          return
-        }
+        if (mod) { deleteRows(selectedRows()); return }
         clearSelection()
         return
       }
       case 'Escape': {
-        /* Escape peels one layer at a time, transient first: the menu, then a
+        /* Escape peels one layer at a time, transient first: the filter panel,
+           then the menu, then a
            rectangle back to the cell it grew from, then the cell itself, then
            the search. Only when there is nothing left to put away does it
            reach the window behind the grid. */
+        if (!filterPanel.hidden) { event.preventDefault(); closeFilter(); return }
         if (!menu.hidden) { event.preventDefault(); closeMenu(); return }
         if (!singleCell()) { event.preventDefault(); moveTo(cursor.r, cursor.c); return }
         /* Deselected: the highlight goes and the coordinates stay, so an arrow
@@ -2619,13 +3265,13 @@ export function mountCsv ({
     /* The data goes on the clipboard either way — setting it twice with the
        same text is harmless. The guard is on the *effect*: cut clearing the
        cells twice, or paste landing twice. */
-    event.clipboardData?.setData('text/plain', gridToClipboard(rectValues()))
+    event.clipboardData?.setData('text/plain', gridToClipboard(selectionValues()))
   })
 
   frame.addEventListener('cut', (event) => {
     if (editing || event.target.closest?.('.csv-bar')) return
     event.preventDefault()
-    event.clipboardData?.setData('text/plain', gridToClipboard(rectValues()))
+    event.clipboardData?.setData('text/plain', gridToClipboard(selectionValues()))
     unlessKey('cut', () => clearSelection())
   })
 
@@ -2675,6 +3321,7 @@ export function mountCsv ({
       current = { path, delimiter, declared, newline: detectNewline(text) }
       cursor = { r: rows.length ? 0 : -1, c: 0 }
       anchor = { ...cursor }
+      extras = []
       // A file opens with its first cell selected, whatever Escape had done to
       // the one before it.
       shown = true
@@ -2685,6 +3332,12 @@ export function mountCsv ({
       lastColBuilt = -1
       liveRows.clear()
       sort = null
+      /* A filter belongs to the file it was made for: its values are that
+         file's values, and carrying it into the next one would open a table
+         with rows already missing for a reason nothing on screen explains. */
+      filters = new Map()
+      onlyMatches = false
+      closeFilter()
       history = []
       future = []
       clearTimeout(statsTimer)
@@ -2714,7 +3367,16 @@ export function mountCsv ({
     save: saveFile,
 
     async close () {
-      await saveFile({ flush: true })
+      /* The last save this file will ever get — everything below throws the
+         rows away. Letting the error out of here is worse than useless: the
+         one caller is `leaveDoc`, which runs outside the try that opening a
+         document wraps itself in, so a failed write became an unhandled
+         rejection in the middle of a tab switch and the reader saw nothing at
+         all. Closing anyway is right; saying so is the part that was missing. */
+      await saveFile({ flush: true }).catch((err) => {
+        onStatus(`“${current?.path?.split('/').pop() || 'This file'}” could not be saved: ${err?.message || 'the write failed'}`)
+        console.error('csv close: save failed for', current?.path, err)
+      })
       clearTimeout(saveTimer)
       clearTimeout(statsTimer)
       stats = null
@@ -2726,8 +3388,11 @@ export function mountCsv ({
       history = []
       future = []
       sort = null
+      filters = new Map()
+      onlyMatches = false
       editing = null
       closeMenu()
+      closeFilter()
       liveRows.clear()
       window_.replaceChildren()
       headRow.replaceChildren()
@@ -2749,6 +3414,7 @@ export function mountCsv ({
       frame.classList.toggle('is-reading', readonly)
       table.setAttribute('aria-readonly', String(readonly))
       closeMenu()
+      closeFilter()
       paintBar()
       // The headings carry a title that names what a double-click does, and in
       // Reading view it does nothing.
@@ -2765,6 +3431,18 @@ export function mountCsv ({
     /** The command palette's Auto-resize all columns, which a language table
      *  answers the same way. True when anything actually moved. */
     fitColumns: () => fitAllColumns(),
+
+    /** The palette's Filter this column — the same panel the funnel opens, on
+     *  the column the cursor is in. */
+    filter () { filterColumn(cursor.c) },
+
+    /** …and the way back out of every filter at once. True when there was one
+     *  to clear, so the caller can say which of the two just happened. */
+    clearFilters () {
+      const on = filtering()
+      clearAllFilters()
+      return on
+    },
 
     /** ⌘Z and ⇧⌘Z, which arrive through the window menu rather than as keys. */
     history (redo) {
@@ -2783,7 +3461,15 @@ export function mountCsv ({
         `${r.toLocaleString()} ${r === 1 ? 'row' : 'rows'} · ${c} ${c === 1 ? 'column' : 'columns'}`
       ]
       if (sort) parts.push(`sorted by ${header[sort.col] || `column ${sort.col + 1}`} ${sort.dir === 'asc' ? '↑' : '↓'}`)
-      if (filtering && query.trim()) parts.push(`showing ${viewRows().toLocaleString()}`)
+      /* Named rather than counted: "filtered" alone leaves the reader hunting
+         for which column is doing it, and the whole point of the line is that
+         a table showing 812 of 8,000 rows says why. */
+      const by = [...filters].filter(([, hidden]) => hidden.size)
+        .map(([col]) => header[col] || `column ${col + 1}`)
+      if (onlyMatches && query.trim()) by.push(`“${query.trim()}”`)
+      if (by.length) {
+        parts.push(`showing ${order.length.toLocaleString()} of ${r.toLocaleString()}, filtered by ${by.join(', ')}`)
+      }
       const totals = statsSummary()
       if (totals) parts.push(totals)
       return parts.join(' · ')

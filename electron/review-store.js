@@ -176,6 +176,31 @@ function makeStore ({ vault }) {
     },
 
     /**
+     * Take back the most recent answer for one card — the store half of the
+     * session's undo.
+     *
+     * `state` is what the card knew before the answer (null for a card that
+     * had never been seen). The state file is simply set back; the log, which
+     * is append-only by design, gets an `undo` line instead of an erasure,
+     * and `history` resolves the pair so the statistics never see either.
+     */
+    async unrecord (entry) {
+      if (!entry?.id) return { ok: false }
+      await load()
+      if (entry.state && typeof entry.state === 'object') cards[entry.id] = entry.state
+      else delete cards[entry.id]
+      await flush()
+      try {
+        await fs.mkdir(dir(), { recursive: true })
+        await fs.appendFile(logFile(),
+          JSON.stringify({ id: entry.id, at: entry.at || Date.now(), undo: true }) + '\n', 'utf8')
+      } catch (err) {
+        console.error('review log undo append failed', err)
+      }
+      return { ok: true }
+    },
+
+    /**
      * Forget the cards of a note that has been deleted.
      *
      * Unguarded, unlike `prune`: this is somebody saying "that note is gone",
@@ -263,7 +288,18 @@ function makeStore ({ vault }) {
       const out = []
       for (const line of raw.split('\n')) {
         if (!line.trim()) continue
-        try { out.push(JSON.parse(line)) } catch { /* a torn last line */ }
+        let parsed
+        try { parsed = JSON.parse(line) } catch { continue /* a torn last line */ }
+        /* An undo line strikes out the answer it took back. Resolved here so
+           every consumer of the history sees neither half — the statistics
+           must not count an answer the reviewer explicitly unsaid. */
+        if (parsed?.undo) {
+          for (let i = out.length - 1; i >= 0; i--) {
+            if (out[i].id === parsed.id) { out.splice(i, 1); break }
+          }
+          continue
+        }
+        out.push(parsed)
       }
       return out.slice(-limit)
     }

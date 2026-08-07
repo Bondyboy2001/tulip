@@ -112,24 +112,47 @@ function makeIndexCache ({ dir, vaultPath }) {
      * the byte count, or `{ skipped: 'too large' }`.
      */
     save (entries) {
-      const body = JSON.stringify({
+      /* Only the four fields `load` will accept. The in-memory index picks up
+         ride-along fields over a session — search writes `kind` and `fileTags`
+         onto entries, alias resolution writes `aliases` — and serializing those
+         put bytes on disk that the load path immediately threw away. */
+      const kept = []
+      for (const [key, entry] of entries) {
+        kept.push([key, { name: entry.name, text: entry.text, mtime: entry.mtime, size: entry.size }])
+      }
+
+      const serialize = () => JSON.stringify({
         version: VERSION,
         vaultPath,
         at: Date.now(),
-        entries: Object.fromEntries(entries)
+        entries: Object.fromEntries(kept)
       })
+
+      let body = serialize()
+      let dropped = 0
       if (body.length > MAX_CACHE_BYTES) {
-        /* Deliberately leaves any existing file alone rather than deleting it:
-           a smaller cache from an earlier state is still valid — every entry in
-           it is checked before it is believed — and is better than none. */
-        return { skipped: 'too large' }
+        /* Over budget, the old behaviour was to skip the write and leave any
+           existing file in place — which silently froze the cache at whatever
+           launch last fit, forever. Dropping the largest notes instead keeps
+           the cache alive for the rest of the vault: a dropped note is not a
+           wrong answer, it is one re-read on the first search, the same as any
+           mtime mismatch. Largest first because one 4MB note costs the budget
+           of a thousand ordinary ones. */
+        kept.sort((a, b) => b[1].text.length - a[1].text.length)
+        while (kept.length && body.length > MAX_CACHE_BYTES) {
+          const drop = Math.max(1, Math.ceil(kept.length * 0.1))
+          kept.splice(0, drop)
+          dropped += drop
+          body = serialize()
+        }
+        if (!kept.length) return { skipped: 'too large' }
       }
       /* Not awaited by the caller — see the call site in `syncIndex` — but the
          promise is answered here so a rejection is not an unhandled one. A
          cache that failed to write is a slower first search next time and
          nothing else. */
       writer.flush(target, () => body).catch(() => {})
-      return { written: body.length }
+      return dropped ? { written: body.length, dropped } : { written: body.length }
     },
 
     /** Forget this vault's cache entirely. */
@@ -139,4 +162,4 @@ function makeIndexCache ({ dir, vaultPath }) {
   }
 }
 
-module.exports = { makeIndexCache, VERSION, MAX_CACHE_BYTES }
+module.exports = { makeIndexCache, MAX_CACHE_BYTES }

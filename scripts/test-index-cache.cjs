@@ -128,6 +128,33 @@ async function main () {
     assert.equal(back.get('a.md').text, 'small and valid')
   })
 
+  await check('ride-along fields never reach the disk', async () => {
+    /* Search annotates in-memory entries (`kind`, `fileTags`), alias
+       resolution memoises `aliases` — bytes the load path would only throw
+       away. The save must serialize the four real fields and nothing else. */
+    const store = makeIndexCache({ dir, vaultPath: '/somewhere/Annotated' })
+    store.save(new Map([['a.md', entry('a', 'text', {
+      kind: 'note', fileTags: ['x', 'y'], aliases: ['other name']
+    })]]))
+    await settled()
+    const raw = JSON.parse(await fsp.readFile(store.path, 'utf8'))
+    assert.deepEqual(raw.entries['a.md'], { name: 'a', text: 'text', mtime: 1000, size: 4 })
+  })
+
+  await check('an oversized vault drops its largest notes and keeps the rest', async () => {
+    const store = makeIndexCache({ dir, vaultPath: '/somewhere/Mostly' })
+    const result = store.save(new Map([
+      ['big.md', entry('big', 'x'.repeat(MAX_CACHE_BYTES + 1))],
+      ['a.md', entry('a', 'alpha')],
+      ['b.md', entry('b', 'beta')]
+    ]))
+    assert.ok(result.written, 'the trimmed cache is still written')
+    assert.equal(result.dropped, 1)
+    await settled()
+    const back = await store.load()
+    assert.deepEqual([...back.keys()].sort(), ['a.md', 'b.md'])
+  })
+
   await check('two vaults do not share a file', async () => {
     const one = makeIndexCache({ dir, vaultPath: '/vaults/One' })
     const two = makeIndexCache({ dir, vaultPath: '/vaults/Two' })

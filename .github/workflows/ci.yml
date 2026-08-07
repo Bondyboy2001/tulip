@@ -48,8 +48,24 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      # test:kernel spawns a real `jupyter server` and speaks the real protocol
+      # to it — there is no mock, on purpose, because the failures it exists to
+      # catch are the ones a mock would be written not to have. Without Jupyter
+      # installed that suite skips itself, and a skip in CI is indistinguishable
+      # from a pass: the only place the kernel is covered would report green for
+      # a machine that never asked. So CI installs it and sets
+      # TULIP_REQUIRE_JUPYTER, which turns the skip into a failure.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Jupyter
+        run: python -m pip install --disable-pip-version-check jupyter-server ipykernel
+
       - name: Test
         run: npm test
+        env:
+          TULIP_REQUIRE_JUPYTER: '1'
 
       - name: Build
         run: npm run build

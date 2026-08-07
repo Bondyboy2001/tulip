@@ -17,8 +17,9 @@ lock-in.
 - Write in focused Editing, Reading, or Raw views.
 - Link and embed notes with `[[wikilinks]]`, backlinks, tabs, and a live outline.
 - Keep Markdown, PDFs, websites, whiteboards, and TeX documents together.
-- Read and edit Jupyter notebooks as cells, with their saved outputs, plots and
-  tracebacks — no kernel, so nothing is run.
+- Read, edit and run Jupyter notebooks as cells — execution happens on a real
+  Jupyter kernel when one is installed, and the file's saved outputs, plots and
+  tracebacks render either way.
 - Search the whole vault and work with an optional AI copilot.
 - Build language-learning tables and review them with spaced repetition.
 - Start notes from a `templates/` folder, and click any `#tag` to find its notes.
@@ -165,6 +166,19 @@ opened before, with **Choose a folder…** at the top for one it has not. Only
 folders already on that list can be opened from it; anything new goes through
 the system's own folder dialog.
 
+## When something goes wrong
+
+If Tulip ever says something went wrong, the palette has the two things worth
+doing about it. **Reveal crash log** opens the folder holding `crash.log`, which
+is where every failure in either half of the app is written with a timestamp —
+and which says so plainly when nothing has ever failed. **Copy diagnostics**
+puts the versions, the platform and the tail of that log on the clipboard, ready
+to paste into a report.
+
+Neither sends anything anywhere. The diagnostics describe the vault by its shape
+— how many notes, how much text — and never by its path, so what you paste does
+not carry your folder names with it.
+
 ## Development
 
 ```bash
@@ -175,6 +189,8 @@ npm test          # run the test suite
 npm run verify    # lint, tests, production build, and staging checks
 npm run typecheck # tsc --checkJs, a report rather than a gate; see tsconfig.json
 npm audit         # must stay clean; see the overrides in package.json
+npm run bench     # markdown render; also bench:reading, bench:dom, bench:table
+npm run bench:boot # real launches, timed — see bench/boot-bench.mjs
 ```
 
 The lint rules are few and every one of them fires only on a defect — including
@@ -183,17 +199,26 @@ launch-time crashes got through. `npm run typecheck` is deliberately outside
 `verify`: it reports around two thousand findings today, of which the useful
 third are null-safety, and tsconfig.json says what to do about that.
 
+The window is served over a `tulip-app://` protocol rather than from `file://`,
+for one reason: Chromium keeps no V8 code cache for a `file:` page, so every
+launch recompiled the whole editor from source. `TULIP_NO_APP_SCHEME=1` sends it
+back to `file://`, which is how `bench:boot` takes both halves of a comparison
+from one build. Measure with that rather than by reasoning about bundle size —
+bytes have twice now turned out not to predict launch time here.
+
 CI runs the suite, the production build and the audit on macOS and Windows, and
 packages both, on every push.
 
 ## Not planned
 
 Tulip is deliberately smaller than the apps it resembles. There is no graph
-view, no kanban board, no calendar or daily notes, and no Markdown/HTML vault
-export (PDF export exists, under **Export as PDF…**).
+view, no kanban board, and no calendar or daily notes. Export works one note
+at a time — **Export as PDF…**, **Export as HTML…** (one self-contained file)
+and **Export as Markdown…** (the note with its attachments copied beside it) —
+rather than as a whole-vault operation.
 
-There is one window and one vault open at a time, and the sidebar splits in two
-and no further. Tulip makes no network request unless asked: the only one it can
+There is one vault open at a time, and the sidebar splits in two and no
+further. Tulip makes no network request unless asked: the only one it can
 make on its own behalf is **Check for updates…**, and nothing runs it but you.
 
 Tulip is licensed under the [MIT License](LICENSE).

@@ -1,6 +1,5 @@
 import React from 'react'
 import { createRoot } from 'react-dom/client'
-import '@excalidraw/excalidraw/index.css'
 import {
   CaptureUpdateAction,
   Excalidraw,
@@ -13,6 +12,50 @@ import { whiteboardElementsText } from '../electron/whiteboard-data.js'
 import { noteName, WHITEBOARD_EXT } from './vault-paths.js'
 
 const boardName = (path) => String(path).split('/').pop().replace(WHITEBOARD_EXT, '')
+
+/* ------------------------------------------------------------- stylesheet */
+
+/* Excalidraw's stylesheet, linked in rather than imported — see the entry
+   point in build.mjs for why. Started when this module is evaluated, which is
+   when the first board is opened: the fetch then overlaps the module's own
+   evaluation, and there is a lot of that to overlap with. `mountWhiteboard`
+   awaits it, so a board is never painted against half a cascade.
+
+   The same `document.baseURI` reasoning as math.js's loadStyles: `dist` is
+   where build.mjs puts the file, and `import.meta.url` is wherever esbuild's
+   splitting last put *this* module, which is not the same place. */
+let loadingStyles = null
+
+function loadStyles () {
+  if (loadingStyles) return loadingStyles
+
+  const link = document.createElement('link')
+  link.rel = 'stylesheet'
+  link.href = new URL('whiteboard.css', document.baseURI).href
+  link.dataset.tulipWhiteboard = ''
+
+  loadingStyles = new Promise((resolve, reject) => {
+    link.addEventListener('load', resolve, { once: true })
+    link.addEventListener('error', () => {
+      loadingStyles = null
+      // Taken back out so the next attempt starts clean, rather than leaving a
+      // dead <link> in the head per board opened.
+      link.remove()
+      reject(new Error('Whiteboard styles could not be loaded.'))
+    }, { once: true })
+  })
+  document.head.append(link)
+  return loadingStyles
+}
+
+export { loadStyles as loadWhiteboardStyles }
+
+/* Started now rather than when `mountWhiteboard` is reached, for the overlap
+   described above. The `catch` is not error handling — `mountWhiteboard`'s
+   caller awaits the same promise and decides there — it is what keeps a
+   failure this early from also being reported as an unhandled rejection, which
+   would put a console error beside the message the reader is already getting. */
+loadStyles().catch(() => {})
 
 const h = React.createElement
 const TULIP_NOTE = 'https://tulip.local/note/'

@@ -62,6 +62,10 @@ export function renderPdfEmbed (spec, onReady = () => {}, fileChip) {
   const state = {
     dead: false,
     doc: null,
+    /* What actually closes the document — a document proxy has no `destroy` of
+       its own; the loading task it came from does, and it takes the worker and
+       the buffer with it. Same reasoning as src/pdf-text.js. */
+    loading: null,
     watcher: null,   // the IntersectionObserver over page wrappers
     sizer: null,     // the ResizeObserver watching the box's width
     opening: false,
@@ -91,10 +95,13 @@ export function renderPdfEmbed (spec, onReady = () => {}, fileChip) {
     state.dead = true
     state.watcher?.disconnect()
     state.sizer?.disconnect()
-    const doc = state.doc
+    const loading = state.loading
     state.doc = null
+    state.loading = null
     // After the render in flight settles; destroying under one wedges pdf.js.
-    if (doc) Promise.resolve(state.inFlight).catch(() => {}).then(() => doc.destroy()).catch(() => {})
+    if (loading) {
+      Promise.resolve(state.inFlight).catch(() => {}).then(() => loading.destroy()).catch(() => {})
+    }
   }
 
   /** The whole embed becomes a plain chip if the document cannot be shown —
@@ -161,9 +168,11 @@ export function renderPdfEmbed (spec, onReady = () => {}, fileChip) {
     ])
     if (state.dead) return
 
-    const doc = await pdfjs.getDocument({ url: source, ...PDF_DATA }).promise
-    if (state.dead) { doc.destroy(); return }
+    const loading = pdfjs.getDocument({ url: source, ...PDF_DATA })
+    const doc = await loading.promise
+    if (state.dead) { loading.destroy().catch(() => {}); return }
     state.doc = doc
+    state.loading = loading
     count.textContent = doc.numPages === 1 ? '1 page' : `${doc.numPages} pages`
 
     /* Fit to the box's width, sized from page 1 the way the tab viewer is; a

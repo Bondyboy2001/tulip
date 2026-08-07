@@ -47,6 +47,7 @@ import {
 import { calloutHead, calloutIcon } from './callouts.js'
 import {
   slashEmbed, openEmbedPicker, slashCommands, fenceLanguages, calloutKinds,
+  hashTags, tagChoices as tagChoicesFacet,
   embedChoices as embedChoicesFacet
 } from './slash.js'
 import { mermaidBlocks } from './mermaid-editor.js'
@@ -2042,7 +2043,8 @@ const markdownKeymap = [
 
 export function createEditor ({
   parent, onChange, onOpenLink, noteNames, noteTitle, onRename, resolveEmbed,
-  resolveNoteEmbed, languageTable, noteFlag, titleEditable, embedChoices
+  resolveNoteEmbed, languageTable, noteFlag, titleEditable, embedChoices,
+  tagChoices
 }) {
   const preview = new Compartment()
   const sourceLanguage = new Compartment()
@@ -2172,6 +2174,7 @@ export function createEditor ({
         tableAssetResolver.of(resolveEmbed || (() => null)),
         embedNoteResolver.of(resolveNoteEmbed || (() => null)),
         embedChoicesFacet.of(embedChoices || (() => [])),
+        tagChoicesFacet.of(tagChoices || (() => [])),
         // Raw view empties this compartment: same document, same history, no
         // decorations standing between you and the markup.
         preview.of(RENDERED),
@@ -2182,7 +2185,7 @@ export function createEditor ({
         codeAiForm,
         proseBrackets,
         autocompletion({
-          override: [wikiCompletion, slashCommands, fenceLanguages, calloutKinds],
+          override: [wikiCompletion, slashCommands, fenceLanguages, calloutKinds, hashTags],
           icons: false
         }),
         tulipTheme,

@@ -24,6 +24,12 @@ const {
   isRequestPath: isAiRenameRequest,
   parseRequest: parseAiRenameRequest
 } = require('./copilot-rename')
+const {
+  REQUEST_PATH: AI_SEARCH_REQUEST,
+  RESULTS_PATH: AI_SEARCH_RESULTS,
+  isRequestPath: isAiSearchRequest,
+  parseRequest: parseAiSearchRequest
+} = require('./copilot-search')
 const { makeStore: makeLanguageHistoryStore } = require('./language-history-store')
 const { classifyVaultEvent } = require('./vault-events')
 const { narrowsFrom } = require('./search-narrow')
@@ -37,6 +43,7 @@ const { safeFileName } = require('./safe-name')
 const { parseFrontmatter, propsOf, propValues } = require('./frontmatter.cjs')
 const { emptyWhiteboard, whiteboardText } = require('./whiteboard-data')
 const { KernelHost } = require('./kernel')
+const { killTree } = require('./kill-tree')
 const PDF_TEXT_FORMAT = require('./pdf-text-format.json').version
 const VAULT_CONTRACT = require('./vault-contract.json')
 const WEB_PARTITIONS = require('./web-partitions.json')
@@ -183,6 +190,15 @@ const isCode = (p) => CODE_EXT.has(path.extname(String(p || '')).toLowerCase())
 const DATA_EXT = new Set(Object.keys(VAULT_CONTRACT.dataExtensions))
 const isData = (p) => DATA_EXT.has(path.extname(String(p || '')).toLowerCase())
 
+/* Every other text document the Copilot can edit, for the turn review. The
+   review card is built by diffing before/after snapshots, and a snapshot that
+   read only notes and TeX made an agent's write to a notebook, a table or a
+   script invisible — unreviewable, and unrejectable. Kind is decided here;
+   how much of a file is worth holding two copies of is a question of bytes,
+   answered in `readDocumentSnapshot`. */
+const isReviewedDocument = (p) =>
+  isNotebook(p) || isSite(p) || isWhiteboard(p) || isCode(p) || isData(p)
+
 /* Highlights drawn on a PDF, mirroring the vault's own shape:
    `Papers/thesis.pdf` is annotated in `.annotations/Papers/thesis.pdf.json`.
 
@@ -277,7 +293,21 @@ const CHAT_IMAGE_DIR = VAULT_CONTRACT.chatImageDirectory
 
 /* The renderer reaches attachments through this scheme rather than file://,
    which the page's CSP does not admit. It has to be declared before the app is
-   ready, so it sits at module scope. */
+   ready, so both sit at module scope.
+
+   `tulip-app` serves the app's own bundle — the window's document and every
+   script, stylesheet and font under dist/. It exists for ONE privilege that
+   `file:` cannot be given: `codeCache`. Chromium keeps no V8 code cache for a
+   file:// page, so around 570KB of real code (CodeMirror, lezer, markdown-it)
+   was parsed and compiled from source on every single launch, and the same
+   compile was thrown away at every quit. Served from here that work is done
+   once and read back from the cache afterwards.
+
+   `codeCache` requires `standard: true` — the two are documented together, and
+   without the second the first is quietly ignored. `secure: true` keeps the
+   page a secure context, which the existing CSP, the fonts and the workers all
+   already assume. It is deliberately NOT `corsEnabled`: nothing cross-origin
+   should be reading the app's own bundle. */
 protocol.registerSchemesAsPrivileged([{
   scheme: 'tulip-file',
   privileges: {
@@ -287,7 +317,26 @@ protocol.registerSchemesAsPrivileged([{
     stream: true,
     corsEnabled: true
   }
+}, {
+  scheme: 'tulip-app',
+  privileges: {
+    standard: true,
+    secure: true,
+    supportFetchAPI: true,
+    stream: true,
+    codeCache: true
+  }
 }])
+
+/* The window's own address, and the escape hatch back to the old one.
+
+   `TULIP_NO_APP_SCHEME=1` sends the window to `loadFile` instead, which is
+   what this replaced. It is here for two reasons: bench/boot-bench.mjs takes
+   both halves of its comparison from one build, and a protocol handler that
+   turns out to be broken on someone's machine has a way to be ruled out
+   without a rebuild. */
+const APP_ORIGIN = 'tulip-app://app'
+const useAppScheme = () => process.env.TULIP_NO_APP_SCHEME !== '1'
 
 /* ==================================================================== windows
    Every window Tulip has open, and the two questions the rest of the file asks
@@ -809,8 +858,12 @@ async function syncIndex () {
 
   /* And out to disk, coalesced, so the next launch starts from here. Not
      awaited: the index in memory is already correct and every caller of this
-     is waiting on that, not on the copy. */
-  indexCache?.save(index)
+     is waiting on that, not on the copy. A vault too big to cache whole gets
+     its largest notes dropped from the copy — worth a line in the log,
+     because the symptom (a slow first search, every launch) points nowhere. */
+  const saved = indexCache?.save(index)
+  if (saved?.dropped) console.warn(`index cache over budget: ${saved.dropped} largest notes left out`)
+  else if (saved?.skipped) console.warn('index cache skipped: vault too large to cache at all')
 }
 
 function ensureIndex () {
@@ -821,10 +874,12 @@ function ensureIndex () {
   return syncing
 }
 
-/* TeX text by rel path, keyed on mtime/size — the same shape as
+/* Reviewed-document text by rel path, keyed on mtime/size — the same shape as
    `whiteboardIndex`. Snapshots run twice per Copilot turn, and without this
-   each one re-reads every TeX document in the vault. */
-const texSnapshotCache = new Map() // rel path -> { mtime, size, text }
+   each one re-reads every TeX document, notebook, table and script in the
+   vault. */
+const documentSnapshotCache = new Map() // rel path -> { mtime, size, text }
+const MAX_SNAPSHOT_CACHE_BYTES = 64 * 1024 * 1024
 
 /**
  * A counter that moves whenever any document in the vault might have.
@@ -863,30 +918,54 @@ async function readDocumentSnapshot () {
   await ensureIndex()
   const snapshot = new Map([...index].map(([key, entry]) => [key, entry.text]))
   /* TeX is edited in the same CodeMirror surface and by the same Copilot, but
-     it deliberately is not part of the Markdown search/link index. Read it
-     here so a TeX-only turn still has a before/after operation to review and
-     reject. The vault walk is shared with the index; only the document bytes
-     are additional. */
-  const { tex = [] } = await getVaultSnapshot()
+     it deliberately is not part of the Markdown search/link index. The other
+     documents — notebooks, tables, scripts, whiteboards — are not in it
+     either, and for years an agent's write to any of them produced no review
+     card and could not be rejected. All are read here so the turn's diff sees
+     them. The vault walk is shared with the index; only the document bytes are
+     additional — and bounded: a reviewed document over `MAX_VERSIONED_BYTES`
+     would carry two copies of itself into a 4 MB trust store and evict the
+     history of everything else, so past that it goes unreviewed, exactly as
+     it already goes unversioned. TeX keeps its old unbounded reading. */
+  const { tex = [], documents = [] } = await getVaultSnapshot()
   const seen = new Set()
-  const documents = await mapLimit(tex, WALK_LIMIT, async (abs) => {
+  const sized = [
+    ...tex.map((abs) => [abs, Infinity]),
+    ...documents.map((abs) => [abs, MAX_VERSIONED_BYTES])
+  ]
+  const read = await mapLimit(sized, WALK_LIMIT, async ([abs, cap]) => {
     try {
       const key = rel(abs)
       seen.add(key)
       const stat = await fs.stat(abs)
-      const cached = texSnapshotCache.get(key)
+      if (stat.size > cap) {
+        // A held copy of the smaller file it used to be must not linger as if
+        // it were current.
+        documentSnapshotCache.delete(key)
+        return null
+      }
+      const cached = documentSnapshotCache.get(key)
       if (cached && cached.mtime === stat.mtimeMs && cached.size === stat.size) {
         return [key, cached.text]
       }
       const text = await fs.readFile(abs, 'utf8')
-      texSnapshotCache.set(key, { mtime: stat.mtimeMs, size: stat.size, text })
+      documentSnapshotCache.set(key, { mtime: stat.mtimeMs, size: stat.size, text })
       return [key, text]
     } catch { return null }
   })
-  for (const key of [...texSnapshotCache.keys()]) {
-    if (!seen.has(key)) texSnapshotCache.delete(key)
+  let held = 0
+  for (const [key, entry] of documentSnapshotCache) {
+    if (!seen.has(key)) documentSnapshotCache.delete(key)
+    else held += entry.text.length
   }
-  for (const document of documents) if (document) snapshot.set(...document)
+  /* Bounded in total as well as per file. With code and data files included, a
+     vault carrying a checked-out project could otherwise pin the text of
+     thousands of files in main-process memory for the life of the session.
+     Cleared whole rather than evicted piecemeal: the cache only saves
+     re-reads, so the rare vault that overflows it pays a fresh read per turn
+     rather than growing a leak. */
+  if (held > MAX_SNAPSHOT_CACHE_BYTES) documentSnapshotCache.clear()
+  for (const document of read) if (document) snapshot.set(...document)
   return snapshot
 }
 
@@ -1176,7 +1255,8 @@ async function getVaultSnapshot ({ fresh = false } = {}) {
       notes: files.filter((abs) => MD_EXT.has(path.extname(abs).toLowerCase())),
       tex: files.filter(isTex),
       pdfs: files.filter(isPdf).map(rel),
-      whiteboards: files.filter(isWhiteboard)
+      whiteboards: files.filter(isWhiteboard),
+      documents: files.filter(isReviewedDocument)
     }
     snapshot.revision = snapshotRevision(snapshot)
     // Something changed while we were reading; the answer is already behind.
@@ -1809,7 +1889,7 @@ async function openVault (dir) {
   await migrateAttachments(dir).catch(() => {})
   index.clear()
   whiteboardIndex.clear()
-  texSnapshotCache.clear()
+  documentSnapshotCache.clear()
   forgetLinkTables()
   /* A different vault means a different cache file, and the index just emptied
      is now allowed to be seeded from it again. */
@@ -1929,6 +2009,78 @@ ipcMain.on('app:error', (_event, kind, detail) => {
   logCrash(`renderer/${String(kind).slice(0, 40)}`, String(detail).slice(0, 4000))
 })
 
+/**
+ * The crash log, shown to the person the toast told about it.
+ *
+ * The renderer has said "the details are in the crash log" since it learned to
+ * report its own failures, and until now there was no way to reach one from
+ * inside the app: you had to know that it lives in the app's data directory and
+ * go there yourself. A message whose only next step is knowledge the reader
+ * does not have is barely better than no message.
+ *
+ * Revealed rather than opened. What lands in this file is a stack trace, and
+ * the useful thing to do with one is send it somewhere — which starts in a file
+ * manager, not in whatever has claimed .log on this machine.
+ */
+ipcMain.handle('app:reveal-log', () => {
+  const file = CRASH_LOG()
+  if (!fsSync.existsSync(file)) return false
+  shell.showItemInFolder(file)
+  return true
+})
+
+/**
+ * Everything worth putting in a bug report, as text ready to paste.
+ *
+ * Deliberately assembled here rather than in the renderer: the versions and the
+ * log are main's to know, and a reader who is reporting a fault should not have
+ * to collect five facts from four places to do it.
+ *
+ * The vault is described by shape and never by name — a count of notes says
+ * what a maintainer needs (is this a vault of 12 files or 12,000?) while a path
+ * would carry the reader's own directory names, and often their real one, into
+ * whatever they paste this into.
+ */
+ipcMain.handle('app:diagnostics', async () => {
+  const lines = [
+    `Tulip ${app.getVersion()}`,
+    `Electron ${process.versions.electron}, Chromium ${process.versions.chrome}, Node ${process.versions.node}`,
+    `${process.platform} ${process.arch} ${os.release()}`,
+    `Windows open: ${liveWindows().length}`
+  ]
+
+  if (vaultPath) {
+    try {
+      await ensureIndex()
+      const bytes = [...index.values()].reduce((sum, entry) => sum + (entry.size || 0), 0)
+      // Bytes below a kilobyte, because "0 KB" beside a note count that is
+      // plainly not zero reads as a fault in the report rather than a rounding.
+      const size = bytes < 1024 ? `${bytes} bytes` : `${Math.round(bytes / 1024)} KB`
+      lines.push(`Vault: ${index.size} notes, ${size} indexed`)
+    } catch {
+      lines.push('Vault: could not be read')
+    }
+  } else {
+    lines.push('Vault: none open')
+  }
+
+  /* The end of the log, not the whole of it. It is capped at 512KB, which is
+     far more than anybody pastes into a report, and what explains a fault is
+     nearly always the last thing in it. */
+  let tail = ''
+  try {
+    const raw = await fs.readFile(CRASH_LOG(), 'utf8')
+    tail = raw.split('\n').slice(-60).join('\n').trim()
+  } catch {
+    /* No log is the ordinary case, and the good one. */
+  }
+
+  return {
+    text: lines.join('\n') + (tail ? `\n\nLast entries in the crash log:\n${tail}` : '\n\nThe crash log is empty.'),
+    hasLog: Boolean(tail)
+  }
+})
+
 /* The window's own reveal, set by createWindow and called from the renderer's
    `app:painted` — see the account there. A no-op before there is a window and
    after the first show, so a second announcement (a boot retried after an
@@ -1938,7 +2090,21 @@ ipcMain.on('app:error', (_event, kind, detail) => {
    `revealMainWindow` here showed whichever window was built last — so opening
    a second one left the first hidden until its 4-second backstop fired. */
 const reveals = new Map()
-ipcMain.on('app:painted', (event) => reveals.get(event.sender.id)?.())
+ipcMain.on('app:painted', (event) => {
+  reveals.get(event.sender.id)?.()
+  /* The first paint is also the moment to warm the search index. Left alone,
+     the first full vault walk runs when the first note open asks for its
+     backlinks — on top of the renderer's opening burst of requests, which is
+     the one moment this process is already busy. Kicked from here instead,
+     the walk happens while the reader is still looking at the tree, and the
+     backlink call that would have started it awaits the same `syncing`
+     promise it would have created. A moment's delay lets the paint's own
+     round trip finish first; when the index is already clean this is a
+     resolved promise and nothing more. */
+  if (vaultPath) {
+    setTimeout(() => { ensureIndex().catch((error) => logCrash('warmIndex', error)) }, 50)
+  }
+})
 
 ipcMain.handle('app:flushed', async (event) => {
   await flushPendingDurability()
@@ -1952,13 +2118,34 @@ ipcMain.handle('app:flushed', async (event) => {
    anything down. */
 const flushWaits = new Map()
 
+/* How long a silent renderer gets before the door closes anyway. Short,
+   because this is the wedged-page case and the window has to close. */
+const FLUSH_QUIET_MS = 1500
+/* And the most a *working* renderer gets, however much it says it is still
+   going. A notebook holding a session's worth of plots is tens of megabytes of
+   base64 to re-serialise and write, and 1.5 s of that is not a hung page — it
+   is a large file being saved correctly. Without the ceiling a renderer stuck
+   in a loop that keeps reporting progress could hold a quit open for ever. */
+const FLUSH_CEILING_MS = 20_000
+
+/* Said by a renderer that is still writing. Every one of these buys another
+   quiet period, up to the ceiling — see `askRendererToFlush`. */
+ipcMain.on('app:flushing', (event) => flushWaits.get(event.sender.id)?.working())
+
 /**
  * Ask one window's renderer to write what it is holding, and wait for it.
  *
  * A page that is wedged, or one whose renderer died, must not hold the door:
- * the timer resolves the promise whatever happens. Asking twice for the same
- * window is the same ask — ⌘⇧W pressed twice, or ⌘Q arriving while a close is
- * already waiting, must not leave the first promise stranded on its timer.
+ * the timer resolves the promise whatever happens. But a fixed deadline cannot
+ * tell "wedged" from "busy", and the documents most likely to be slow here are
+ * the ones with no draft to fall back on — a grid, a board, a notebook. So the
+ * deadline is a quiet period rather than a total: a renderer that keeps saying
+ * it is working keeps the door open, and a renderer that says nothing loses it
+ * on the same 1.5 s as before.
+ *
+ * Asking twice for the same window is the same ask — ⌘⇧W pressed twice, or ⌘Q
+ * arriving while a close is already waiting, must not leave the first promise
+ * stranded on its timer.
  */
 function askRendererToFlush (win) {
   if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return Promise.resolve()
@@ -1968,8 +2155,16 @@ function askRendererToFlush (win) {
 
   const entry = {}
   entry.promise = new Promise((resolve) => {
-    const timer = setTimeout(resolve, 1500)
-    entry.reply = () => { clearTimeout(timer); resolve() }
+    const startedAt = Date.now()
+    let timer = setTimeout(resolve, FLUSH_QUIET_MS)
+    const done = () => { clearTimeout(timer); resolve() }
+    entry.reply = done
+    entry.working = () => {
+      const left = FLUSH_CEILING_MS - (Date.now() - startedAt)
+      if (left <= 0) return done()
+      clearTimeout(timer)
+      timer = setTimeout(resolve, Math.min(FLUSH_QUIET_MS, left))
+    }
   }).finally(() => flushWaits.delete(key))
 
   flushWaits.set(key, entry)
@@ -2123,7 +2318,11 @@ function createWindow ({ open = null } = {}) {
   win.webContents.on('did-fail-load', reveal)
   win.on('closed', () => clearTimeout(revealBackstop))
 
-  win.loadFile(path.join(__dirname, '..', 'dist', 'index.html'))
+  /* Over `tulip-app` rather than `file:`, for the V8 code cache — see the
+     scheme registration. The handler is installed in `whenReady` before any
+     window is built, so there is never a load racing it. */
+  if (useAppScheme()) win.loadURL(`${APP_ORIGIN}/index.html`)
+  else win.loadFile(path.join(__dirname, '..', 'dist', 'index.html'))
 
   // External links open in the browser; the vault never navigates away.
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -2185,10 +2384,21 @@ function createWindow ({ open = null } = {}) {
      vault with no window to show for it, and every event it sent was dropped
      on the floor, including the one that records what it changed — so the
      edits landed with no way to review or undo them. */
+  /* Read now, not in the handler below. By the time `closed` fires the
+     webContents is gone, and `win.webContents` on a destroyed window does not
+     answer null — it throws "Object has been destroyed". So the first line of
+     that handler threw, every line after it was skipped, and the crash guard
+     logged it where nobody was looking: closing a window left its runs and its
+     kernels alive, and ⌘W on the first window left the copilot's CLI running
+     against the vault with no window to show for it. Which is the exact failure
+     the comment above this describes, arriving by the route that was meant to
+     prevent it. */
+  const contentsId = win.webContents.id
+
   win.on('closed', () => {
     windows.delete(win)
-    reveals.delete(win.webContents.id)
-    documentZoomClaims.delete(win.webContents.id)
+    reveals.delete(contentsId)
+    documentZoomClaims.delete(contentsId)
     stopRunsOwnedBy(win)
     stopKernelsOwnedBy(win)
     if (primary) {
@@ -2418,9 +2628,39 @@ function buildMenu () {
         { label: 'Reveal in Finder', click: () => toFocused('menu', 'reveal') },
         { type: 'separator' },
         { label: 'Save', accelerator: 'Cmd+S', click: () => toFocused('menu', 'save') },
+        /* Not Cmd+P, which has always been the command palette here. */
+        { label: 'Print…', accelerator: 'Cmd+Alt+P', click: () => toFocused('menu', 'print-note') },
         { label: 'Export as PDF…', click: () => toFocused('menu', 'export-pdf') },
+        { label: 'Export as HTML…', click: () => toFocused('menu', 'export-html') },
+        { label: 'Export as Markdown…', click: () => toFocused('menu', 'export-markdown') },
         { label: 'Export Whiteboard as PNG…', click: () => toFocused('menu', 'export-whiteboard-png') },
-        { label: 'Export Whiteboard as SVG…', click: () => toFocused('menu', 'export-whiteboard-svg') }
+        { label: 'Export Whiteboard as SVG…', click: () => toFocused('menu', 'export-whiteboard-svg') },
+        { label: 'Export Notebook as Script…', click: () => toFocused('menu', 'export-notebook-script') },
+        { label: 'Export Notebook as HTML…', click: () => toFocused('menu', 'export-notebook-html') }
+      ]
+    },
+    {
+      /* Running is a menu of its own rather than items under Edit, because
+         running is not editing — and because these are the commands a notebook
+         has that nothing else in the app does. Every one of them does nothing
+         at all while anything but a notebook is open, which is what the
+         renderer's own guard is for; a menu that greys out per document would
+         need the menu rebuilt on every tab switch. */
+      label: 'Notebook',
+      submenu: [
+        /* No accelerator on this one, deliberately. ⇧⏎, ⌘⏎ and ⌥⏎ are already
+           the three Enters a notebook has, and they are handled in the page
+           where the difference between them lives — a menu accelerator would
+           swallow the key app-wide and hand all three to this one command,
+           which is only the first of the three. */
+        { label: 'Run Cell', click: () => toFocused('menu', 'nb-run-cell') },
+        { label: 'Run All', click: () => toFocused('menu', 'nb-run-all') },
+        { label: 'Run All Above', click: () => toFocused('menu', 'nb-run-above') },
+        { label: 'Run All Below', click: () => toFocused('menu', 'nb-run-below') },
+        { type: 'separator' },
+        { label: 'Interrupt', accelerator: 'Cmd+.', click: () => toFocused('menu', 'nb-interrupt') },
+        { label: 'Restart Kernel…', click: () => toFocused('menu', 'nb-restart') },
+        { label: 'Restart and Run All…', click: () => toFocused('menu', 'nb-restart-all') }
       ]
     },
     {
@@ -2727,6 +2967,46 @@ ipcMain.handle('pdf:source', async (_e, p) => {
   if (!isPdf(abs)) throw new Error('Only PDFs have a document source.')
   ensurePdfText(rel(abs)).catch(() => {})
   return `tulip-file://vault/${rel(abs).split(path.sep).map(encodeURIComponent).join('/')}`
+})
+
+/**
+ * Put the version currently on disk somewhere safe, under a name of its own.
+ *
+ * A document changed on disk while it had unsaved edits in a buffer, and the
+ * buffer is what the app is about to keep. For markdown that is a three-way
+ * merge and both sides survive; for everything else — a whiteboard, a grid, a
+ * notebook — there is nothing to merge line by line, so the disk's version was
+ * simply dropped, with a toast to say so. A toast is not a copy. Whatever the
+ * other side wrote, whether that was a sync client or a Jupyter running beside
+ * this one, was gone the moment the next autosave landed.
+ *
+ * So it is copied first, and only then overwritten. The name follows the
+ * convention every sync client already uses and every user has already seen,
+ * which is the point: a file called `Analysis (conflicted copy).ipynb` sitting
+ * next to `Analysis.ipynb` explains itself without a dialog.
+ *
+ * Copied byte for byte rather than read and rewritten as text — a notebook is
+ * mostly base64 and a whiteboard is not ours to reformat. Returns the new
+ * path, or null when there was nothing on disk to keep.
+ */
+ipcMain.handle('file:conflict-copy', async (_e, p) => {
+  const abs = await realSafePath(p)
+  const ext = path.extname(abs)
+  const stem = path.basename(abs, ext)
+  const target = freeName(path.dirname(abs), `${stem} (conflicted copy)`, ext)
+  try {
+    /* `COPYFILE_EXCL` so this can never land on a file that appeared between
+       `freeName` looking and the copy happening — losing the disk's version is
+       the exact failure this handler exists to prevent, and doing it to a
+       bystander would be worse. */
+    await fs.copyFile(abs, target, fsSync.constants.COPYFILE_EXCL)
+  } catch {
+    return null
+  }
+  noteSelfWrite(target)
+  indexDirty = true
+  invalidateVaultSnapshot()
+  return rel(target)
 })
 
 ipcMain.handle('file:write', async (_e, p, content, metadata = null) => {
@@ -3740,7 +4020,10 @@ function hitLines (text, spots, max = 4) {
    ranked below it. */
 let lastSearch = null
 
-ipcMain.handle('search:vault', async (_e, raw, opts = {}) => {
+/* A named function rather than an inline handler because the search now has
+   two callers: the overlay, and the Copilot's request file — see
+   `consumeAiSearch`. */
+async function searchVault (raw, opts = {}) {
   // One shape, whichever way this answers.
   const nothing = { results: [], truncated: false, unsearched: 0, unsearchedPaths: [] }
   if (!vaultPath) return nothing
@@ -3904,7 +4187,9 @@ ipcMain.handle('search:vault', async (_e, raw, opts = {}) => {
      the IPC boundary performs, so the flag arrived as undefined every time and
      the cap was silent. */
   return { results: truncated ? results.slice(0, 200) : results, truncated, unsearched, unsearchedPaths }
-})
+}
+
+ipcMain.handle('search:vault', (_e, raw, opts = {}) => searchVault(raw, opts))
 
 /**
  * Every tag in the vault and how many notes carry it — the inventory the
@@ -3942,6 +4227,29 @@ ipcMain.handle('tags:vault', async () => {
     .sort((a, b) => b.notes - a.notes || a.tag.localeCompare(b.tag))
 })
 
+/* One line of what a replace would do, for the preview: the first line the two
+   texts disagree on, before and after. A line is the right unit because it is
+   what the reader can check the pattern against — "workspace → vault" is not
+   obviously right or wrong until you see it standing in a sentence.
+
+   Compared line by line rather than by character offset: a replacement of a
+   different length shifts every offset after it, and the interesting thing is
+   which line changed, not where in the file it now sits. */
+const SAMPLE_CHARS = 200
+function firstChangedLine (before, after) {
+  const was = before.split('\n')
+  const now = after.split('\n')
+  const clip = (line) => {
+    const text = String(line ?? '').trim()
+    return text.length > SAMPLE_CHARS ? `${text.slice(0, SAMPLE_CHARS)}…` : text
+  }
+  for (let i = 0; i < Math.max(was.length, now.length); i++) {
+    if (was[i] === now[i]) continue
+    return { line: i + 1, before: clip(was[i]), after: clip(now[i]) }
+  }
+  return null
+}
+
 /**
  * The same query, used to rewrite rather than to find.
  *
@@ -3954,6 +4262,20 @@ ipcMain.handle('tags:vault', async () => {
  * vault leaves the notes it did not reach untouched rather than truncated, and
  * the paths come back for the renderer to reload anything it has open — its
  * own buffer is now older than the disk.
+ *
+ * Two options decide whether anything is written at all:
+ *
+ * `preview` counts and matches exactly as a real run would, and then returns
+ * instead of writing. This is the only edit in Tulip that touches notes nobody
+ * has open, which is what makes a wrong pattern expensive — the undo stack of
+ * a closed note is not a thing that exists, and the batch entry in the trust
+ * store is the only way back. Being able to look first is cheaper than being
+ * able to undo.
+ *
+ * `only` narrows a real run to a named set of paths. The renderer passes back
+ * exactly the paths its preview showed, so what gets rewritten is what was on
+ * screen when the reader said yes — a note that grew a match in between is not
+ * quietly swept in with the rest.
  */
 ipcMain.handle('search:replace', async (_e, raw, replacement, opts = {}) => {
   if (!vaultPath) return { notes: 0, hits: 0, rewritten: [] }
@@ -3973,8 +4295,11 @@ ipcMain.handle('search:replace', async (_e, raw, replacement, opts = {}) => {
   /* Counted and rewritten first, written second. `find` carries a `lastIndex`
      between the count and the replace, so the matching has to stay one note at
      a time — but the writes below do not. */
+  const only = Array.isArray(opts.only) ? new Set(opts.only) : null
+
   const pending = []
   for (const [key, entry] of index) {
+    if (only && !only.has(key)) continue
     if (!passesFilters(key, entry, q.filters)) continue
     // Nothing to count and nothing to write: the overwhelming common case.
     if (!has.test(entry.text)) continue
@@ -3992,6 +4317,22 @@ ipcMain.handle('search:replace', async (_e, raw, replacement, opts = {}) => {
     if (next === entry.text) continue
 
     pending.push({ key, abs: path.resolve(vaultPath, key), next, n, previous: entry.text })
+  }
+
+  /* Asked what it would do, not told to do it. Everything above has already
+     run — the same filters, the same matching, the same rewrite — so what
+     comes back is the actual outcome rather than an estimate of it. */
+  if (opts.preview) {
+    return {
+      preview: true,
+      notes: pending.length,
+      hits: pending.reduce((sum, p) => sum + p.n, 0),
+      /* Sorted by weight: the note a mistake would damage most is the one
+         worth reading first, and a hundred-file list is scrolled, not read. */
+      files: pending
+        .sort((a, b) => b.n - a.n || a.key.localeCompare(b.key))
+        .map(({ key, n, previous, next }) => ({ path: key, hits: n, sample: firstChangedLine(previous, next) }))
+    }
   }
 
   /* Concurrently, for the same reason the link rewriter is: a replace across
@@ -4517,6 +4858,179 @@ ipcMain.handle('pdf:export', async (event, name, to) => {
     })
     await fs.writeFile(filePath, bytes)
     return { ok: true, path: filePath, bytes: bytes.length }
+  } catch (err) {
+    return { ok: false, error: err.message }
+  }
+})
+
+/* The same page as `pdf:export`, sent to a real printer through the system's
+   own dialog instead of to a file. The renderer has already done the deciding
+   — light palette, reading view, everything settled — before it invokes. */
+ipcMain.handle('pdf:print', async (event) => {
+  const win = windowOf(event)
+  if (!win) return { ok: false, error: 'There is no window to print from.' }
+  return await new Promise((resolve) => {
+    win.webContents.print({ printBackground: true }, (success, reason) => {
+      if (success) resolve({ ok: true })
+      else if (String(reason || '').includes('cancel')) resolve({ ok: false, canceled: true })
+      else resolve({ ok: false, error: reason || 'Printing did not finish.' })
+    })
+  })
+})
+
+/* ------------------------------------------------------- html export
+
+   The reading view as one self-contained file: the renderer hands over the
+   settled, light-palette markup it prepared (the same preparation the PDF
+   export does), and this side folds in everything the page would otherwise
+   have to ask Tulip for — the stylesheet, the fonts it names, and every
+   image, as data URIs — so the result opens anywhere with nothing beside it. */
+
+const EXPORT_IMAGE_MIME = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.avif': 'image/avif',
+  '.svg': 'image/svg+xml',
+  '.bmp': 'image/bmp'
+}
+const EXPORT_IMAGE_CAP = 10 * 1024 * 1024
+
+/** Stylesheet with every `url(./fonts/…)` it names carried inline. */
+async function inlineExportCss (file) {
+  let css
+  try { css = await fs.readFile(path.join(DIST, file), 'utf8') } catch { return '' }
+  const jobs = []
+  css.replace(/url\((["']?)\.\/fonts\/([^"')]+)\1\)/g, (_whole, _q, font) => {
+    jobs.push(font)
+    return _whole
+  })
+  const fonts = new Map()
+  for (const font of new Set(jobs)) {
+    try {
+      const bytes = await fs.readFile(path.join(DIST, 'fonts', font))
+      fonts.set(font, `url(data:font/woff2;base64,${bytes.toString('base64')})`)
+    } catch { /* a font that cannot be read falls back to the system's */ }
+  }
+  return css.replace(/url\((["']?)\.\/fonts\/([^"')]+)\1\)/g,
+    (whole, _q, font) => fonts.get(font) || whole)
+}
+
+/** Every `tulip-file://vault/…` image in the markup, made self-contained. */
+async function inlineExportImages (html) {
+  const sources = new Set()
+  html.replace(/(["'])tulip-file:\/\/vault\/([^"']+)\1/g, (_whole, _q, rel) => {
+    sources.add(rel)
+    return _whole
+  })
+  const data = new Map()
+  for (const encoded of sources) {
+    try {
+      const rel = encoded.split('/').map(decodeURIComponent).join('/')
+      const mime = EXPORT_IMAGE_MIME[path.extname(rel).toLowerCase()]
+      if (!mime) continue                       // audio and video stay external
+      const abs = await realSafePath(rel)
+      const stat = await fs.lstat(abs)
+      if (!stat.isFile() || stat.size > EXPORT_IMAGE_CAP) continue
+      const bytes = await fs.readFile(abs)
+      data.set(encoded, `data:${mime};base64,${bytes.toString('base64')}`)
+    } catch { /* an unreadable image exports as its broken self */ }
+  }
+  return html.replace(/(["'])tulip-file:\/\/vault\/([^"']+)\1/g,
+    (whole, quote, rel) => (data.has(rel) ? `${quote}${data.get(rel)}${quote}` : whole))
+}
+
+ipcMain.handle('note:export-html', async (event, name, html, to) => {
+  const win = windowOf(event)
+  if (!win) return { ok: false, error: 'There is no window to export from.' }
+
+  const safe = String(name || 'note').replace(/[\\/:*?"<>|]/g, '-').trim().slice(0, 120) || 'note'
+  let filePath = typeof to === 'string' && to.endsWith('.html') ? to : null
+  if (!filePath) {
+    const chosen = await dialog.showSaveDialog(win, {
+      title: 'Export as HTML',
+      defaultPath: path.join(app.getPath('documents'), `${safe}.html`),
+      filters: [{ name: 'HTML', extensions: ['html'] }]
+    })
+    if (chosen.canceled || !chosen.filePath) return { ok: false, canceled: true }
+    filePath = chosen.filePath
+  }
+
+  try {
+    const css = [await inlineExportCss('renderer.css'), await inlineExportCss('katex.css')]
+      .filter(Boolean).join('\n')
+    const body = await inlineExportImages(String(html || ''))
+    const page = `<!doctype html>
+<html data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${safe.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</title>
+<style>${css}</style>
+<style>
+/* Standing in for the app around the page: the reading column gets the page
+   to itself, and the controls that only meant something inside Tulip go. */
+body { margin: 0; background: var(--paper, #fff); }
+.reading { overflow: visible; height: auto; padding: 2rem clamp(1rem, 8vw, 5rem); }
+.code-tools, .tk-copy, .fold-chevron, .reading-fold, .embed-resize-grip { display: none !important; }
+</style>
+</head>
+<body>
+${body}
+</body>
+</html>
+`
+    await fs.writeFile(filePath, page, 'utf8')
+    return { ok: true, path: filePath, bytes: Buffer.byteLength(page) }
+  } catch (err) {
+    return { ok: false, error: err.message }
+  }
+})
+
+/* ----------------------------------------------------- markdown export
+
+   The note as a portable folder: the text with its embeds rewritten to plain
+   relative links, and the files those links now name copied beside it. The
+   renderer resolved the embeds — it owns the resolution rules — and this
+   side owns the destination dialog and the copying. */
+
+ipcMain.handle('note:export-markdown', async (event, name, text, files, to) => {
+  const win = windowOf(event)
+  if (!win) return { ok: false, error: 'There is no window to export from.' }
+
+  const safe = String(name || 'note').replace(/[\\/:*?"<>|]/g, '-').trim().slice(0, 120) || 'note'
+  let filePath = typeof to === 'string' && to.endsWith('.md') ? to : null
+  if (!filePath) {
+    const chosen = await dialog.showSaveDialog(win, {
+      title: 'Export as Markdown',
+      defaultPath: path.join(app.getPath('documents'), `${safe}.md`),
+      filters: [{ name: 'Markdown', extensions: ['md'] }]
+    })
+    if (chosen.canceled || !chosen.filePath) return { ok: false, canceled: true }
+    filePath = chosen.filePath
+  }
+
+  try {
+    await fs.writeFile(filePath, String(text || ''), 'utf8')
+    let copied = 0
+    for (const file of Array.isArray(files) ? files : []) {
+      if (!file?.rel || !file?.as) continue
+      /* `as` came from the renderer; contained under the note's own folder or
+         refused, so a mangled name cannot write outside the destination. */
+      const target = path.resolve(path.dirname(filePath), String(file.as))
+      if (!target.startsWith(path.dirname(filePath) + path.sep)) continue
+      try {
+        const source = await realSafePath(String(file.rel))
+        const stat = await fs.lstat(source)
+        if (!stat.isFile()) continue
+        await fs.mkdir(path.dirname(target), { recursive: true })
+        await fs.copyFile(source, target)
+        copied++
+      } catch { /* a missing attachment exports as its broken link */ }
+    }
+    return { ok: true, path: filePath, copied }
   } catch (err) {
     return { ok: false, error: err.message }
   }
@@ -5234,12 +5748,60 @@ compiledRunner('cuda', {
  * session. The well-known locations below are a fallback for when that fails,
  * and a backstop for shells that only export PATH for interactive use.
  *
- * None of this describes Windows, where a process started from Explorer already
- * inherits the machine and user PATH that installers write to, and where none of
- * these directories exist. There the list is empty and the login-shell probe is
- * skipped entirely rather than spawning a shell that is not there.
+ * Windows has no login shell to ask — a process started from Explorer already
+ * inherits the machine and user PATH that installers write to — so the probe is
+ * skipped there rather than spawning a shell that is not present. But "most
+ * installers register themselves" is not "all of them do": the Python.org
+ * installer leaves "Add to PATH" unticked by default, TeX Live and MiKTeX
+ * install under their own roots, and a user-scope Node or Rust toolchain lands
+ * in AppData. Those are the same holes the list below plugs on macOS, so
+ * Windows gets its own version of it rather than nothing at all.
  */
-const FALLBACK_PATHS = process.platform === 'win32' ? [] : [
+
+/* Where Windows puts things, from the environment rather than assumed: a
+   machine with a D: drive or a redirected profile has none of the C:\ paths a
+   literal list would name. */
+const WINDOWS_ROOTS = () => {
+  const local = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local')
+  const roaming = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming')
+  const programs = process.env.ProgramFiles || 'C:\\Program Files'
+  const systemDrive = process.env.SystemDrive || 'C:'
+  const found = [
+    /* The Python.org installer's per-user location, which is the default and
+       the one whose "Add Python to PATH" box is unticked. Each minor version
+       gets its own folder, so the directory is listed and its children added —
+       newest last, so a later version wins the lookup. */
+    path.join(local, 'Programs', 'Python'),
+    path.join(local, 'Microsoft', 'WindowsApps'),   // the Store's Python and others
+    path.join(roaming, 'npm'),                      // npm's global bin, user scope
+    path.join(local, 'Programs', 'nodejs'),
+    path.join(os.homedir(), '.cargo', 'bin'),
+    path.join(os.homedir(), '.elan', 'bin'),        // Lean, via elan
+    path.join(programs, 'nodejs'),
+    // TeX, for ```tikz — both distributions, at their own default roots.
+    `${systemDrive}\\texlive`,
+    path.join(programs, 'MiKTeX', 'miktex', 'bin', 'x64')
+  ]
+  /* Two of those are parents rather than bin directories: a Python install is
+     `…\Python\Python312\` and a TeX Live one is `…\texlive\2025\bin\windows`.
+     Expanding them is a few `readdirSync`s at startup, and the alternative is
+     naming a year and a minor version in the source. */
+  const expanded = []
+  for (const dir of found) {
+    expanded.push(dir)
+    if (!dir.includes('Python') && !dir.includes('texlive')) continue
+    let children = []
+    try { children = fsSync.readdirSync(dir).sort() } catch { continue }
+    for (const child of children) {
+      const at = path.join(dir, child)
+      if (dir.includes('texlive')) expanded.push(path.join(at, 'bin', 'windows'))
+      else expanded.push(at, path.join(at, 'Scripts'))
+    }
+  }
+  return expanded
+}
+
+const FALLBACK_PATHS = process.platform === 'win32' ? WINDOWS_ROOTS() : [
   '/opt/homebrew/bin', '/opt/homebrew/sbin',   // Homebrew, Apple silicon
   '/usr/local/bin', '/usr/local/sbin',         // Homebrew, Intel — and much else
   '/opt/local/bin',                            // MacPorts
@@ -5298,9 +5860,7 @@ function readLoginPath () {
     // A profile that waits for input would otherwise hang this forever. The
     // whole group goes, so a pipeline the profile started goes with it.
     bail = setTimeout(() => {
-      try { process.kill(-child.pid, 'SIGKILL') } catch {
-        try { child.kill('SIGKILL') } catch { /* already gone */ }
-      }
+      killTree(child, 'SIGKILL')
       finish(null)
     }, 4000)
     bail.unref?.()
@@ -5597,9 +6157,10 @@ function stopRun (id) {
   const run = runs.get(id)
   if (!run || run.done) return false
 
-  const signal = (sig) => {
-    try { process.kill(-run.child.pid, sig) } catch { try { run.child.kill(sig) } catch {} }
-  }
+  /* The tree, not the process: a run block's interpreter is free to have
+     started something of its own, and on Windows what we hold is often a shim
+     around the real one. See electron/kill-tree.js. */
+  const signal = (sig) => killTree(run.child, sig)
   signal('SIGTERM')
   run.killTimer = setTimeout(() => signal('SIGKILL'), 2000)
   return true
@@ -5676,6 +6237,29 @@ ipcMain.handle('kernel:interrupt', async (_e, notebookPath) => {
   return kernel ? kernel.interrupt() : false
 })
 
+/* The answer to an `input()` the kernel is blocked on. Nothing is returned but
+   whether there was a question to answer: what the kernel does with it comes
+   back as ordinary output, the way it does when you type into a terminal. */
+ipcMain.handle('kernel:input', async (_e, notebookPath, value) => {
+  const kernel = kernels.get(notebookPath)
+  return kernel ? kernel.respondInput(value) : false
+})
+
+/* Completion and inspection answer straight back rather than as events: unlike
+   a cell, nothing is drawn until the whole reply is in hand. A kernel that is
+   not running is not an error worth raising here — the caller is a Tab key. */
+ipcMain.handle('kernel:complete', async (_e, notebookPath, code, cursorPos) => {
+  const kernel = kernels.get(notebookPath)
+  if (!kernel) return null
+  return kernel.complete(code, cursorPos).catch(() => null)
+})
+
+ipcMain.handle('kernel:inspect', async (_e, notebookPath, code, cursorPos) => {
+  const kernel = kernels.get(notebookPath)
+  if (!kernel) return null
+  return kernel.inspect(code, cursorPos).catch(() => null)
+})
+
 ipcMain.handle('kernel:restart', async (_e, notebookPath) => {
   const kernel = kernels.get(notebookPath)
   return kernel ? kernel.restart() : false
@@ -5691,11 +6275,7 @@ ipcMain.handle('kernel:specs', () => kernels.kernelSpecs())
 /* For quitting, where there is no later: the SIGKILL escalation timer in
    `stopRun` would never fire, so the groups go outright. */
 function killAllRuns () {
-  for (const run of runs.values()) {
-    try { process.kill(-run.child.pid, 'SIGKILL') } catch {
-      try { run.child.kill('SIGKILL') } catch { /* already gone */ }
-    }
-  }
+  for (const run of runs.values()) killTree(run.child, 'SIGKILL')
 }
 
 /* --------------------------------------------------------------- manim
@@ -6124,6 +6704,58 @@ async function consumeAiRename (event) {
   }
 }
 
+/**
+ * Consume the provider-neutral search request written by Copilot: run the
+ * vault search the overlay runs, and leave the answer where the agent's own
+ * file tool can read it. The request is deleted either way — a request that
+ * failed must not run again on the next watcher pass.
+ */
+async function consumeAiSearch () {
+  let requestFile
+  const resultsFile = await realSafePath(AI_SEARCH_RESULTS).catch(() => null)
+  try {
+    requestFile = await realSafePath(AI_SEARCH_REQUEST)
+    const request = parseAiSearchRequest(await fs.readFile(requestFile, 'utf8'))
+    const found = await searchVault(request.query, request.opts)
+    /* Bounded for the reader it has: an agent wants the map, not the vault
+       over again. Forty notes, four places each, lines clipped. */
+    const body = {
+      query: request.query,
+      truncated: !!found.truncated || (found.results?.length || 0) > 40,
+      unsearched: found.unsearched || 0,
+      error: found.error,
+      results: (found.results || []).slice(0, 40).map((one) => ({
+        path: one.path,
+        kind: one.kind,
+        hits: (one.hits || []).slice(0, 4).map((hit) => ({
+          line: hit.line,
+          page: hit.page,
+          text: String(hit.text || '').slice(0, 200)
+        })),
+        total: one.total
+      }))
+    }
+    if (resultsFile) {
+      noteSelfWrite(resultsFile)
+      await fs.writeFile(resultsFile, JSON.stringify(body, null, 1), 'utf8')
+      noteSelfWrite(resultsFile)
+    }
+  } catch (err) {
+    if (resultsFile) {
+      noteSelfWrite(resultsFile)
+      await fs.writeFile(resultsFile, JSON.stringify({
+        error: err?.message || 'The Copilot search could not be completed.'
+      }, null, 1), 'utf8').catch(() => {})
+      noteSelfWrite(resultsFile)
+    }
+  } finally {
+    if (requestFile) {
+      noteSelfWrite(requestFile)
+      await fs.unlink(requestFile).catch(() => {})
+    }
+  }
+}
+
 function sendAiReview (id, operation) {
   if (!operation || aiReviewsSent.has(id)) return
   aiReviewsSent.add(id)
@@ -6179,6 +6811,15 @@ ai.attach(
       }
       return
     }
+    /* The search request rides the same seam: the agent's Write of the hidden
+       file is consumed rather than shown, serialized on the same chain as the
+       renames so two requests never race each other. */
+    if (isAiSearchRequest(event?.path)) {
+      if (event?.k === 'edited') {
+        aiRenameWork = aiRenameWork.then(() => consumeAiSearch()).catch(() => {})
+      }
+      return
+    }
     if (event?.k === 'text') {
       if (aiText && aiTextTurn !== event.turnId) flushAiText()
       aiTextTurn = turnId(event.turnId)
@@ -6189,6 +6830,14 @@ ai.attach(
     flushAiText()
     if (event?.k === 'turn-end' || event?.k === 'error') {
       const id = turnId(event.turnId)
+      /* The turn is over, so its search answers are litter: swept on the same
+         chain the searches run on, so a request still being answered is not
+         raced by its own cleanup — and the next turn cannot read a stale
+         answer as a fresh one. */
+      aiRenameWork
+        .then(() => realSafePath(AI_SEARCH_RESULTS))
+        .then((file) => { noteSelfWrite(file); return fs.unlink(file) })
+        .catch(() => {})
       /* A provider reports its Write before the request has crossed main's
          rename path. Wait for that small operation or the after-snapshot can
          race it and produce no review card. */
@@ -6351,7 +7000,11 @@ ipcMain.handle('trust:restore', async (_e, id, onlyPath = null) => {
 const CHAT_DIR = () => path.join(app.getPath('userData'), 'chats')
 const chatFile = () => path.join(CHAT_DIR(), `${sha1(vaultPath || '')}.json`)
 
-ipcMain.handle('ai:history:load', () => {
+ipcMain.handle('ai:history:load', (event) => {
+  /* The same fence as `ai:start` and the save half below: transcripts belong
+     to the one window allowed to hold the panel, and a window that cannot
+     write them has no business reading them either. */
+  assertCopilotWindow(event)
   if (!vaultPath) return {}
   const file = chatFile()
   let raw
@@ -6423,6 +7076,30 @@ ipcMain.handle('review:all', async () => {
 ipcMain.handle('review:record', async (_e, entries) => {
   if (!vaultPath) return { ok: false }
   return review.record(entries)
+})
+
+/* A deck to import, picked and read but deliberately not parsed: the CSV
+   dialect logic lives in the renderer (src/csv.js) beside the table the rows
+   are joining. */
+ipcMain.handle('review:pick-csv', async () => {
+  if (!vaultPath) throw new Error('Open a vault first.')
+  const picked = await dialog.showOpenDialog(focusedWindow(), {
+    title: 'Import cards',
+    properties: ['openFile'],
+    buttonLabel: 'Import',
+    filters: [{ name: 'Comma or tab separated', extensions: ['csv', 'tsv', 'txt'] }]
+  })
+  if (picked.canceled || !picked.filePaths[0]) return null
+  const source = picked.filePaths[0]
+  const stat = await fs.lstat(source)
+  if (!stat.isFile()) throw new Error('That is not a file.')
+  if (stat.size > 8 * 1024 * 1024) throw new Error('That file is too large to be a deck.')
+  return { name: path.basename(source), text: await fs.readFile(source, 'utf8') }
+})
+
+ipcMain.handle('review:unrecord', async (_e, entry) => {
+  if (!vaultPath) return { ok: false }
+  return review.unrecord(entry)
 })
 
 ipcMain.handle('review:prune', async (_e, knownIds) => {
@@ -7007,6 +7684,73 @@ app.whenReady().then(async () => {
     }
   })
 
+  /* The app's own bundle. Everything served here ships inside Tulip — there is
+     no reader-supplied path on this scheme at all — so the guard is only
+     `appAsset`'s containment, and it is here to catch a mistake rather than an
+     attack.
+
+     THE CONTENT TYPE IS STATED, NOT GUESSED, for the one type that must be
+     right: Chromium refuses a module script that does not arrive as JavaScript,
+     and refusing the entry module is a blank window rather than a slow one. The
+     rest of the map is what dist/index.html actually pulls in. Anything not
+     named keeps whatever `net.fetch` inferred from the extension — pdf.js's
+     cmaps and font files reach the page over `tulip-file://app/` instead, and
+     that path has always relied on the guess. */
+  const APP_MIME = {
+    '.html': 'text/html',
+    '.js': 'text/javascript',
+    '.mjs': 'text/javascript',
+    '.cjs': 'text/javascript',
+    '.css': 'text/css',
+    '.json': 'application/json',
+    '.svg': 'image/svg+xml',
+    '.wasm': 'application/wasm',
+    '.woff2': 'font/woff2',
+    '.woff': 'font/woff',
+    '.ttf': 'font/ttf',
+    '.map': 'application/json'
+  }
+
+  protocol.handle('tulip-app', async (request) => {
+    const url = new URL(request.url)
+    if (url.host !== 'app') return new Response('Forbidden', { status: 403 })
+
+    let abs
+    try {
+      const wanted = decodeURIComponent(url.pathname).replace(/^\/+/, '')
+      // A bare origin is the document, so a stray navigation to it lands on the
+      // app rather than on a 404 that looks like a broken install.
+      abs = appAsset(wanted || 'index.html')
+    } catch {
+      return new Response('Forbidden', { status: 403 })
+    }
+
+    /* Read, not `net.fetch`. The vault handler above goes through the network
+       stack because it needs range replies and streaming for files that run to
+       hundreds of megabytes. Nothing here is remotely that size — the whole
+       eager boot graph is under a megabyte across 28 files — and `net.fetch`
+       of a file: URL from inside a protocol handler was MEASURED at 10-13ms a
+       request against 1ms for the same file loaded directly, which cost more
+       than the code cache saves. That regression is the entire reason this
+       comment exists; see bench/boot-bench.mjs.
+
+       ASYNC, and not `readFileSync`, which was tried: a synchronous read blocks
+       the very event loop that the other 27 requests are queued on, and
+       measured WORSE (180ms of request time against 139ms). What is left is
+       not I/O at all — it is the cost of a main-process callback per request
+       while main is busy opening a vault. The way to get the rest of the code
+       cache's value is fewer requests, not faster ones. */
+    try {
+      const body = await fs.readFile(abs)
+      const headers = new Headers()
+      const type = APP_MIME[path.extname(abs).toLowerCase()]
+      if (type) headers.set('content-type', type)
+      return new Response(body, { status: 200, headers })
+    } catch {
+      return new Response('Not found', { status: 404 })
+    }
+  })
+
   // Warmed now rather than on the first Run, so clicking Run does not wait on
   // a login shell. A failure here is not fatal — the fallbacks still apply.
   readLoginPath().then((value) => { loginPath = value }).catch(() => {})
@@ -7027,6 +7771,13 @@ app.whenReady().then(async () => {
       writeConfig({ vaultPath: savedVault, defaultVaultPath: undefined })
     }
     trust.setVault(vaultPath, cfg.historyInVault === true)
+    /* And the folder a notebook's kernel is allowed to see, which `openVault`
+       sets and this path did not. Without it the Jupyter server takes whatever
+       directory the app happened to be launched from — `/`, from the Finder —
+       so `read_csv("data.csv")` beside a notebook read someone else's root
+       until the reader switched vaults, which on the ordinary launch is never.
+       See electron/kernel.js. */
+    kernels.setRoot(vaultPath)
     // Present in the list from the first launch, not only once it is left.
     rememberVault(vaultPath)
     /* And the index this vault was left holding. The launch that most needs it

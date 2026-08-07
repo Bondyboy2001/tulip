@@ -29,6 +29,9 @@ contextBridge.exposeInMainWorld('tulip', {
     // Size and dates, for the Info pane.
     info: (p) => ipcRenderer.invoke('file:info', p),
     write: (p, content, metadata) => ipcRenderer.invoke('file:write', p, content, metadata),
+    /* Keep what is on disk before the buffer overwrites it. Called on the one
+       path where the two cannot be reconciled — see `file:conflict-copy`. */
+    conflictCopy: (p) => ipcRenderer.invoke('file:conflict-copy', p),
     create: (dir, name) => ipcRenderer.invoke('file:create', dir, name),
     rename: (p, name) => ipcRenderer.invoke('file:rename', p, name),
     remove: (p) => ipcRenderer.invoke('file:delete', p),
@@ -120,6 +123,14 @@ contextBridge.exposeInMainWorld('tulip', {
      cannot be driven from a probe, so scripts hand a path and skip it. */
   exportPdf: (name, to) => ipcRenderer.invoke('pdf:export', name, to),
 
+  /* The same page, to a printer through the system dialog. */
+  printNote: () => ipcRenderer.invoke('pdf:print'),
+
+  /* The reading view as one self-contained HTML file; the note and its
+     attachments as a portable Markdown folder. `to` is the scripted seam. */
+  exportHtml: (name, html, to) => ipcRenderer.invoke('note:export-html', name, html, to),
+  exportMarkdown: (name, text, files, to) => ipcRenderer.invoke('note:export-markdown', name, text, files, to),
+
   /**
    * Executing a fenced block. The renderer sends the language and the code and
    * gets an id back; the process itself, and every decision about what may be
@@ -146,7 +157,16 @@ contextBridge.exposeInMainWorld('tulip', {
     interrupt: (path) => ipcRenderer.invoke('kernel:interrupt', path),
     restart: (path) => ipcRenderer.invoke('kernel:restart', path),
     shutdown: (path) => ipcRenderer.invoke('kernel:shutdown', path),
-    specs: () => ipcRenderer.invoke('kernel:specs')
+    specs: () => ipcRenderer.invoke('kernel:specs'),
+    /* The answer to an `input()`, and the two questions a cell asks about the
+       code in it rather than about running it. These three are round trips
+       rather than events: each has exactly one answer, and nothing is drawn
+       until it lands. */
+    input: (path, value) => ipcRenderer.invoke('kernel:input', path, value),
+    complete: (path, code, cursorPos) =>
+      ipcRenderer.invoke('kernel:complete', path, code, cursorPos),
+    inspect: (path, code, cursorPos) =>
+      ipcRenderer.invoke('kernel:inspect', path, code, cursorPos)
   },
 
   /* Manim renders to a real file in the vault rather than to the page, so it
@@ -203,6 +223,8 @@ contextBridge.exposeInMainWorld('tulip', {
   review: {
     all: () => ipcRenderer.invoke('review:all'),
     record: (entries) => ipcRenderer.invoke('review:record', entries),
+    unrecord: (entry) => ipcRenderer.invoke('review:unrecord', entry),
+    pickCsv: () => ipcRenderer.invoke('review:pick-csv'),
     prune: (knownIds) => ipcRenderer.invoke('review:prune', knownIds),
     history: () => ipcRenderer.invoke('review:history')
   },
@@ -304,6 +326,11 @@ contextBridge.exposeInMainWorld('tulip', {
   // and the window may close. See the close handler in main.
   flushed: () => ipcRenderer.invoke('app:flushed'),
 
+  /* "Still writing." Main gives a closing window a short quiet period and no
+     more; this is how a genuinely slow save — a large notebook, a long grid —
+     says the page is working rather than wedged, and buys another one. */
+  flushing: () => ipcRenderer.send('app:flushing'),
+
   /* Is there a newer Tulip? Asked only when somebody asks — see the account
      beside the handler in main. There is no updater behind this and nothing
      that installs anything; the answer is a version number and a link. */
@@ -314,6 +341,13 @@ contextBridge.exposeInMainWorld('tulip', {
      place where failures get noticed. Sent rather than invoked: the caller is
      an error handler, and it must not be given a promise it could reject. */
   reportError: (kind, detail) => ipcRenderer.send('app:error', String(kind), String(detail)),
+
+  /* The other half of `reportError`: where the reader goes once they have been
+     told there is something to read. `revealLog` answers false when there is no
+     log yet, which is the ordinary state of a healthy install and worth saying
+     rather than silently opening an empty folder. */
+  revealLog: () => ipcRenderer.invoke('app:reveal-log'),
+  diagnostics: () => ipcRenderer.invoke('app:diagnostics'),
 
   on: (channel, fn) => {
     const allowed = [

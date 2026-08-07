@@ -25,8 +25,18 @@ import { createRequire } from 'node:module'
 const require = createRequire(import.meta.url)
 const { KernelHost } = require('../electron/kernel.js')
 
-const have = spawnSync('jupyter', ['server', '--version'], { encoding: 'utf8' })
+/* `shell` because on Windows the executable is jupyter.cmd, which spawn will
+ * not find by the bare name — without it this probe can only ever report a
+ * miss there, which reads exactly like a machine without Jupyter. */
+const have = spawnSync('jupyter', ['server', '--version'], { encoding: 'utf8', shell: process.platform === 'win32' })
 if (have.error || have.status !== 0) {
+  /* A skip is honest on a developer's machine and a lie in CI, where nothing
+   * else covers this file: green would mean "the kernel works" when it means
+   * "we never asked". CI sets TULIP_REQUIRE_JUPYTER and gets a failure. */
+  if (process.env.TULIP_REQUIRE_JUPYTER) {
+    console.error('kernel: TULIP_REQUIRE_JUPYTER is set but no Jupyter server is on PATH')
+    process.exit(1)
+  }
   console.log('kernel: skipped — no Jupyter server on PATH')
   process.exit(0)
 }
@@ -140,6 +150,21 @@ try {
   assert.equal(substituted.substituted, 'kernel-that-does-not-exist', 'and says what it swapped')
   ok('a missing kernelspec falls back instead of refusing to run')
 
+  /* The picker is only as honest as the server's search path, and a server
+     pointed at the wrong data directory does not fail — it succeeds with a
+     shorter list. That is invisible on the one machine where every kernel is
+     ipykernel, so it is checked against the reader's own `jupyter kernelspec
+     list`: whatever their CLI can see, this server has to offer. */
+  const listed = spawnSync('jupyter', ['kernelspec', 'list', '--json'], { encoding: 'utf8' })
+  if (!listed.error && listed.status === 0) {
+    const theirs = Object.keys(JSON.parse(listed.stdout).kernelspecs || {})
+    const { specs } = await host.kernelSpecs()
+    const ours = new Set(specs.map((spec) => spec.name))
+    const missing = theirs.filter((name) => !ours.has(name))
+    assert.deepEqual(missing, [], 'the server was pointed away from some kernels')
+    ok(`every kernel on this machine is offered (${theirs.length})`)
+  }
+
   /* Two notebooks are two namespaces, the way two tabs in Jupyter are. */
   const other = await host.kernelFor(path.join(root, 'Other.ipynb'), 'python3')
   assert.notEqual(other.id, kernel.id)
@@ -152,11 +177,38 @@ try {
     'False', 'one notebook cannot see the other’s variables')
   ok('two notebooks get two namespaces')
 
+  /* Two asks for the same notebook while it is starting. Starting a kernel is
+     several round trips long, and two callers that both looked and both saw
+     nothing built two of them — the second took the map, and the first became
+     a Python process nothing could name, shut down or interrupt again. */
+  const twice = path.join(root, 'Twice.ipynb')
+  const [a, b] = await Promise.all([
+    host.kernelFor(twice, 'python3'),
+    host.kernelFor(twice, 'python3')
+  ])
+  assert.equal(a, b, 'one kernel, asked for twice')
+  assert.equal(a.id, host.get(twice).id, 'and it is the one the map holds')
+  await host.shutdown(twice)
+  ok('two asks while a kernel is starting wait on the one kernel')
+
   await host.shutdown(notebook)
   assert.equal(host.get(notebook), null)
   ok('a notebook’s kernel goes when the notebook does')
 } finally {
   await host.dispose().catch(() => {})
 }
+
+/* The failure a machine without Jupyter has, which is the one this feature
+   most often meets. It has to arrive as the sentence that says what to install
+   — and it has to arrive at all: resolving a spawn on a timer rather than on
+   the `spawn` event meant a slow ENOENT read as a running server, and sixty
+   seconds of polling a process that did not exist before the wrong error. */
+const nowhere = new KernelHost({ rootDir: root, pathFor: () => path.join(root, 'no-such-bin') })
+const began = Date.now()
+await assert.rejects(
+  () => nowhere.kernelFor(path.join(root, 'Nothing.ipynb')),
+  /could not start a Jupyter server/i)
+assert.ok(Date.now() - began < 10_000, 'and says so rather than waiting out the readiness poll')
+ok(`a machine without Jupyter is told what to install (${Date.now() - began}ms)`)
 
 console.log(`\n${passed} checks passed`)

@@ -210,6 +210,29 @@ async function checks () {
     assert.ok(log.some((line) => line.id === id), 'and the answer is in the log')
   })
 
+  await check('an undone answer leaves neither state nor statistics behind', async () => {
+    const id = 'Deck.lang|undone-word|f'
+    const at = Date.now()
+    await call('review:record', [{ id, at, grade: 3, state: { due: 9, stability: 1, difficulty: 5, reps: 1, lapses: 0, last: 0 } }])
+    await call('review:unrecord', { id, at, state: null })
+    const all = await call('review:all')
+    assert.equal(all[id], undefined, 'a never-seen card goes back to never seen')
+    const log = await call('review:history')
+    assert.ok(!log.some((line) => line.id === id), 'and the history shows neither the answer nor the undo')
+  })
+
+  await check('undo puts back the state a card had before the answer', async () => {
+    const id = 'Deck.lang|reworded|f'
+    const before = { due: 5, stability: 3, difficulty: 4, reps: 2, lapses: 1, last: 1 }
+    await call('review:record', [{ id, at: Date.now() - 1000, grade: 3, state: before }])
+    await call('review:record', [{ id, at: Date.now(), grade: 1, state: { ...before, due: 0, lapses: 2 } }])
+    await call('review:unrecord', { id, at: Date.now(), state: before })
+    const all = await call('review:all')
+    assert.deepEqual(all[id], before)
+    const log = await call('review:history')
+    assert.equal(log.filter((line) => line.id === id).length, 1, 'only the first answer remains counted')
+  })
+
   await check('review:prune refuses to act on a scan that found nothing', async () => {
     const answer = await call('review:prune', [])
     assert.equal(answer.refused, true)
@@ -304,5 +327,33 @@ async function checks () {
     }
     assert.deepEqual(Object.keys(sidecar('file-tags.json')), [])
     assert.deepEqual(Object.keys(sidecar('table-widths.json')), [])
+  })
+
+  /* What a reader is handed when they are told something went wrong. The toast
+     that sends them here is the only account they get of a failure, so the two
+     things behind it have to be true: the log is reachable only when there is
+     one, and the report describes this install rather than a template. */
+  await check('there is no crash log to reveal until something goes wrong', async () => {
+    // The suite's own userData is fresh, so a log here would mean main wrote
+    // one during boot — which is a finding in itself, not a passing test.
+    assert.equal(await call('app:reveal-log'), false)
+  })
+
+  await check('diagnostics describe this build and this vault', async () => {
+    const { text, hasLog } = await call('app:diagnostics')
+    assert.match(text, /^Tulip \d+\.\d+\.\d+/, 'the version leads the report')
+    assert.match(text, /Electron \d/, 'the Electron version is in it')
+    assert.match(text, new RegExp(`${process.platform}`), 'the platform is in it')
+    assert.match(text, /Vault: \d+ notes/, 'the vault is described by shape')
+    assert.equal(hasLog, false, 'nothing has failed, so there is nothing to quote')
+  })
+
+  await check('diagnostics name no path from the reader machine', async () => {
+    /* A report is written to be pasted somewhere public. The vault path is a
+       home directory more often than not, and a real name with it. */
+    const { text } = await call('app:diagnostics')
+    assert.equal(text.includes(VAULT), false, 'the vault path is in the report')
+    assert.equal(text.includes(require('node:os').homedir()), false,
+      'the home directory is in the report')
   })
 }
