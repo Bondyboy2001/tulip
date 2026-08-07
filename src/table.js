@@ -1905,6 +1905,11 @@ function fittedWidths (wrap, host = wrap?.closest('.cm-scroller')) {
      inherited type. */
   host.append(probe)
   const widths = [...probe.querySelectorAll('thead th')]
+    /* One row of headers, so the bound is the table's column count — and
+       measuring them is the whole errand: fitting a column means asking how
+       wide its heading came out. The probe is laid out by the append above and
+       nothing here writes, so this is one settle and then n known answers. */
+    // eslint-disable-next-line tulip/no-layout-thrash
     .map((head) => Math.max(MIN_COLUMN_WIDTH, Math.ceil(head.getBoundingClientRect().width)))
   probe.remove()
   return widths

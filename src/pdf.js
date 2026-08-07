@@ -598,8 +598,13 @@ export function mountPdf ({
 
     // At most the keep-window's pages, rather than every page in the document.
     for (const page of [...drawnPages]) {
+      /* eslint-disable tulip/no-layout-thrash -- `drawnPages` is the keep
+         window, which is a small fixed number of pages either side of the one
+         being read; a 900-page PDF has the same handful drawn as a 3-page one.
+         That bound is the whole reason this set exists. */
       const from = page.wrap.offsetTop
       const to = from + page.wrap.offsetHeight
+      /* eslint-enable tulip/no-layout-thrash */
       if (to < keep.from || from > keep.to) undraw(page)
     }
 

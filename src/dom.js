@@ -123,6 +123,10 @@ function focusableWithin (root) {
     if (node.closest('[hidden]')) return false
     // `offsetParent` is null for anything display:none, which is how every
     // panel here hides the halves of itself it is not showing.
+    /* Bounded by what a dialog holds: the focusable controls of ONE modal, tens
+       of nodes chosen by whoever wrote that dialog. The count cannot grow with
+       the document, which is the bound the rule below is really about. */
+    // eslint-disable-next-line tulip/no-layout-thrash
     return node.offsetParent !== null || node === document.activeElement
   })
 }
@@ -133,6 +137,9 @@ function focusableWithin (root) {
  */
 function topModal () {
   const open = [...document.querySelectorAll('[aria-modal="true"]')]
+    /* A fixed handful of dialogs exist and at most a couple are ever mounted at
+       once: a constant, not a collection. */
+    // eslint-disable-next-line tulip/no-layout-thrash
     .filter((node) => node.offsetParent !== null)
   return open[open.length - 1] || null
 }

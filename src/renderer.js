@@ -3205,6 +3205,10 @@ el.tabs.addEventListener('dragover', (e) => {
   e.dataTransfer.dropEffect = 'move'
   const rest = [...el.tabs.querySelectorAll('.tab:not(.is-dragging)')]
   const after = rest.find((t) => {
+    /* The open tabs, and `find` stops at the first one past the pointer. A
+       strip holds a dozen or so and cannot hold a note's worth; nothing here
+       writes, so the layout settles once and the rest are answered from it. */
+    // eslint-disable-next-line tulip/no-layout-thrash
     const box = t.getBoundingClientRect()
     return e.clientX < box.left + box.width / 2
   }) || null
@@ -8069,11 +8073,17 @@ function overlayRow ({ item, hits }, i, mode, index) {
 
 function syncSelection () {
   const { index, mode, items } = state.overlay
+  /* The scroll happens after the loop, not inside it. `scrollIntoView` forces a
+     layout, and doing that between two `setAttribute`s makes the engine settle
+     a list it is halfway through being told about — once per painted row on a
+     long result set. One row is being scrolled to either way. */
+  let selected = null
   for (const li of el.panelList.children) {
     const on = Number(li.dataset.index) === index
     li.setAttribute('aria-selected', String(on))
-    if (on) li.scrollIntoView({ block: 'nearest' })
+    if (on) selected = li
   }
+  selected?.scrollIntoView({ block: 'nearest' })
   // The whole window is painted from the same custom properties, so previewing
   // is nothing more than pointing the root at another palette — or another
   // typeface. Both go through `preview`, which holds it to one repaint a frame.
@@ -9387,8 +9397,14 @@ function applySettings (cfg) {
      the window never answered again. (It is reached from `ensureEditor`, so it
      landed a moment after such a note opened and looked like the render.)
      Blocks made by a later render start at zero of their own accord, which is
-     why the transition is the only case there ever was. */
+     why the transition is the only case there ever was.
+
+     This is one of the two sites `tulip/no-layout-thrash` was written for, and
+     it still reports here: the rule sees the shape and cannot see the guard,
+     which is the point of the guard. The disable below says so rather than
+     denying it. */
   if (wasWrappingCode && !wrapsCode) {
+    // eslint-disable-next-line tulip/no-layout-thrash
     for (const pre of el.reading.querySelectorAll('pre.code-text')) pre.scrollLeft = 0
   }
   /* Switching it off takes the underlines with it inside the editor; switching

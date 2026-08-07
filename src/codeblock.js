@@ -431,11 +431,26 @@ const codeBlockScroll = ViewPlugin.fromClass(
     sync (line) {
       if (this.busy || !line.isConnected) return
       this.busy = true
+      /* Read every line, then write every line — never one after the other down
+         the block. Interleaved, each write invalidates the layout the next read
+         has to rebuild, so a long fence costs a layout per line rather than one
+         for the reads and one for the writes. `line.scrollLeft` is hoisted for
+         the same reason: it does not change while this runs, and asking for it
+         once per sibling was asking the same question n times. */
+      const to = line.scrollLeft
+      const behind = []
       for (const other of codeLines(blockLines(line))) {
-        if (other !== line && other.scrollLeft !== line.scrollLeft) {
-          other.scrollLeft = line.scrollLeft
-        }
+        /* A pure read pass: nothing here writes, so the layout settles once and
+           every answer after that is already known. The writes are the loop
+           below, which is why they are a loop of their own. */
+        // eslint-disable-next-line tulip/no-layout-thrash
+        if (other !== line && other.scrollLeft !== to) behind.push(other)
       }
+      /* And a pure write pass. Writing `scrollLeft` invalidates the layout but
+         does not wait for one, so n writes with no read between them are n
+         cheap writes and a single settle afterwards. */
+      // eslint-disable-next-line tulip/no-layout-thrash
+      for (const other of behind) other.scrollLeft = to
       this.busy = false
     }
   }

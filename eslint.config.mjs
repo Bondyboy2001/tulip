@@ -41,7 +41,8 @@ import globals from 'globals'
 const require = createRequire(import.meta.url)
 const tulip = {
   rules: {
-    'consistent-optional-chaining': require('./eslint-rules/consistent-optional-chaining.js')
+    'consistent-optional-chaining': require('./eslint-rules/consistent-optional-chaining.js'),
+    'no-layout-thrash': require('./eslint-rules/no-layout-thrash.js')
   }
 }
 
@@ -106,6 +107,14 @@ const REAL_MISTAKES = {
      plainly elsewhere in it. Three launch-time crashes came from exactly that
      inconsistency; see eslint-rules/consistent-optional-chaining.js. */
   'tulip/consistent-optional-chaining': 'error',
+
+  /* The second rule written for this codebase, after the second hang in a
+     week: a layout-forcing property read or written on the member of a
+     collection being iterated is one forced layout per member, and with
+     `content-visibility: auto` on every reading-view block that is a wedged
+     window rather than a slow one. See eslint-rules/no-layout-thrash.js for
+     both instances and for what it deliberately does not report. */
+  'tulip/no-layout-thrash': 'error',
 
   /* Empty blocks are a house idiom here: `catch { /* already gone *\/ }` is how
      this codebase says a failure is expected and has nothing to do. The comment
@@ -182,5 +191,15 @@ export default [
     },
     plugins: { tulip },
     rules: REAL_MISTAKES
+  },
+
+  /* A harness measures its fixture on purpose. `scripts/table-tests.js` walks
+     every header of a ten-column table to assert where it landed, which is the
+     assertion rather than a hang; the fixtures are small and are built by the
+     test itself. Same reasoning tsconfig.json gives for leaving scripts/ out of
+     the typecheck: these files exist to be thrown away and rewritten. */
+  {
+    files: ['scripts/**'],
+    rules: { 'tulip/no-layout-thrash': 'off' }
   }
 ]

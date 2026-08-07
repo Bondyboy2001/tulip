@@ -48,6 +48,16 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      # The whole-tree `npm run typecheck` still does not gate — it reports
+      # ~2,570 findings, most of them the DOM's own typing, and tsconfig.json
+      # says why at length. This gates the 44 modules that are already clean
+      # under strictNullChecks, so the class of bug that has actually shipped
+      # here twice (a null deref reachable before the thing is built) cannot
+      # come back in them. Widening the list is the ongoing work; see the
+      # header of scripts/typecheck-gate.mjs.
+      - name: Typecheck (gated modules)
+        run: npm run typecheck:gate
+
       # test:kernel spawns a real `jupyter server` and speaks the real protocol
       # to it — there is no mock, on purpose, because the failures it exists to
       # catch are the ones a mock would be written not to have. Without Jupyter

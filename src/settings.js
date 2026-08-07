@@ -954,13 +954,17 @@ export function mountSettings ({ el, api, values, onChange }) {
     active = entry.section.id
     renderRail()
     renderBody()
-    for (const line of el.body.querySelectorAll('.settings-row')) {
+    /* Found first, scrolled to after: `scrollIntoView` forces a layout, and a
+       search that walks the rows measuring as it goes pays for that once per
+       row it passes. The answer is one row. */
+    const found = [...el.body.querySelectorAll('.settings-row')].find((line) => {
       const name = line.querySelector('.settings-name')
-      if (!name || !name.textContent.startsWith(entry.name)) continue
-      line.scrollIntoView({ block: 'center' })
-      line.classList.add('is-found')
-      setTimeout(() => line.classList.remove('is-found'), 1600)
-      break
+      return name && name.textContent.startsWith(entry.name)
+    })
+    if (found) {
+      found.scrollIntoView({ block: 'center' })
+      found.classList.add('is-found')
+      setTimeout(() => found.classList.remove('is-found'), 1600)
     }
   }
 
