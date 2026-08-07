@@ -1,6 +1,6 @@
 {
   "name": "tulip",
-  "version": "0.1.79",
+  "version": "0.1.80",
   "description": "A minimal markdown editor and language-learning vault",
   "main": "electron/main.js",
   "type": "commonjs",
