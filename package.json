@@ -53,6 +53,7 @@
     "typecheck": "tsc -p tsconfig.json",
     "typecheck:gate": "node scripts/typecheck-gate.mjs",
     "test:lint-rules": "node scripts/test-lint-rules.mjs",
+    "test:boot-graph": "node scripts/test-boot-graph.mjs",
     "test:index-cache": "node scripts/test-index-cache.cjs",
     "test:review-stats": "esbuild scripts/test-review-stats.mjs --bundle --format=esm --platform=node --outfile=node_modules/.cache/test-review-stats.mjs --log-level=error && node node_modules/.cache/test-review-stats.mjs",
     "test:ipc": "node scripts/test-ipc.mjs",
