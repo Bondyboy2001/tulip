@@ -311,7 +311,19 @@ contextBridge.exposeInMainWorld('tulip', {
     /* Another window on the same vault, optionally opening a note in it. The
        path is only ever handed on to the new window, which reads it the way it
        reads anything else — see the handler in main. */
-    open: (open = null) => ipcRenderer.invoke('window:new', open)
+    open: (open = null) => ipcRenderer.invoke('window:new', open),
+
+    /* A tab being carried from one window's strip to another's. The drag itself
+       cannot hold this — it becomes an OS drag on the way across, and a custom
+       flavour does not survive that — so main holds the claim and both strips
+       ask it. See the account beside the handlers. */
+    tabDragStart: (path) => ipcRenderer.send('tab:drag-start', path),
+    tabDragEnd: () => ipcRenderer.send('tab:drag-end'),
+    /* Null unless ANOTHER window is dragging: a reorder inside one strip must
+       never look like a handoff. */
+    tabDragging: () => ipcRenderer.invoke('tab:dragging'),
+    /* Takes it, once. A second drop gets null. */
+    tabClaim: () => ipcRenderer.invoke('tab:claim')
   },
 
   /* Said once, when the window is worth looking at: settings applied, tree
@@ -355,7 +367,9 @@ contextBridge.exposeInMainWorld('tulip', {
       'run:out', 'run:done', 'ai:event', 'app:flush', 'kernel:event',
       // A word was taught or untaught — the open note's spelling is one word
       // out of date, wherever the asking happened.
-      'dictionary:changed'
+      'dictionary:changed',
+      // Another window has taken a tab this one was dragging: let go of it.
+      'tab:claimed'
     ]
     if (!allowed.includes(channel)) return () => {}
     const listener = (_e, payload) => fn(payload)

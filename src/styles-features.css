@@ -28,6 +28,18 @@
 }
 .saved-search-open::before { content: '⌕'; margin-right: 7px; color: var(--accent); }
 .saved-search-open:hover { background: var(--hover); color: var(--ink); }
+/* The input takes the button's own box so the row does not move when a rename
+   starts — the same metrics, minus the ⌕ the button draws before its label. */
+.saved-search-name {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 7px;
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  background: var(--sunk);
+  color: var(--ink);
+  font: 12px/1.2 var(--font-ui);
+}
 .saved-search-remove {
   flex: none;
   width: 22px;

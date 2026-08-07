@@ -15,6 +15,14 @@ const handlers = new Map()
 const realHandle = ipcMain.handle.bind(ipcMain)
 ipcMain.handle = (channel, fn) => { handlers.set(channel, fn); return realHandle(channel, fn) }
 
+/* The send-only half. `ipcMain.on` carries the channels where nothing waits for
+   an answer, and one of them — the tab a window has picked up — is half of a
+   protocol whose other half IS invoked, so testing only the invoked half would
+   test a conversation with one side missing. */
+const listeners = new Map()
+const realOn = ipcMain.on.bind(ipcMain)
+ipcMain.on = (channel, fn) => { listeners.set(channel, fn); return realOn(channel, fn) }
+
 /* The window is created — main's boot depends on having one, and half of what
    is being tested is reached through it — but it is never put on screen. A
    suite that threw a window over the reader's desk and took the keyboard from
@@ -34,6 +42,14 @@ const call = (channel, ...args) => {
   if (!fn) throw new Error('no handler for ' + channel)
   // The first argument of an ipcMain handler is the event, which these ignore.
   return fn({ sender: null }, ...args)
+}
+
+/* The same, for a handler that cares WHICH window is asking. A window is a
+   `sender.id` to all of these, so a number is a whole window here. */
+const from = (id, channel, ...args) => {
+  const fn = handlers.get(channel) || listeners.get(channel)
+  if (!fn) throw new Error('no handler for ' + channel)
+  return fn({ sender: { id } }, ...args)
 }
 
 const results = []
@@ -355,5 +371,63 @@ async function checks () {
     assert.equal(text.includes(VAULT), false, 'the vault path is in the report')
     assert.equal(text.includes(require('node:os').homedir()), false,
       'the home directory is in the report')
+  })
+
+  /* ---- a tab carried from one window's strip to another's ----
+
+     Main arbitrates this because the drag itself cannot: it becomes an OS drag
+     on the way across and a custom flavour does not survive the crossing. What
+     that buys has to be tested from both windows at once, which is what the
+     `from(id, …)` helper is for — two numbers standing in for two windows. */
+  const A = 101
+  const B = 202
+
+  await check('a strip is not told about its own drag', async () => {
+    from(A, 'tab:drag-start', 'Note.md')
+    assert.equal(await from(A, 'tab:dragging'), null,
+      'the window that picked the tab up would treat a reorder as a handoff')
+    const seen = await from(B, 'tab:dragging')
+    assert.equal(seen && seen.path, 'Note.md', 'the other window cannot see what is in flight')
+    from(A, 'tab:drag-end')
+  })
+
+  await check('a drag that ends nowhere leaves no claim behind', async () => {
+    from(A, 'tab:drag-start', 'Note.md')
+    from(A, 'tab:drag-end')
+    assert.equal(await from(B, 'tab:dragging'), null)
+    assert.equal(await from(B, 'tab:claim'), null, 'a stale claim can still be taken')
+  })
+
+  await check('only the window that picked a tab up may put it down', async () => {
+    from(A, 'tab:drag-start', 'Note.md')
+    // B never started this drag; its end must not cancel A's.
+    from(B, 'tab:drag-end')
+    const seen = await from(B, 'tab:dragging')
+    assert.equal(seen && seen.path, 'Note.md')
+    from(A, 'tab:drag-end')
+  })
+
+  await check('a tab is claimed once, and the second drop gets nothing', async () => {
+    from(A, 'tab:drag-start', 'Note.md')
+    const first = await from(B, 'tab:claim')
+    assert.equal(first && first.path, 'Note.md')
+    /* Two strips both opening one note is the failure this guards: the claim is
+       consumed before the handler awaits anything, so a second drop landing in
+       the same frame finds nothing. */
+    assert.equal(await from(B, 'tab:claim'), null)
+    assert.equal(await from(A, 'tab:dragging'), null, 'the claim outlived being taken')
+  })
+
+  await check('a strip cannot claim its own drag', async () => {
+    from(A, 'tab:drag-start', 'Note.md')
+    assert.equal(await from(A, 'tab:claim'), null)
+    from(A, 'tab:drag-end')
+  })
+
+  await check('a path that is not one is not carried', async () => {
+    for (const bad of [null, 42, '', 'x'.repeat(1025)]) {
+      from(A, 'tab:drag-start', bad)
+      assert.equal(await from(B, 'tab:dragging'), null, `it accepted ${JSON.stringify(bad)}`)
+    }
   })
 }

@@ -3004,11 +3004,21 @@ function renderTabs () {
     button.tab = tab
     button.addEventListener('dragstart', (e) => {
       e.dataTransfer.effectAllowed = 'move'
+      /* Deliberately empty, and it stays empty. Once a drag leaves the window
+         it is an OS drag, and whatever is in `text/plain` is what every other
+         application on the machine is offered — a note's path handed to a text
+         field somewhere is not what dragging a tab means. The path travels
+         through main instead; see `api.window.tabDragStart`. */
       e.dataTransfer.setData('text/plain', '')
       button.classList.add('is-dragging')
+      if (tab.path) api.window.tabDragStart(tab.path)
     })
     button.addEventListener('dragend', () => {
       button.classList.remove('is-dragging')
+      /* Always, and in the window that started the drag: this runs whether the
+         tab was dropped here, in another window, or nowhere at all, so the
+         claim in main cannot outlive the gesture that made it. */
+      api.window.tabDragEnd()
       settleTabOrder()
     })
     frag.append(button)
@@ -3200,7 +3210,19 @@ function markTabOverflow () {
    mid-drag would replace that element, and its dragend would die with it. */
 el.tabs.addEventListener('dragover', (e) => {
   const moving = el.tabs.querySelector('.tab.is-dragging')
-  if (!moving) return
+  /* Nothing of ours is being dragged in this strip, so this is either another
+     window's tab arriving or something else entirely. Taking the drop is how
+     the strip offers itself as a target; `drop` finds out which it was. It has
+     to say so on every dragover — a target that does not preventDefault is not
+     a target, and there is nothing to ask main synchronously here. */
+  if (!moving) {
+    if (e.dataTransfer.effectAllowed === 'move') {
+      e.preventDefault()
+      e.dataTransfer.dropEffect = 'move'
+      el.tabs.classList.add('is-drop-target')
+    }
+    return
+  }
   e.preventDefault()
   e.dataTransfer.dropEffect = 'move'
   const rest = [...el.tabs.querySelectorAll('.tab:not(.is-dragging)')]
@@ -3216,7 +3238,40 @@ el.tabs.addEventListener('dragover', (e) => {
   // the guard keeps the DOM still while the pointer stays over one tab.
   if (moving.nextElementSibling !== after) el.tabs.insertBefore(moving, after)
 })
-el.tabs.addEventListener('drop', (e) => e.preventDefault())
+el.tabs.addEventListener('dragleave', (e) => {
+  // Only when the pointer has actually left the strip, not when it crosses from
+  // one tab button to the next — those bubble here as a leave too.
+  if (!el.tabs.contains(e.relatedTarget)) el.tabs.classList.remove('is-drop-target')
+})
+
+/**
+ * A tab dropped here.
+ *
+ * A reorder inside this strip is already done — the buttons were moved as the
+ * pointer went, and `dragend` settles the state. Anything else is a tab from
+ * another window: main is asked what is in flight, and hands it over once.
+ */
+el.tabs.addEventListener('drop', async (e) => {
+  e.preventDefault()
+  el.tabs.classList.remove('is-drop-target')
+  if (el.tabs.querySelector('.tab.is-dragging')) return
+
+  const taken = await api.window.tabClaim().catch(() => null)
+  // Null when nothing was in flight, when this window is the one that started
+  // the drag, or when another window's drop got there first.
+  if (!taken?.path) return
+  await openNote(taken.path, { newTab: true })
+  revealInTree(taken.path)
+})
+
+/* The other side of the handoff: this window was carrying the tab and somebody
+   else has taken it. Closing it here is what makes the gesture a move rather
+   than a second copy — and it goes through `closeTab`, so a dirty buffer is
+   saved before it goes and ⌘⇧T can still bring it back. */
+api.on('tab:claimed', async (path) => {
+  const at = state.tabs.findIndex((tab) => tab.path === path)
+  if (at >= 0) await closeTab(at)
+})
 
 /** The state catches up with where the drag left the buttons. */
 function settleTabOrder () {

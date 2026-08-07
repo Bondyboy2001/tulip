@@ -2481,6 +2481,74 @@ ipcMain.handle('window:new', (_e, open) => {
   return { ok: true }
 })
 
+/* ======================================================= a tab between windows
+
+   Dragging a tab from one window's strip onto another's is arbitrated here
+   rather than carried by the drag itself.
+
+   A drag between two BrowserWindows leaves the page and becomes an OS drag, and
+   what survives that crossing is a short list of standard flavours — not a
+   custom MIME type, and not reliably on every platform. Writing the note's path
+   into `text/plain` so it would survive means every drop target outside the app
+   receives a filesystem path it did not ask for, which is a worse bargain than
+   asking main.
+
+   So the strip says what it has picked up, the receiving strip asks what is in
+   flight, and main is the one place both of them agree with. `dragend` always
+   runs in the window that started the drag — including when the drop happened
+   somewhere else entirely — so the claim cannot outlive the gesture. */
+let tabInFlight = null
+
+/* Keyed by `event.sender.id` throughout rather than by the window object: the
+   id is what every side of this can compare without holding a reference to a
+   window that may close mid-drag. */
+ipcMain.on('tab:drag-start', (event, path) => {
+  if (typeof path !== 'string' || !path || path.length > 1024) return
+  tabInFlight = { path, from: event.sender.id }
+})
+
+ipcMain.on('tab:drag-end', (event) => {
+  // Only the window that picked it up may put it down: a stale end from another
+  // window would cancel a drag it was never part of.
+  if (tabInFlight && tabInFlight.from === event.sender.id) tabInFlight = null
+})
+
+/**
+ * What another window is dragging, if anything.
+ *
+ * Answers null for the window that started the drag, so an ordinary reorder
+ * inside one strip is never mistaken for a handoff.
+ */
+ipcMain.handle('tab:dragging', (event) => {
+  if (!tabInFlight || tabInFlight.from === event.sender.id) return null
+  return { path: tabInFlight.path }
+})
+
+/**
+ * The receiving window has taken the tab: tell the window that had it to let go.
+ *
+ * The claim is consumed here, so two strips cannot both take one tab — a drop
+ * that arrives second gets null and does nothing.
+ */
+ipcMain.handle('tab:claim', async (event) => {
+  const claim = tabInFlight
+  if (!claim || claim.from === event.sender.id) return null
+  // Consumed before the await, not after: two drops landing in the same frame
+  // would otherwise both find a claim here and both open the note.
+  tabInFlight = null
+  const from = liveWindows().find((w) => w.webContents.id === claim.from)
+  if (from) {
+    /* The buffer reaches the disk BEFORE the other window reads it. The
+       receiving window opens the note off the disk, so without this it would
+       open the version from before whatever was just typed — and then the
+       window that had the edit closes its tab, taking the edit with it. Same
+       ordering `openInNewWindow` keeps, for the same reason. */
+    await askRendererToFlush(from)
+    sendTo(from, 'tab:claimed', claim.path)
+  }
+  return { path: claim.path }
+})
+
 /**
  * The copilot belongs to the primary window, and answers only to it.
  *

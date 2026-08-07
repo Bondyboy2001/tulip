@@ -19,8 +19,62 @@ export function normalizeSavedSearches (value) {
   return normalized
 }
 
+/* What a saved search is called after someone has typed at it. Out here rather
+   than inline because the empty case is a decision and not an oversight: an
+   emptied name is not a nameless folder, it is a folder back to being called
+   what it has always been called when it had no name of its own. */
+export function renamedTo (item, typed) {
+  return { ...item, name: String(typed || '').trim() || item.query }
+}
+
 export function mountSavedSearches ({ root, onOpen, onChange }) {
   let items = []
+  /* The row being renamed, held across a repaint so that a rename survives the
+     list being rebuilt under it — `paint()` replaces every node, so the input
+     has to be put back rather than merely left alone. */
+  let renaming = null
+
+  /** Rename in place: the button becomes an input over the same row. */
+  function startRename (item, row, open) {
+    renaming = item.id
+    const input = document.createElement('input')
+    input.type = 'text'
+    input.className = 'saved-search-name'
+    input.value = item.name
+    input.setAttribute('aria-label', `Rename saved search ${item.name}`)
+
+    let settled = false
+    const settle = (keep) => {
+      /* Blur fires when Enter and Escape remove the input as well, so without
+         this the commit runs twice — once with the typed name and once with
+         whatever the second pass reads off a detached node. */
+      if (settled) return
+      settled = true
+      renaming = null
+      if (keep) item.name = renamedTo(item, input.value).name
+      paint()
+      if (keep) onChange(items)
+    }
+
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); settle(true) }
+      else if (e.key === 'Escape') { e.preventDefault(); settle(false) }
+      /* The sidebar's own key handling would take these otherwise. */
+      e.stopPropagation()
+    })
+    input.addEventListener('blur', () => settle(true))
+
+    row.replaceChild(input, open)
+    /* A microtask, because `paint()` re-enters this while the row is still
+       being built and is not in the document yet — and focusing a detached
+       node does nothing at all, silently. By the time this runs, the
+       `replaceChildren` at the end of paint has happened. */
+    queueMicrotask(() => {
+      if (!input.isConnected) return
+      input.focus()
+      input.select()
+    })
+  }
 
   function paint () {
     root.hidden = !items.length
@@ -39,6 +93,17 @@ export function mountSavedSearches ({ root, onOpen, onChange }) {
       open.title = item.query
       open.textContent = item.name
       open.addEventListener('click', () => onOpen(item.query))
+      /* F2 is what the note tree uses, so the gesture is one gesture; the
+         double-click is for anyone who never learned it. */
+      open.addEventListener('keydown', (e) => {
+        if (e.key !== 'F2') return
+        e.preventDefault()
+        startRename(item, row, open)
+      })
+      open.addEventListener('dblclick', (e) => {
+        e.preventDefault()
+        startRename(item, row, open)
+      })
       const remove = document.createElement('button')
       remove.type = 'button'
       remove.className = 'saved-search-remove'
@@ -52,6 +117,9 @@ export function mountSavedSearches ({ root, onOpen, onChange }) {
       })
       row.append(open, remove)
       list.append(row)
+      /* Re-entered rather than preserved: the row it was editing no longer
+         exists, so the input is built again over the new one. */
+      if (renaming === item.id) { renaming = null; startRename(item, row, open) }
     }
     root.replaceChildren(head, list)
   }

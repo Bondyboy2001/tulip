@@ -1339,6 +1339,13 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
   mask-image: linear-gradient(to right, #000 calc(100% - 18px), transparent);
 }
 .tabs::-webkit-scrollbar { display: none; }
+/* A tab from another window is over the strip. Inset rather than an outline:
+   the strip is already up against the window chrome on three sides, and a ring
+   drawn outside it lands under the titlebar. */
+.tabs.is-drop-target {
+  box-shadow: inset 0 0 0 1px var(--accent);
+  border-radius: 6px;
+}
 
 .tab {
   display: flex;
