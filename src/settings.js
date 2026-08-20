@@ -28,6 +28,10 @@ import {
   allModels, asOptions, defaultEnabled, modelFromConfig
 } from './models.js'
 
+/* The two rules the provider groups follow, kept separate so they can be
+   tested without a document to build into. */
+import { groupCount, groupOpen } from './model-groups.js'
+
 const SECTIONS = [
   {
     id: 'appearance',
@@ -461,9 +465,7 @@ export function mountSettings ({ el, api, values, onChange }) {
           // A newly opened settings pane starts with every provider folded.
           // Search results open automatically; otherwise only an explicit
           // click changes a group's state for the lifetime of this pane.
-          const open = opened.has(group.name)
-            ? opened.get(group.name)
-            : !!query
+          const open = groupOpen(opened, group.name, query)
 
           const box = node('div', 'model-group')
           box.classList.toggle('is-open', open)
@@ -471,7 +473,7 @@ export function mountSettings ({ el, api, values, onChange }) {
           const bar = node('button', 'model-group-head')
           bar.type = 'button'
           bar.setAttribute('aria-expanded', String(open))
-          const counter = node('span', 'model-group-count', `${ticked}/${of}`)
+          const counter = node('span', 'model-group-count', groupCount(ticked, of))
           // One button for the whole group, because ticking three hundred
           // OpenRouter models one at a time is not a feature.
           const every = node('button', 'model-group-all')
@@ -479,7 +481,7 @@ export function mountSettings ({ el, api, values, onChange }) {
 
           const refresh = () => {
             ticked = group.models.filter((model) => chosen.has(model.key)).length
-            counter.textContent = `${ticked}/${of}`
+            counter.textContent = groupCount(ticked, of)
             every.textContent = ticked === of ? 'None' : 'All'
             every.title = ticked === of
               ? 'Take all of these out of the list'

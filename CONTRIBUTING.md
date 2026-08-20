@@ -20,16 +20,34 @@ names.
 ## Before you open a pull request
 
 ```bash
-npm run verify   # tests, a production build, and the staging checks
+npm run verify   # lint, types, the whole suite, and a production build
 ```
 
 `npm run lint` and `npm run typecheck` are the fast pair to run while working;
 `verify` includes both. CI runs all of it on Linux, macOS and Windows, and
 fails on any dependency advisory rated high or above.
 
-Two suites drive a real Electron window and need a display: `test:table` and
-`test:agent-diff`. On a headless Linux machine, put `xvfb-run
---auto-servernum` in front of the command.
+The suite is every `scripts/test-*.{mjs,cjs}` — found, not listed, so a new
+file is in it as soon as it exists. Run one by name:
+
+```bash
+npm test              # everything, in parallel, reporting every failure
+npm test pdf          # just the files whose name contains "pdf"
+```
+
+Two of them drive a real Electron window and need a display:
+`test-table.mjs` and `test-agent-diff.mjs`. On a headless Linux machine, put
+`xvfb-run --auto-servernum` in front, or skip them with `npm test --
+--no-display`. CI always runs them.
+
+### Adding a test
+
+Drop a `scripts/test-*.mjs` in and it runs. It is bundled with esbuild first,
+because `src/` is ESM full of browser assumptions that this CommonJS package
+cannot import directly — write it as an ordinary module of `assert` calls that
+throws on failure. A `.cjs` test needs no bundling and runs as it is. If yours
+needs something else, `scripts/run-tests.mjs` has a short table of exceptions
+and a note about each.
 
 ## How the code is arranged
 

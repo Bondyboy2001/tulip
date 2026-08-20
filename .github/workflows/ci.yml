@@ -54,7 +54,9 @@ jobs:
       - run: npm ci
       # Two suites drive a real Electron window, which needs a display server.
       # macOS and Windows runners have one; Linux runners do not, so xvfb-run
-      # supplies it there and the command is the same everywhere else.
+      # supplies it there and the command is the same everywhere else. Never
+      # --no-display here: skipping them in CI is how test-agent-diff came to
+      # spend its whole life never having run.
       - if: runner.os == 'Linux'
         run: |
           sudo apt-get update

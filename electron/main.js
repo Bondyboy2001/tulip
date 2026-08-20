@@ -21,6 +21,7 @@ const { parseByteRange, streamFileRange } = require('./range-response')
 const { ocrPagesOf, parsePages, relevantPdfContext } = require('./pdf-context')
 const { parseFrontmatter, propsOf, propValues } = require('./frontmatter.cjs')
 const updates = require('./updates')
+const { killPlan } = require('./process-tree')
 const PDF_TEXT_FORMAT = require('./pdf-text-format.json').version
 const VAULT_CONTRACT = require('./vault-contract.json')
 const WEB_PARTITIONS = require('./web-partitions.json')
@@ -4025,11 +4026,11 @@ const cancelled = new Set()
 /** Stop a process and its descendants on the host platform. */
 function signalProcessTree (child, signal) {
   if (!child?.pid) return
-  if (IS_WINDOWS) {
-    const args = ['/pid', String(child.pid), '/t']
-    if (signal === 'SIGKILL') args.push('/f')
+  // What to do is electron/process-tree.js's; doing it is this function's.
+  const plan = killPlan(child.pid, signal, process.platform)
+  if (plan.kind === 'spawn') {
     try {
-      const killer = spawn('taskkill.exe', args, {
+      const killer = spawn(plan.command, plan.args, {
         stdio: 'ignore', windowsHide: true, detached: true
       })
       killer.unref()
@@ -4038,7 +4039,7 @@ function signalProcessTree (child, signal) {
     }
     return
   }
-  try { process.kill(-child.pid, signal) } catch {
+  try { process.kill(plan.target, plan.signal) } catch {
     try { child.kill(signal) } catch { /* already gone */ }
   }
 }
