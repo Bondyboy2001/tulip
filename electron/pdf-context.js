@@ -1,3 +1,4 @@
+// @ts-check
 'use strict'
 
 /* Page-level retrieval for Copilot. The complete sidecar remains available to

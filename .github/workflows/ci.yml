@@ -18,7 +18,7 @@ jobs:
   # it. An advisory or a lint error is a one-line answer, and waiting on a macOS
   # runner to hear it is the slowest way to be told.
   check:
-    name: Audit
+    name: Lint and audit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -27,6 +27,8 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
       # Fails the build on a known-vulnerable package. High and above only:
       # this gates merges, and a moderate advisory in a build-time dependency
       # should open a Dependabot PR, not stop the queue.

@@ -1,3 +1,4 @@
+// @ts-check
 /* ============================================================ review store
    What the scheduler remembers between sessions.
 
@@ -273,7 +274,7 @@ function makeStore ({ vault }) {
      end, so nothing is thrown away and the reader can still add it up by hand.
      Only ever one generation back — this is a safety net, not an archive. */
   async function rollLogIfHuge () {
-    let size = 0
+    let size
     try { size = fsSync.statSync(logFile()).size } catch { return }
     if (size < MAX_LOG_BYTES) return
     await fs.rename(logFile(), `${logFile()}.1`).catch(() => {})

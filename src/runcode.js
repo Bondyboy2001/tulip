@@ -344,6 +344,10 @@ function requestStop (state) {
    colours, cursor moves — OSC — titles and hyperlinks — and lone two-byte
    escapes. Streamed output is already decoded incrementally above; keeping
    this idempotent cleanup covers non-stream payloads and older saved state. */
+ 
+// Matching terminal escapes is the entire purpose here: these are the bytes
+// a subprocess actually emits.
+// eslint-disable-next-line no-control-regex
 const ANSI = /\x1b(?:\[[0-9;?]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[@-Z\\-_])/g
 
 function plain (text) {

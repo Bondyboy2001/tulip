@@ -64,8 +64,9 @@ function mount (parent, doc, { language = false } = {}) {
   })
 }
 
-const frame = () => new Promise((resolve) =>
-  requestAnimationFrame(() => requestAnimationFrame(resolve)))
+const frame = () => new Promise((resolve) => {
+  requestAnimationFrame(() => requestAnimationFrame(resolve))
+})
 
 const cellAt = (view, r, c) =>
   view.dom.querySelector(`.tk-table-wrap [data-row="${r}"][data-col="${c}"]`)
@@ -535,7 +536,7 @@ async function run () {
 
     const last = () => view.dom.querySelector('[data-row="24"][data-col="0"]')
     for (let i = 0; i < 90 && !last()?.classList.contains('tk-table-cell-selected'); i++) {
-      await new Promise((resolve) => requestAnimationFrame(resolve))
+      await new Promise((resolve) => { requestAnimationFrame(resolve) })
     }
     const scrolled = scroller.scrollTop
     at('mouseup', box.left + 4, below)

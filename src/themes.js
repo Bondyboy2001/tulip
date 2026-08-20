@@ -1,3 +1,4 @@
+// @ts-check
 /* =============================================================== themes
    A theme is a block of custom properties in the stylesheet, selected by
    `data-theme` on the root. This file holds only what the picker needs: the

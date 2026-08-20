@@ -1647,7 +1647,9 @@ class AgentDeletedWidget extends WidgetType {
 
   eq (other) {
     const samePieces = (a, b) => (a == null || b == null)
-      ? a == b
+      // Inside this branch one of them is already nullish, so "equal" can only
+      // mean both are — and null and undefined count as the same absence.
+      ? (a == null && b == null)
       : a.length === b.length &&
         a.every((piece, i) => piece.text === b[i].text && piece.changed === b[i].changed)
     return other.rows.length === this.rows.length &&

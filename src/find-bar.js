@@ -1,3 +1,4 @@
+// @ts-check
 /* ======================================================== find bar parts
    The controls both find bars are built from.
 

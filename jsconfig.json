@@ -1,0 +1,50 @@
+{
+  "//": [
+    "Type checking, file by file.",
+    "",
+    "Turning checkJs on across the whole tree reports 2,845 errors, and almost",
+    "none of them are defects: they are the checker not knowing that a",
+    "querySelector returned an HTMLElement, or that window.tulip exists. A gate",
+    "nobody can turn green is not a gate.",
+    "",
+    "So checkJs is off, and a file opts in by starting with `// @ts-check`. Fifty",
+    "already do \u2014 every store that writes to disk, the preload that is the",
+    "renderer's whole view of the outside world, and the pure-logic modules where",
+    "a wrong argument is a real bug. The list only grows: clean up a file's types,",
+    "add the marker, and it can never regress.",
+    "",
+    "Run it with `npm run typecheck`."
+  ],
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "module": "NodeNext",
+    "moduleResolution": "nodenext",
+    "allowJs": true,
+    "checkJs": false,
+    "noEmit": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "strict": false,
+    "noImplicitAny": false,
+    "types": [
+      "node"
+    ]
+  },
+  "include": [
+    "src/**/*.js",
+    "electron/**/*.js",
+    "electron/**/*.cjs",
+    "build.mjs"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "release",
+    "build"
+  ]
+}

@@ -1,3 +1,4 @@
+// @ts-check
 /* ============================================================= callouts
    A blockquote whose first line names a kind:
 

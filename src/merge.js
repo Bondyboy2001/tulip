@@ -1,3 +1,4 @@
+// @ts-check
 /* ============================================================= merging
    What one note looks like when two hands have written to it since they last
    agreed: the buffer the user is typing in and the file a sync client (or

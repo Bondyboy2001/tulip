@@ -1,3 +1,4 @@
+// @ts-check
 /**
  * Case-folded, one code unit for one code unit.
  *

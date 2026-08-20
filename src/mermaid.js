@@ -182,7 +182,7 @@ async function drawInto (host, code) {
      pause pays for a layout, and the half-typed drafts never enter the cache.
      A source already drawn (or already refused) still lands immediately. */
   if (!settled(keyFor(code))) {
-    await new Promise((resolve) => setTimeout(resolve, DEBOUNCE_MS))
+    await new Promise((resolve) => { setTimeout(resolve, DEBOUNCE_MS) })
     if (!host.isConnected) return false
   }
 

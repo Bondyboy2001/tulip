@@ -1,3 +1,4 @@
+// @ts-check
 /**
  * What a click on a rendered note means.
  *

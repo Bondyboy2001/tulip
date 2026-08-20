@@ -1,3 +1,4 @@
+// @ts-check
 /* ================================================================ lint
    The house style for a markdown file, applied rather than complained about.
 

@@ -1,3 +1,4 @@
+// @ts-check
 /**
  * How long ago, said the way a person would say it — and said the same way
  * everywhere: the chat list and the history panel answer "when?" in one voice.

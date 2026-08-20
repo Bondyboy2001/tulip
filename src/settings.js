@@ -1,3 +1,4 @@
+// @ts-check
 /* ============================================================= settings
    A rail of sections on the left, flat rows on the right — the shape people
    already know from Obsidian, and the shape that keeps a growing list of

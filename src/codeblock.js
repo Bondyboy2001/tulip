@@ -1,3 +1,4 @@
+// @ts-check
 /* ========================================================== code blocks
    Editing behaviour that belongs to code but not to prose. Markdown's own
    indentation rules stop at the fence, so pressing Enter inside a block would

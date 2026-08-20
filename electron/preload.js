@@ -1,3 +1,4 @@
+// @ts-check
 'use strict'
 
 const { contextBridge, ipcRenderer, webUtils } = require('electron')

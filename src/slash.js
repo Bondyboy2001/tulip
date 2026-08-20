@@ -1,3 +1,4 @@
+// @ts-check
 /**
  * The slash menu: type `/` at the start of a line and pick what to insert.
  *

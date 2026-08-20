@@ -1,3 +1,4 @@
+// @ts-check
 /* One accessibility contract for the three collapsible columns. Grid geometry
  * decides what is visible; this module makes keyboard and assistive-technology
  * reachability agree with it. */

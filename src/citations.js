@@ -7,7 +7,7 @@
  * renderer reaches disk asynchronously through the preload bridge.
  */
 
-const CITE_KEY = /@([A-Za-z0-9_:.\/-]+)/
+const CITE_KEY = /@([A-Za-z0-9_:./-]+)/
 
 /** A citation cluster beginning at `pos`, or null. */
 function citationAt (source, pos) {
@@ -116,7 +116,7 @@ function parseBibTeX (source) {
         if (!match) { pos++; continue }
         pos = field.lastIndex
 
-        let value = ''
+        let value
         if (rest[pos] === '{') {
           let level = 1
           const from = ++pos

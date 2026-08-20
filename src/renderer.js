@@ -4179,6 +4179,9 @@ function textFacts (text) {
   while (!matches.next().done) words++
 
   const tags = new Set()
+  // `\[` beside `(` keeps the class legible; `[\s([]` is a run of brackets
+  // nobody can read.
+  // eslint-disable-next-line no-useless-escape
   for (const m of body.matchAll(/(^|[\s(\[])#([\p{L}\p{N}/_-]+)/gu)) tags.add(m[2].toLowerCase())
 
   /* Links, not embeds: `![[picture.png]]` is a thing in the note rather than a
@@ -6126,8 +6129,8 @@ function exportCurtain () {
    every stage and image to report itself done — bounded, because a broken
    block should not hold an export hostage. */
 async function settleReadingForExport () {
-  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
-  await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+  const wait = (ms) => new Promise((resolve) => { setTimeout(resolve, ms) })
+  await new Promise((resolve) => { requestAnimationFrame(() => requestAnimationFrame(resolve)) })
 
   const box = el.reading
   const top = box.scrollTop

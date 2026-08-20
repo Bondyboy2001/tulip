@@ -1,3 +1,4 @@
+// @ts-check
 /*
  * The text layer of a PDF is geometry, not prose. pdf.js returns positioned
  * fragments in an order that is often good enough for one-column pages and

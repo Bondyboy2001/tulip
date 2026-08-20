@@ -1,3 +1,4 @@
+// @ts-check
 /* ========================================================== transclusion
    One note standing inside another.
 

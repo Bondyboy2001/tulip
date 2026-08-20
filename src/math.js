@@ -280,7 +280,7 @@ export function mathPlugin (md) {
 
     const firstLine = state.src.slice(start + 2, max).trim()
     let line = startLine
-    let content = ''
+    let content
     let closed = false
 
     if (firstLine.endsWith(close) && firstLine.length > 2) {

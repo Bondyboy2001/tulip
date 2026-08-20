@@ -1,3 +1,4 @@
+// @ts-check
 /* ================================================================ fonts
    Two typefaces run the app: one for what you write — the notes, the reading
    view, the table grids — and one for everything around it. Each is a custom

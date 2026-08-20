@@ -1,3 +1,4 @@
+// @ts-check
 'use strict'
 
 const fsSync = require('node:fs')
@@ -126,7 +127,7 @@ class TrustStore {
      store is next written out. */
   serialized (data = this.data) {
     while (data.operations.length) {
-      let size = 0
+      let size
       try { size = Buffer.byteLength(JSON.stringify(data)) } catch { break }
       if (size <= MAX_BYTES) break
       let drop = -1

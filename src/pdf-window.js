@@ -1,3 +1,4 @@
+// @ts-check
 /** First ordered page whose measured bottom lies after `point`. `bounds` is
  *  lazy so a viewer reads layout for logarithmically many wrappers. */
 export function firstPageEndingAfter (length, point, bounds) {

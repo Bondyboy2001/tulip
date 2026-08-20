@@ -1,3 +1,4 @@
+// @ts-check
 /* ============================================================= headings
    One answer to "what are this note's headings and blocks, and where does
    [[Note#Anchor]] land". The outline panel, the switcher's heading mode,

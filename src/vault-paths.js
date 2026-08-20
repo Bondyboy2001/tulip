@@ -1,3 +1,4 @@
+// @ts-check
 /* ===================================================== vault paths
    What a path in the vault means, built once from the contract both processes
    read. Every one of these matchers used to be written out by hand in two or

@@ -1014,7 +1014,7 @@ async function writeAtomic (abs, content, { durable = true } = {}) {
   noteSelfWrite(tmp)
   noteSelfWrite(abs)
   const file = await fs.open(tmp, 'w')
-  let stamp = null
+  let stamp
   try {
     await file.writeFile(content, 'utf8')
     if (durable) await file.sync()
@@ -1194,7 +1194,7 @@ async function migrateAttachments (dir) {
       } catch {
         // Already there under the same name — merge the files one by one.
         if (!note.isDirectory()) continue
-        let files = []
+        let files
         try { files = await fs.readdir(path.join(from, note.name)) } catch { continue }
         for (const file of files) {
           await fs.rename(path.join(from, note.name, file), path.join(target, file))
@@ -1257,7 +1257,7 @@ function askRendererToFlush (win) {
      quit stalled the full 1.5 s before closing a second time. */
   if (flushAsked) return flushAsked
   flushAsked = new Promise((resolve) => {
-    if (!win || win.webContents.isDestroyed()) return resolve()
+    if (!win || win.webContents.isDestroyed()) { resolve(); return }
     const timer = setTimeout(resolve, 1500)
     flushReply = () => { clearTimeout(timer); resolve() }
     win.webContents.send('app:flush')
@@ -4649,7 +4649,7 @@ ipcMain.handle('ai:history:save', async (_e, history) => {
        the reader — hangs off a rejected promise, and a resolved `{ok: false}`
        never reached it: a full disk silently dropped the session's history and
        the only trace was this console line. */
-    throw new Error(err.message || 'the history could not be written')
+    throw new Error(err.message || 'the history could not be written', { cause: err })
   }
 })
 
@@ -4789,7 +4789,7 @@ ipcMain.handle('draft:list', async () => {
        `safePath` throws on anything that is not inside it, which is also the
        check that keeps a hand-edited draft from naming a file elsewhere. */
     let disk = null
-    try { disk = await fs.readFile(safePath(draft.path), 'utf8') } catch { disk = null }
+    try { disk = await fs.readFile(safePath(draft.path), 'utf8') } catch { /* renamed, deleted, or no longer inside the vault */ }
     if (disk === draft.text) { await fs.unlink(file).catch(() => {}); continue }
     out.push({ path: draft.path, text: draft.text, at: draft.at || 0, disk })
   }

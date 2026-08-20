@@ -1,3 +1,4 @@
+// @ts-check
 /**
  * The stops zoom walks, and the one way to ask which stop a factor is nearest.
  *

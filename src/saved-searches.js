@@ -1,3 +1,4 @@
+// @ts-check
 /* Saved queries are smart folders: a name is optional presentation, while the
  * query remains the portable rule that produces the folder's contents. */
 

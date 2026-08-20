@@ -1,3 +1,4 @@
+// @ts-check
 /* ========================================================== run widgets
    The editing view's Run control, in the two places the reading view puts it:
    the button on the fence's header line, out at the right beside the language

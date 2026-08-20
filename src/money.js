@@ -1,3 +1,4 @@
+// @ts-check
 /* ================================================================ money
    `$` is overloaded: it opens maths and it prices things. The maths scanners
    already decline anything that looks like a price, which leaves prices as

@@ -1,3 +1,4 @@
+// @ts-check
 /* ============================================================ languages
    A fenced block announces itself with a small tile: the language's own
    colour and its brand mark, from the Simple Icons set in logos.js. The few

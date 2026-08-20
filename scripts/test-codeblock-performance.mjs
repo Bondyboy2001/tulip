@@ -86,6 +86,10 @@ const cachedMs = await time(
   9
 )
 
+ 
+// The same terminal escapes src/runcode.js strips, reproduced here so the
+// benchmark measures the real pattern.
+// eslint-disable-next-line no-control-regex
 const ANSI = /\x1b(?:\[[0-9;?]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[@-Z\\-_])/g
 const chunks = Array.from({ length: 1024 }, (_, index) =>
   `\x1b[3${index % 8}m${String(index).padStart(4, '0')} ${'output '.repeat(4)}\x1b[0m\n`

@@ -1,3 +1,4 @@
+// @ts-check
 /* Country flags are stored as Unicode prefixes in `.language.md` filenames.
    That keeps the choice portable without frontmatter or sidecar files. */
 

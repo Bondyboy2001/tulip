@@ -1,3 +1,4 @@
+// @ts-check
 'use strict'
 
 /* ================================================================ frontmatter
@@ -115,6 +116,9 @@ function needsQuotes (text, inList = false) {
   if (/^[-?:,[\]{}#&*!|>'"%@`]|["']$/.test(text)) return true
   if (/:([\s]|$)/.test(text)) return true
   if (/\s#/.test(text)) return true
+  // `\[\]` as a matched pair reads as a bracket of either kind, where the
+  // unescaped `[\]` reads as a mistake.
+  // eslint-disable-next-line no-useless-escape
   if (inList && /[,\[\]#]/.test(text)) return true
   return false
 }

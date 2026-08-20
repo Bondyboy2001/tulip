@@ -1,3 +1,4 @@
+// @ts-check
 'use strict'
 
 /* Durable, atomic state writes shared by the small JSON stores.

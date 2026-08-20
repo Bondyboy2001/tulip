@@ -1,3 +1,4 @@
+// @ts-check
 /* ========================================================== typed answers
    Whether what was typed is the answer.
 

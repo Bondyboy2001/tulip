@@ -1,3 +1,4 @@
+// @ts-check
 /* =========================================================== merge panel
    The contested places in a note two hands have written to, one card each,
    and the choice between yours and the disk's. Changes that do not touch the

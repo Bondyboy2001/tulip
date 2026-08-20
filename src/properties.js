@@ -74,7 +74,7 @@ export function tagsPanel (view, { onCommit } = {}) {
       entries.splice(at, 1)
     }
     const block = serializeFrontmatter(entries)
-    let from = 0
+    const from = 0
     let to = 0
     if (parsed.range) {
       const last = view.state.doc.lineAt(Math.min(parsed.range.end - 1, view.state.doc.length))

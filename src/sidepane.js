@@ -1,3 +1,4 @@
+// @ts-check
 /**
  * The side pane: a second document, standing beside the one being written.
  *

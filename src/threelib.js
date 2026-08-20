@@ -1,3 +1,4 @@
+// @ts-check
 /* =============================================================== three lib
    The three.js runtime a ```three block draws with, as one file.
 

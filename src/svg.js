@@ -1,3 +1,4 @@
+// @ts-check
 /* ================================================================== svg
    An ```svg block is a picture already — the source *is* the drawing, with
    nothing in between. So both views show the drawing where the code was, and

@@ -1,3 +1,4 @@
+// @ts-check
 /* =============================================================== models
    One list of models, drawn from three CLIs.
 

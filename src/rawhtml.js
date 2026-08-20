@@ -141,6 +141,10 @@ function safeUrl (value, { tag, isAsset, resolve }) {
      is a live URL to everything except a check run on the raw string. Only the
      verdict comes from the copy — what gets written is what the note wrote, or
      an anchor like `#4.1 Numbers` would lose the space it needs to be found. */
+   
+  // Stripping control characters out of a URL is what this line is for —
+  // they are the smuggling vector.
+  // eslint-disable-next-line no-control-regex
   const probe = url.replace(/[\u0000-\u0020\u007f]/g, '')
   if (!probe) return null
   if (probe.startsWith('#')) return url

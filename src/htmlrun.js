@@ -1,3 +1,4 @@
+// @ts-check
 /* ================================================================ html runs
    An ```html block is a page, and running it shows the page.
 

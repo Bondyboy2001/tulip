@@ -1,3 +1,4 @@
+// @ts-check
 /* ================================================================== three
    A ```three block is a scene, and the block is only the interesting part of
    it: no <canvas>, no renderer, no resize handler and no animation loop, which

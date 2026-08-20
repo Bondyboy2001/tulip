@@ -1,3 +1,4 @@
+// @ts-check
 /* ================================================================== guests
    A block that is really a page, and the sandbox it is shown in.
 

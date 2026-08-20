@@ -456,7 +456,6 @@ function renderCell (td, text, {
 
     if (!match) {
       td.append(text.slice(last))
-      last = text.length
       break
     }
     if (match.index > last) td.append(text.slice(last, match.index))

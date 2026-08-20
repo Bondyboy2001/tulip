@@ -1,3 +1,4 @@
+// @ts-check
 /**
  * Citations in a copilot reply: the page of the open document an answer came
  * from.

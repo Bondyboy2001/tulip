@@ -1,3 +1,4 @@
+// @ts-check
 /* ======================================================= inline highlights
    One grammar for `==highlighted text==`, shared by the reading view and the
    editor. Markdown-it does not include this extension, and CodeMirror sees the

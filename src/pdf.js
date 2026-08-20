@@ -1344,7 +1344,7 @@ export function mountPdf ({
       if (epoch !== state.epoch) return null
       throw new Error(err?.name === 'PasswordException'
         ? 'That PDF is password-protected.'
-        : 'That PDF could not be read.')
+        : 'That PDF could not be read.', { cause: err })
     }
     if (epoch !== state.epoch) { doc.destroy(); return null }
 

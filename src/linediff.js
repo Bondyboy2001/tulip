@@ -1,3 +1,4 @@
+// @ts-check
 /**
  * A line diff, the shape a diff is usually read in: each removed line sitting
  * directly above the line that replaced it, with a little unchanged text either
