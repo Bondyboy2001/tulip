@@ -20,6 +20,7 @@ const { narrowsFrom } = require('./search-narrow')
 const { parseByteRange, streamFileRange } = require('./range-response')
 const { ocrPagesOf, parsePages, relevantPdfContext } = require('./pdf-context')
 const { parseFrontmatter, propsOf, propValues } = require('./frontmatter.cjs')
+const updates = require('./updates')
 const PDF_TEXT_FORMAT = require('./pdf-text-format.json').version
 const VAULT_CONTRACT = require('./vault-contract.json')
 const WEB_PARTITIONS = require('./web-partitions.json')
@@ -1467,6 +1468,7 @@ function buildMenu () {
       label: 'Tulip',
       submenu: [
         { role: 'about' },
+        { label: 'Check for Updates…', click: () => updates.check({ manual: true }) },
         { type: 'separator' },
         /* Which vault is open is a fact about the app rather than about a file
            in it, so it is asked for here rather than under File — where it sat
@@ -1577,7 +1579,12 @@ function buildMenu () {
       item.label === 'Open Vault…' || item.label === 'Settings…'
     )
     fileMenu.submenu.unshift(...commands, { type: 'separator' })
-    fileMenu.submenu.push({ type: 'separator' }, { role: 'quit' })
+    /* Checking for updates goes to the bottom rather than up with those two:
+       it belongs beside Exit, among the things that are about the application
+       rather than about the note, which is where the app menu had it on
+       macOS and where Windows puts it in the absence of a Help menu. */
+    const check = appMenu.submenu.find((item) => item.label === 'Check for Updates…')
+    fileMenu.submenu.push({ type: 'separator' }, check, { role: 'quit' })
     template.shift()
   }
   Menu.setApplicationMenu(Menu.buildFromTemplate(template))
@@ -5231,6 +5238,10 @@ app.whenReady().then(async () => {
   buildMenu()
   createWindow()
   guardGuests()
+
+  // Ten seconds after launch and every six hours thereafter — see updates.js
+  // for why it waits and what turns it off.
+  updates.watch()
 
   const cfg = readConfig()
   /* `vaultPath` was the persisted home before default vaults had their own

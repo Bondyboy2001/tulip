@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  What the hardened runtime has to be asked for by name.
+
+  The hardened runtime is required for notarization, and it turns off a set of
+  things by default. Three of them are things Tulip does:
+
+  - Electron's renderer compiles JavaScript, which the runtime reads as writing
+    executable memory. Every Electron app needs these two.
+  - A fenced code block runs a real interpreter — python3, node, and the rest —
+    as a child process, and those are not signed by us.
+
+  Nothing else is listed. Camera, microphone, address book and the other
+  entitlements an Electron template usually arrives carrying are absent because
+  the app does not use them, and each one is a permission prompt the user would
+  be asked to grant for no reason.
+-->
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <!-- Run blocks spawn interpreters the user already has installed; without
+       this the hardened runtime refuses to load their libraries. -->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+</dict>
+</plist>

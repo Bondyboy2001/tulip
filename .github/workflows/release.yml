@@ -34,7 +34,19 @@ jobs:
               release/latest.yml
     runs-on: ${{ matrix.os }}
     env:
-      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      # Signing turns itself on when the certificates are present and stays off
+      # when they are not, so a fork — or this repository before the
+      # certificates exist — still produces working unsigned builds rather than
+      # a failed job. See CONTRIBUTING.md for what each secret is and how to
+      # produce it.
+      CSC_IDENTITY_AUTO_DISCOVERY: ${{ secrets.MAC_CERTIFICATE != '' }}
+      CSC_LINK: ${{ secrets.MAC_CERTIFICATE }}
+      CSC_KEY_PASSWORD: ${{ secrets.MAC_CERTIFICATE_PASSWORD }}
+      WIN_CSC_LINK: ${{ secrets.WINDOWS_CERTIFICATE }}
+      WIN_CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -43,7 +55,25 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
-      - run: ${{ matrix.command }}
+
+      # Notarization is a separate switch from signing, and asking for it
+      # without an Apple ID fails the build — so it is added to the command
+      # rather than set in package.json, only on the run that can satisfy it.
+      # An unsigned build takes the plain command and is unaffected.
+      - name: Package
+        run: ${{ matrix.command }}${{ matrix.name == 'macOS' && secrets.APPLE_ID != '' && ' -c.mac.notarize=true' || '' }}
+
+      # Says in the log which kind of build this is. Without it, an unsigned
+      # release looks exactly like a signed one until a user tries to open it.
+      - name: Report signing status
+        shell: bash
+        run: |
+          if [ -n "${{ secrets.MAC_CERTIFICATE }}${{ secrets.WINDOWS_CERTIFICATE }}" ]; then
+            echo "Signed build."
+          else
+            echo "::warning::Unsigned build — macOS Gatekeeper will refuse it and Windows SmartScreen will warn. See CONTRIBUTING.md."
+          fi
+
       - uses: actions/upload-artifact@v5
         with:
           name: tulip-${{ matrix.name }}

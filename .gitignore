@@ -9,8 +9,15 @@ dist/
 output/
 
 # The packaged .app that scripts/build-app.sh assembles — ~280MB of copied
-# Electron, rebuildable from source in one command.
-build/
+# Electron, rebuildable from source in one command. Everything in here is
+# generated except the entitlements, which are source: electron-builder reads
+# them out of buildResources, which is this directory.
+#
+# `build/*` rather than `build/`: git will not re-include a file whose parent
+# directory is itself excluded, so ignoring the contents is what lets the one
+# exception below be tracked.
+build/*
+!build/entitlements.mac.plist
 release/
 
 # Scratch written by agent tooling run inside the repo.
