@@ -13,12 +13,35 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Everything that is true regardless of platform, on the cheapest runner, as
+  # its own job so it starts at the same moment as the matrix rather than after
+  # it. An advisory or a lint error is a one-line answer, and waiting on a macOS
+  # runner to hear it is the slowest way to be told.
+  check:
+    name: Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      # Fails the build on a known-vulnerable package. High and above only:
+      # this gates merges, and a moderate advisory in a build-time dependency
+      # should open a Dependabot PR, not stop the queue.
+      - run: npm audit --audit-level=high
+
   verify:
     name: Verify (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, windows-latest]
+        # Linux first: it is the fastest and cheapest of the three, and it
+        # catches everything that is not platform-specific before the billed
+        # minutes on the other two are spent. macOS and Windows stay because
+        # the app ships on both and the packaging differs on both.
+        os: [ubuntu-latest, macos-14, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
@@ -27,4 +50,14 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      - run: npm run verify
+      # Two suites drive a real Electron window, which needs a display server.
+      # macOS and Windows runners have one; Linux runners do not, so xvfb-run
+      # supplies it there and the command is the same everywhere else.
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y xvfb
+      - if: runner.os == 'Linux'
+        run: xvfb-run --auto-servernum npm run verify
+      - if: runner.os != 'Linux'
+        run: npm run verify

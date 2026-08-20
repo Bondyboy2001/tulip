@@ -61,8 +61,8 @@
     "katex": "^0.18.1",
     "markdown-it": "^14.3.0",
     "markdown-it-footnote": "^4.0.0",
-    "mermaid": "^11.16.0",
-    "pdfjs-dist": "6.1.200",
+    "mermaid": "^11.17.0",
+    "pdfjs-dist": "6.2.108",
     "simple-icons": "16.27.1",
     "three": "^0.185.1"
   },

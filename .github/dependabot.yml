@@ -1,0 +1,44 @@
+# Tulip renders PDFs and Markdown from wherever the vault got them, so the
+# parsers below are the app's exposed edge: pdfjs-dist, mermaid, katex and
+# markdown-it all read files nobody here wrote. Advisories against them are what
+# this is for, and `npm audit` in CI is the other half — the audit says a known
+# bad version is installed today, and these updates are how it stops being
+# installed before anyone has to notice.
+version: 2
+
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    # Every dependency here is a devDependency: the app ships as a bundle built
+    # from them rather than as a tree of packages, so the default
+    # "production only" filter would watch nothing at all.
+    allow:
+      - dependency-type: all
+    groups:
+      # CodeMirror ships as a dozen packages that expect to move together — a
+      # PR per package produces a set of updates that only work once all of
+      # them are merged.
+      codemirror:
+        patterns:
+          - "@codemirror/*"
+          - "@lezer/*"
+      # Patch and minor bumps across the rest, as one PR to review rather than
+      # a queue of near-identical ones. Majors stay separate: those are the
+      # ones that need the build and the packaging checked by hand.
+      minor-and-patch:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "@codemirror/*"
+          - "@lezer/*"
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
