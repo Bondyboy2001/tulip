@@ -2560,41 +2560,6 @@ ipcMain.handle('tags:vault', async () => {
 })
 
 /**
- * The local extensions a vault carries in `.tulip/extensions/`, as raw source.
- *
- * Opt in at the app's level (`extensionsEnabled` in config): these files are
- * code the user asked Tulip to run, and a vault received from somebody else
- * must not start running itself the first time it is opened. Read-only from
- * here — what an extension may *do* is bounded by the bridge in
- * src/extensions.js, and a malformed one reports itself in `error` rather
- * than dropping the list.
- */
-ipcMain.handle('extensions:list', async () => {
-  if (!vaultPath || !readConfig().extensionsEnabled) return []
-  const dir = path.join(vaultPath, '.tulip', 'extensions')
-  let names
-  try {
-    names = (await fs.readdir(dir)).filter((n) => n.endsWith('.js')).sort()
-  } catch { return [] }
-
-  const out = []
-  for (const name of names.slice(0, 100)) {
-    try {
-      const source = await fs.readFile(path.join(dir, name), 'utf8')
-      // Larger than this is not an extension, it is an accident.
-      if (source.length > 256 * 1024) {
-        out.push({ id: name.replace(/\.js$/, ''), file: name, error: 'Too large to load (256 KB cap).' })
-        continue
-      }
-      out.push({ id: name.replace(/\.js$/, ''), file: name, source })
-    } catch (err) {
-      out.push({ id: name.replace(/\.js$/, ''), file: name, error: String(err.message || err) })
-    }
-  }
-  return out
-})
-
-/**
  * The same query, used to rewrite rather than to find.
  *
  * One term only. A multi-term query means "the note holding both of these",
