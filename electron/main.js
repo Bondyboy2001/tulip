@@ -1316,6 +1316,39 @@ function createWindow () {
      account above `fenceWebviewAttach`. */
   fenceWebviewAttach(mainWindow)
 
+  /* The renderer died — out of memory, or a crash somewhere below JavaScript.
+     No handler inside it ran, so the window is now a blank frame holding a
+     process that is not there, and ⌘S does nothing for the rest of the session.
+
+     Reloaded rather than reported, because the reload is the recovery: drafts
+     are main's, written every 1.2 s and untouched by whatever happened over
+     there, and `offerDraftRecovery` on the next boot offers back every note
+     whose draft is ahead of its file. So the text survives the crash by the
+     same path it survives a power cut — the only thing needed here is to get
+     a live renderer in front of it.
+
+     `clean-exit` and `killed` are not crashes: they are what a window being
+     closed and an app being quit look like from here. */
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    console.error('renderer gone', details)
+    if (details.reason === 'clean-exit' || details.reason === 'killed') return
+    if (quitting || !mainWindow || mainWindow.isDestroyed()) return
+    /* The close handler holds the window open until the renderer answers
+       `app:flush`. There is no renderer to answer, so a close attempted now
+       would wait out the full 1.5 s timeout — and the reload below is about to
+       make the question moot anyway. */
+    flushReply?.()
+    mainWindow.reload()
+  })
+
+  /* A frame that has not returned to its event loop for long enough that the
+     window manager has stopped drawing it. Not fatal — a long synchronous scan
+     of a large note looks exactly like this and finishes on its own — so
+     nothing is done to the window. It is logged because the state is otherwise
+     indistinguishable, from a report, from the crash above. */
+  mainWindow.on('unresponsive', () => console.error('renderer unresponsive'))
+  mainWindow.on('responsive', () => console.error('renderer responsive again'))
+
   /* Nothing a note started outlives the window that started it. The copilot's
      process is included: it is one CLI per conversation, running with the vault
      as its working directory and holding tools that write notes. Left alive by
@@ -5262,6 +5295,19 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
+})
+
+/* A helper process Chromium runs beside the renderer — the GPU process, a
+   utility process, a <webview>'s own renderer — has died. Chromium restarts
+   most of these by itself, and the app carries on, so there is nothing to do
+   about it here.
+
+   Logged all the same, because these deaths are what the *next* report will be
+   about and nothing else records them: a GPU process that keeps dying is a
+   window that keeps going blank or losing its canvases, and a note holding a
+   three.js scene or a heavy PDF is the likeliest thing to have caused it. */
+app.on('child-process-gone', (_event, details) => {
+  console.error('child process gone', details)
 })
 
 app.on('before-quit', () => {

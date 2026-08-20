@@ -712,6 +712,72 @@ function clearDraft (path) {
   api.draft.clear(path).catch(() => {})
 }
 
+/* ----------------------------------------------------------- going wrong
+
+   An error nothing caught does not stop the renderer. The process survives and
+   only the frame that threw is abandoned — which is the quiet part: whatever
+   that frame was partway through is abandoned with it. A save halfway past its
+   await never clears `dirty`; a keystroke handler that threw before reaching
+   `queueDraft` leaves nothing scheduled. The buffer can be ahead of both the
+   file and the draft with nothing on its way to close the gap, and nothing on
+   screen saying so.
+
+   So this is not reporting, it is the fix: write the draft at once, ahead of
+   its debounce, and say on screen that the text was kept. The stack goes to the
+   console, where a stack is useful — the person typing needs to know about
+   their paragraph, not about the exception.
+
+   Registered beside the drafts they protect rather than down in the lifecycle
+   handlers, and early enough in the module to cover boot.
+
+   A renderer that dies outright — out of memory, a crash below JavaScript —
+   reaches none of this: no handler in a dead process runs. That case belongs to
+   the main process, and is handled there in `render-process-gone`. */
+let lastCrashAt = 0
+function crashed (what, detail) {
+  console.error(what, detail)
+  try {
+    /* An error inside a render loop arrives thousands of times, and each one
+       would be an IPC message and a re-run of the same toast. The first of a
+       burst does the work; the rest have nothing to add. */
+    const now = Date.now()
+    if (now - lastCrashAt < 2000) return
+    lastCrashAt = now
+
+    /* Not awaited. Whatever went wrong may well go wrong again on the next
+       tick, and the write is already on its way to main the moment the call is
+       made — waiting here would only add a frame in which it can be lost. */
+    writeDraft().catch(() => {})
+    toast('Something went wrong. Your unsaved text has been kept.')
+
+    /* Separately, and last. `copilot` is declared further down the module, so
+       an error raised while this file is still evaluating reaches it inside its
+       temporal dead zone — and `flush` returns nothing at all when there is
+       nothing unsaved, so it cannot be treated as a promise either. Neither is
+       a reason for the note's own draft above to go unwritten. */
+    try { copilot.flush() } catch { /* not built yet, or nothing to write */ }
+  } catch {
+    /* Thrown from the handler for a thrown error — the page is too early or too
+       far gone for a toast. The console already has the original, which is the
+       part worth keeping. */
+  }
+}
+
+window.addEventListener('error', (event) => {
+  /* `error` on window is two events wearing one name. A script that threw
+     arrives with `target` set to the window and the exception in `error`; an
+     <img> or a stylesheet that failed to load arrives with `target` set to the
+     element and no exception at all. Only the first kind means the buffer may
+     be stranded — a picture that did not load is the asset layer's business,
+     and toasting about it would be noise. */
+  if (event.target !== window) return
+  crashed('uncaught error', event.error || event.message)
+})
+
+window.addEventListener('unhandledrejection', (event) => {
+  crashed('unhandled rejection', event.reason)
+})
+
 /* Rebuilding the outline means re-scanning the note, which is not something to
    do on every keystroke — a heading only ever appears between them. */
 let outlineTimer = null
