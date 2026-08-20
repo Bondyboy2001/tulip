@@ -1,0 +1,54 @@
+name: Bug report
+description: Something in Tulip does not do what it should.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what happened, and what you expected instead.
+      placeholder: |
+        1. Opened a note containing a table
+        2. Pressed Tab in the last cell
+        3. The row was duplicated; I expected a new row
+    validations:
+      required: true
+
+  - type: textarea
+    id: note
+    attributes:
+      label: The smallest note that reproduces it
+      description: >
+        If a particular note is involved, the least Markdown that still shows
+        the problem. This is worth more than a screenshot.
+      render: markdown
+
+  - type: input
+    id: version
+    attributes:
+      label: Tulip version
+      description: From Tulip → About, or the release you downloaded.
+      placeholder: 0.1.1
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - macOS (Apple silicon)
+        - macOS (Intel)
+        - Windows
+        - Built from source
+    validations:
+      required: true
+
+  - type: textarea
+    id: console
+    attributes:
+      label: Anything in the console
+      description: >
+        Optional. View → Toggle Developer Tools, then the Console tab. Errors
+        there usually name the part of the app that went wrong.
+      render: text
