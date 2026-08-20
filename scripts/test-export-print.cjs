@@ -28,6 +28,22 @@ for (const sel of ['.titlebar', '#sidebar', '.doc-head', 'footer.status', '#side
 check('the export curtain is hidden from its own print', printBlock.includes('.export-curtain'))
 check('overlays are hidden in print', printBlock.includes('#overlay'))
 
+/* Floating chrome lives on `document.body`, not inside the app shell, so
+   hiding the shell leaves it on the page — a docked audio player used to print
+   on top of the note. Each selector is checked twice: that the print block
+   names it, and that it is a class the source really assigns. The rule this
+   replaced named `.dd-root`, which nothing creates, so it hid nothing while
+   reading exactly as though it did. Only the second check catches that. */
+const bodyChrome = [
+  ['.dd-menu', 'src/dropdown.js'],
+  ['.media-dock', 'src/renderer.js'],
+  ['.code-ai-popover', 'src/renderer.js']
+]
+for (const [sel, source] of bodyChrome) {
+  check(`${sel} is hidden in print`, printBlock.includes(sel))
+  check(`${sel} is a class the app really assigns`, read(source).includes(`'${sel.slice(1)}`))
+}
+
 const readingRule = printBlock.match(/\.reading\s*{[^}]*}/s)
 check('the reading rule exists in print', !!readingRule)
 check('the article un-scrolls for pagination', !!readingRule && /overflow:\s*visible/.test(readingRule[0]))

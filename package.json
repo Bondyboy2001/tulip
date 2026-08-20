@@ -13,6 +13,7 @@
   "scripts": {
     "test": "node scripts/run-tests.mjs",
     "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
     "typecheck": "tsc -p jsconfig.json --noEmit",
     "build": "node build.mjs",
     "icon": "electron scripts/make-icon.cjs",

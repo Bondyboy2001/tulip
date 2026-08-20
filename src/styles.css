@@ -7277,13 +7277,6 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 }
 .model-refresh:hover:not(:disabled) { border-color: var(--accent); color: var(--ink) }
 .model-refresh:disabled { color: var(--faint); cursor: default; }
-.model-picker-count {
-  flex: none;
-  font-family: var(--font-ui);
-  font-size: 11.5px;
-  color: var(--faint);
-  font-variant-numeric: tabular-nums;
-}
 /* Bounded, and scrolling on its own: the pane behind it scrolls too, which is
    normally worth avoiding — but the alternative is the search box scrolling out
    of sight while you are reading the three hundred results it just found. */
@@ -8591,10 +8584,16 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 
   @page { size: Letter; margin: 18mm 16mm; }
 
+  /* The floating chrome is listed by the class it actually carries. Each of
+     these lives on `document.body` rather than inside the shell, so hiding the
+     shell does not hide them: an open dropdown menu or a docked audio player
+     would otherwise print on top of the note. `.dd-root` used to stand here
+     and is assigned by nothing at all, so it hid nothing while reading as
+     though it did. */
   .titlebar, #sidebar, #grip-sidebar, .doc-head, footer.status,
   #sidepane, #grip-side, #ai, #grip-ai,
   #pdf-tools, #site-tools, .empty, #lang-keys,
-  #overlay, #toast, .dd-root, .export-curtain,
+  #overlay, #toast, .dd-menu, .media-dock, .code-ai-popover, .export-curtain,
   .editor-host, #pdf, #site { display: none !important; }
 
   /* The grid gives way to one flowing column, and the app shell's fixed,

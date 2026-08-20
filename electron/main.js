@@ -16,6 +16,7 @@ const { TrustStore } = require('./trust-store')
 const { makeStore: makeReviewStore } = require('./review-store')
 const { makeStore: makeLanguageHistoryStore } = require('./language-history-store')
 const { classifyVaultEvent } = require('./vault-events')
+const { syncDirectory } = require('./atomic-store')
 const { narrowsFrom } = require('./search-narrow')
 const { parseByteRange, streamFileRange } = require('./range-response')
 const { ocrPagesOf, parsePages, relevantPdfContext } = require('./pdf-context')
@@ -949,15 +950,6 @@ const pendingDurability = new Set()
 let durabilityTimer = null
 let durabilityFlushing = null
 const DURABILITY_INTERVAL_MS = 30000
-
-async function syncDirectory (dirPath) {
-  const dir = await fs.open(dirPath, 'r')
-  try {
-    await dir.sync()
-  } finally {
-    await dir.close()
-  }
-}
 
 async function syncExistingFile (abs) {
   const file = await fs.open(abs, 'r')

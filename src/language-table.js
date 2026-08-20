@@ -163,7 +163,7 @@ function columnsFor (header, options = {}) {
 }
 
 /** The `key: value` lines above the first `---`, if the note opens with one. */
-export function frontmatterOf (markdown) {
+function frontmatterOf (markdown) {
   const text = String(markdown || '')
   const block = frontmatterBlock(text)
   if (!block) return {}

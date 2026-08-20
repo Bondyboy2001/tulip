@@ -2,7 +2,7 @@
 /* Saved queries are smart folders: a name is optional presentation, while the
  * query remains the portable rule that produces the folder's contents. */
 
-export function normalizeSavedSearches (value) {
+function normalizeSavedSearches (value) {
   const seen = new Set()
   return (Array.isArray(value) ? value : []).flatMap((item) => {
     const query = String(typeof item === 'string' ? item : item?.query || '').trim()

@@ -23,7 +23,7 @@
  */
 
 import { spawn } from 'node:child_process'
-import { mkdir, readdir } from 'node:fs/promises'
+import { mkdir, readdir, readFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
@@ -46,13 +46,31 @@ const EXCEPTIONS = {
   'test-ai.mjs': { format: 'cjs' },
   // Imports a logo, which the renderer's build inlines as text.
   'test-codeblock-performance.mjs': { loader: { '.svg': 'text' } },
-  /* These two spawn Electron themselves and take no bundling. They also need
-     a window on a screen: Chromium defers focus events on an unfocused
-     document, and both are asserting on things that only happen to a focused
-     one. On a headless Linux box, put `xvfb-run --auto-servernum` in front. */
-  'test-table.mjs': { direct: true, display: true },
-  'test-agent-diff.mjs': { direct: true, display: true }
+  /* These two spawn Electron themselves, and need a window on a screen:
+     Chromium defers focus events on an unfocused document, and both assert on
+     things that only happen to a focused one. On a headless Linux box, put
+     `xvfb-run --auto-servernum` in front. */
+  'test-table.mjs': { display: true },
+  'test-agent-diff.mjs': { display: true }
 }
+
+/* Whether a test has to be bundled at all.
+ *
+ * Only the ones that reach into `src/` or `electron/` do — that code is ESM
+ * full of browser assumptions this CommonJS package cannot import directly.
+ * A test that just reads files and asserts about them needs nothing, and
+ * bundling it actively breaks it: the bundle lands in node_modules/.cache, so
+ * anything resolving a path against its own location starts looking for the
+ * repository inside node_modules.
+ *
+ * Inferred rather than listed, because that failure is silent until the test
+ * happens to read a file, and by then it looks like the test is wrong.
+ *
+ * Static and dynamic both: the codeblock benchmark reaches for highlight.js
+ * with `await import(...)` so the cost of loading it lands inside the timed
+ * section, and a pattern that only knew about `from` quietly stopped
+ * bundling it. */
+const IMPORTS_APP = /(?:from|import)\s*\(?\s*['"]\.\.\/(src|electron)\//
 
 /* Not tests, despite the names: the first is a page the agent-diff test writes
    out and loads, the second is the body of the table suite, which
@@ -68,11 +86,10 @@ async function findTests () {
     .filter((name) => /^test-.*\.(mjs|cjs)$/.test(name))
     .filter((name) => !NOT_TESTS.has(name))
     .sort()
-  return names.map((name) => ({
-    name,
-    file: path.join(ROOT, 'scripts', name),
-    ...(EXCEPTIONS[name] || {}),
-    direct: EXCEPTIONS[name]?.direct ?? name.endsWith('.cjs')
+  return Promise.all(names.map(async (name) => {
+    const file = path.join(ROOT, 'scripts', name)
+    const direct = name.endsWith('.cjs') || !IMPORTS_APP.test(await readFile(file, 'utf8'))
+    return { name, file, ...(EXCEPTIONS[name] || {}), direct }
   }))
 }
 

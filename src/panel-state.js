@@ -9,7 +9,7 @@ const SPECS = [
   ['ai', 'aiPanel']
 ]
 
-export function syncPanelAccessibility (app, panels) {
+function syncPanelAccessibility (app, panels) {
   for (const [state, key] of SPECS) {
     const panel = panels[key]
     if (!panel) continue

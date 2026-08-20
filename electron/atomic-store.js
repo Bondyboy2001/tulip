@@ -18,6 +18,9 @@ const temporary = (target) => path.join(
   `.${path.basename(target)}.${process.pid}.${++serial}.tmp`
 )
 
+/* Make a rename durable. Best effort at the call site: not every filesystem
+   permits a directory fsync, and a close that fails after a successful sync
+   has nothing left to report. */
 async function syncDirectory (dir) {
   let handle
   try {
@@ -148,4 +151,4 @@ function makeCoalescedWriter () {
   }
 }
 
-module.exports = { makeCoalescedWriter, writeAtomicSync }
+module.exports = { makeCoalescedWriter, syncDirectory, writeAtomicSync }
