@@ -4,8 +4,8 @@
    otherwise drop the caret back to column zero on every line.
    ================================================================== */
 
-import { keymap, ViewPlugin, Decoration, WidgetType } from '@codemirror/view'
-import { Prec } from '@codemirror/state'
+import { keymap, ViewPlugin, Decoration, WidgetType, EditorView } from '@codemirror/view'
+import { Prec, StateEffect, StateField } from '@codemirror/state'
 import { syntaxTree, indentUnit } from '@codemirror/language'
 import { markdownLanguage } from '@codemirror/lang-markdown'
 
@@ -181,15 +181,22 @@ const codeLineNumbers = ViewPlugin.fromClass(
             if (node.name !== 'FencedCode') return
             const first = state.doc.lineAt(node.from).number
             const last = state.doc.lineAt(node.to).number
+            /* Only the part of the fence this visible range actually covers.
+               The tree iteration is already viewport-scoped, but entering one
+               node used to number the whole block: a 5,000-line fence produced
+               10,000 widgets on every keystroke and every scroll frame, nearly
+               all of them for lines nobody could see. The printed number is
+               `ln - first` rather than a running counter, so it stays the
+               number the whole fence would have given. */
+            const head = Math.max(first + 1, state.doc.lineAt(Math.max(from, node.from)).number)
+            const tail = Math.min(last - 1, state.doc.lineAt(Math.min(to, node.to)).number)
             // The fence lines themselves are chrome, not code, so numbering
             // starts on the line after the opening ```.
-            let n = 0
-            for (let ln = first + 1; ln < last; ln++) {
+            for (let ln = head; ln <= tail; ln++) {
               if (seen.has(ln)) continue
               seen.add(ln)
-              n++
               ranges.push(
-                Decoration.widget({ widget: new LineNumberWidget(n), side: -1 })
+                Decoration.widget({ widget: new LineNumberWidget(ln - first), side: -1 })
                   .range(state.doc.line(ln).from),
                 Decoration.widget({ widget: new RunSpacerWidget(), side: 1 })
                   .range(state.doc.line(ln).to)
@@ -206,6 +213,63 @@ const codeLineNumbers = ViewPlugin.fromClass(
   },
   { decorations: (v) => v.decorations }
 )
+
+/* ------------------------------------------------ room for the copilot */
+
+/**
+ * The code block copilot's prompt, kept in the document's own layout.
+ *
+ * The reading view builds the block itself and simply puts the form in it, so
+ * the code moves down to make room. The editing view draws the block as editor
+ * lines, and a form floated over them covers the very code it is asking about —
+ * which is what a fixed overlay did before this. A block widget is the editing
+ * view's way of saying the same thing: the editor reserves the height, the
+ * lines below it move down, and the form scrolls with the block because it is
+ * part of the block.
+ *
+ * The form itself is the renderer's — one element, reused by both views, so the
+ * widget carries it rather than building one. Which means it must not be
+ * rebuilt for a redraw it did not cause: `eq` on the element and the position
+ * keeps the same node in place, and with it the caret and the half-typed
+ * request inside it.
+ */
+export const setCodeAiForm = StateEffect.define()
+
+class CodeFormWidget extends WidgetType {
+  constructor (form, pos) { super(); this.form = form; this.pos = pos }
+  eq (other) { return other.form === this.form && other.pos === this.pos }
+  toDOM () { return this.form }
+  /* Everything inside it — typing, the send chord, the resize handle — belongs
+     to the form, not to the document behind it. */
+  ignoreEvent () { return true }
+  get estimatedHeight () { return this.form.offsetHeight || 120 }
+  /* The element outlives the widget: it is the renderer's, and closing the
+     form is what takes it off screen. */
+  destroy () {}
+}
+
+export const codeAiForm = StateField.define({
+  create: () => null,
+
+  update (open, tr) {
+    for (const effect of tr.effects) if (effect.is(setCodeAiForm)) return effect.value
+    if (!open || !tr.docChanged) return open
+    /* The block can move under it — the copilot's own edit arrives as a change
+       to the note, and so does anything typed above it. */
+    const pos = tr.changes.mapPos(open.pos, -1)
+    return pos === open.pos ? open : { form: open.form, pos }
+  },
+
+  provide: (field) => EditorView.decorations.from(field, (open) => open
+    ? Decoration.set([
+      Decoration.widget({
+        widget: new CodeFormWidget(open.form, open.pos),
+        block: true,
+        side: -1
+      }).range(open.pos)
+    ])
+    : Decoration.none)
+})
 
 /* -------------------------------------------------- scrolling one block */
 
@@ -374,11 +438,26 @@ const codeBlockScroll = ViewPlugin.fromClass(
     sync (line) {
       if (this.busy || !line.isConnected) return
       this.busy = true
+      /* Read every line, then write every line — never one after the other down
+         the block. Interleaved, each write invalidates the layout the next read
+         has to rebuild, so a long fence costs a layout per line rather than one
+         for the reads and one for the writes. `line.scrollLeft` is hoisted for
+         the same reason: it does not change while this runs, and asking for it
+         once per sibling was asking the same question n times. */
+      const to = line.scrollLeft
+      const behind = []
       for (const other of codeLines(blockLines(line))) {
-        if (other !== line && other.scrollLeft !== line.scrollLeft) {
-          other.scrollLeft = line.scrollLeft
-        }
+        /* A pure read pass: nothing here writes, so the layout settles once and
+           every answer after that is already known. The writes are the loop
+           below, which is why they are a loop of their own. */
+        // eslint-disable-next-line tulip/no-layout-thrash
+        if (other !== line && other.scrollLeft !== to) behind.push(other)
       }
+      /* And a pure write pass. Writing `scrollLeft` invalidates the layout but
+         does not wait for one, so n writes with no read between them are n
+         cheap writes and a single settle afterwards. */
+      // eslint-disable-next-line tulip/no-layout-thrash
+      for (const other of behind) other.scrollLeft = to
       this.busy = false
     }
   }

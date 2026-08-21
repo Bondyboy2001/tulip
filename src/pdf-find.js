@@ -25,7 +25,7 @@
    the pages and answers with a page number and a height down it.
    ================================================================== */
 
-import { el } from './blocks.js'
+import { el } from './dom.js'
 import { chip, icon, tallyText } from './find-bar.js'
 
 /* The first pass over a long document asks the worker for every page's text.

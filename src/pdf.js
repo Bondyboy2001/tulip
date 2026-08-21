@@ -24,6 +24,7 @@
 import { ZOOM_STEPS, pinchFactor } from './zoom.js'
 import { searchablePage, itemAtOffset, foldCase } from './pdf-search.js'
 import { firstPageEndingAfter } from './pdf-window.js'
+import { MARK_COLORS } from './pdf-colors.js'
 
 /* pdf.js is the largest thing the app can load and most sessions never open a
    document, so it is fetched the first time one is opened rather than sitting
@@ -72,14 +73,6 @@ export const PDF_DATA = {
  *  edit in the stylesheet and a stored highlight keeps meaning what it said.
  *  Exported because the toolbar draws the same palette the popups do, and two
  *  lists of colours would be two lists to keep in step. */
-export const MARK_COLORS = [
-  { id: 'yellow', label: 'Yellow' },
-  { id: 'rose', label: 'Rose' },
-  { id: 'green', label: 'Green' },
-  { id: 'blue', label: 'Blue' },
-  { id: 'violet', label: 'Violet' }
-]
-
 const COLOR_IDS = new Set(MARK_COLORS.map((c) => c.id))
 const DEFAULT_COLOR = 'yellow'
 
@@ -181,15 +174,22 @@ const uid = () => `h${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).
  * @param {(message:string)=>void} o.onError  something failed that the reader
  *                                            would otherwise learn from a lost
  *                                            highlight much later
+ * @param {boolean} o.selectionMenu  whether selecting text offers PDF actions
  */
 export function mountPdf ({
   host, api,
   onDoc = () => {}, onPage = () => {}, onMarks = () => {}, onZoom = () => {},
-  onStuck = () => {}, onAsk = () => {}, onTool = () => {}, onError = () => {}
+  onStuck = () => {}, onAsk = () => {}, onTool = () => {}, onError = () => {},
+  selectionMenu = true
 }) {
   const state = {
     path: '',
     doc: null,
+    /* The loading task the document came out of, kept because it is the only
+       thing that can take the document away again: a document proxy has no
+       `destroy` of its own, and destroying the task takes the document, its
+       worker and the buffer with it. Same reasoning as src/pdf-text.js. */
+    loading: null,
     pages: [],          // one entry per page, in order
     scale: 1,           // what pages are currently drawn at
     zoom: 'fit',        // 'fit' or a number from ZOOM_STEPS
@@ -591,8 +591,13 @@ export function mountPdf ({
 
     // At most the keep-window's pages, rather than every page in the document.
     for (const page of [...drawnPages]) {
+      /* eslint-disable tulip/no-layout-thrash -- `drawnPages` is the keep
+         window, which is a small fixed number of pages either side of the one
+         being read; a 900-page PDF has the same handful drawn as a 3-page one.
+         That bound is the whole reason this set exists. */
       const from = page.wrap.offsetTop
       const to = from + page.wrap.offsetHeight
+      /* eslint-enable tulip/no-layout-thrash */
       if (to < keep.from || from > keep.to) undraw(page)
     }
 
@@ -1248,7 +1253,7 @@ export function mountPdf ({
   /* ------------------------------------------------------------- gestures */
 
   host.addEventListener('mouseup', (event) => {
-    if (!state.doc || event.button !== 0) return
+    if (!state.doc || event.button !== 0 || !selectionMenu) return
     // A click that lands in the popup is the popup's own business.
     if (pop.contains(event.target)) return
 
@@ -1346,9 +1351,10 @@ export function mountPdf ({
         ? 'That PDF is password-protected.'
         : 'That PDF could not be read.')
     }
-    if (epoch !== state.epoch) { doc.destroy(); return null }
+    if (epoch !== state.epoch) { loading.destroy().catch(() => {}); return null }
 
     state.doc = doc
+    state.loading = loading
     /* From here on, every await is re-checked. Loading the marks, fetching the
        first page and walking a big outline are all slow enough for the reader
        to have opened something else meanwhile — and an open that settles late
@@ -1471,10 +1477,10 @@ export function mountPdf ({
        its settle would fire against the next one — holding that document's
        first pages back, and then refreshing a viewer that had moved on. */
     release()
-    const doc = state.doc
+    const loading = state.loading
 
     Object.assign(state, {
-      path: '', doc: null, pages: [], marks: [], base: null, at: 1, quote: null, flashing: null,
+      path: '', doc: null, loading: null, pages: [], marks: [], base: null, at: 1, quote: null, flashing: null,
       // Not the tool or the pen — those are the reader's, not the document's.
       past: [], future: []
     })
@@ -1482,7 +1488,7 @@ export function mountPdf ({
     sheet.replaceChildren()
     // The words belonged to that document; the next one has its own.
     pageText.clear()
-    try { await doc.destroy() } catch { /* going away regardless */ }
+    try { await loading?.destroy() } catch { /* going away regardless */ }
   }
 
   /* ------------------------------------------------------------ moving about */

@@ -14,10 +14,6 @@
  * still renders stretchy delimiters and spacing worse than KaTeX's own boxes.
  */
 
-import { EditorView, Decoration, WidgetType } from '@codemirror/view'
-import { StateField } from '@codemirror/state'
-import { syntaxTree } from '@codemirror/language'
-import { inCode } from './blocks.js'
 
 /* ---------------------------------------------------------------- render */
 
@@ -30,13 +26,26 @@ function loadStyles () {
 
   const link = document.createElement('link')
   link.rel = 'stylesheet'
-  link.href = new URL('katex.css', import.meta.url).href
+  /* Resolved against the document, not against this module.
+     build.mjs emits the stylesheet as a named entry point beside index.html,
+     so `dist/katex.css` is where it always is — but `import.meta.url` is
+     wherever esbuild's splitting last happened to put *this file*, and the day
+     math.js landed in a shared chunk that became `dist/chunks/katex.css`. The
+     link 404ed, `loadKatex` never resolved, and every `$…$` in the app
+     rendered as its own source in a `.math-pending` span, silently: nothing
+     throws, the promise is simply never fulfilled. The document is the one
+     base that cannot move out from under this. */
+  link.href = new URL('katex.css', document.baseURI).href
   link.dataset.tulipKatex = ''
 
   loadingStyles = new Promise((resolve, reject) => {
     link.addEventListener('load', resolve, { once: true })
     link.addEventListener('error', () => {
       loadingStyles = null
+      // Taken back out, because the next expression will try again: a
+      // stylesheet that will not load once left one dead <link> in the head
+      // per equation rendered.
+      link.remove()
       reject(new Error('KaTeX styles could not be loaded.'))
     }, { once: true })
   })
@@ -95,7 +104,8 @@ function indexEquations (spans) {
   return labels
 }
 
-function equationSource (tex, equations = null) {
+/* Exported for math-editor.js, which renders the same equation live. */
+export function equationSource (tex, equations = null) {
   const found = LABEL.exec(tex)
   const label = found?.[1]?.trim() || ''
   let source = String(tex || '').replace(/\\label\s*\{[^{}]+\}/g, '').trim()
@@ -338,30 +348,6 @@ export function mathPlugin (md) {
 
 /* -------------------------------------------------- live preview widget */
 
-class MathWidget extends WidgetType {
-  constructor (tex, display, label = '') {
-    super()
-    this.tex = tex
-    this.display = display
-    this.label = label
-  }
-
-  eq (other) {
-    return other.tex === this.tex && other.display === this.display && other.label === this.label
-  }
-
-  toDOM () {
-    const host = document.createElement('span')
-    host.className = this.display ? 'tk-math tk-math-display' : 'tk-math'
-    if (this.label) host.dataset.equation = this.label
-    renderMathInto(host, this.tex, this.display)
-    return host
-  }
-
-  // Clicking the rendered maths should put the caret in the source behind it.
-  ignoreEvent () { return false }
-}
-
 /** Every $…$ and $$…$$ span in the document, in order. */
 export function findMath (text) {
   const spans = []
@@ -513,103 +499,89 @@ export function equationsFor (doc) {
   return entry.equations
 }
 
+/* -------------------------------------------------------- sliding it on */
+
 /**
- * Renders maths in the editing view, and steps out of the way — showing the
- * raw TeX — whenever the cursor is inside the expression, which is the same
- * rule the rest of the live preview follows.
+ * Could this transaction do nothing to the document's maths but slide it?
  *
- * A StateField rather than a ViewPlugin: a `$$…$$` block spans line breaks,
- * and CodeMirror refuses replace decorations across a line break when they
- * come from a plugin — opening a note with display maths threw and left the
- * whole view broken. Same rule the diagrams and the tables follow.
- */
-/**
- * Which spans the selection is sitting in, as a string that changes only when
- * that set does.
+ * Only when every change stays inside one line, writes none of the three
+ * characters this scanner is built out of, lands on a line that held none of
+ * them either, and falls outside every span already found. Under all four a
+ * span can neither be opened nor closed nor have its TeX altered:
  *
- * Moving the caret changes what this field draws only when it crosses into or
- * out of an expression — every other movement, which is nearly all of them,
- * produces exactly the decorations already on screen. Comparing the answer is
- * far cheaper than rebuilding: no widgets are constructed and no decoration set
- * is sorted, and the spans themselves are already cached.
+ * - every delimiter — `$`, `$$`, `\(`, `\[` — is made of `$` or `\`, so a line
+ *   with neither cannot carry one, and an edit writing neither cannot add one;
+ * - a delimiter that failed to match can only be rescued by a character on its
+ *   own line (a space taken out from beside it, a digit taken off the end of
+ *   `$x$5`) or by a `$` arriving to close it — and both are excluded;
+ * - the container tests (`opensLine`, `closesLine`) read only the line the
+ *   `$$` itself is on, which is not this one;
+ * - a multi-line `$$…$$` passing overhead would have the change inside it, and
+ *   the last test is what refuses that.
+ *
+ * Everything else takes the full scan. `\n` is refused with the other two so
+ * that line boundaries — and so the positions of everything below — move by a
+ * single delta the change set can map.
  */
-function touchedSpans (state) {
-  const spans = mathSpans(state.doc)
-  let signature = ''
-  for (let i = 0; i < spans.length; i++) {
-    const span = spans[i]
-    if (state.selection.ranges.some((r) => r.to >= span.from && r.from <= span.to)) {
-      signature += `${i},`
-    }
-  }
-  return signature
+const SCANNED = /[$\\\n]/
+
+function slidable (tr, spans) {
+  const before = tr.startState.doc
+  let ok = true
+
+  tr.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
+    if (!ok) return
+    if (SCANNED.test(inserted.toString())) { ok = false; return }
+    const line = before.lineAt(fromA)
+    // A change reaching past the line's end took a newline with it.
+    if (toA > line.to) { ok = false; return }
+    if (/[$\\]/.test(line.text)) { ok = false; return }
+    if (spans.some((s) => s.from <= fromA && toA <= s.to)) { ok = false; return }
+  })
+
+  return ok
 }
 
-function buildMathDeco (state) {
-  const tree = syntaxTree(state)
-  const ranges = []
-  const hidden = []
-  const equations = equationsFor(state.doc)
+/* The document this slide produced, the one it came from, and the changes
+   between — read by money-editor.js, whose own cache is a fact about the same
+   document and goes stale at the same moment. */
+let slide = { doc: null, from: null, changes: null }
 
-  /* In code, `$` is a shell variable or a string literal, and the reading
-     view never typesets there. The test is asked of the tree rather than of
-     the span cache, which is keyed on the document alone — money.js makes
-     the same call, of the same helper. */
-  for (const span of mathSpans(state.doc)) {
-    if (inCode(tree, span.from)) continue
+/** The slide that produced `doc`, if one did. */
+export const slidThrough = (doc) => (slide.doc === doc ? slide : null)
 
-    const touched = state.selection.ranges.some(
-      (r) => r.to >= span.from && r.from <= span.to
-    )
-    if (touched) {
-      /* The caret is in it, so the source is showing rather than the
-         typeset result — and TeX is not prose. Without this the checker
-         underlines every `\alpha` and `\frac` the moment you edit one. */
-      ranges.push(
-        Decoration.mark({ attributes: { spellcheck: 'false' } })
-          .range(span.from, span.to)
-      )
-      continue
-    }
+/**
+ * Fill the cache for a transaction's document from the one it already holds,
+ * when the transaction cannot have changed the answer.
+ *
+ * Called from the maths StateField, which sees every transaction before
+ * anything reads the spans. It is an accelerator and nothing more: skip it and
+ * `fill` still computes the same spans, at the price this exists to avoid —
+ * a fresh `doc.toString()` and a fresh whole-note scan on every keystroke,
+ * pulled on three times over by the layers built on top of it.
+ */
+export function advanceMath (tr) {
+  if (!tr.docChanged || cache.doc !== tr.startState.doc) return
+  if (!slidable(tr, cache.spans)) return
 
-    const equation = equationSource(span.tex, equations)
-    ranges.push(
-      Decoration.replace({ widget: new MathWidget(equation.source, span.display, equation.label) })
-        .range(span.from, span.to)
-    )
-    /* Only what conceals text is atomic — the same rule the rest of the live
-       preview follows (see editor.js). The spellcheck mark above leaves the
-       TeX visible, and handing *that* range to `atomicRanges` too made the
-       expression unenterable: every click inside the revealed source was
-       pushed back out to an edge, so the caret could only ever sit at the
-       ends of the block. */
-    hidden.push(Decoration.replace({}).range(span.from, span.to))
+  /* The string is spliced rather than read back off the rope: it is the other
+     half of what a keystroke used to cost here, and the edit is already in
+     hand. */
+  let text = ''
+  let at = 0
+  tr.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
+    text += cache.text.slice(at, fromA) + inserted.toString()
+    at = toA
+  })
+  text += cache.text.slice(at)
+
+  const map = (pos) => tr.changes.mapPos(pos)
+  cache = {
+    doc: tr.state.doc,
+    text,
+    spans: cache.spans.map((s) => ({ ...s, from: map(s.from), to: map(s.to) })),
+    // The numbering reads a span's TeX and nothing else, and no TeX moved.
+    equations: cache.equations
   }
-  return { deco: Decoration.set(ranges, true), atomic: Decoration.set(hidden, true) }
+  slide = { doc: cache.doc, from: tr.startState.doc, changes: tr.changes }
 }
-
-const mathState = (state) => ({ ...buildMathDeco(state), touched: touchedSpans(state) })
-
-export const mathPreview = StateField.define({
-  create: mathState,
-  update (value, tr) {
-    if (tr.docChanged) return mathState(tr.state)
-    /* The parse advancing can move a span into or out of code — and a freshly
-       opened note has no tree at create() at all. The parser reports its
-       progress through transactions of its own; this catches them. Widget
-       eq() keeps the untouched renders alive across every rebuild. */
-    if (syntaxTree(tr.state) !== syntaxTree(tr.startState)) return mathState(tr.state)
-    if (tr.selection) {
-      /* Only when the caret has crossed an expression's edge. Holding an arrow
-         key down through a note full of maths used to rebuild every widget in
-         it on every intermediate position. */
-      const touched = touchedSpans(tr.state)
-      return touched === value.touched ? value : { ...buildMathDeco(tr.state), touched }
-    }
-    return value
-  },
-  provide: (field) => [
-    EditorView.decorations.from(field, (value) => value.deco),
-    EditorView.atomicRanges.of((view) => view.state.field(field).atomic)
-  ]
-})

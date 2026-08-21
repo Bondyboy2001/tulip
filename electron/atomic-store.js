@@ -49,6 +49,7 @@ async function writeAtomic (target, body, { durable = true } = {}) {
 function writeAtomicSync (target, body, { durable = true } = {}) {
   fsSync.mkdirSync(path.dirname(target), { recursive: true })
   const tmp = temporary(target)
+  /** @type {number | null} */
   let fd = null
   try {
     fd = fsSync.openSync(tmp, 'wx')
@@ -58,6 +59,7 @@ function writeAtomicSync (target, body, { durable = true } = {}) {
     fd = null
     fsSync.renameSync(tmp, target)
     if (durable) {
+      /** @type {number | null} */
       let dir = null
       try {
         dir = fsSync.openSync(path.dirname(target), 'r')
@@ -83,7 +85,9 @@ function makeCoalescedWriter () {
   const laneFor = (target) => {
     if (lanes.has(target)) return lanes.get(target)
     let requested = 0
+    /** @type {{ serialize: () => string, options?: { durable?: boolean } } | null} */
     let pending = null
+    /** @type {Promise<void> | null} */
     let draining = null
     const waiters = []
 

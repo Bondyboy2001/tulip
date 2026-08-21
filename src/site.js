@@ -27,6 +27,67 @@ import { stepZoom } from './zoom.js'
    fence that lets it be any http(s) page and nothing else. */
 const WEB_PARTITION = WEB_PARTITIONS.web
 
+/* ---------------------------------------------------------- why it failed */
+
+/* Chromium names its network failures for the people who wrote it:
+   `ERR_NAME_NOT_RESOLVED`, or just `Error -105` when even the name is missing.
+   Under "This page would not load" that is a second thing to look up, not an
+   answer — so each of the ones a reader actually meets says what happened in a
+   sentence, and the code goes on the card's tooltip for whoever wants it.
+
+   Keyed by name and by number both, because `did-fail-load` supplies the name
+   for most failures and nothing but the number for some. */
+const PLAIN_FAILURE = {
+  ERR_INTERNET_DISCONNECTED: 'There is no internet connection.',
+  '-106': 'There is no internet connection.',
+  ERR_NAME_NOT_RESOLVED: 'That address could not be found. It may be mistyped, or the site may no longer exist.',
+  '-105': 'That address could not be found. It may be mistyped, or the site may no longer exist.',
+  ERR_NAME_RESOLUTION_FAILED: 'That address could not be looked up.',
+  '-137': 'That address could not be looked up.',
+  ERR_CONNECTION_TIMED_OUT: 'The connection timed out. The site may be down, or the connection slow.',
+  '-118': 'The connection timed out. The site may be down, or the connection slow.',
+  ERR_TIMED_OUT: 'The connection timed out. The site may be down, or the connection slow.',
+  '-7': 'The connection timed out. The site may be down, or the connection slow.',
+  ERR_CONNECTION_REFUSED: 'The site refused the connection.',
+  '-102': 'The site refused the connection.',
+  ERR_CONNECTION_RESET: 'The connection was cut off part-way.',
+  '-101': 'The connection was cut off part-way.',
+  ERR_CONNECTION_CLOSED: 'The connection was closed before the page arrived.',
+  '-100': 'The connection was closed before the page arrived.',
+  ERR_CONNECTION_FAILED: 'The connection could not be made.',
+  '-104': 'The connection could not be made.',
+  ERR_ADDRESS_UNREACHABLE: 'That address cannot be reached from this network.',
+  '-109': 'That address cannot be reached from this network.',
+  ERR_EMPTY_RESPONSE: 'The site answered with nothing at all.',
+  '-324': 'The site answered with nothing at all.',
+  ERR_TOO_MANY_REDIRECTS: 'The site kept redirecting and never arrived anywhere.',
+  '-310': 'The site kept redirecting and never arrived anywhere.',
+  ERR_SSL_PROTOCOL_ERROR: 'The secure connection could not be set up.',
+  '-107': 'The secure connection could not be set up.',
+  ERR_CERT_COMMON_NAME_INVALID: 'The site’s security certificate is not for this address.',
+  ERR_CERT_DATE_INVALID: 'The site’s security certificate has expired, or this computer’s clock is wrong.',
+  ERR_CERT_AUTHORITY_INVALID: 'The site’s security certificate is not from an authority this computer trusts.',
+  ERR_BLOCKED_BY_CLIENT: 'Something on this computer blocked the page.',
+  '-20': 'Something on this computer blocked the page.',
+  ERR_BLOCKED_BY_RESPONSE: 'The site would not allow the page to be shown here.',
+  '-27': 'The site would not allow the page to be shown here.',
+  ERR_UNKNOWN_URL_SCHEME: 'That is not an address this window can open.',
+  '-302': 'That is not an address this window can open.',
+  ERR_FILE_NOT_FOUND: 'There is nothing at that address.',
+  '-6': 'There is nothing at that address.'
+}
+
+/** @returns {string} what went wrong, in a sentence. */
+function plainFailure (description, code) {
+  const named = String(description || '').trim()
+  return PLAIN_FAILURE[named] || PLAIN_FAILURE[String(code)] ||
+    /* Certificate failures are a run of codes rather than a handful, and any
+       one of them means the same thing to the reader. */
+    (Number(code) <= -200 && Number(code) >= -220
+      ? 'The site’s security certificate could not be trusted.'
+      : 'The page could not be reached.')
+}
+
 /* ------------------------------------------------------------- the file */
 
 /**
@@ -164,7 +225,7 @@ export function mountSite ({ host, api, onState = () => {} }) {
       // -3 is a navigation the page itself abandoned, which is ordinary.
       if (e.errorCode === -3 || !e.isMainFrame) return
       state.loading = false
-      showFailure(e.errorDescription || `Error ${e.errorCode}`)
+      showFailure(e.errorDescription, e.errorCode)
       report()
     })
   }
@@ -265,11 +326,16 @@ export function mountSite ({ host, api, onState = () => {} }) {
     'Type one in the bar above and this file will point there.'
   )
 
-  const showFailure = (why) => showCard(
-    'This page would not load',
-    why,
-    { label: 'Try again', run: () => { if (state.url) load(state.url) } }
-  )
+  const showFailure = (description, code) => {
+    showCard(
+      'This page would not load',
+      plainFailure(description, code),
+      { label: 'Try again', run: () => { if (state.url) load(state.url) } }
+    )
+    // The exact name is still worth having when the plain sentence is not the
+    // whole story, so it is where anyone looking for it would look.
+    if (card) card.title = description || `Error ${code}`
+  }
 
   /* -------------------------------------------------------------- opening */
 

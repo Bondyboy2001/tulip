@@ -34,6 +34,7 @@ await writeFile('node_modules/.cache/agent-diff-page.html', `<!doctype html>
   --measure: 72ch; --ink: #1c1c1c; --muted: #777; --faint: #aaa;
   --sel: #dde3f0; --accent: #3056d3; --accent-dim: #e3e9fa;
   --active-line: #f4f4f4; --agent-flash: #e3e9fa;
+  --line-soft: #ddd; --z-sticky: 4;
 }
 body { margin: 0; }
 </style>
@@ -47,14 +48,17 @@ body { margin: 0; }
 </script>
 <script type="module">
   window.__done = import('./agent-diff-page.js').then((mod) => mod.run())
-<\/script>`)
+</script>`)
 
 await writeFile('node_modules/.cache/agent-diff-main.mjs', `
 import electron from 'electron'
 const { app, BrowserWindow } = electron
 const say = (payload) => { console.log(JSON.stringify(payload)); app.exit(payload.error ? 1 : 0) }
 app.whenReady().then(async () => {
-  const win = new BrowserWindow({ width: 520, height: 400, show: true })
+  /* Not throttled behind another window — see the note in test-grid.mjs. */
+  const win = new BrowserWindow({
+    width: 520, height: 400, show: true, webPreferences: { backgroundThrottling: false }
+  })
   try {
     await win.loadFile(${JSON.stringify(await import('node:path').then((m) => m.resolve('node_modules/.cache/agent-diff-page.html')))})
     for (let wait = 0; wait < 120; wait++) {
@@ -113,5 +117,10 @@ assert.deepEqual(result.rawLines, [3], 'the review survives the view switch')
 assert.ok(result.rawWords >= 1, 'raw view: the changed words are still marked')
 assert.equal(result.inRawView.deletedDisplay, 'block', 'raw view: removed lines are shown')
 assert.notEqual(result.inRawView.addedPaint, 'rgba(0, 0, 0, 0)', 'raw view: the added line is painted')
+
+assert.match(result.codeStyle.deletedFontFamily, /monospace/, 'code removals use the code font')
+assert.equal(result.codeStyle.deletedFontSize, '12.5px', 'code removals use the code font size')
+assert.equal(result.codeStyle.addedMarker, '"+"', 'code additions show a + marker')
+assert.equal(result.codeStyle.addedMarkerZIndex, '4', 'the + marker sits above the sticky gutter')
 
 console.log('agent-diff: all checks passed')

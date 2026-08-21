@@ -8,6 +8,11 @@ const { contextBridge, ipcRenderer, webUtils } = require('electron')
  * stays the only thing that can touch the filesystem.
  */
 contextBridge.exposeInMainWorld('tulip', {
+  /* Which desktop this is. The page has no `process` of its own and had no way
+     to ask, so every shortcut it printed was a ⌘ chord and every "reveal"
+     button said Finder — on Windows, instructions to press keys that are not
+     there. A string rather than an `isMac` flag: the page should be able to
+     tell the third platform apart from the two it knows. */
   platform: process.platform,
   vault: {
     pick: () => ipcRenderer.invoke('vault:pick'),
@@ -15,19 +20,45 @@ contextBridge.exposeInMainWorld('tulip', {
     // `known` is the revision the caller already drew; passing it lets main
     // answer "still that one" instead of sending the whole tree back.
     snapshot: (known) => ipcRenderer.invoke('vault:snapshot', known),
-    notes: () => ipcRenderer.invoke('vault:notes')
+    notes: () => ipcRenderer.invoke('vault:notes'),
+    /* The vaults connected before this one, so switching between two of them
+       is a pick from a list rather than a walk through a file dialog. Main
+       keeps the list and will only open something already on it — choosing a
+       vault it has never seen is `pick`, which is a native dialog. */
+    recent: () => ipcRenderer.invoke('vault:recent'),
+    open: (dir) => ipcRenderer.invoke('vault:open', dir),
+    // The other names notes answer to, for resolving `[[Alias]]`.
+    aliases: () => ipcRenderer.invoke('vault:aliases')
   },
   file: {
     read: (p) => ipcRenderer.invoke('file:read', p),
     // Size and dates, for the Info pane.
     info: (p) => ipcRenderer.invoke('file:info', p),
-    write: (p, content) => ipcRenderer.invoke('file:write', p, content),
+    write: (p, content, metadata) => ipcRenderer.invoke('file:write', p, content, metadata),
+    /* Keep what is on disk before the buffer overwrites it. Called on the one
+       path where the two cannot be reconciled — see `file:conflict-copy`. */
+    conflictCopy: (p) => ipcRenderer.invoke('file:conflict-copy', p),
     create: (dir, name) => ipcRenderer.invoke('file:create', dir, name),
     rename: (p, name) => ipcRenderer.invoke('file:rename', p, name),
     remove: (p) => ipcRenderer.invoke('file:delete', p),
     move: (p, destDir) => ipcRenderer.invoke('file:move', p, destDir),
     reveal: (p) => ipcRenderer.invoke('file:reveal', p),
+    // Is it text, and how big? Asked of the files the vault has no view of its
+    // own for, because the extension is a claim and the bytes are the fact.
+    probe: (p) => ipcRenderer.invoke('file:probe', p),
+    // Handed to whatever the desktop opens it with.
+    openDefault: (p) => ipcRenderer.invoke('file:open-default', p),
     import: (destDir, sources) => ipcRenderer.invoke('file:import', destDir, sources)
+  },
+  fileTags: {
+    get: (p) => ipcRenderer.invoke('file-tags:get', p),
+    set: (p, tags) => ipcRenderer.invoke('file-tags:set', p, tags)
+  },
+  /* How wide a table's columns were left. A `.csv` has nowhere inside it to
+     record that, so it is filed against the path instead — see csv.js. */
+  tableWidths: {
+    get: (p) => ipcRenderer.invoke('table-widths:get', p),
+    set: (p, widths) => ipcRenderer.invoke('table-widths:set', p, widths)
   },
   /**
    * The on-disk path of a dragged-in File. Electron stopped putting `.path` on
@@ -47,11 +78,22 @@ contextBridge.exposeInMainWorld('tulip', {
   site: {
     create: (dir) => ipcRenderer.invoke('site:create', dir)
   },
-  /* A note that starts as an empty Markdown table — an ordinary note, so the
-     grid it opens in is the ordinary one: headers typed, columns added and
-     removed like any other table in any other note. */
+  whiteboard: {
+    create: (dir) => ipcRenderer.invoke('whiteboard:create', dir),
+    export: (name, ext, bytes, to) =>
+      ipcRenderer.invoke('whiteboard:export', name, ext, bytes, to)
+  },
+  /* A focused table document with editable generic headers. */
   table: {
     create: (dir, name) => ipcRenderer.invoke('table:create', dir, name)
+  },
+
+  /* A source or data file. The extension goes over separately rather than on
+     the end of the name: main checks it against the vault contract's lists,
+     and a name and an extension that have already been joined cannot be
+     checked without being taken apart again. */
+  source: {
+    create: (dir, name, ext) => ipcRenderer.invoke('source:create', dir, name, ext)
   },
   language: {
     create: (dir, name) => ipcRenderer.invoke('language:create', dir, name),
@@ -78,10 +120,22 @@ contextBridge.exposeInMainWorld('tulip', {
       save: (p, highlights) => ipcRenderer.invoke('pdf:marks:save', p, highlights)
     }
   },
+  tex: {
+    create: (dir) => ipcRenderer.invoke('tex:create', dir),
+    compile: (p) => ipcRenderer.invoke('tex:compile', p)
+  },
 
   /* The open note as a PDF file. `to` is the scripted seam — the save dialog
      cannot be driven from a probe, so scripts hand a path and skip it. */
   exportPdf: (name, to) => ipcRenderer.invoke('pdf:export', name, to),
+
+  /* The same page, to a printer through the system dialog. */
+  printNote: () => ipcRenderer.invoke('pdf:print'),
+
+  /* The reading view as one self-contained HTML file; the note and its
+     attachments as a portable Markdown folder. `to` is the scripted seam. */
+  exportHtml: (name, html, to) => ipcRenderer.invoke('note:export-html', name, html, to),
+  exportMarkdown: (name, text, files, to) => ipcRenderer.invoke('note:export-markdown', name, text, files, to),
 
   /**
    * Executing a fenced block. The renderer sends the language and the code and
@@ -92,6 +146,33 @@ contextBridge.exposeInMainWorld('tulip', {
     start: (lang, code) => ipcRenderer.invoke('run:start', lang, code),
     warm: (lang) => ipcRenderer.invoke('run:warm', lang),
     kill: (id) => ipcRenderer.invoke('run:kill', id)
+  },
+
+  /**
+   * Running a notebook's cells.
+   *
+   * Unlike `run`, which is one program per block, these all name a notebook:
+   * its cells share a kernel, so the notebook — not the cell — is the thing a
+   * running process belongs to. Output arrives on `kernel:event` rather than
+   * as the answer to `execute`, because a cell that prints for ten seconds
+   * should be readable while it does.
+   */
+  kernel: {
+    start: (path, wanted) => ipcRenderer.invoke('kernel:start', path, wanted),
+    execute: (path, code) => ipcRenderer.invoke('kernel:execute', path, code),
+    interrupt: (path) => ipcRenderer.invoke('kernel:interrupt', path),
+    restart: (path) => ipcRenderer.invoke('kernel:restart', path),
+    shutdown: (path) => ipcRenderer.invoke('kernel:shutdown', path),
+    specs: () => ipcRenderer.invoke('kernel:specs'),
+    /* The answer to an `input()`, and the two questions a cell asks about the
+       code in it rather than about running it. These three are round trips
+       rather than events: each has exactly one answer, and nothing is drawn
+       until it lands. */
+    input: (path, value) => ipcRenderer.invoke('kernel:input', path, value),
+    complete: (path, code, cursorPos) =>
+      ipcRenderer.invoke('kernel:complete', path, code, cursorPos),
+    inspect: (path, code, cursorPos) =>
+      ipcRenderer.invoke('kernel:inspect', path, code, cursorPos)
   },
 
   /* Manim renders to a real file in the vault rather than to the page, so it
@@ -113,13 +194,18 @@ contextBridge.exposeInMainWorld('tulip', {
    * which note is open. Everything it says comes back on `ai:event`.
    */
   ai: {
+    /* `opts.key` names the conversation the copilot belongs to. One process per
+       chat, so a turn about one note and a turn about another run side by
+       side rather than one waiting on the other. */
     start: (opts) => ipcRenderer.invoke('ai:start', opts),
     /* `{ fresh: true }` asks the CLIs again rather than taking the answer main
        is holding — what the Refresh button in Settings is for, after installing
        a model or signing into a provider mid-session. */
     models: (opts) => ipcRenderer.invoke('ai:models', opts),
-    send: (text, context) => ipcRenderer.invoke('ai:send', text, context),
-    stop: () => ipcRenderer.invoke('ai:stop'),
+    doctor: () => ipcRenderer.invoke('ai:doctor'),
+    send: (key, text, context, turnId) =>
+      ipcRenderer.invoke('ai:send', key, text, context, turnId),
+    stop: (key, turnId) => ipcRenderer.invoke('ai:stop', key, turnId),
     /* A picture pasted into the message box, filed in the vault so the agent —
        which reads files and takes no images over its message stream — can be
        pointed at it. `bytes` is a Uint8Array; the answer is a vault path. */
@@ -134,6 +220,11 @@ contextBridge.exposeInMainWorld('tulip', {
        really is unfocused, and bouncing the dock — are the main process's to
        do. */
     announce: (info) => ipcRenderer.invoke('ai:announce', info),
+    /* The turn's own before-copy of one file — what the review card is diffed
+       against. Asked for instead of reading the disk, because a provider can
+       announce a Write after the file has already changed; by then the disk is
+       the copilot's version and the baseline is the only "before" left. */
+    baseline: (turnId, path) => ipcRenderer.invoke('ai:baseline', turnId, path),
     // Transcripts, per note, kept with the app's state rather than the vault.
     history: {
       load: () => ipcRenderer.invoke('ai:history:load'),
@@ -147,6 +238,8 @@ contextBridge.exposeInMainWorld('tulip', {
   review: {
     all: () => ipcRenderer.invoke('review:all'),
     record: (entries) => ipcRenderer.invoke('review:record', entries),
+    unrecord: (entry) => ipcRenderer.invoke('review:unrecord', entry),
+    pickCsv: () => ipcRenderer.invoke('review:pick-csv'),
     prune: (knownIds) => ipcRenderer.invoke('review:prune', knownIds),
     history: () => ipcRenderer.invoke('review:history')
   },
@@ -182,15 +275,32 @@ contextBridge.exposeInMainWorld('tulip', {
     to: (p) => ipcRenderer.invoke('links:to', p)
   },
 
-  /* Local extensions from `.tulip/extensions/`, as raw source — only when the
-     user has turned them on in Settings. What they can do is bounded by the
-     bridge in src/extensions.js. */
-  extensions: {
-    list: () => ipcRenderer.invoke('extensions:list')
-  },
   config: {
     get: () => ipcRenderer.invoke('config:get'),
     set: (patch) => ipcRenderer.invoke('config:set', patch)
+  },
+  /* The rebindable menu commands — id, label, menu, default key — for the
+     Hotkeys section of Settings. Read-only; the bindings themselves travel
+     back as the `hotkeys` config record. */
+  hotkeys: {
+    list: () => ipcRenderer.invoke('hotkeys:list')
+  },
+  /* The spellchecker's custom dictionary. Adding mostly happens from the
+     native context menu over a misspelling, which main owns outright; these
+     are for the Settings pane, which shows the list, takes words back out of
+     it, and offers a way to type one in. */
+  dictionary: {
+    words: () => ipcRenderer.invoke('dictionary:words'),
+    add: (word) => ipcRenderer.invoke('dictionary:add', word),
+    remove: (word) => ipcRenderer.invoke('dictionary:remove', word)
+  },
+  /* Which of these words are not words. Chromium draws the red underlines and
+     will not say what it underlined, so the sidebar's Spelling pane asks main,
+     which keeps a dictionary of its own — and the custom words above, so the
+     two answers agree. */
+  spell: {
+    check: (words) => ipcRenderer.invoke('spell:check', words),
+    suggest: (word) => ipcRenderer.invoke('spell:suggest', word)
   },
   durability: {
     flush: () => ipcRenderer.invoke('durability:flush')
@@ -213,16 +323,74 @@ contextBridge.exposeInMainWorld('tulip', {
        underneath it at the same time — see the zoom-changed handler in main. */
     claim: (on) => ipcRenderer.invoke('zoom:claim', on)
   },
-  systemTheme: () => ipcRenderer.invoke('theme:system'),
+  version: () => ipcRenderer.invoke('app:version'),
+
+  window: {
+    /* Which window this is: whether it restores and remembers the session's
+       tab strip, and whether it may hold the copilot. Asked once, in boot. */
+    role: () => ipcRenderer.invoke('window:role'),
+    /* Another window on the same vault, optionally opening a note in it. The
+       path is only ever handed on to the new window, which reads it the way it
+       reads anything else — see the handler in main. */
+    open: (open = null) => ipcRenderer.invoke('window:new', open),
+
+    /* A tab being carried from one window's strip to another's. The drag itself
+       cannot hold this — it becomes an OS drag on the way across, and a custom
+       flavour does not survive that — so main holds the claim and both strips
+       ask it. See the account beside the handlers. */
+    tabDragStart: (path) => ipcRenderer.send('tab:drag-start', path),
+    tabDragEnd: () => ipcRenderer.send('tab:drag-end'),
+    /* Null unless ANOTHER window is dragging: a reorder inside one strip must
+       never look like a handoff. */
+    tabDragging: () => ipcRenderer.invoke('tab:dragging'),
+    /* Takes it, once. A second drop gets null. */
+    tabClaim: () => ipcRenderer.invoke('tab:claim')
+  },
+
+  /* Said once, when the window is worth looking at: settings applied, tree
+     drawn, the note that was open back on the page. The window is not shown
+     until this arrives, so a launch is a dock bounce and then the text —
+     rather than an empty frame with a splash card in it while the rest loads.
+     Sent, not invoked: nothing here waits for an answer, and boot should not
+     be able to stall on one. */
+  painted: () => ipcRenderer.send('app:painted'),
 
   // The answer to `app:flush`: the renderer has written what it had to write,
   // and the window may close. See the close handler in main.
   flushed: () => ipcRenderer.invoke('app:flushed'),
 
+  /* "Still writing." Main gives a closing window a short quiet period and no
+     more; this is how a genuinely slow save — a large notebook, a long grid —
+     says the page is working rather than wedged, and buys another one. */
+  flushing: () => ipcRenderer.send('app:flushing'),
+
+  /* Is there a newer Tulip? Asked only when somebody asks — see the account
+     beside the handler in main. There is no updater behind this and nothing
+     that installs anything; the answer is a version number and a link. */
+  checkForUpdate: () => ipcRenderer.invoke('app:update-check'),
+
+  /* An exception nobody caught, on its way to main's crash log — the renderer
+     has no log of its own, and a DevTools console nobody has open is not a
+     place where failures get noticed. Sent rather than invoked: the caller is
+     an error handler, and it must not be given a promise it could reject. */
+  reportError: (kind, detail) => ipcRenderer.send('app:error', String(kind), String(detail)),
+
+  /* The other half of `reportError`: where the reader goes once they have been
+     told there is something to read. `revealLog` answers false when there is no
+     log yet, which is the ordinary state of a healthy install and worth saying
+     rather than silently opening an empty folder. */
+  revealLog: () => ipcRenderer.invoke('app:reveal-log'),
+  diagnostics: () => ipcRenderer.invoke('app:diagnostics'),
+
   on: (channel, fn) => {
     const allowed = [
-      'vault:changed', 'vault:opened', 'menu', 'theme:system', 'zoom',
-      'run:out', 'run:done', 'ai:event', 'app:flush'
+      'vault:changed', 'vault:opened', 'menu', 'zoom',
+      'run:out', 'run:done', 'ai:event', 'app:flush', 'kernel:event',
+      // A word was taught or untaught — the open note's spelling is one word
+      // out of date, wherever the asking happened.
+      'dictionary:changed',
+      // Another window has taken a tab this one was dragging: let go of it.
+      'tab:claimed'
     ]
     if (!allowed.includes(channel)) return () => {}
     const listener = (_e, payload) => fn(payload)

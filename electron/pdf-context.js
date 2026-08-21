@@ -9,7 +9,21 @@ const STOP = new Set([
   'about', 'after', 'again', 'also', 'attached', 'before', 'could', 'document',
   'explain', 'from', 'have', 'into', 'page', 'paper', 'please', 'should',
   'summarise', 'summarize', 'summary', 'that', 'their', 'there', 'these', 'they',
-  'this', 'those', 'what', 'when', 'where', 'which', 'with', 'would', 'your'
+  'this', 'those', 'what', 'when', 'where', 'which', 'with', 'would', 'your',
+  /* A turn that only keeps the conversation going — thanks, continue, yes —
+     has no topic to search a book for. Left out of the stoplist it would
+     "rank" whole pages for the word "thanks" on every follow-up. */
+  'thanks', 'thank', 'continue', 'yes', 'yeah', 'yep', 'ok', 'okay', 'sure',
+  'great', 'cool', 'done', 'perfect', 'nice', 'cheers', 'right', 'correct',
+  'exactly', 'got', 'go', 'next', 'more',
+  /* Question scaffolding and function words. They appear on nearly every page
+     of a book, so scoring on them is noise that inflates the page budget. */
+  'the', 'and', 'but', 'for', 'not', 'was', 'were', 'are', 'is', 'do', 'does',
+  'did', 'can', 'will', 'would', 'could', 'may', 'might', 'must', 'than',
+  'then', 'too', 'very', 'just', 'its', 'his', 'her', 'them', 'say', 'says',
+  'said', 'tell', 'know', 'see', 'look', 'find', 'show', 'make', 'come',
+  'think', 'want', 'need', 'get', 'being', 'been', 'has', 'have', 'had',
+  'who', 'whom', 'whose', 'how', 'why', 'also', 'over', 'under', 'through'
 ])
 
 const PAGE = /^--- page (\d+) of (\d+) ---\s*$/gm
@@ -54,8 +68,12 @@ function parsePages (text) {
 }
 
 function queryTerms (query) {
-  return [...new Set((folded(query).match(/[\p{L}\p{N}]{3,}/gu) || [])
-    .filter((term) => !STOP.has(term)))]
+  return [...new Set((folded(query).match(/[\p{L}\p{N}]{2,}/gu) || [])
+    .filter((term) => !STOP.has(term) &&
+      /* Words need three letters to be worth searching; a number is worth
+         searching from two, because "page 42" is a real question and its
+         answer lives on a page full of other numbers. */
+      (/[\p{L}]/u.test(term) ? term.length >= 3 : term.length >= 2)))]
 }
 
 /* Stops at `cap`, because the caller only ever asks whether a term appears up
@@ -92,16 +110,52 @@ function excerpt (page, terms, limit) {
   return `${start ? '…\n' : ''}${body}${start + limit < source.length ? '\n…' : ''}`
 }
 
+/* How much ranked context a question earns. A follow-up that names no topic
+   ("thanks", "continue", "yes") must not pay for six pages of a book the
+   conversation already holds — and a question that names one thing does not
+   need the budget of one that spans several. The open page is the anchor for
+   a termless question, because "summarise this page" is a real request and
+   the page the reader is looking at is the one it means. */
+function contextBudget (terms) {
+  if (terms.length) {
+    return {
+      maxPages: Math.min(6, 1 + terms.length),
+      maxChars: Math.min(14000, Math.max(3000, terms.length * 1200 + 2000))
+    }
+  }
+  return { maxPages: 1, maxChars: 3000 }
+}
+
 /**
  * @param {string} query
- * @param {{path:string,textPath:string,openPage?:number,pages:object[]}[]} documents
+ * @param {{path:string,textPath:string,openPage?:number,pages:{page:number,pages:number,text:string,folded:string}[]}[]} documents
  *   `pages` comes from `parsePages`. The caller holds them across turns rather
  *   than splitting the same book up again for every question.
  */
 function relevantPdfContext (query, documents, { maxPages = 6, maxChars = 14000 } = {}) {
   const terms = queryTerms(query)
   const phrase = folded(query).trim()
+  const budget = contextBudget(terms)
+  const askedPages = maxPages !== 6 ? maxPages : budget.maxPages
+  const askedChars = maxChars !== 14000 ? maxChars : budget.maxChars
   const ranked = []
+
+  /* A question with nothing to search for is a question about the page in
+     front of the reader. Scoring the whole book for it would spend the same
+     CPU a real question spends to pick the page the reader is already on, so
+     it is chosen directly — and a termless question with no open page has
+     nothing to ground it, so it carries no ranked context at all. */
+  if (!terms.length) {
+    const open = (documents || []).find((document) => Number(document.openPage) > 0)
+    if (!open) return ''
+    const page = open.pages.find((candidate) => candidate.page === Number(open.openPage))
+    if (!page) return ''
+    return [
+      'Relevant PDF pages selected locally from extracted text and OCR:',
+      `--- ${open.path} page ${page.page} of ${page.pages} ---\n${excerpt(page, [], askedChars)}`,
+      'Use these pages first. The complete page-marked text files are listed above; search or read them if the answer depends on omitted material.'
+    ].join('\n\n').slice(0, askedChars + 1200)
+  }
 
   /* Ranking carries a reference to the page, not a copy of it. A book is four
      hundred pages and six of them are used; cloning every one to hang a score
@@ -129,20 +183,20 @@ function relevantPdfContext (query, documents, { maxPages = 6, maxChars = 14000 
     if (seen.has(key)) continue
     seen.add(key)
     selected.push(entry)
-    if (selected.length >= maxPages) break
+    if (selected.length >= askedPages) break
   }
   selected.sort((a, b) =>
     a.document.path.localeCompare(b.document.path) || a.page.page - b.page.page)
 
   if (!selected.length) return ''
-  const perPage = Math.max(800, Math.floor(maxChars / selected.length))
+  const perPage = Math.max(800, Math.floor(askedChars / selected.length))
   const blocks = selected.map(({ page, document }) =>
     `--- ${document.path} page ${page.page} of ${page.pages} ---\n${excerpt(page, terms, perPage)}`)
   return [
     'Relevant PDF pages selected locally from extracted text and OCR:',
     blocks.join('\n\n'),
     'Use these pages first. The complete page-marked text files are listed above; search or read them if the answer depends on omitted material.'
-  ].join('\n\n').slice(0, maxChars + 1200)
+  ].join('\n\n').slice(0, askedChars + 1200)
 }
 
 module.exports = { ocrPagesOf, parsePages, relevantPdfContext }

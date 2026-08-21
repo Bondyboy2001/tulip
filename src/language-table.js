@@ -13,27 +13,19 @@
    ================================================================== */
 
 import VAULT_CONTRACT from '../electron/vault-contract.json'
-import { LANGUAGE_FLAG } from './vault-paths.js'
 import {
-  AGAIN, HARD, GOOD, EASY,
-  grade as gradeCard, preview, humanDays, isLeech, isNew, isDue
+  AGAIN, GOOD,
+  grade as gradeCard, isLeech, isNew, isDue
 } from './srs.js'
-import { EXACT, judge, gradeFor, diff } from './study-match.js'
+import { EXACT, judge, diff } from './study-match.js'
 import { speechTag } from './speech.js'
+import { keyLabel } from './platform.js'
 
 const LANGUAGE_TABLE_SUFFIX = VAULT_CONTRACT.languageTableSuffix
-const LEGACY_LANGUAGE_TABLES = new Set(
-  VAULT_CONTRACT.legacyLanguageTableNames.map((name) => name.toLowerCase())
-)
 const LANGUAGE_TABLE_TEMPLATE = VAULT_CONTRACT.languageTableTemplates.vocabulary
 
-export const isLanguageTablePath = (path) => {
-  const parts = String(path || '').replaceAll('\\', '/').split('/')
-  const name = parts.pop() || ''
-  if (name.toLowerCase().endsWith(LANGUAGE_TABLE_SUFFIX)) return true
-  const folder = parts.pop() || ''
-  return LEGACY_LANGUAGE_TABLES.has(name.toLowerCase()) && LANGUAGE_FLAG.test(folder)
-}
+export const isLanguageTablePath = (path) =>
+  String(path || '').toLowerCase().endsWith(LANGUAGE_TABLE_SUFFIX)
 
 /**
  * Split one Markdown-table row without treating an escaped pipe as a column.
@@ -70,6 +62,14 @@ const delimiter = (line) => {
   return row.length > 1 && row.every((value) => /^:?-{1,}:?$/.test(value))
 }
 
+function indexOfAny (values, wanted) {
+  for (const name of wanted) {
+    const at = values.indexOf(name)
+    if (at >= 0) return at
+  }
+  return -1
+}
+
 /**
  * The `---` block a note opens with, trailing newline and all, or ''.
  *
@@ -87,25 +87,38 @@ function frontmatterBlock (text) {
   return close < 0 ? text : text.slice(0, close + 1)
 }
 
-/** A language document is its frontmatter, if it has any, and its first table. */
+/**
+ * A language note that has no table gets one. Nothing else.
+ *
+ * A language table is a Markdown file with a Markdown table in it — that is the
+ * whole format. A heading above the grid, a paragraph of grammar notes under
+ * it, a second table: all ordinary Markdown, and all kept.
+ *
+ * This used to keep only the frontmatter and the first table, so everything
+ * else in the file was deleted the first time it was opened; and it rewrote a
+ * Vocabulary table's columns into a fixed schema on every open, which put a
+ * renamed or dragged column straight back where the schema said it belonged.
+ * Both were the document being told what it was allowed to be.
+ */
 export function normalizeLanguageTable (markdown) {
   const text = String(markdown || '')
-  const head = frontmatterBlock(text)
-  const lines = text.slice(head.length).split(/\r?\n/)
-
+  const lines = text.split(/\r?\n/)
   for (let at = 0; at < lines.length - 1; at++) {
-    if (!lines[at].includes('|') || !delimiter(lines[at + 1])) continue
-    let end = at + 2
-    while (end < lines.length && lines[end].includes('|') && lines[end].trim()) end++
-    return head + lines.slice(at, end).join('\n') + '\n'
+    if (lines[at].includes('|') && delimiter(lines[at + 1])) return text
   }
-  return head + LANGUAGE_TABLE_TEMPLATE
+
+  /* Below the frontmatter and below whatever else the note already says, with
+     one blank line between — a table welded onto the end of a paragraph is not
+     a table as far as Markdown is concerned. */
+  const head = frontmatterBlock(text)
+  const body = text.slice(head.length).replace(/\s+$/, '')
+  return head + (body ? `${body}\n\n` : '') + LANGUAGE_TABLE_TEMPLATE
 }
 
 /**
  * Which columns are the question, the answer, the sentence and the aside.
  *
- * Named columns first, because a table that says `Word` and `English` means it.
+ * Named columns first, because a table that says `Greek` and `English` means it.
  * Failing that, the first two keep older or hand-written language tables
  * studyable: almost every such table puts the prompt in column 0 and its answer
  * in column 1.
@@ -120,13 +133,7 @@ export function normalizeLanguageTable (markdown) {
 function columnsFor (header, options = {}) {
   const names = header.map((name) => name.trim().toLowerCase())
   const named = (want) => (want ? names.indexOf(String(want).trim().toLowerCase()) : -1)
-  const anyOf = (...wanted) => {
-    for (const want of wanted) {
-      const at = names.indexOf(want)
-      if (at >= 0) return at
-    }
-    return -1
-  }
+  const anyOf = (...wanted) => indexOfAny(names, wanted)
 
   let front = named(options.front)
   let back = named(options.back)
@@ -135,6 +142,12 @@ function columnsFor (header, options = {}) {
     const english = names.indexOf('english')
     if (word >= 0 && english >= 0) {
       front = word
+      back = english
+    } else if (english >= 0) {
+      const details = new Set(['sound', 'sounds', 'example', 'sentence', 'usage', 'in context', 'notes', 'note', 'gender', 'remark'])
+      const studied = names.findIndex((name, index) => index !== english && !details.has(name))
+      if (studied < 0) return null
+      front = studied
       back = english
     } else if (names.length >= 2) {
       // Any two-column table reads as prompt-then-answer.
@@ -163,7 +176,7 @@ function columnsFor (header, options = {}) {
 }
 
 /** The `key: value` lines above the first `---`, if the note opens with one. */
-export function frontmatterOf (markdown) {
+function frontmatterOf (markdown) {
   const text = String(markdown || '')
   const block = frontmatterBlock(text)
   if (!block) return {}
@@ -205,6 +218,130 @@ export function studyColumns (markdown) {
   return null
 }
 
+/* ------------------------------------------------------------- importing */
+
+/* What a CSV column may call itself and still be recognised. `front` is the
+   word being learned, `back` its meaning — the same vocabulary `columnsFor`
+   resolves table headers with, so a file exported from another flashcard app
+   lands in the columns the cards will be built from. */
+const CSV_NAMES = {
+  front: ['word', 'term', 'front'],
+  back: ['english', 'meaning', 'translation', 'back', 'definition'],
+  example: ['example', 'sentence', 'usage', 'in context'],
+  notes: ['notes', 'note', 'remark', 'gender']
+}
+
+/**
+ * Rows from a CSV or TSV, as an edit that appends them to the note's table.
+ *
+ * Pure: takes the note's text and the parsed rows, answers with where to
+ * insert and what — the caller owns the editor. The first row is treated as a
+ * header when it names any column this module knows; otherwise the columns
+ * are positional, word first, in the order flashcard exports use. Rows whose
+ * word the table already holds are skipped, so importing the same file twice
+ * adds nothing the second time.
+ *
+ * A note with no table yet gains the vocabulary template's, which keeps the
+ * shape identical to a table made in the app.
+ *
+ * @returns {{at: number, insert: string, added: number, skipped: number}}
+ */
+export function importCards (markdown, rows) {
+  const src = String(markdown || '')
+  const records = (Array.isArray(rows) ? rows : [])
+    .map((row) => (Array.isArray(row) ? row.map((cell) => String(cell ?? '').trim()) : []))
+    .filter((row) => row.some(Boolean))
+  if (!records.length) return { at: src.length, insert: '', added: 0, skipped: 0 }
+
+  /* The CSV's own column plan, by name when it has one. */
+  const head = records[0].map((cell) => cell.toLowerCase())
+  const csvAt = (want) => indexOfAny(head, want)
+  const named = Object.values(CSV_NAMES).some((names) => csvAt(names) >= 0)
+  const plan = named
+    ? {
+        front: csvAt(CSV_NAMES.front),
+        back: csvAt(CSV_NAMES.back),
+        example: csvAt(CSV_NAMES.example),
+        notes: csvAt(CSV_NAMES.notes)
+      }
+    : { front: 0, back: 1, example: 2, notes: 3 }
+  if (named && plan.front < 0) plan.front = head.findIndex((_cell, i) => !Object.values(plan).includes(i))
+  const body = named ? records.slice(1) : records
+
+  /* The table the rows join: the first one the note holds, read by the same
+     rules the cards are. */
+  const lines = src.split('\n')
+  const options = frontmatterOf(src)
+  let table = null
+  for (let at = 0; at < lines.length - 1; at++) {
+    if (!delimiter(lines[at + 1])) continue
+    const header = cells(lines[at])
+    const columns = columnsFor(header, {
+      front: options['study-front'],
+      back: options['study-back'],
+      example: options['study-example']
+    })
+    if (!columns) break
+    let last = at + 1
+    while (last + 1 < lines.length && cells(lines[last + 1]).length && lines[last + 1].includes('|')) last++
+    table = { header, columns, last }
+    break
+  }
+
+  const escapeCell = (value) => String(value ?? '').replace(/\|/g, '\\|')
+  const width = table ? table.header.length : cells(LANGUAGE_TABLE_TEMPLATE.split('\n')[0]).length
+  const columns = table
+    ? table.columns
+    : columnsFor(cells(LANGUAGE_TABLE_TEMPLATE.split('\n')[0]))
+
+  /* Already-known words, so a re-import is a no-op rather than a duplicate. */
+  const known = new Set()
+  if (table) {
+    for (let at = table.last; cells(lines[at]).length && at > 0; at--) {
+      const word = cells(lines[at])[columns.front]
+      if (word) known.add(word.toLowerCase())
+    }
+  }
+
+  const made = []
+  let skipped = 0
+  for (const record of body) {
+    const word = record[plan.front] || ''
+    const meaning = plan.back >= 0 ? (record[plan.back] || '') : ''
+    if (!word) { skipped++; continue }
+    if (known.has(word.toLowerCase())) { skipped++; continue }
+    known.add(word.toLowerCase())
+    const out = Array.from({ length: width }, () => '')
+    out[columns.front] = escapeCell(word)
+    out[columns.back] = escapeCell(meaning)
+    if (columns.example >= 0 && plan.example >= 0) out[columns.example] = escapeCell(record[plan.example] || '')
+    if (columns.notes >= 0 && plan.notes >= 0) out[columns.notes] = escapeCell(record[plan.notes] || '')
+    made.push(`| ${out.join(' | ')} |`)
+  }
+  if (!made.length) return { at: src.length, insert: '', added: 0, skipped }
+
+  if (table) {
+    /* After the table's last row: the end of that line, newline included when
+       one follows. */
+    let at = 0
+    for (let n = 0; n <= table.last; n++) at += lines[n].length + 1
+    const insert = made.join('\n') + '\n'
+    // The offset above assumes a newline ends the last row; when the row is
+    // the end of the file, it does not have one yet.
+    if (at > src.length) return { at: src.length, insert: '\n' + made.join('\n'), added: made.length, skipped }
+    return { at, insert, added: made.length, skipped }
+  }
+
+  const templateHead = LANGUAGE_TABLE_TEMPLATE.split('\n').slice(0, 2).join('\n')
+  const lead = src.trim() === '' ? '' : (src.endsWith('\n') ? '\n' : '\n\n')
+  return {
+    at: src.length,
+    insert: `${lead}${templateHead}\n${made.join('\n')}\n`,
+    added: made.length,
+    skipped
+  }
+}
+
 /* --------------------------------------------------------- kinds of card */
 
 /** Read it and know what it means. The first sight of every word. */
@@ -218,20 +355,14 @@ export const DICTATE = 'd'
  *  grammar around the word rather than the word alone. */
 export const CLOZE = 'c'
 
-export const KINDS = [RECOGNISE, PRODUCE, DICTATE, CLOZE]
+const KINDS = [RECOGNISE, PRODUCE, DICTATE, CLOZE]
 
-/* What each kind is called on screen, and whether its answer is typed.
-   Recognition is the one that is revealed rather than typed: it is the cheap
-   first pass over a new word, and making it cost a sentence of typing is how a
-   deck of twenty new words becomes a deck nobody opens. */
+/* What each kind is called on screen. Every kind takes a typed answer. */
 const KIND_LABEL = {
   [RECOGNISE]: 'What does this mean?',
   [PRODUCE]: 'How do you say this?',
   [DICTATE]: 'Write what you hear',
   [CLOZE]: 'Fill the gap'
-}
-const KIND_TYPED = {
-  [RECOGNISE]: false, [PRODUCE]: true, [DICTATE]: true, [CLOZE]: true
 }
 
 /**
@@ -256,21 +387,24 @@ export function clozeOf (sentence, term) {
     .normalize('NFD')
     .replace(/\p{M}/gu, '')
 
-  /* Folded character by character rather than as a whole string: NFD can change
-     a string's length, and an index into the folded text has to be an index
-     into the original. */
-  const folded = [...text].map(fold)
-  const target = [...word].map(fold).join('')
-  if (!target) return ''
+  // Whole-string fold is ~10× faster than per-char `[...text].map(fold)` — same
+  // result because each source char maps to one folded char (NFD+strip leaves
+  // the base letter, `ς→σ` is 1:1). Length stays equal, so an index in the
+  // folded string is an index in the original.
+  const foldedText = fold(text)
+  const foldedWord = fold(word)
+  if (!foldedWord) return ''
 
-  for (let at = 0; at + word.length <= text.length; at++) {
-    if (folded.slice(at, at + word.length).join('') !== target) continue
+  let at = foldedText.indexOf(foldedWord)
+  while (at !== -1) {
     // Only on a word boundary, so `το` does not blank the middle of `καρότο`.
     const before = text[at - 1]
     const after = text[at + word.length]
-    if (before && /[\p{L}\p{N}]/u.test(before)) continue
-    if (after && /[\p{L}\p{N}]/u.test(after)) continue
-    return text.slice(0, at) + '____' + text.slice(at + word.length)
+    if (!(before && /[\p{L}\p{N}]/u.test(before)) &&
+        !(after && /[\p{L}\p{N}]/u.test(after))) {
+      return text.slice(0, at) + '____' + text.slice(at + word.length)
+    }
+    at = foldedText.indexOf(foldedWord, at + 1)
   }
   return ''
 }
@@ -347,7 +481,6 @@ export function languageCards (markdown, notePath = '', { speaks = false } = {})
         path: notePath,
         term,
         kind,
-        typed: KIND_TYPED[kind],
         label: KIND_LABEL[kind],
         aside,
         ...fields
@@ -492,6 +625,23 @@ export function dueCount (cards, states, now, options = {}) {
   return buildQueue(cards, states, now, options).length
 }
 
+/** The drill is binary: only an exact English answer leaves the session. */
+export const sessionGrade = (verdict) => verdict === EXACT ? GOOD : AGAIN
+
+/** The visible, accessible result of checking one typed answer. */
+export const studyFeedback = (verdict) => verdict === EXACT
+  ? { result: 'correct', text: '✓ Correct' }
+  : { result: 'wrong', text: '✕ Incorrect' }
+
+/** Count each card once, regardless of how many retries it later needs. */
+export function recordFirstTry (stats, id, correct) {
+  if (stats.firstTrySeen.has(id)) return false
+  stats.firstTrySeen.add(id)
+  if (correct) stats.firstTryCorrect++
+  else stats.firstTryWrong++
+  return true
+}
+
 /* --------------------------------------------------------- the overlay */
 
 /** Nothing typed yet, nothing revealed, no verdict. */
@@ -520,13 +670,16 @@ const blank = () => ({ typed: '', revealed: false, verdict: null, matched: '' })
  *   as `{path, text}` — what makes ⌃⌘S mean "everything due" rather than "this
  *   file, if it happens to be the one in front of you"
  * @param {object} arg.speech   from src/speech.js
- * @param {() => object} arg.settings  `{newPerDay, retention, typing, speaking}`
+ * @param {() => object} arg.settings  `{newPerDay, retention, speaking}`
  */
 export function mountLanguageStudy ({
   el, source, notePath, decks, api, speech, settings = () => ({}), onEmpty, onDone
 }) {
   const state = {
     queue: [], done: 0, states: {}, pending: [], open: false,
+    firstTrySeen: new Set(), firstTryCorrect: 0, firstTryWrong: 0,
+    lastAnswer: null,                    // what undo puts back — one step only
+    undone: new Set(),                   // entries taken back; flush skips them
     tags: {},                            // deck path -> the voice to speak it in
     ...blank()
   }
@@ -537,13 +690,9 @@ export function mountLanguageStudy ({
     return {
       newPerDay: Number(values.newPerDay) > 0 ? Number(values.newPerDay) : NEW_PER_DAY,
       retention: Number(values.retention) > 0 ? Number(values.retention) : 0.9,
-      typing: values.typing !== false,
       speaking: values.speaking !== false
     }
   }
-
-  /** Whether this card wants an answer typed into the box. */
-  const isTyped = (card) => !!card && card.typed && prefs().typing
 
   const tagFor = (card) => state.tags[card?.path] || ''
 
@@ -557,14 +706,18 @@ export function mountLanguageStudy ({
   function paint () {
     const card = current()
     if (!card) {
+      el.prompt.hidden = true
       el.word.textContent = state.done ? 'Done for today' : 'Nothing due'
-      el.english.textContent = state.done
-        ? `${state.done} ${state.done === 1 ? 'card' : 'cards'} reviewed. The rest are scheduled.`
-        : 'Every card here is scheduled for a later day.'
-      el.english.hidden = false
-      el.reveal.hidden = true
-      el.answerActions.hidden = true
+      el.word.hidden = false
+      el.english.textContent = 'Every card here is scheduled for a later day.'
+      el.english.hidden = !!state.done
+      if (el.summary) {
+        el.summary.hidden = !state.done
+        if (el.firstCorrect) el.firstCorrect.textContent = String(state.firstTryCorrect)
+        if (el.firstWrong) el.firstWrong.textContent = String(state.firstTryWrong)
+      }
       if (el.input) el.input.hidden = true
+      if (el.feedback) el.feedback.hidden = true
       if (el.verdict) el.verdict.hidden = true
       if (el.replay) el.replay.hidden = true
       if (el.aside) el.aside.hidden = true
@@ -573,9 +726,10 @@ export function mountLanguageStudy ({
       return
     }
 
-    const typed = isTyped(card)
     const answered = state.revealed
 
+    el.prompt.hidden = false
+    if (el.summary) el.summary.hidden = true
     el.prompt.textContent = card.label
     el.word.textContent = card.prompt
     el.word.hidden = !card.prompt
@@ -592,50 +746,38 @@ export function mountLanguageStudy ({
        was typed and with the difference marked — printing it a second time
        underneath is the same word twice and invites the eye to compare the two
        copies rather than the two spellings. */
-    el.english.hidden = !answered || (typed && !!state.verdict)
+    el.english.hidden = !answered || !!state.verdict
     if (el.aside) {
       el.aside.textContent = card.aside || ''
       el.aside.hidden = !answered || !card.aside
     }
 
     if (el.input) {
-      el.input.hidden = !typed || answered
+      el.input.hidden = answered
       el.input.value = state.typed
       el.input.lang = tagFor(card) || ''
+    }
+    if (el.feedback) {
+      el.feedback.hidden = !answered || !state.verdict
+      if (answered && state.verdict) {
+        const feedback = studyFeedback(state.verdict)
+        el.feedback.dataset.result = feedback.result
+        el.feedback.textContent = feedback.text
+      }
     }
     if (el.verdict) {
       el.verdict.hidden = !answered || !state.verdict
       if (answered && state.verdict) drawVerdict()
     }
 
-    el.reveal.hidden = answered || typed
-    el.answerActions.hidden = !answered
     el.progress.textContent = `${state.done + 1} of ${state.done + state.queue.length}`
     if (el.hint) {
+      const undoHint = state.lastAnswer
+        ? ` · ${keyLabel('⌘Z')} takes back the last answer`
+        : ''
       el.hint.textContent = answered
-        ? 'Enter accepts · 1–4 grades it yourself'
-        : typed ? 'Type the answer · Enter checks it' : 'Space reveals the answer'
-    }
-
-    if (answered) {
-      /* Each button says what it will do. "Good — 12d" turns an abstract
-         judgement into a choice with a visible consequence, which is the single
-         most useful thing a review surface can put on screen. */
-      const ahead = preview(state.states[card.id], Date.now(), prefs().retention)
-      if (el.againWhen) el.againWhen.textContent = humanDays(ahead[AGAIN])
-      if (el.hardWhen) el.hardWhen.textContent = humanDays(ahead[HARD])
-      if (el.goodWhen) el.goodWhen.textContent = humanDays(ahead[GOOD])
-      if (el.easyWhen) el.easyWhen.textContent = humanDays(ahead[EASY])
-
-      /* Which button Enter will press, so the default is visible rather than
-         remembered. `data-graded` is what moves the filled treatment off Good
-         and onto it: on a card the typing already answered, a filled Good next
-         to a ringed Hard is two buttons both claiming to be the one. */
-      const suggested = state.verdict ? gradeFor(state.verdict) : GOOD
-      el.answerActions.toggleAttribute('data-graded', !!state.verdict)
-      for (const [g, button] of [[AGAIN, el.again], [HARD, el.hard], [GOOD, el.got], [EASY, el.easy]]) {
-        button?.classList.toggle('is-suggested', g === suggested)
-      }
+        ? undoHint.replace(/^ · /, '')
+        : `Type the answer · Enter checks it${undoHint}`
     }
   }
 
@@ -671,15 +813,6 @@ export function mountLanguageStudy ({
 
   /* ---------------------------------------------------------- answering */
 
-  /** Reveal a card that is not typed — or show the answer to one that is. */
-  function reveal () {
-    const card = current()
-    if (!card || state.revealed) return
-    state.revealed = true
-    if (card.kind === RECOGNISE) say(card)
-    paint()
-  }
-
   /** Check what was typed, and show what it earned. */
   function check () {
     const card = current()
@@ -692,6 +825,14 @@ export function mountLanguageStudy ({
     // word that has just been retrieved rather than being the answer itself.
     if (card.kind !== DICTATE) say(card)
     paint()
+    /* Keep the verdict on screen long enough to read, then move on without a
+       second grading decision. Anything short of an exact answer returns at
+       the end of this session. The identity check prevents an old timer from
+       advancing a newer card if Enter was pressed during the pause. */
+    const grade = sessionGrade(state.verdict)
+    setTimeout(() => {
+      if (state.open && current() === card && state.revealed) answer(grade)
+    }, 1200)
   }
 
   /** Answer the card in front, and schedule it. */
@@ -700,9 +841,25 @@ export function mountLanguageStudy ({
     if (!card || !state.revealed) return
 
     const now = Date.now()
+    /* Everything undo has to put back, taken before anything moves: the
+       card's scheduled state, the session tallies, and whether this id had
+       been seen at all — `recordFirstTry` is about to decide that. */
+    state.lastAnswer = {
+      card,
+      prevState: state.states[card.id],
+      wasAgain: grade === AGAIN,
+      firstTry: {
+        seen: state.firstTrySeen.has(card.id),
+        correct: state.firstTryCorrect,
+        wrong: state.firstTryWrong
+      }
+    }
+    recordFirstTry(state, card.id, grade === GOOD)
     const next = gradeCard(state.states[card.id], grade, now, prefs().retention)
     state.states[card.id] = next
-    state.pending.push({ id: card.id, at: now, grade, state: next })
+    const entry = { id: card.id, at: now, grade, state: next }
+    state.lastAnswer.entry = entry
+    state.pending.push(entry)
 
     state.queue.shift()
     state.done++
@@ -728,17 +885,60 @@ export function mountLanguageStudy ({
   }
 
   const focusInput = () => {
-    if (isTyped(current()) && !state.revealed && el.input) el.input.focus()
+    if (current() && !state.revealed && el.input) el.input.focus()
     else el.card.focus()
+  }
+
+  /**
+   * Take back the last answer — one step, because the step just taken is the
+   * one a slipped Enter or a mistyped accent graded wrongly; anything further
+   * back has been read, considered and left behind.
+   *
+   * The answer may be anywhere on its journey to disk: still in `pending`,
+   * mid-write, or already recorded. Marking the entry undone covers all
+   * three — `flush` skips marked entries wherever it finds them, and the
+   * store is told to put the card's state back in case the write already
+   * happened. Both are idempotent, so racing the in-flight write is safe.
+   */
+  function undo () {
+    const last = state.lastAnswer
+    if (!last || !state.open) return
+    state.lastAnswer = null
+
+    state.undone.add(last.entry)
+    const held = state.pending.indexOf(last.entry)
+    if (held !== -1) state.pending.splice(held, 1)
+    else api.review.unrecord({ id: last.card.id, at: last.entry.at, state: last.prevState || null }).catch(() => {})
+
+    if (last.wasAgain) {
+      const at = state.queue.lastIndexOf(last.card)
+      if (at !== -1) state.queue.splice(at, 1)
+    }
+    state.queue.unshift(last.card)
+    state.done--
+
+    if (last.prevState === undefined) delete state.states[last.card.id]
+    else state.states[last.card.id] = last.prevState
+    state.firstTryCorrect = last.firstTry.correct
+    state.firstTryWrong = last.firstTry.wrong
+    if (!last.firstTry.seen) state.firstTrySeen.delete(last.card.id)
+
+    Object.assign(state, blank())
+    paint()
+    const card = current()
+    if (card?.kind === DICTATE) say(card)
+    focusInput()
   }
 
   /* ------------------------------------------------------------ the deck */
 
   /** Everything answered since the last write, to the vault. */
   async function flush () {
-    if (!state.pending.length) return
-    const batch = state.pending
+    // An entry undone while it waited — or while an earlier failed write held
+    // it — is not owed to anyone.
+    const batch = state.pending.filter((one) => !state.undone.has(one))
     state.pending = []
+    if (!batch.length) return
     try {
       await api.review.record(batch)
     } catch (err) {
@@ -820,7 +1020,11 @@ export function mountLanguageStudy ({
       const tag = options.lang || speechTag(deck.path.split('/').slice(-2, -1)[0] || '')
       state.tags[deck.path] = tag
       const speaks = speaking && !!tag && !!speech?.has(tag)
-      cards.push(...languageCards(deck.text, deck.path, { speaks }))
+      /* Study is one predictable Duolingo-companion drill: see the language's
+         word and type its English meaning. The richer card kinds remain
+         available to the parser, but do not enter this session. */
+      cards.push(...languageCards(deck.text, deck.path, { speaks })
+        .filter((card) => card.kind === RECOGNISE))
     }
     return cards
   }
@@ -846,6 +1050,11 @@ export function mountLanguageStudy ({
 
     state.queue = buildQueue(cards, state.states, Date.now(), { newPerDay })
     state.done = 0
+    state.firstTrySeen = new Set()
+    state.firstTryCorrect = 0
+    state.firstTryWrong = 0
+    state.lastAnswer = null
+    state.undone = new Set()
     Object.assign(state, blank())
     state.open = true
     el.root.hidden = false
@@ -884,34 +1093,38 @@ export function mountLanguageStudy ({
   /* ------------------------------------------------------------- events */
 
   el.close.addEventListener('click', close)
-  el.reveal.addEventListener('click', reveal)
-  el.again.addEventListener('click', () => answer(AGAIN))
-  el.hard?.addEventListener('click', () => answer(HARD))
-  el.got.addEventListener('click', () => answer(GOOD))
-  el.easy?.addEventListener('click', () => answer(EASY))
   el.replay?.addEventListener('click', (event) => {
     event.stopPropagation()
     say(current())
   })
-  el.card.addEventListener('click', () => {
-    if (!isTyped(current())) reveal()
-    else focusInput()
-  })
+  el.card.addEventListener('click', () => focusInput())
   el.root.addEventListener('mousedown', (event) => {
     if (event.target === el.root) close()
   })
   el.input?.addEventListener('input', () => { state.typed = el.input.value })
   // Quitting mid-session must not lose the answers already given.
   window.addEventListener('beforeunload', () => {
-    if (state.pending.length) api.review.record(state.pending)
+    const owed = state.pending.filter((one) => !state.undone.has(one))
+    if (owed.length) api.review.record(owed)
   })
 
   window.addEventListener('keydown', (event) => {
     if (el.root.hidden) return
     if (event.key === 'Escape') { event.preventDefault(); close(); return }
 
+    /* Before the typing branch on purpose: the moment undo matters most is
+       when the next card is already up and the input has the keyboard —
+       which is also why it is the application chord and not a bare letter,
+       since a bare letter there is an answer being typed. */
+    if ((event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey &&
+        event.key.toLowerCase() === 'z') {
+      event.preventDefault()
+      undo()
+      return
+    }
+
     const card = current()
-    const typing = isTyped(card) && !state.revealed
+    const typing = !!card && !state.revealed
 
     if (typing) {
       // Everything else belongs to the text box — including space, which in a
@@ -921,30 +1134,14 @@ export function mountLanguageStudy ({
       return
     }
 
-    if (!state.revealed) {
-      if (event.key === ' ' || event.key === 'Enter') { event.preventDefault(); reveal() }
-      else if (event.key === 'Tab' && card?.say) { event.preventDefault(); say(card) }
-      return
-    }
-
-    /* 1–4 left to right, the way every review surface numbers them, with the
-       arrows kept for the two people already used to them here. Enter takes
-       whatever the typed answer earned — which for a card that was simply
-       revealed is Good, its long-standing meaning. */
+    /* Enter can skip the short feedback pause. Wrong answers still go to the
+       end of the queue; right answers leave the session. */
     if (event.key === 'Enter') {
       event.preventDefault()
-      answer(state.verdict ? gradeFor(state.verdict) : GOOD)
+      answer(sessionGrade(state.verdict))
       return
     }
     if (event.key === 'Tab' && card?.say) { event.preventDefault(); say(card); return }
-
-    const key = {
-      1: AGAIN, ArrowLeft: AGAIN,
-      2: HARD,
-      3: GOOD, ArrowRight: GOOD, ' ': GOOD,
-      4: EASY
-    }[event.key]
-    if (key) { event.preventDefault(); answer(key) }
   })
 
   return { open, close, flush, due, isOpen: () => state.open }

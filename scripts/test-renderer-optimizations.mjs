@@ -79,10 +79,12 @@ const fakeStyle = () => ({
 const panel = (left, right) => ({ getBoundingClientRect: () => ({ left, right }) })
 const grip = () => Object.assign(new EventHub(), {
   offsetParent: {},
+  style: {},
   classList: { add () {}, remove () {} },
+  getClientRects () { return [{}] },
   setPointerCapture () {}
 })
-const panelApp = { dataset: {}, style: fakeStyle() }
+const panelApp = { dataset: {}, style: fakeStyle(), append () {} }
 const sidebarGrip = grip()
 const starts = []
 const previews = []
@@ -90,6 +92,7 @@ const ends = []
 globalThis.window.addEventListener = () => {}
 globalThis.window.innerWidth = 1440
 globalThis.MutationObserver = class { observe () {} }
+globalThis.ResizeObserver = class { observe () {} }
 let panelFrame = null
 globalThis.requestAnimationFrame = (callback) => { panelFrame = callback; return 7 }
 globalThis.cancelAnimationFrame = (id) => { if (id === 7) panelFrame = null }

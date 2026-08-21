@@ -17,14 +17,11 @@
    thing you ask for, and what makes the answer worth keeping.
    ================================================================== */
 
-import { WidgetType } from '@codemirror/view'
-import { Facet } from '@codemirror/state'
 import { embedSpec, renderEmbed } from './assets.js'
-import { el, pictureBlocks } from './blocks.js'
 import { artefactRun, attachArtefactBlock } from './runcode.js'
 import { DRAWN } from './languages.js'
 
-const api = window.tulip
+const api = globalThis.tulip
 
 export function isTikz (lang) {
   return String(lang || '').trim().toLowerCase() === DRAWN.tikz
@@ -42,8 +39,10 @@ const runs = new Map()
 /* The drawing for a path we have just been handed. Going through embedSpec
    keeps one decision about what an .svg in this vault becomes, shared with
    every other embed. */
-function pictureFor (path, onLoad) {
-  const picture = renderEmbed(embedSpec(path, { resolve: () => path }))
+/* Exported for the editing half next door, not for general use. */
+export function pictureFor (path, onLoad) {
+  const asItself = { dir: '', resolve: () => path }
+  const picture = renderEmbed(embedSpec(path, asItself))
   if (onLoad) picture.querySelector?.('img')?.addEventListener('load', onLoad, { once: true })
   return picture
 }
@@ -90,7 +89,8 @@ function tikzSpec (code, noteName) {
  * @param {(path: string|null) => void} onPicture  a drawing arrived, or went
  * @param {() => void} [onPaint]  the status changed shape; re-measure
  */
-function tikzRun (code, noteName, onPicture, onPaint) {
+/* Exported for the editing half next door, not for general use. */
+export function tikzRun (code, noteName, onPicture, onPaint) {
   const { runs: table, key, ...spec } = tikzSpec(code, noteName)
   return artefactRun(table, key, {
     ...spec,
@@ -136,7 +136,7 @@ const READS_FILES = /\\(?:openin|openout|read|write|input|include|InputIfFileExi
  */
 export function attachTikz (wrap, head, code, { noteName }) {
   const asks = READS_FILES.test(code)
-  attachArtefactBlock(wrap, head, {
+  const spec = {
     ...tikzSpec(code, noteName),
     kind: 'tikz',
     make: (path) => pictureFor(path),
@@ -148,58 +148,6 @@ export function attachTikz (wrap, head, code, { noteName }) {
         ? 'This picture reads files, so it is not drawn until you ask'
         : 'Draw this picture with TeX'
     }
-  })
-}
-
-/* ------------------------------------------------- the editing view */
-
-/* Which note the editor is showing, as the function the renderer already keeps
-   for the title — the widgets need it to name the file a drawing goes to, and
-   asking for it at the moment one is built means a note switch cannot leave a
-   widget writing into the note it used to be. A facet carries it in rather than
-   a module-level variable, the same route the embed resolver takes. */
-export const tikzNote = Facet.define({
-  combine: (values) => values[0] || (() => 'Untitled')
-})
-
-/**
- * The picture, standing under the fence that describes it. Cached drawings
- * appear without anything being run; a block that has never been drawn shows
- * the button that draws it.
- *
- * A StateField rather than a ViewPlugin — block widgets change line geometry —
- * and the widget asks the editor to measure again whenever it changes height,
- * or every line below it ends up out of step with where it is drawn.
- */
-class PictureWidget extends WidgetType {
-  constructor (code) { super(); this.code = code }
-
-  // Equal while the block's text is unchanged, so typing elsewhere in the note
-  // maps the widget across rather than redrawing — and a running block is not
-  // torn down mid-render by an edit three paragraphs away.
-  eq (other) { return other.code === this.code }
-
-  toDOM (view) {
-    const noteName = view.state.facet(tikzNote)() || 'Untitled'
-    const host = el('div', 'cm-tikz')
-    const stage = el('div', 'cm-tikz-stage')
-    const bar = el('div', 'cm-tikz-bar')
-    host.append(stage, bar)
-
-    const measure = () => view.requestMeasure()
-    const run = tikzRun(this.code, noteName, (path) => {
-      stage.replaceChildren(path ? pictureFor(path, measure) : '')
-      stage.hidden = !path
-      measure()
-    }, measure)
-
-    stage.hidden = true
-    bar.append(run.button)
-    host.append(run.status)
-    return host
   }
-
-  ignoreEvent () { return true }
+  attachArtefactBlock(wrap, head, spec)
 }
-
-export const tikzBlocks = pictureBlocks(isTikz, (code) => new PictureWidget(code))

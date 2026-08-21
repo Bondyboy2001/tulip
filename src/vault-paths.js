@@ -18,14 +18,37 @@ const noteExtAlternation = VAULT_CONTRACT.noteExtensions
   .map((ext) => escapeRe(ext.replace(/^\./, '')))
   .join('|')
 
-/* A language table is `Name.language.md` — the `.language` is part of the
-   extension for the purpose of stripping it, so the tree shows "Spanish" and
-   not "Spanish.language". */
+/* A language table is `Name.lang` — `.lang` is one of the contract's note
+   extensions, so stripping it here is what makes the tree show "Spanish". */
 export const NOTE_EXT =
-  new RegExp(`(?:\\.language)?\\.(${noteExtAlternation})$`, 'i')
+  new RegExp(`\\.(${noteExtAlternation})$`, 'i')
 
+/* Source files and data files, from the same contract. Both are lists rather
+   than single extensions, so both are one alternation built once — a matcher
+   rebuilt per call would be run against every entry of every vault walk.
+
+   Anchored on a leading dot as well as the end, so `main.cpp` matches and a
+   file actually named `cpp` does not. */
+const extAlternation = (list) => list.map(escapeRe).join('|')
+
+export const CODE_EXT =
+  new RegExp(`(${extAlternation(VAULT_CONTRACT.codeExtensions)})$`, 'i')
+
+/* The delimiter is the value, so the matcher is built from the keys. */
+const DATA_DELIMITERS = VAULT_CONTRACT.dataExtensions
+export const DATA_EXT =
+  new RegExp(`(${extAlternation(Object.keys(DATA_DELIMITERS))})$`, 'i')
+
+export const TEX_EXT = new RegExp(`${escapeRe(VAULT_CONTRACT.texExtension)}$`, 'i')
 export const PDF_EXT = new RegExp(`${escapeRe(VAULT_CONTRACT.pdfExtension)}$`, 'i')
 export const SITE_EXT = new RegExp(`${escapeRe(VAULT_CONTRACT.siteExtension)}$`, 'i')
+export const WHITEBOARD_EXT = new RegExp(`${escapeRe(VAULT_CONTRACT.whiteboardExtension)}$`, 'i')
+
+/* A Jupyter notebook. JSON on disk like a whiteboard is, and for the same
+   reason not a source file: the editor would show the encoding — escaped
+   newlines, base64 images — rather than the document, and the document is the
+   cells. See src/notebook.js. */
+export const NOTEBOOK_EXT = new RegExp(`${escapeRe(VAULT_CONTRACT.notebookExtension)}$`, 'i')
 
 /* Regional-indicator pairs — the two codepoints a flag emoji is made of, and
    the prefix a language folder carries its country in. A source string in the
@@ -33,8 +56,58 @@ export const SITE_EXT = new RegExp(`${escapeRe(VAULT_CONTRACT.siteExtension)}$`,
    \u{...} escapes mean codepoints rather than literal text. */
 export const LANGUAGE_FLAG = new RegExp(VAULT_CONTRACT.languageFlagPattern, 'u')
 
+export const isCodePath = (path) => CODE_EXT.test(path || '')
+export const isDataPath = (path) => DATA_EXT.test(path || '')
+
+/** How to split a row of the data file at `path` — the contract's delimiter for
+ *  its extension, and a comma for anything that reached here without one. */
+export const dataDelimiter = (path) => {
+  const match = DATA_EXT.exec(path || '')
+  return (match && DATA_DELIMITERS[match[1].toLowerCase()]) || ','
+}
+
+/** The word behind a source file's extension: `solve.py` → `py`, which is the
+ *  spelling languages.js already knows as Python. Kept here because the
+ *  extension is a path fact; what the word *means* is languages.js's business
+ *  and is not restated in the contract. */
+export const codeToken = (path) => {
+  const match = CODE_EXT.exec(path || '')
+  return match ? match[1].slice(1).toLowerCase() : ''
+}
+
+export const isTexPath = (path) => TEX_EXT.test(path || '')
 export const isPdfPath = (path) => PDF_EXT.test(path || '')
 export const isSitePath = (path) => SITE_EXT.test(path || '')
+export const isWhiteboardPath = (path) => WHITEBOARD_EXT.test(path || '')
+export const isNotebookPath = (path) => NOTEBOOK_EXT.test(path || '')
+export const isLanguageTablePath = (path) =>
+  String(path || '').toLowerCase().endsWith(VAULT_CONTRACT.languageTableSuffix)
+
+/** Whether the last segment carries an extension at all. A wikilink names a
+ *  note without one — `[[Reading list]]` — and that is the difference between
+ *  "a file of a kind nothing here handles" and "a note that may not exist
+ *  yet". */
+const HAS_EXT = /\.[^./]+$/
+
+/**
+ * A file the vault holds but has no view of its own for: a photograph, a
+ * recording, a `.docx`, an archive.
+ *
+ * The vault is a folder on disk and people put things in folders. Everything
+ * above this line is a kind Tulip knows how to *be* — a note, a paper, a board
+ * — and everything else used to be simply absent: not in the tree, not in the
+ * switcher, invisible in its own vault. It is listed now, and what opening one
+ * means is decided at the door in renderer.js: text is text whatever it is
+ * called, a picture gets a picture viewer, and what is left is described rather
+ * than pretended at.
+ */
+export const isViewedFilePath = (path) => {
+  const name = String(path || '').split('/').pop() || ''
+  if (!HAS_EXT.test(name)) return false
+  return !NOTE_EXT.test(name) && !isTexPath(name) && !isPdfPath(name) &&
+    !isSitePath(name) && !isWhiteboardPath(name) && !isDataPath(name) &&
+    !isNotebookPath(name) && !isCodePath(name)
+}
 
 /* A file attached in the copilot's message box lives under the attachments
    folder but belongs to a conversation rather than to a note. Named here
@@ -48,4 +121,4 @@ export const isChatAttachment = (path) =>
 
 /** A path's last segment with the extension taken off — the name to show. */
 export const noteName = (path) =>
-  String(path || '').split('/').pop().replace(NOTE_EXT, '')
+  (String(path || '').split('/').pop() || '').replace(NOTE_EXT, '')

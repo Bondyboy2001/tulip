@@ -2,11 +2,10 @@
    A strip of the letters a language has and a US keyboard does not, docked
    under the table so they can be typed without leaving it.
 
-   It is a typing aid, not an input method. Someone studying a language
-   seriously should add its real layout in System Settings and switch with
-   ⌃Space — that muscle memory transfers to every other app, and this does not.
-   What this is for is the letter you need once in a row of English: the ñ in
-   señor, the ř you cannot find, a script you do not want a whole layout for.
+   The compact A→letter toggle also makes it an inline transliterator. With it
+   on, Latin letters typed into a table cell are replaced by the current
+   language's script. It is deliberately local to the language table: the rest
+   of Tulip and the rest of the Mac retain their normal keyboard.
 
    There is nothing to set up. A language folder already carries a flag and a
    name, and keysFor in the renderer turns those into a row of letters — so a
@@ -18,11 +17,20 @@
    makes it.
    ================================================================== */
 
-import { el } from './blocks.js'
+import { el } from './dom.js'
 
 /* How many keys answer to a shortcut. Nine because ⌥0 is not a tenth of
    anything, and past nine the strip is quicker to look at than to remember. */
 const SHORTCUTS = 9
+
+/* The strip's phonetic hints supply most scripts. Greek needs the conventional
+   keyboard/transliteration choices where several letters share a sound: i is
+   iota, h is eta and w is omega. Longest matches make th/ch/ps one letter. */
+const GREEK = new Map(Object.entries({
+  a: 'α', b: 'β', g: 'γ', d: 'δ', e: 'ε', z: 'ζ', h: 'η', th: 'θ',
+  i: 'ι', k: 'κ', l: 'λ', m: 'μ', n: 'ν', x: 'ξ', o: 'ο', p: 'π',
+  r: 'ρ', s: 'σ', t: 'τ', y: 'υ', f: 'φ', ch: 'χ', ps: 'ψ', w: 'ω'
+}))
 
 /** The table cell the caret is in, or null when it is anywhere else. */
 function focusedCell () {
@@ -59,10 +67,83 @@ function parseKey (token) {
   }
 }
 
+/** Roman spellings to script letters, with ambiguous Greek made predictable. */
+export function transliterationMap (tokens) {
+  const entries = tokens.map(parseKey)
+  if (entries.some(({ key }) => key === 'α') && entries.some(({ key }) => key === 'ω')) {
+    return new Map(GREEK)
+  }
+
+  const map = new Map()
+  for (const { key, hint } of entries) {
+    if (/^[a-z]+$/i.test(hint) && !map.has(hint.toLowerCase())) {
+      map.set(hint.toLowerCase(), key)
+    }
+  }
+  return map
+}
+
+/** Convert a Latin word using longest matches, preserving initial capitals. */
+/* Longest-first key lists, one per map. This runs on every keydown while
+   conversion mode is on, and the map only changes when the layout does. */
+const sortedKeys = new WeakMap()
+
+export function transliterateLatin (source, map, final = false) {
+  let matches = sortedKeys.get(map)
+  if (!matches) {
+    matches = [...map.keys()].sort((a, b) => b.length - a.length)
+    sortedKeys.set(map, matches)
+  }
+  let result = ''
+  for (let at = 0; at < source.length;) {
+    const rest = source.slice(at).toLowerCase()
+    const match = matches.find((candidate) => rest.startsWith(candidate))
+    if (!match) { result += source[at++]; continue }
+    const letter = map.get(match)
+    result += source[at] === source[at].toUpperCase() ? letter.toUpperCase() : letter
+    at += match.length
+  }
+  return final ? result.replace(/σ$/u, 'ς') : result
+}
+
+function caretOffset (cell) {
+  const selection = window.getSelection()
+  if (!selection?.rangeCount || !selection.getRangeAt(0).collapsed) return null
+  const range = selection.getRangeAt(0).cloneRange()
+  if (!cell.contains(range.startContainer) && range.startContainer !== cell) return null
+  range.selectNodeContents(cell)
+  range.setEnd(selection.anchorNode, selection.anchorOffset)
+  return range.toString().length
+}
+
+function pointAt (cell, wanted) {
+  const walker = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT)
+  let left = wanted
+  let node
+  while ((node = walker.nextNode())) {
+    if (left <= node.data.length) return [node, left]
+    left -= node.data.length
+  }
+  return [cell, cell.childNodes.length]
+}
+
+/** Select a plaintext span in the editable cell, measured in UTF-16 offsets. */
+function selectOffsets (cell, from, to) {
+  const range = document.createRange()
+  const [startNode, startAt] = pointAt(cell, from)
+  const [endNode, endAt] = pointAt(cell, to)
+  range.setStart(startNode, startAt)
+  range.setEnd(endNode, endAt)
+  const selection = window.getSelection()
+  selection.removeAllRanges()
+  selection.addRange(range)
+}
+
 /**
  * The strip.
  *
- * @param {{root: HTMLElement, keys: HTMLElement}} dom  the dock and the row in it
+ * @param {{root: HTMLElement, keys: HTMLElement, shift: HTMLElement, mode: HTMLElement}} dom
+ *   the dock, its controls and the row in it
  * @returns {{setKeys: (tokens: string[]) => void, show: (on: boolean) => void}}
  */
 export function mountKeyboard (dom) {
@@ -70,6 +151,10 @@ export function mountKeyboard (dom) {
      read back off the DOM: the Shift key sits in the same row, so the nth
      button and the nth letter are not the same thing. */
   let entries = []
+  let roman = new Map()
+  let conversionOn = false
+  let conversion = { cell: null, source: '', output: '', end: -1 }
+  const resetConversion = () => { conversion = { cell: null, source: '', output: '', end: -1 } }
 
   /* Shift, in its two forms. `locked` is the on-screen key, which stays down
      until pressed again — a mouse cannot hold a modifier while it clicks. `held`
@@ -109,6 +194,7 @@ export function mountKeyboard (dom) {
       cell = focusedCell()
     }
     if (!cell) return
+    resetConversion()
     document.execCommand('insertText', false, (capital && entry.upper) || entry.key)
   }
 
@@ -125,6 +211,11 @@ export function mountKeyboard (dom) {
 
   function setKeys (tokens) {
     entries = tokens.map(parseKey)
+    roman = transliterationMap(tokens)
+    conversionOn = false
+    resetConversion()
+    dom.mode.hidden = roman.size === 0
+    dom.mode.setAttribute('aria-pressed', 'false')
     dom.keys.replaceChildren()
 
     for (const [at, entry] of entries.entries()) {
@@ -177,6 +268,54 @@ export function mountKeyboard (dom) {
     paintCase()
   })
 
+  dom.mode.addEventListener('click', () => {
+    conversionOn = !conversionOn
+    resetConversion()
+    dom.mode.setAttribute('aria-pressed', String(conversionOn))
+    dom.mode.title = conversionOn
+      ? 'Language typing is on'
+      : 'Convert Latin typing into this language'
+  })
+
+  /* Replace the current Latin word as one unit after every letter. Keeping the
+     source word alongside its rendered form is what lets `t` become τ first,
+     then θ when `h` completes the longer `th` spelling. */
+  window.addEventListener('keydown', (event) => {
+    if (!conversionOn || dom.root.hidden || event.isComposing ||
+        event.metaKey || event.ctrlKey || event.altKey) return
+
+    const cell = focusedCell()
+    const at = cell ? caretOffset(cell) : null
+    const continuing = cell && at !== null && cell === conversion.cell && at === conversion.end
+
+    if (/^[a-z]$/i.test(event.key) && cell && at !== null) {
+      event.preventDefault()
+      const source = (continuing ? conversion.source : '') + event.key
+      const before = continuing ? conversion.output : ''
+      const output = transliterateLatin(source, roman)
+      if (before) selectOffsets(cell, at - before.length, at)
+      document.execCommand('insertText', false, output)
+      conversion = {
+        cell,
+        source,
+        output,
+        end: at - before.length + output.length
+      }
+      return
+    }
+
+    /* Greek sigma has a separate word-final form. Commit it just before the
+       browser inserts the space or punctuation that ends the word. */
+    if (continuing && /^[\s.,!?;:]$/.test(event.key)) {
+      const final = transliterateLatin(conversion.source, roman, true)
+      if (final !== conversion.output) {
+        selectOffsets(cell, at - conversion.output.length, at)
+        document.execCommand('insertText', false, final)
+      }
+    }
+    if (event.key !== 'Shift') resetConversion()
+  })
+
   /* The real Shift key drives the strip while it is down, so the letters on
      screen are the letters that would be typed. Watched only while the strip is
      on screen, and reset on blur — a window switched away from mid-chord would
@@ -214,7 +353,7 @@ export function mountKeyboard (dom) {
     show (on) {
       dom.root.hidden = !on
       // A strip that goes away with Shift down must not come back holding it.
-      if (!on) release()
+      if (!on) { release(); resetConversion() }
     }
   }
 }

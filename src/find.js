@@ -33,7 +33,7 @@ import {
   findNext, findPrevious, selectMatches,
   replaceNext, replaceAll, closeSearchPanel
 } from '@codemirror/search'
-import { el } from './blocks.js'
+import { el } from './dom.js'
 import { chip, icon, tallyText, wrap } from './find-bar.js'
 
 /* Counting stops here. A note with more matches than this does not need an
@@ -134,6 +134,25 @@ class FindPanel {
     this.count()
   }
 
+  /**
+   * CodeMirror calls this once the panel is in the document.
+   *
+   * `main-field` above is only half the story: `openSearchPanel` reads it to
+   * move focus when the panel is *already* open, and does nothing but dispatch
+   * when it is not — the stock panel focuses itself from here, and a panel that
+   * replaces it has to do the same. Without it the first ⌘F of a note opened
+   * the bar and left the caret in the document, so the word you came to search
+   * for was typed into the note instead. (Every ⌘F after that one worked, which
+   * is what made it read as flaky rather than missing.)
+   *
+   * Selected, not merely focused: the query is seeded from what was under the
+   * cursor, and typing should replace that rather than run on from it.
+   */
+  mount () {
+    this.input.focus()
+    this.input.select()
+  }
+
   /* ------------------------------------------------------------ pieces */
 
   /* Every control here hands the caret back to the query when it is done: the
@@ -192,7 +211,7 @@ class FindPanel {
     const q = this.query()
     if (q.eq(getSearchQuery(this.view.state))) return
 
-    const spec = { effects: [setSearchQuery.of(q)] }
+    const spec = { effects: /** @type {import('@codemirror/state').StateEffect<unknown>[]} */ ([setSearchQuery.of(q)]) }
 
     if (jump && q.valid) {
       // From where the search started, then from the top: a query that has no

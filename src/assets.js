@@ -276,7 +276,7 @@ export function embedResizeGrip () {
  * puts back what was there when nothing was written, and `settle` runs at the
  * end of every gesture either way.
  */
-export function wireResizeHandle (handle, {
+function wireResizeHandle (handle, {
   begin,
   paint,
   commit,
@@ -465,6 +465,43 @@ const CELL_IMAGE_CAP = 640
  * A preference and not a floor: a cell width in an auto-laid-out table is a
  * suggestion, so the column still grows for its other rows.
  */
+/**
+ * A table cell that holds nothing but a picture is the picture: the cell gives
+ * up its padding and the picture fills it, edge to edge, whatever the column
+ * turns out to be. The editing view decides the same thing under the same class
+ * name — see `has-image-only` in src/table.js — and the stylesheet then treats
+ * the two alike, which is what keeps the same table looking the same in both
+ * views.
+ *
+ * The cell keeps the picture's asked-for width as a *hint* (`fitImageCell`),
+ * because a picture told to fill has no width of its own left to size the
+ * column with.
+ *
+ * Asked after the embeds are built rather than of the stubs, because only the
+ * built embed knows whether the attachment turned out to be an image: a PDF or
+ * a recording in a cell is furniture that still wants its padding.
+ *
+ * Reached through the pictures rather than through the cells. A note of any
+ * length is mostly cells that hold words — 3,600 of them in a page of forty
+ * tables — and asking each of them whether its one child is a picture cost more
+ * than every other pass over the page put together, for an answer that is "no"
+ * everywhere a picture is not. `root` is always a page just built from
+ * `md.render`, so no cell arrives carrying the class or the width a previous
+ * answer left: there is nothing to clear where there is no picture.
+ */
+export function markImageCells (root) {
+  for (const image of root.querySelectorAll('img.embed-img')) {
+    const cell = image.parentElement
+    if (!cell || (cell.tagName !== 'TD' && cell.tagName !== 'TH')) continue
+    const kids = [...cell.childNodes].filter(
+      (node) => node.nodeType !== Node.TEXT_NODE || node.textContent.trim() !== ''
+    )
+    if (kids.length !== 1 || kids[0] !== image) continue
+    cell.classList.add('has-image-only')
+    fitImageCell(cell, image, Number(image.getAttribute('width')) || null)
+  }
+}
+
 export function fitImageCell (cell, image, asked) {
   if (asked) {
     cell.style.width = `${asked}px`
@@ -599,6 +636,17 @@ function remoteSpec (src, { alt, size, writtenAsImage }) {
 export function embedSpec (src, {
   alt = '', size = null, resolve, resolveNote = null, dir = '', writtenAsImage = false
 } = {}) {
+  /* An embed with no target at all — `![[ ]]`, the slash key's placeholder —
+     is not a missing file, it is a choice still to be made. Named rather than
+     left a blank, so a note that never finished the gesture says so quietly
+     in both views instead of hiding an invisible gap. */
+  if (!String(src || '').trim()) {
+    return {
+      kind: 'missing', path: null, url: null, alt,
+      label: alt || 'Embed', width: null, height: null, page: null, start: null
+    }
+  }
+
   /* `Sample.pdf#page=3` — the fragment is an instruction to the viewer, not
      part of the name, so it comes off before the vault is asked. Only for a
      local target: a URL keeps its fragment, which belongs to the site. */
@@ -895,6 +943,12 @@ export function renderEmbed (spec, onReady = () => {}) {
     img.alt = spec.alt || ''
     if (spec.path) img.dataset.vaultImage = spec.path
     img.loading = 'lazy'
+    /* Off the thread the note is being rendered on. Lazy already keeps the
+       pictures below the fold from being decoded at all; this keeps the ones
+       above it from being decoded synchronously, which on a note full of
+       photographs is the difference between the text appearing and the whole
+       page waiting for the images. */
+    img.decoding = 'async'
     if (spec.width) img.width = spec.width
     if (spec.height) img.height = spec.height
     img.addEventListener('load', onReady, { once: true })

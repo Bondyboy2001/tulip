@@ -1,25 +1,40 @@
 import { EditorView, Decoration, ViewPlugin, WidgetType, keymap, drawSelection,
-         rectangularSelection, dropCursor, highlightActiveLine } from '@codemirror/view'
+         rectangularSelection, dropCursor, highlightActiveLine,
+         lineNumbers } from '@codemirror/view'
 import { EditorState, EditorSelection, Prec, StateEffect, StateField,
-         Compartment, Facet } from '@codemirror/state'
+         Compartment, Facet, Transaction } from '@codemirror/state'
 import { syntaxTree, HighlightStyle, syntaxHighlighting, indentOnInput,
          bracketMatching, indentUnit, foldService, codeFolding, foldEffect,
-         unfoldEffect, foldedRanges, foldKeymap } from '@codemirror/language'
-import { codeTokens, languageFor } from './highlight.js'
+         unfoldEffect, foldedRanges, foldKeymap, StreamLanguage,
+         LanguageDescription } from '@codemirror/language'
+import { stex } from '@codemirror/legacy-modes/mode/stex'
+import { codeTokens, languageFor, languageSupportFor, primeLanguageDescription } from './highlight.js'
 import { languageChip } from './languages.js'
+import { primeSyntaxTree } from './spelling.js'
 
 export { openSearchPanel }
+
+/* The reading view colours code through highlight.js, which cannot name
+   `LanguageDescription` in an import of its own without putting CodeMirror on
+   the startup path — see the account there. This module has it anyway, and the
+   parser configured below calls `languageFor` synchronously, so it is handed
+   over here rather than fetched again. */
+primeLanguageDescription(LanguageDescription)
+/* Same arrangement for the spell checker's prose scan, which skips code by
+   asking the syntax tree — see the note in spelling.js. */
+primeSyntaxTree(syntaxTree)
 import { defaultKeymap, history, historyKeymap, indentWithTab, undo, redo } from '@codemirror/commands'
-import { search, searchKeymap, highlightSelectionMatches, openSearchPanel } from '@codemirror/search'
+import { search, searchKeymap, openSearchPanel } from '@codemirror/search'
 import { findConfig } from './find.js'
-import { EXTERNAL_SCHEME, flashTarget } from './links.js'
+import { EXTERNAL_SCHEME, flashTarget, scrollBehavior } from './links.js'
 import { autocompletion, closeBrackets, closeBracketsKeymap,
          completionKeymap, startCompletion } from '@codemirror/autocomplete'
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
 import { tags as t } from '@lezer/highlight'
-import { mathPreview, equationsFor } from './math.js'
-import { moneyPreview } from './money.js'
-import { codeBlockKeymap, proseBrackets, codeBlockView } from './codeblock.js'
+import { equationsFor } from './math.js'
+import { mathPreview } from './math-editor.js'
+import { moneyPreview } from './money-editor.js'
+import { codeBlockKeymap, proseBrackets, codeBlockView, codeAiForm, setCodeAiForm } from './codeblock.js'
 import { runBlocks } from './runblocks.js'
 import { propertiesPreview } from './properties.js'
 import {
@@ -31,10 +46,14 @@ import {
   embedResizeGrip, wireEmbedResize
 } from './assets.js'
 import { calloutHead, calloutIcon } from './callouts.js'
-import { slashCommands, fenceLanguages, calloutKinds } from './slash.js'
-import { mermaidBlocks } from './mermaid.js'
-import { tikzBlocks, tikzNote } from './tikz.js'
-import { svgBlocks } from './svg.js'
+import {
+  slashEmbed, openEmbedPicker, slashCommands, fenceLanguages, calloutKinds,
+  hashTags, tagChoices as tagChoicesFacet,
+  embedChoices as embedChoicesFacet
+} from './slash.js'
+import { mermaidBlocks } from './mermaid-editor.js'
+import { tikzBlocks, tikzNote } from './tikz-editor.js'
+import { svgBlocks } from './svg-editor.js'
 import { headingsFor, blockReferences, blockReferenceOnLine } from './headings.js'
 import { findInlineHighlights } from './marks.js'
 import { findCitations } from './citations.js'
@@ -44,7 +63,27 @@ import { fileDiff, withinLines } from './linediff.js'
 
 const tulipTheme = EditorView.theme({
   '&': { color: 'var(--ink)', backgroundColor: 'transparent', height: '100%' },
+  /* A note has no gutter at all. A source file has one when the setting asks
+     for it — and it is drawn as part of the page rather than as a rail: no
+     panel behind it, no border down its edge, just faint numbers standing off
+     the text. The heavier version CodeMirror ships is for an IDE, where the
+     gutter is a target for breakpoints and folds; here it is only an address. */
   '.cm-gutters': { display: 'none' },
+  '&.is-source .cm-gutters': {
+    display: 'flex',
+    border: 'none',
+    background: 'transparent',
+    color: 'var(--faint)'
+  },
+  '&.is-source .cm-lineNumbers .cm-gutterElement': {
+    minWidth: '2.5em',
+    padding: '0 10px 0 0',
+    /* The numbers are an aside, so they are set a size down from the code and
+       do not change width with the digit. */
+    fontSize: '0.86em',
+    fontVariantNumeric: 'tabular-nums'
+  },
+  '&.is-source .cm-activeLineGutter': { background: 'transparent', color: 'var(--muted)' },
   /* Padding cancelled by an equal negative margin: the highlight band extends
      past the text on both sides without shifting the text itself.
 
@@ -72,6 +111,17 @@ const tulipTheme = EditorView.theme({
     padding: '0 24px',
     caretColor: 'var(--accent)'
   },
+  /* A source file — TeX, or any of the code extensions in the vault contract —
+     is not prose with live Markdown decorations. Give it the full pane and the
+     code face while keeping the ordinary note measure and typography
+     untouched. `is-tex` is the older name for the same state and stays on the
+     TeX editor, because the stage's split-pane layout keys off it. */
+  '&.is-source .cm-scroller': {
+    fontFamily: 'var(--font-mono)',
+    fontSize: '13.5px',
+    lineHeight: '1.62'
+  },
+  '&.is-source .cm-content': { maxWidth: 'none', marginInline: '0' },
   // CodeMirror's base theme paints a black caret and injects itself after our
   // stylesheet, so on a dark background the cursor disappeared entirely. Theme
   // rules outrank the base theme, which is why these live here and not in CSS.
@@ -80,13 +130,17 @@ const tulipTheme = EditorView.theme({
     borderLeftWidth: '2px'
   },
   '&.cm-focused .cm-cursor': { borderLeftColor: 'var(--accent)' },
-  /* A rendered language table replaces the source lines with one block
-     widget, but CodeMirror still owns a document selection at the hidden
-     boundary. Suppress the cursor itself in the theme layer: unlike the page
-     stylesheet, this is injected alongside CodeMirror's cursor rules and
-     cannot lose to their adopted stylesheet. The focused contenteditable cell
-     continues to draw its ordinary, line-height caret. */
-  '&.is-language-table-editor .cm-cursor': { display: 'none' },
+  /* A rendered table replaces its source lines with one block widget, but
+     CodeMirror still owns a document selection at the hidden boundary.
+     Suppress the cursor itself in the theme layer: unlike the page stylesheet,
+     this is injected alongside CodeMirror's cursor rules and cannot lose to
+     their adopted stylesheet. The focused contenteditable cell continues to
+     draw its ordinary, line-height caret.
+
+     Keyed on the grid holding focus rather than on the note being a language
+     one: a language note is an ordinary Markdown file that may have prose
+     above its table, and prose needs its caret. */
+  '&.has-table-cell-focus .cm-cursor': { display: 'none' },
   /* Both states, and the focused one spelled out the long way on purpose.
      CodeMirror's base theme paints the focused selection with
      `.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground`
@@ -111,6 +165,20 @@ const tulipTheme = EditorView.theme({
     outline: 'none'
   },
   '.cm-placeholder': { color: 'var(--faint)', fontStyle: 'italic' },
+  /* A word the dictionary did not know. Drawn as an underline rather than a
+     wash so it reads as the platform's own mark and nothing else in the note
+     shifts; `skip-ink: none` because a wavy line broken around every descender
+     in "misspelling" stops looking like one. The colour is the theme's own red
+     — every theme has one for a removed line — so this does not become the one
+     hard-coded crimson in an otherwise soft palette. */
+  '.cm-misspelled': {
+    textDecoration: 'underline',
+    textDecorationStyle: 'wavy',
+    textDecorationColor: 'color-mix(in srgb, var(--code-removed) 78%, transparent)',
+    textDecorationSkipInk: 'none',
+    textDecorationThickness: '1px',
+    textUnderlineOffset: '2px'
+  },
   // Where the copilot just wrote. It fades rather than clears, so a run of
   // edits reads as a hand moving down the page.
   '.cm-agentEdit': {
@@ -133,6 +201,7 @@ const tulipTheme = EditorView.theme({
     color: 'var(--code-added)',
     fontFamily: 'var(--font-mono)',
     fontWeight: '650',
+    zIndex: 'var(--z-sticky)',
     userSelect: 'none'
   },
   /* The words that moved, marked the way the panel's diff card marks them: a
@@ -148,16 +217,6 @@ const tulipTheme = EditorView.theme({
   '.cm-agent-working-line': {
     background: 'color-mix(in srgb, var(--accent) 12%, transparent)',
     boxShadow: 'inset 3px 0 0 color-mix(in srgb, var(--accent) 65%, transparent)'
-  },
-  /* Text the copilot is still writing. It sits in the flow at the size and
-     leading of the paragraph it is joining, so a sentence appearing reads as
-     part of the note — but held back a shade, because until the tool runs none
-     of it is on disk and a reader should be able to tell. */
-  '.cm-agent-draft': {
-    whiteSpace: 'pre-wrap',
-    color: 'color-mix(in srgb, var(--ink) 68%, transparent)',
-    background: 'color-mix(in srgb, var(--accent) 7%, transparent)',
-    borderRadius: '2px'
   },
   '.cm-agent-typing-cursor': {
     display: 'inline-block',
@@ -189,6 +248,24 @@ const tulipTheme = EditorView.theme({
     color: 'color-mix(in srgb, var(--code-removed) 75%, transparent)',
     fontFamily: 'var(--font-mono)',
     userSelect: 'none'
+  },
+  /* Deleted widgets next to a fenced-code line belong to that fence. Match
+     its typography and gutter instead of inheriting the prose diff's larger
+     body type. */
+  '.cm-agent-deleted:has(+ .tk-code-block), .tk-code-block + .cm-agent-deleted': {
+    margin: '1px 0',
+    borderInline: '1px solid var(--line-soft)',
+    fontFamily: 'var(--font-mono)',
+    fontSize: '12.5px',
+    lineHeight: '1.62'
+  },
+  '.cm-agent-deleted:has(+ .tk-code-block) .cm-agent-deleted-line, .tk-code-block + .cm-agent-deleted .cm-agent-deleted-line': {
+    gridTemplateColumns: 'calc(2ch + 16px) minmax(0, 1fr)',
+    padding: '0 12px'
+  },
+  '.cm-agent-deleted:has(+ .tk-code-block) .cm-agent-diff-mark, .tk-code-block + .cm-agent-deleted .cm-agent-diff-mark': {
+    paddingRight: '16px',
+    textAlign: 'right'
   },
 
   /* The completion tooltip — the `[[` note list and the slash menu. Styled
@@ -525,12 +602,40 @@ function sizerFor (img, view) {
         'stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>' +
     '</svg>'
 
+  /* The second control: change what the picture embeds. Same corner, one
+     button over from the source reveal — clicking the picture itself stays
+     free for caret placement, and this is the explicit "click into it" the
+     placeholder chip already offers. */
+  const change = document.createElement('button')
+  change.type = 'button'
+  change.className = 'tk-embed-control tk-embed-change'
+  change.title = 'Choose what to embed'
+  change.setAttribute('aria-label', 'Choose what to embed')
+  change.innerHTML =
+    '<svg viewBox="0 0 16 16" aria-hidden="true">' +
+      '<path d="M7 2.5 3.5 6 7 9.5M9 2.5l3.5 3.5L9 9.5" fill="none" stroke="currentColor" ' +
+        'stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>' +
+    '</svg>'
+
   const grip = embedResizeGrip()
-  host.append(img, source, grip)
+  host.append(img, change, source, grip)
 
   /* Keep the editor's caret where it is until the click selects the exact
      source range below. Otherwise mousedown first moves it to whichever side
      of the replacement CodeMirror happens to hit-test. */
+  change.addEventListener('mousedown', (event) => {
+    event.preventDefault()
+    event.stopPropagation()
+  })
+  change.addEventListener('click', (event) => {
+    event.preventDefault()
+    event.stopPropagation()
+    const range = embedRangeAtDOM(view, host)
+    if (range) openEmbedPicker(view, range.from, range.to)
+  })
+
+  /* Same for the source reveal: keep the caret put until the click selects
+     the exact range below. */
   source.addEventListener('mousedown', (event) => {
     event.preventDefault()
     event.stopPropagation()
@@ -728,6 +833,20 @@ class BulletWidget extends WidgetType {
     const dot = document.createElement('span')
     dot.className = 'tk-bullet'
     dot.textContent = '•'
+    return dot
+  }
+}
+
+/* An ordered item's number, drawn as a small accent-coloured circle — the
+   same rendering the reading view builds from the list-item counter, so the
+   two views agree on what a numbered list looks like. */
+class OrderedMarkWidget extends WidgetType {
+  constructor (num) { super(); this.num = num }
+  eq (other) { return other.num === this.num }
+  toDOM () {
+    const dot = document.createElement('span')
+    dot.className = 'tk-olnum'
+    dot.textContent = this.num
     return dot
   }
 }
@@ -997,6 +1116,12 @@ function buildDecorations (view, imageSource = null) {
         if (inCode(start, end) || isClaimed(start, end)) continue
 
         claimed.push([start, end])
+
+        /* An embed with no target — `![[ ]]` — is an instruction to choose,
+           not a missing picture, so the live preview stays off it; the slash
+           module's own field draws the chip that opens the picker. Claimed so
+           the brackets are not decorated as a link underneath it. */
+        if (!embed.src.trim()) continue
 
         const spec = specForEmbed(embed, { resolve, resolveNote })
         if (spec.kind === 'image' &&
@@ -1337,7 +1462,15 @@ function buildDecorations (view, imageSource = null) {
 
         if (name === 'ListMark') {
           const mark = state.doc.sliceString(node.from, node.to)
-          if (/\d/.test(mark)) return   // ordered lists keep their numbering
+          const number = /^\d+/.exec(mark)
+          if (number) {
+            ranges.push(
+              Decoration.replace({ widget: new OrderedMarkWidget(number[0]) })
+                .range(node.from, node.to)
+            )
+            hidden.push([node.from, node.to])
+            return
+          }
           const after = state.doc.sliceString(node.to, Math.min(node.to + 6, state.doc.length))
           const task = /^\s*\[[ xX]\]/.exec(after)
           if (task) {
@@ -1803,52 +1936,42 @@ const agentTyping = StateField.define({
   provide: (field) => EditorView.decorations.from(field)
 })
 
-/* The text of a write the copilot is still composing, shown where it will land.
-   It is a decoration and not a document change on purpose: nothing here has
-   been written to disk yet, so putting it in the document would hand autosave a
-   half-finished sentence and fill undo with a hundred one-token steps. The
-   document catches up in one transaction when the tool actually runs. */
-const agentDraftEffect = StateEffect.define() // { from, to, text } | null
+/* ------------------------------------------------------------- spelling */
 
-class AgentDraft extends WidgetType {
-  constructor (text) { super(); this.text = text }
-  eq (other) { return other.text === this.text }
-  toDOM () {
-    const draft = document.createElement('span')
-    draft.className = 'cm-agent-draft'
-    // Read by nobody: a screen reader announcing a partial sentence on every
-    // token would be unusable, and the settled text is announced when it lands.
-    draft.setAttribute('aria-hidden', 'true')
-    draft.append(document.createTextNode(this.text))
-    const caret = document.createElement('span')
-    caret.className = 'cm-agent-typing-cursor'
-    draft.append(caret)
-    return draft
-  }
+/* The words the dictionary did not know, as the editor draws them.
 
-  ignoreEvent () { return true }
-}
+   Chromium underlines misspellings in a contenteditable of its own accord, and
+   for a plain text box that would be the whole feature. It is not enough here:
+   CodeMirror rebuilds the DOM of a line on every edit and only renders the
+   lines in view, and the platform's markers do not survive that — text that was
+   loaded rather than typed is usually never marked at all. The underline is
+   therefore drawn from the same answer the Spelling pane is drawn from, which
+   has the second, larger benefit of the two agreeing: what the pane skips as
+   code, maths, a wikilink or a tag is not underlined either.
 
-const agentDraft = StateField.define({
+   Positions come from outside, so the field maps them through edits and keeps
+   them until the next pass — otherwise every keystroke would blink every
+   underline in the note off and on again while the dictionary was asked. */
+const misspellingEffect = StateEffect.define() // [{ from, to }]
+
+const misspellings = StateField.define({
   create: () => Decoration.none,
   update (deco, tr) {
     for (const effect of tr.effects) {
-      if (!effect.is(agentDraftEffect)) continue
-      if (!effect.value) return Decoration.none
+      if (!effect.is(misspellingEffect)) continue
+      const marks = []
       const end = tr.state.doc.length
-      const from = Math.max(0, Math.min(effect.value.from, end))
-      const to = Math.max(from, Math.min(effect.value.to, end))
-      const widget = new AgentDraft(effect.value.text)
-      /* The span being replaced is the Edit's `old_string`: it is about to stop
-         existing, so it is covered rather than left beside its replacement. A
-         Write, and an Edit that only inserts, have nothing to cover. */
-      return Decoration.set([to > from
-        ? Decoration.replace({ widget }).range(from, to)
-        : Decoration.widget({ widget, side: 1 }).range(from)])
+      for (const { from, to } of effect.value || []) {
+        /* The pass ran against the document as it was when it started. A word
+           whose end has since fallen off the document is dropped rather than
+           clamped: a mark stretched to the end of the note is worse than a
+           missing one, and the next pass is 500ms away. */
+        if (!(to > from) || to > end) continue
+        marks.push(Decoration.mark({ class: 'cm-misspelled' }).range(from, to))
+      }
+      return Decoration.set(marks, true)
     }
-    // The real write landing is what ends the preview.
-    if (tr.docChanged) return Decoration.none
-    return deco
+    return deco.map(tr.changes)
   },
   provide: (field) => EditorView.decorations.from(field)
 })
@@ -1891,12 +2014,17 @@ const RENDERED = [livePreview, mathPreview, tablePreview, tableCursorGuard, tabl
                   mermaidBlocks, tikzBlocks, svgBlocks, codeBlockView,
                   headingFoldService, codeFolding({ placeholderText: ' … ' }),
                   keymap.of(foldKeymap),
-                  syntaxHighlighting(highlight)]
+                  ...slashEmbed]
 
 /* Passing the language list straight to `markdown()` leaves any word it does
    not recognise unparsed, and therefore uncoloured — `manim` among them. The
    reading view resolves the same aliases through the same function. */
 const fenceLanguage = (info) => languageFor(info)
+
+/* Built once: `markdown()` assembles a full Language/parser configuration and
+   these are reconfigured into every note on open. */
+const MD_SOURCE = markdown({ base: markdownLanguage, codeLanguages: fenceLanguage, addKeymap: false })
+const TEX_SOURCE = StreamLanguage.define(stex)
 
 /* ------------------------------------------------------------ shortcuts */
 
@@ -1936,10 +2064,22 @@ const markdownKeymap = [
 
 export function createEditor ({
   parent, onChange, onOpenLink, noteNames, noteTitle, onRename, resolveEmbed,
-  resolveNoteEmbed, languageTable, noteFlag, titleEditable
+  resolveNoteEmbed, languageTable, noteFlag, titleEditable, embedChoices,
+  tagChoices
 }) {
   const preview = new Compartment()
+  const sourceLanguage = new Compartment()
+  const sourceTitle = new Compartment()
+  const sourceColor = new Compartment()
+  const sourceAttributes = new Compartment()
+  /* Line numbers, which only a source file ever gets — see `sourceEffects`. */
+  const sourceNumbers = new Compartment()
+  /* And the file run's output, which only a source file ever has. A prose note
+     runs its code a fence at a time, and those panels are already widgets of
+     their own — see src/runblocks.js. */
   let raw = false
+  let numbered = false
+  let sourceMode = 'markdown'
   let agentTypingRun = 0
   let agentTypingTimer = 0
   /* Whoever is waiting on the reveal currently running. Cancelling one means
@@ -1960,6 +2100,12 @@ export function createEditor ({
   const wikiCompletion = (context) => {
     const before = context.matchBefore(/\[\[[^\]]*/)
     if (!before) return null
+
+    /* `![[` asks for something to stand in the page — an attachment or a
+       note — and the slash module answers those keystrokes with its inline
+       ghost instead of this tooltip. So the target of an embed never opens
+       the note list; the two completions must not both claim the same `[[`. */
+    if (context.state.sliceDoc(before.from - 1, before.from) === '!') return null
 
     /* `[[#` names a heading in this note rather than another note — the one
        target the editor can answer for on its own, since the vault's other
@@ -2012,27 +2158,37 @@ export function createEditor ({
         indentUnit.of('    '),
         bracketMatching(),
         closeBrackets(),
-        highlightSelectionMatches(),
         /* Configured up front rather than left for `openSearchPanel` to add on
            first use: until the extension is in the state there is no query to
            seed, so the first ⌘F of a session ignored the selection and every
            one after it honoured it. */
         search(findConfig),
         EditorView.lineWrapping,
-        markdown({ base: markdownLanguage, codeLanguages: fenceLanguage, addKeymap: false }),
-        titleFor(noteTitle, onRename, noteFlag, titleEditable),
+        sourceLanguage.of(MD_SOURCE),
+        sourceTitle.of(titleFor(noteTitle, onRename, noteFlag, titleEditable)),
+        sourceColor.of(syntaxHighlighting(highlight)),
+        sourceAttributes.of(EditorView.editorAttributes.of({ class: '' })),
+        sourceNumbers.of([]),
+        /* A language note is a table editor, not a free-form buffer: the only
+           way to write to it is through a cell. Typing, pasting or deleting in
+           the source lines around the grid is dropped here, which is what a
+           click on the blank line under the table would otherwise reach.
+
+           Untagged transactions pass untouched — `view.patch` carries no
+           userEvent, and it is how a change made on disk (a sync client, a
+           link rewrite) lands in the open note; an earlier version of this
+           filter swallowed those. Cell writes and row controls identify
+           themselves as input.table, the copilot as input.agent, tidying as
+           input.lint, and undo must stay or a mistaken cell edit is forever. */
         languageTableMode.of(languageTable || (() => false)),
-        /* Language documents are table editors, not free-form buffers. Cell
-           writes and row controls identify themselves as input.table. The
-           tags panel's writes (input.tags) edit the note's head,
-           which is config rather than grid, and safe for the same reason. */
         EditorState.transactionFilter.of((tr) => {
           if (!languageTable?.() || !tr.docChanged) return tr
-          if (tr.isUserEvent('input.table') ||
-              tr.isUserEvent('input.tags') ||
-              tr.isUserEvent('input.agent') ||
-              tr.isUserEvent('undo') ||
-              tr.isUserEvent('redo')) return tr
+          const event = tr.annotation(Transaction.userEvent)
+          if (!event ||
+              event.startsWith('input.table') ||
+              event.startsWith('input.agent') ||
+              event.startsWith('input.lint') ||
+              event === 'undo' || event === 'redo') return tr
           return []
         }),
         // A drawing is filed under the note it belongs to, so the widgets are
@@ -2042,16 +2198,22 @@ export function createEditor ({
         agentDiff,
         agentWorking,
         agentTyping,
-        agentDraft,
+        misspellings,
         tableAssetResolver.of(resolveEmbed || (() => null)),
         embedNoteResolver.of(resolveNoteEmbed || (() => null)),
+        embedChoicesFacet.of(embedChoices || (() => [])),
+        tagChoicesFacet.of(tagChoices || (() => [])),
         // Raw view empties this compartment: same document, same history, no
         // decorations standing between you and the markup.
         preview.of(RENDERED),
         codeBlockKeymap,
+        /* Outside `preview`, unlike the rest of a code block's rendering: raw
+           view empties that compartment, and a field that comes and goes is a
+           field the renderer cannot hand a form to. */
+        codeAiForm,
         proseBrackets,
         autocompletion({
-          override: [wikiCompletion, slashCommands, fenceLanguages, calloutKinds],
+          override: [wikiCompletion, slashCommands, fenceLanguages, calloutKinds, hashTags],
           icons: false
         }),
         tulipTheme,
@@ -2078,7 +2240,7 @@ export function createEditor ({
               const inFragment = el.closest('.transclude')
                 ?.querySelector(`[data-equation="${CSS.escape(equation)}"]`)
               if (inFragment) {
-                inFragment.scrollIntoView({ block: 'center', behavior: 'smooth' })
+                inFragment.scrollIntoView({ block: 'center', behavior: scrollBehavior() })
                 flashTarget(inFragment)
                 return true
               }
@@ -2164,6 +2326,97 @@ export function createEditor ({
     state: EditorState.create({ doc: '', extensions })
   })
 
+  /* The selection is not painted on the text — it is a layer of absolutely
+     positioned rectangles, measured once and redrawn only when CodeMirror
+     believes the geometry moved. CodeMirror watches its scroller for that, and
+     the scroller is not what changes here: the writing column is a max-width on
+     the content inside it, so turning "Readable line length" off, picking a
+     different line width, or dragging a pane divider all reflow the text while
+     leaving the scroller exactly the width it was.
+
+     The layer therefore kept rectangles measured against the old column, and a
+     selection inside a code block came out overhanging the block it belongs to
+     — the band still as wide as the column had been. Watching the content
+     element is watching the thing that actually resizes. */
+  /* Width only. The content box also changes height on every keystroke that
+     wraps or unwraps a line, and CodeMirror has already scheduled a measure for
+     that edit — so answering the height too bought a second measure pass per
+     wrapped line typed, for a geometry change that was never the problem. */
+  let columnWidth = -1
+  const columnObserver = new ResizeObserver((entries) => {
+    const entry = entries[entries.length - 1]
+    const width = entry.contentBoxSize?.[0]?.inlineSize ??
+      entry.target.getBoundingClientRect().width
+    if (width === columnWidth) return
+    columnWidth = width
+    view.requestMeasure()
+  })
+  columnObserver.observe(view.contentDOM)
+  const destroy = view.destroy.bind(view)
+  view.destroy = () => { columnObserver.disconnect(); destroy() }
+
+  /* Markdown is the only mode that is prose. Everything else — TeX, and every
+     source extension the vault contract names — is a file shown as itself: no
+     inline title, no live preview, no raw/read/edit choice, and always
+     coloured. Asked as a question rather than compared against a list, because
+     the list is open-ended now and every one of the five decisions below would
+     otherwise have to grow with it. */
+  const isProse = () => sourceMode === 'markdown'
+
+  /* A code file's parser, once its grammar has arrived. `languageFor` hands
+     back a description whose parser is fetched on demand and a compartment
+     cannot be reconfigured with a promise, so the file opens uncoloured for
+     the moment that takes and is reconfigured when it lands. Held against the
+     mode it was loaded for: switching tabs mid-fetch must not colour Julia
+     with the Python parser that was still on its way. */
+  let codeSource = null
+  let codeSourceFor = ''
+
+  const sourceParser = () => {
+    if (sourceMode === 'markdown') return MD_SOURCE
+    if (sourceMode === 'tex') return TEX_SOURCE
+    return codeSourceFor === sourceMode ? codeSource : []
+  }
+
+  /** Fetch the grammar for a code mode and put it on if it is still the one
+   *  open. A language with no parser — plain text, or an extension
+   *  language-data does not carry — settles as no parser at all, which is a
+   *  file shown in the code face without colour rather than a failure. */
+  const loadCodeSource = (mode) => {
+    const description = languageFor(mode)
+    if (!description) return
+    Promise.resolve(languageSupportFor(description)).then((support) => {
+      if (sourceMode !== mode || !support) return
+      codeSource = support
+      codeSourceFor = mode
+      view.dispatch({ effects: sourceEffects() })
+    }).catch(() => { /* uncoloured is a complete view of the file */ })
+  }
+
+  const sourceEffects = () => [
+    sourceLanguage.reconfigure(sourceParser()),
+    sourceTitle.reconfigure(isProse()
+      ? titleFor(noteTitle, onRename, noteFlag, titleEditable)
+      : []),
+    sourceColor.reconfigure(raw && isProse() ? [] : syntaxHighlighting(highlight)),
+    sourceAttributes.reconfigure(EditorView.editorAttributes.of({
+      class: isProse() ? (raw ? 'is-raw' : '') : `is-source is-raw${sourceMode === 'tex' ? ' is-tex' : ''}`
+    })),
+    preview.reconfigure(raw || !isProse() ? [] : RENDERED),
+    /* Prose is never numbered, whatever the setting says. A note is a
+       document — its lines are where the words happened to wrap, not addresses
+       anyone refers to — while a source file's line numbers are how a compiler,
+       a stack trace and a colleague all name a place in it. So the setting asks
+       about source files, and this is where "source file" is known. */
+    sourceNumbers.reconfigure(numbered && !isProse() ? lineNumbers() : []),
+  ]
+
+  const markSourceMode = () => {
+    view.dom.classList.toggle('is-source', !isProse())
+    view.dom.classList.toggle('is-tex', sourceMode === 'tex')
+    view.dom.classList.toggle('is-raw', raw || !isProse())
+  }
+
   /**
    * Each note gets a brand-new state rather than a replacing transaction, so
    * undo can never walk backwards out of this note and into the last one.
@@ -2171,33 +2424,119 @@ export function createEditor ({
   view.setDoc = (text) => {
     stopAgentTyping()
     view.setState(EditorState.create({ doc: text, extensions }))
-    // A fresh state resets every compartment to its default, so raw view has to
-    // be re-applied or opening a note would quietly drop you back into preview.
-    if (raw) view.dispatch({ effects: preview.reconfigure([]) })
+    // A fresh state resets every compartment to its default, so the source
+    // language and raw/live-preview choice have to be put back for this file.
+    view.dispatch({ effects: sourceEffects() })
     // CodeMirror rebuilds its root classes with the state. This one is ours,
     // and the Copilot review marks depend on it surviving the note.
-    view.dom.classList.toggle('is-raw', raw)
-    view.contentDOM.spellcheck = spellcheck
+    markSourceMode()
+  }
+
+  /**
+   * Number the lines of source files, or stop.
+   *
+   * A preference rather than a per-file choice: it is a way of reading code,
+   * and someone who wants the numbers wants them in every file they open.
+   */
+  view.setLineNumbers = (on) => {
+    const next = !!on
+    if (numbered === next) return
+    numbered = next
+    view.dispatch({ effects: sourceEffects() })
   }
 
   /** Raw view: the file as it is on disk, monospaced, nothing hidden. */
   view.setRaw = (on) => {
     if (raw === on) return
     raw = on
-    view.dispatch({ effects: preview.reconfigure(on ? [] : RENDERED) })
-    view.dom.classList.toggle('is-raw', on)
+    view.dispatch({ effects: sourceEffects() })
+    markSourceMode()
+  }
+
+  /**
+   * The file's grammar: `markdown`, `tex`, or the word behind a source file's
+   * extension — `py`, `jl`, `cpp` — which languages.js resolves to a language
+   * and highlight.js to a parser. Markdown keeps its three views; everything
+   * else is always source.
+   */
+  view.setSourceMode = (mode) => {
+    const next = String(mode || 'markdown').toLowerCase()
+    if (sourceMode === next) return
+    sourceMode = next
+    if (!isProse() && next !== 'tex') loadCodeSource(next)
+    view.dispatch({ effects: sourceEffects() })
+    markSourceMode()
+    // A source file is symbols, and the marks from the last Markdown note are
+    // not about it. The renderer's next pass will decline to check it at all.
+    if (!isProse()) view.setMisspellings([])
   }
 
   /** Redraw the parts that read from outside the document — the inline title. */
   view.refresh = () => { view.dispatch({ effects: refreshEffect.of(null) }) }
 
-  /* Spelling is checked by the platform, not by us, so this is a property of
-     the editable element rather than an extension. Re-applied after setDoc,
-     which builds a fresh state — and therefore a fresh contentDOM. */
+  /** Select the inline filename so a newly created document can be named. */
+  view.focusTitle = () => {
+    const input = view.dom.querySelector('.tk-title-field:not([readonly])')
+    if (!input) return false
+    input.focus()
+    input.select()
+    return true
+  }
+
+  /* Spelling over the note is the app's own — the underlines come from the
+     `misspellings` field above, drawn from the same dictionary pass the
+     Spelling pane is drawn from. Chromium's own check is deliberately left off
+     here (CodeMirror sets `spellcheck=false` on the content element and this
+     no longer overrides it): it knows nothing of code fences, wikilinks or
+     `$x_i$` and marks all three, and its markers do not survive a document
+     whose lines are rebuilt as they are typed. Everywhere else in the app —
+     the chat box, a table cell, the search fields — the platform's checker is
+     still the one running.
+
+     So this switch now only decides whether the app draws anything. */
   let spellcheck = true
   view.setSpellcheck = (on) => {
     spellcheck = on !== false
-    view.contentDOM.spellcheck = spellcheck
+    // Turning it off has to take the underlines with it. Turning it on cannot
+    // put them back from here — the words come from the dictionary, and the
+    // renderer asks for a fresh pass.
+    if (!spellcheck) view.setMisspellings([])
+  }
+
+  /**
+   * Underline these ranges as misspellings. The whole set, every time: this is
+   * the answer for the current document, not an addition to the last one.
+   *
+   * @param {{from: number, to: number}[]} ranges
+   */
+  view.setMisspellings = (ranges) => {
+    const wanted = (spellcheck && sourceMode !== 'tex' && ranges) || []
+    // A pass that found nothing, over a note that was already clean, is not a
+    // transaction — and this runs every half second while you type.
+    if (!wanted.length && view.state.field(misspellings, false)?.size === 0) return
+    view.dispatch({ effects: misspellingEffect.of(wanted) })
+  }
+
+  /**
+   * The underlined word under a document position, if there is one — what the
+   * right-click menu needs to know before it can offer to correct it.
+   *
+   * @returns {{ from: number, to: number, word: string } | null}
+   */
+  view.misspellingAt = (pos) => {
+    const set = view.state.field(misspellings, false)
+    if (!set) return null
+    let hit = null
+    /* Both edges count. A click lands on one side or the other of the first
+       letter depending on which half of it was hit, and "not quite on the word"
+       is not a distinction anyone is drawing with a right-click. Two marks can
+       never share an edge — there is always a space or a hyphen between two
+       words — so this cannot be ambiguous. */
+    set.between(pos, pos, (from, to) => {
+      hit = { from, to, word: view.state.sliceDoc(from, to) }
+      return false
+    })
+    return hit
   }
 
   /**
@@ -2221,27 +2560,6 @@ export function createEditor ({
       agentWorkingEffect.of(pos),
       EditorView.scrollIntoView(pos, { y: 'center', yMargin: 80 })
     ] })
-  }
-
-  /**
-   * The text of a write as it is being composed, shown in the place it will
-   * land — nothing is in the document yet.
-   *
-   * @param {{from: number, to: number, text: string, reveal?: boolean}} draft
-   */
-  view.showAgentDraft = ({ from, to, text, reveal = false }) => {
-    const end = view.state.doc.length
-    const at = Math.max(0, Math.min(from, end))
-    const effects = [agentDraftEffect.of({ from: at, to, text })]
-    // Only when the draft first appears. Scrolling on every token would drag
-    // the page under a reader who has looked somewhere else in the note.
-    if (reveal) effects.push(EditorView.scrollIntoView(at, { y: 'center', yMargin: 80 }))
-    view.dispatch({ effects })
-  }
-
-  view.clearAgentDraft = () => {
-    if (!view.state.field(agentDraft, false)?.size) return
-    view.dispatch({ effects: agentDraftEffect.of(null) })
   }
 
   const showAgentDiff = (before, after) => {
@@ -2417,6 +2735,33 @@ export function createEditor ({
     })
     if (effects.length) view.dispatch({ effects })
     return effects.length > 0
+  }
+
+  /**
+   * Open the code block copilot's prompt inside the block a line belongs to.
+   *
+   * The renderer owns the form and knows nothing about document positions; the
+   * editor knows nothing about the form. This is the sentence between them:
+   * given the opening fence's line element and the form, put the form in the
+   * block, under the fence and above the code — where the reading view's copy
+   * of it sits. Answers whether it managed to.
+   */
+  view.showCodeForm = (line, form) => {
+    const pos = view.posAtDOM(line)
+    const { doc } = view.state
+    if (pos == null || pos > doc.length) return false
+    const fence = doc.lineAt(pos)
+    // A fence with nothing under it yet: the form goes where the code would.
+    if (fence.number >= doc.lines) return false
+    view.dispatch({ effects: setCodeAiForm.of({ form, pos: doc.line(fence.number + 1).from }) })
+    return true
+  }
+
+  /** Take it out again. Silent when there is nothing open. */
+  view.hideCodeForm = () => {
+    if (view.state.field(codeAiForm, false)) {
+      view.dispatch({ effects: setCodeAiForm.of(null) })
+    }
   }
 
   /** Put that line back at the top. */

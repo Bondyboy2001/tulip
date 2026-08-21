@@ -8,6 +8,8 @@
    view has no tree, and the two views must agree about the answer.
    ================================================================== */
 
+import { svgIcon } from './dom.js'
+
 /**
  * A heading's name, reduced to something a link can be written as. Obsidian's
  * rule: case and punctuation are ignored, runs of whitespace become one dash.
@@ -291,6 +293,30 @@ export function blockReferencePlugin (md) {
 
 const HEADING_TAG = /^H([1-6])$/
 
+/* The one control every heading gets, built once. Building an element runs the
+   HTML parser for the chevron inside it, and a long note asks for hundreds of
+   identical ones; cloning copies nodes that are already built.
+
+   Built on first use rather than at module scope, so importing this module —
+   most of which is text scanning with no DOM in it — never needs a `document`.
+   The chevron comes from `svgIcon` so that one module owns what an icon is,
+   and so this one gets its parse cache rather than keeping a second. */
+let foldTemplate = null
+
+function foldButton () {
+  if (!foldTemplate) {
+    foldTemplate = document.createElement('button')
+    foldTemplate.type = 'button'
+    foldTemplate.className = 'heading-fold'
+    foldTemplate.append(svgIcon('<path d="m3.5 4.5 2.5 3 2.5-3"/>',
+      { viewBox: '0 0 12 12', stroke: 1.35 }))
+    foldTemplate.setAttribute('aria-expanded', 'true')
+    foldTemplate.setAttribute('aria-label', 'Fold section')
+    foldTemplate.title = 'Fold section'
+  }
+  return foldTemplate.cloneNode(true)
+}
+
 /**
  * Add disclosure controls to the top-level headings under `root`.
  *
@@ -314,14 +340,7 @@ export function installHeadingFolds (root) {
     }
     if (!section.length) continue
 
-    const button = document.createElement('button')
-    button.type = 'button'
-    button.className = 'heading-fold'
-    button.innerHTML =
-      '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="m3.5 4.5 2.5 3 2.5-3" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/></svg>'
-    button.setAttribute('aria-expanded', 'true')
-    button.setAttribute('aria-label', 'Fold section')
-    button.title = 'Fold section'
+    const button = foldButton()
 
     button.addEventListener('click', (event) => {
       event.preventDefault()

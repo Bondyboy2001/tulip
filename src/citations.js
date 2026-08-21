@@ -7,7 +7,7 @@
  * renderer reaches disk asynchronously through the preload bridge.
  */
 
-const CITE_KEY = /@([A-Za-z0-9_:.\/-]+)/
+const CITE_KEY = /@([A-Za-z0-9_:./-]+)/
 
 /** A citation cluster beginning at `pos`, or null. */
 function citationAt (source, pos) {
@@ -206,11 +206,16 @@ const safeId = (key) => encodeURIComponent(key).replaceAll('%', '_')
  * Resolve citation slots and append the cited entries. Failure is intentionally
  * soft: unresolved source remains visible as `[@key]`, which is better than a
  * blank reference in a portable note.
+ *
+ * @param {HTMLElement} root
+ * @param {{ dir?: string,
+ *           resolve?: (name: string, dir: string) => string | null | undefined,
+ *           read?: (path: string) => Promise<string> }} [options]
  */
 export async function dressCitations (root, {
   dir = '', resolve, read
 } = {}) {
-  const slots = [...root.querySelectorAll('.tk-citation')]
+  const slots = /** @type {HTMLAnchorElement[]} */ ([...root.querySelectorAll('.tk-citation')])
   if (!slots.length) return
   root.querySelector(':scope > .tk-bibliography')?.remove()
   const generation = String((Number(root.dataset.citationGeneration) || 0) + 1)
@@ -218,7 +223,8 @@ export async function dressCitations (root, {
 
   /* One convention rather than a declaration: `references.bib` beside the note.
      The note used to name its own file in frontmatter, which no longer exists. */
-  const paths = [resolve?.('references.bib', dir)].filter(Boolean)
+  const bib = resolve?.('references.bib', dir)
+  const paths = bib ? [bib] : []
   if (!paths.length) {
     for (const slot of slots) slot.title = 'No bibliography file was found.'
     return
@@ -227,7 +233,7 @@ export async function dressCitations (root, {
   const entries = new Map()
   await Promise.all(paths.map(async (path) => {
     try {
-      for (const [key, entry] of parseBibTeX(await read(path))) entries.set(key, entry)
+      for (const [key, entry] of parseBibTeX(await read?.(path))) entries.set(key, entry)
     } catch { /* one broken source must not hide entries from the others */ }
   }))
   if (root.dataset.citationGeneration !== generation) return

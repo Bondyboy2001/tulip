@@ -6,7 +6,6 @@
    ================================================================== */
 
 import { tags as t, tagHighlighter, highlightCode } from '@lezer/highlight'
-import { LanguageDescription } from '@codemirror/language'
 import { languageId } from './languages.js'
 
 export const codeTokens = [
@@ -98,6 +97,18 @@ export function clearHighlightCache () {
    note must not each pay for it, and must not each start their own request. */
 const loading = new Map()
 
+/**
+ * The parser for a language description, deduped and never caching a failure.
+ *
+ * Exported because the editor needs the same thing for a whole source file
+ * that this module needs for a fenced block: one map, so opening `solve.py`
+ * and reading a ```python fence in a note ask for the Python parser once
+ * between them.
+ *
+ * @returns the support object, or a promise for it the first time.
+ */
+export const languageSupportFor = (desc) => support(desc)
+
 function support (desc) {
   if (desc.support) return desc.support
   if (!loading.has(desc.name)) {
@@ -125,8 +136,50 @@ const MAX_HIGHLIGHT = 120_000
    of its own — `three`, `threejs`, `3js` — is one entry here rather than one
    per alias. languages.js already holds that list, and the second copy this
    avoids is the kind that silently stops colouring when the first one grows. */
-const FENCE_ALIAS = { manim: 'python', tikz: 'latex', svg: 'xml', three: 'javascript' }
+/* `cuda` is here for the same reason as the rest: language-data has no CUDA
+   parser, and its fuzzy matcher answers nothing for the word. The C++ parser
+   is the right one — a .cu file is C++ plus `__global__`, `<<<…>>>` and the
+   builtin variables, none of which stop it parsing. */
+const FENCE_ALIAS = { manim: 'python', tikz: 'latex', svg: 'xml', three: 'javascript', cuda: 'cpp' }
 const descriptions = new Map()
+
+/* ------------------------------------------------- the language registry
+
+   `LanguageDescription` comes from @codemirror/language, which imports
+   @codemirror/view: naming it in an import at the top of this file put the
+   whole editing stack — half of everything the app compiles at launch — behind
+   the reading view, which needs this module to colour a code block.
+
+   So it arrives one of two ways, and never at startup:
+
+   - the editor primes it as it loads (`primeLanguageDescription`), because it
+     holds the real import anyway and its parser calls `languageFor`
+     synchronously, with no await to hide a fetch behind;
+   - the reading view awaits `languageSupport()` before colouring, which is a
+     no-op once the editor has been anywhere near.
+
+   Both settle on the same class. Fetching it twice would be worse than a
+   wasted request: two `LanguageDescription`s are two different types, and the
+   matcher would stop recognising its own descriptions. */
+/** @type {typeof import('@codemirror/language').LanguageDescription | null} */
+let LanguageDescription = null
+/** @type {Promise<typeof import('@codemirror/language').LanguageDescription> | null} */
+let arriving = null
+
+/** Called by editor.js at load, with the class it already has to hand. */
+export function primeLanguageDescription (cls) {
+  LanguageDescription ||= cls
+}
+
+/** The class, fetched if the editor has not already supplied it. */
+async function languageSupport () {
+  if (LanguageDescription) return LanguageDescription
+  arriving ||= import('@codemirror/language').then((mod) => {
+    LanguageDescription ||= mod.LanguageDescription
+    return LanguageDescription
+  })
+  return arriving
+}
 
 /**
  * The parser for a fence's language word, aliases resolved. Both views ask
@@ -149,14 +202,16 @@ export function languageFor (token) {
      it is plain came out coloured as maths. */
   if (canon === 'text') return null
   if (!descriptions.has(name)) {
-    descriptions.set(name, LanguageDescription.of({
+    const cls = LanguageDescription
+    if (!cls) throw new Error('languageFor called before its class arrived')
+    descriptions.set(name, cls.of({
       name,
       alias: [name],
       async load () {
         const { languages } = await import('@codemirror/language-data')
-        const real = LanguageDescription.matchLanguageName(languages, name, true) ||
+        const real = cls.matchLanguageName(languages, name, true) ||
           (canon && canon !== name &&
-            LanguageDescription.matchLanguageName(languages, canon, true)) || null
+            cls.matchLanguageName(languages, canon, true)) || null
         if (!real) throw new Error(`Unknown code language: ${name}`)
         return support(real)
       }
@@ -174,6 +229,8 @@ export function languageFor (token) {
 export async function highlightInto (el, code, token) {
   if (!token || code.length > MAX_HIGHLIGHT) return false
 
+  // Before `languageFor`, which cannot build a description without it.
+  await languageSupport()
   const desc = languageFor(token)
   if (!desc) return false
 

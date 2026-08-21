@@ -17,7 +17,7 @@
    asserted in a comment.
    ================================================================== */
 
-import { el } from './blocks.js'
+import { el } from './dom.js'
 
 /**
  * A switch that looks pressed rather than a box that looks ticked: three words

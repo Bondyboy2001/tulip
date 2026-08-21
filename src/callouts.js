@@ -14,7 +14,7 @@
    same colour in the other.
    ================================================================== */
 
-import { svgIcon } from './blocks.js'
+import { svgIcon } from './dom.js'
 import { kinds } from '../electron/callout-kinds.json'
 
 /* The kinds, each with the icon it is drawn with and the hue it borrows. The

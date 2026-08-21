@@ -102,35 +102,6 @@ function splitFlowList (inner) {
     .filter((v) => v !== null && v !== undefined && String(v).trim() !== '')
 }
 
-/** Whether a bare string needs quoting to survive the round trip. `inList`
- *  adds the flow-list separators: a comma is prose on its own line and a
- *  fence inside `[...]`. */
-function needsQuotes (text, inList = false) {
-  if (text === '') return true
-  if (text !== text.trim()) return true
-  if (/^(?:true|false|null|yes|no|on|off)$/i.test(text)) return true
-  if (/^-?\d+(?:\.\d+)?$/.test(text)) return true
-  if (/^[0-9]{4}-[0-9]{2}-[0-9]{2}/.test(text)) return true
-  // An indicator in a place YAML reads as structure rather than as prose.
-  if (/^[-?:,[\]{}#&*!|>'"%@`]|["']$/.test(text)) return true
-  if (/:([\s]|$)/.test(text)) return true
-  if (/\s#/.test(text)) return true
-  if (inList && /[,\[\]#]/.test(text)) return true
-  return false
-}
-
-function scalarSource (value, type, inList = false) {
-  if (value == null) return ''
-  if (typeof value === 'boolean') return value ? 'true' : 'false'
-  if (type === 'number' && typeof value === 'number' && Number.isFinite(value)) return String(value)
-  const text = String(value)
-  // A date reads as a bare word; quoting one is noise.
-  if (type === 'date' && /^[0-9]{4}-[0-9]{2}-[0-9]{2}/.test(text)) return text
-  return needsQuotes(text, inList)
-    ? `"${text.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
-    : text
-}
-
 /**
  * A note's frontmatter, as an ordered list of entries — the shape an editor
  * edits. An entry is either a property:
@@ -203,42 +174,6 @@ function propsOf (parsed) {
 }
 
 /**
- * The frontmatter block for a set of entries — both fence lines included, or
- * '' when nothing is left (a deleted last property takes the container with
- * it; an empty `---\n---` head is not something a note should carry).
- */
-function serializeFrontmatter (entries) {
-  const lines = []
-  for (const entry of entries) {
-    if (!entry) continue
-    if (entry.key === undefined) { lines.push(String(entry.raw)); continue }
-    if (!/^[A-Za-z0-9_][A-Za-z0-9_ .-]*$/.test(entry.key)) continue
-    /* A sidebar edit is not permission to reformat every neighbouring line.
-       Parsed entries retain their exact source until that particular row is
-       changed, preserving block-list layout, quotes and inline comments. */
-    if (entry.changed !== true && typeof entry.raw === 'string' && entry.raw !== '') {
-      lines.push(entry.raw)
-      continue
-    }
-    if (entry.list || Array.isArray(entry.value)) {
-      const items = (Array.isArray(entry.value) ? entry.value : [])
-        .filter((v) => v !== null && v !== undefined && String(v).trim() !== '')
-        .map((v) => scalarSource(v, undefined, true))
-      lines.push(`${entry.key}: [${items.join(', ')}]`)
-      continue
-    }
-    /* An empty value keeps its colon — `key:` with nothing after it. A bare
-       word alone is not a property in YAML, and a trailing space is one no
-       style guide keeps. */
-    const source = scalarSource(entry.value, entry.type)
-    lines.push(source === '' ? `${entry.key}:` : `${entry.key}: ${source}`)
-  }
-  while (lines.length && lines[lines.length - 1] === '') lines.pop()
-  if (!lines.length) return ''
-  return `---\n${lines.join('\n')}\n---\n`
-}
-
-/**
  * The values a property matches against, as lowercase text — one per list
  * item, so `prop:status=reading` finds `status: [reading, review]` as well
  * as `status: reading`.
@@ -248,11 +183,63 @@ function propValues (prop) {
   return list.map((v) => scalarText(v).toLowerCase()).filter(Boolean)
 }
 
+/** A value as a flow-list item: bare when YAML would read it back as itself,
+ *  quoted when it would not. JSON quoting is valid YAML double-quoting. */
+function quoteScalar (value) {
+  const text = scalarText(value)
+  if (text === '') return "''"
+  if (/[[\]{}#&*!|>'",:]|^[\s-]|\s$/.test(text)) return JSON.stringify(text)
+  return text
+}
+
+/**
+ * The note's text with one list property set — the writer the module header
+ * promises. `values` empty removes the property; removing the last property
+ * removes the head's fences too, so a note that gained a head for one alias
+ * and lost it again is byte-identical to where it started. Every entry the
+ * grammar did not understand is carried verbatim in its place, which is the
+ * whole reason the writer rebuilds from `parseFrontmatter`'s entries rather
+ * than from a data structure of its own.
+ */
+function writeListProp (text, key, values) {
+  const src = String(text || '')
+  const clean = (values || []).map((v) => String(v).trim()).filter(Boolean)
+  const line = `${key}: [${clean.map(quoteScalar).join(', ')}]`
+
+  const parsed = parseFrontmatter(src)
+  if (!parsed.range) {
+    if (!clean.length) return src
+    return `---\n${line}\n---\n${src}`
+  }
+
+  const lower = String(key).toLowerCase()
+  const kept = []
+  let replaced = false
+  const entries = [...parsed.entries]
+  /* The body ends in a newline, so splitting it leaves one empty line at the
+     end that is an artifact of the split, not a blank line in the head. */
+  const last = entries[entries.length - 1]
+  if (last && last.key === undefined && last.raw === '') entries.pop()
+  for (const entry of entries) {
+    if (entry.key !== undefined && entry.key.toLowerCase() === lower) {
+      // In place the first time, dropped for duplicates — and dropped
+      // entirely when the new list is empty.
+      if (!replaced && clean.length) { kept.push(line); replaced = true }
+      continue
+    }
+    kept.push(entry.raw)
+  }
+  if (!replaced && clean.length) kept.push(line)
+
+  if (!kept.some((one) => one.trim() !== '')) return src.slice(parsed.range.end)
+  const body = kept.length ? `${kept.join('\n')}\n` : ''
+  return src.slice(0, parsed.range.bodyFrom) + body + src.slice(parsed.range.bodyTo)
+}
+
 module.exports = {
   frontmatterRange,
   parseFrontmatter,
   propsOf,
-  serializeFrontmatter,
   propValues,
-  scalarText
+  writeListProp
 }

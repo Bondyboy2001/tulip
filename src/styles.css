@@ -3,9 +3,49 @@
    sans chrome that recedes, and exactly one accent — madder rose.
    ================================================================== */
 
-/* Text colours are held to a contrast floor against their own background:
-   --muted at roughly 5:1 and --faint at roughly 4:1, so status text and
-   keyboard hints stay legible instead of fading into the paper. */
+/* The one typeface the app carries with it: Computer Modern (the Latin Modern
+   cut), because no Mac ships TeX's face and a note full of maths deserves the
+   option. Bundled woff2, emitted next to the stylesheet by the build — the
+   page's font-src allows 'self' and nothing remote. */
+@font-face {
+  font-family: "Computer Modern";
+  src: url("./fonts/LM-regular.woff2") format("woff2");
+  font-weight: normal;
+  font-style: normal;
+}
+@font-face {
+  font-family: "Computer Modern";
+  src: url("./fonts/LM-italic.woff2") format("woff2");
+  font-weight: normal;
+  font-style: italic;
+}
+@font-face {
+  font-family: "Computer Modern";
+  src: url("./fonts/LM-bold.woff2") format("woff2");
+  font-weight: bold;
+  font-style: normal;
+}
+@font-face {
+  font-family: "Computer Modern";
+  src: url("./fonts/LM-bolditalic.woff2") format("woff2");
+  font-weight: bold;
+  font-style: italic;
+}
+
+/* Text colours are held to a contrast floor against their own background: both
+   --muted and --faint clear WCAG AA for body text (4.5:1), so status text and
+   keyboard hints stay legible instead of fading into the paper.
+
+   --faint used to sit at roughly 4:1 by design, on the reasoning that it is
+   decoration. It is not: completed tasks, study progress, timestamps and the
+   version string are all real text wearing it, in 149 places. Nine of the
+   eleven themes were below the floor; they were moved along their own hue and
+   saturation until they cleared it, so each theme still looks like itself.
+   (Solarized's --muted is the one deliberate divergence from a published
+   palette — base00 lands at 4.3:1 on base3, and legibility won.)
+
+   Keep new themes to the same floor. The check is a contrast ratio against
+   --paper, not an eyeball: these were all plausible-looking before. */
 :root {
   --paper:     #FBFAF8;
   --surface:   #FFFFFF;
@@ -13,7 +53,7 @@
   --ink:       #1A1815;
   --ink-soft:  #443F39;
   --muted:     #6B655E;
-  --faint:     #8A847B;
+  --faint:     #756F67;
   --line:      #E1DCD4;
   --line-soft: #EBE8E1;
   --accent:    #A63A5A;
@@ -70,6 +110,7 @@
   --chat: 340px;
   --ease: cubic-bezier(.22, .61, .36, 1);
 
+
   /* The copilot's edits, marked in the accent so they read as the app
      speaking rather than as a selection. */
   --agent-flash: color-mix(in srgb, var(--accent) 20%, transparent);
@@ -122,15 +163,19 @@
   --z-panel-menu: 20;    /* a menu belonging to a side panel */
   --z-panel-pop:  30;    /* …and a popover over that menu */
   --z-titlebar:   40;    /* app chrome; the document scrolls under it */
+  --z-drag:       50;    /* something held by the pointer, over the document */
   --z-modal:      60;    /* full-surface modals — the overlay, settings */
   --z-study:      65;
   --z-context:    70;    /* the right-click menu, over any modal */
   --z-panel:      80;    /* toast, history — chrome that outranks a menu */
   --z-orphans:    85;
+  /* Openable from Help while the palette is up, so it sits over the modals. */
+  --z-shortcuts:  86;
   --z-preview:    90;    /* the ask box and the wikilink hover card */
   --z-dock:      130;    /* the media dock floats over everything but a menu */
   --z-dropdown:  200;    /* a dropdown is always last: it is what was clicked */
   --z-curtain:   250;    /* the export curtain masks even a dropdown */
+  --z-landing:   300;    /* no vault: nothing behind it is worth showing */
 }
 
 [data-theme="dark"] {
@@ -140,7 +185,7 @@
   --ink:       #E9E5DF;
   --ink-soft:  #C4BEB6;
   --muted:     #9C958C;
-  --faint:     #7E776E;
+  --faint:     #867F75;
   --line:      #332F3B;
   --line-soft: #272430;
   --accent:    #E87D9B;
@@ -188,7 +233,279 @@
 
 :root { color-scheme: light; }
 [data-theme="dark"], [data-theme="dracula"], [data-theme="monokai"],
-[data-theme="cobalt2"], [data-theme="cursor-midnight"] { color-scheme: dark; }
+[data-theme="cobalt2"], [data-theme="cursor-midnight"],
+[data-theme="solarized-dark"], [data-theme="nord"], [data-theme="gruvbox"],
+[data-theme="catppuccin"], [data-theme="one-dark"] { color-scheme: dark; }
+
+[data-theme="solarized-light"] {
+  --paper:     #FDF6E3;
+  --surface:   #FFFCF0;
+  --sunk:      #EEE8D5;
+  --ink:       #073642;
+  --ink-soft:  #40565E;
+  --muted:     #5E737A;
+  --faint:     #637176;
+  --line:      #DCD4BD;
+  --line-soft: #E9E2CC;
+  --accent:    #268BD2;
+  --accent-dim:#268BD226;
+  --stem:      #859900;
+  --sel:       #268BD224;
+  --strong:    #CB4B16;
+  --emph:      #6C71C4;
+
+  --code-keyword:  #859900;
+  --code-atom:     #B58900;
+  --code-number:   #B58900;
+  --code-string:   #2AA198;
+  --code-string2:  #2AA198;
+  --code-comment:  #839496;
+  --code-function: #268BD2;
+  --code-def:      #268BD2;
+  --code-type:     #B58900;
+  --code-property: #657B83;
+  --code-tag:      #CB4B16;
+  --code-operator: #657B83;
+  --code-punct:    #839496;
+  --code-meta:     #B58900;
+  --code-added:    #859900;
+  --code-removed:  #DC322F;
+  --math:          #268BD2;
+  --money:         #6B8500;
+  --code-inline:   #D33682;
+
+  --h1: #268BD2;
+  --h2: #2AA198;
+  --h3: #859900;
+  --h4: #B58900;
+  --h5: #6C71C4;
+  --h6: #CB4B16;
+}
+
+[data-theme="solarized-dark"] {
+  --paper:     #002B36;
+  --surface:   #073642;
+  --sunk:      #00212B;
+  --ink:       #E7E4D8;
+  --ink-soft:  #BFC5BC;
+  --muted:     #93A1A1;
+  --faint:     #819292;
+  --line:      #14495A;
+  --line-soft: #0A3844;
+  --accent:    #268BD2;
+  --accent-dim:#268BD22E;
+  --stem:      #859900;
+  --sel:       #268BD233;
+  --strong:    #CB4B16;
+  --emph:      #6C71C4;
+
+  --code-keyword:  #859900;
+  --code-atom:     #B58900;
+  --code-number:   #B58900;
+  --code-string:   #2AA198;
+  --code-string2:  #2AA198;
+  --code-comment:  #657B83;
+  --code-function: #268BD2;
+  --code-def:      #268BD2;
+  --code-type:     #B58900;
+  --code-property: #93A1A1;
+  --code-tag:      #CB4B16;
+  --code-operator: #93A1A1;
+  --code-punct:    #7C8D8D;
+  --code-meta:     #B58900;
+  --code-added:    #859900;
+  --code-removed:  #DC322F;
+  --math:          #268BD2;
+  --money:         #859900;
+  --code-inline:   #D33682;
+
+  --h1: #268BD2;
+  --h2: #2AA198;
+  --h3: #859900;
+  --h4: #B58900;
+  --h5: #6C71C4;
+  --h6: #CB4B16;
+}
+
+[data-theme="nord"] {
+  --paper:     #2E3440;
+  --surface:   #3B4252;
+  --sunk:      #292E39;
+  --ink:       #ECEFF4;
+  --ink-soft:  #D8DEE9;
+  --muted:     #A7B1C2;
+  --faint:     #959EAE;
+  --line:      #434C5E;
+  --line-soft: #3B4252;
+  --accent:    #88C0D0;
+  --accent-dim:#88C0D02E;
+  --stem:      #A3BE8C;
+  --sel:       #88C0D033;
+  --strong:    #D08770;
+  --emph:      #B48EAD;
+
+  --code-keyword:  #81A1C1;
+  --code-atom:     #B48EAD;
+  --code-number:   #B48EAD;
+  --code-string:   #A3BE8C;
+  --code-string2:  #8FBCBB;
+  --code-comment:  #8791A3;
+  --code-function: #88C0D0;
+  --code-def:      #88C0D0;
+  --code-type:     #8FBCBB;
+  --code-property: #D8DEE9;
+  --code-tag:      #81A1C1;
+  --code-operator: #A7B1C2;
+  --code-punct:    #8791A3;
+  --code-meta:     #D08770;
+  --code-added:    #A3BE8C;
+  --code-removed:  #BF616A;
+  --math:          #88C0D0;
+  --money:         #93B47F;
+  --code-inline:   #EBCB8B;
+
+  --h1: #88C0D0;
+  --h2: #81A1C1;
+  --h3: #A3BE8C;
+  --h4: #EBCB8B;
+  --h5: #B48EAD;
+  --h6: #D08770;
+}
+
+[data-theme="gruvbox"] {
+  --paper:     #282828;
+  --surface:   #32302F;
+  --sunk:      #1D2021;
+  --ink:       #EBDBB2;
+  --ink-soft:  #D5C4A1;
+  --muted:     #BDAE93;
+  --faint:     #A89984;
+  --line:      #504945;
+  --line-soft: #3C3836;
+  --accent:    #FE8019;
+  --accent-dim:#FE80192E;
+  --stem:      #B8BB26;
+  --sel:       #FE801933;
+  --strong:    #FABD2F;
+  --emph:      #83A598;
+
+  --code-keyword:  #FB4934;
+  --code-atom:     #D3869B;
+  --code-number:   #D3869B;
+  --code-string:   #B8BB26;
+  --code-string2:  #8EC07C;
+  --code-comment:  #A89984;
+  --code-function: #FABD2F;
+  --code-def:      #FABD2F;
+  --code-type:     #83A598;
+  --code-property: #D5C4A1;
+  --code-tag:      #FE8019;
+  --code-operator: #BDAE93;
+  --code-punct:    #A89984;
+  --code-meta:     #FE8019;
+  --code-added:    #B8BB26;
+  --code-removed:  #FB4934;
+  --math:          #83A598;
+  --money:         #9CB02A;
+  --code-inline:   #D3869B;
+
+  --h1: #FE8019;
+  --h2: #83A598;
+  --h3: #B8BB26;
+  --h4: #FABD2F;
+  --h5: #D3869B;
+  --h6: #FB4934;
+}
+
+[data-theme="catppuccin"] {
+  --paper:     #1E1E2E;
+  --surface:   #2A2A3C;
+  --sunk:      #181825;
+  --ink:       #CDD6F4;
+  --ink-soft:  #BAC2DE;
+  --muted:     #A6ADC8;
+  --faint:     #8A8FA8;
+  --line:      #45475A;
+  --line-soft: #313244;
+  --accent:    #CBA6F7;
+  --accent-dim:#CBA6F72E;
+  --stem:      #A6E3A1;
+  --sel:       #CBA6F733;
+  --strong:    #FAB387;
+  --emph:      #89B4FA;
+
+  --code-keyword:  #CBA6F7;
+  --code-atom:     #FAB387;
+  --code-number:   #FAB387;
+  --code-string:   #A6E3A1;
+  --code-string2:  #94E2D5;
+  --code-comment:  #8A8FA8;
+  --code-function: #89B4FA;
+  --code-def:      #89B4FA;
+  --code-type:     #F9E2AF;
+  --code-property: #BAC2DE;
+  --code-tag:      #F38BA8;
+  --code-operator: #A6ADC8;
+  --code-punct:    #8A8FA8;
+  --code-meta:     #FAB387;
+  --code-added:    #A6E3A1;
+  --code-removed:  #F38BA8;
+  --math:          #89DCEB;
+  --money:         #82C786;
+  --code-inline:   #F5C2E7;
+
+  --h1: #CBA6F7;
+  --h2: #89B4FA;
+  --h3: #A6E3A1;
+  --h4: #F9E2AF;
+  --h5: #F5C2E7;
+  --h6: #FAB387;
+}
+
+[data-theme="one-dark"] {
+  --paper:     #282C34;
+  --surface:   #2F333D;
+  --sunk:      #21252B;
+  --ink:       #D7DAE0;
+  --ink-soft:  #ABB2BF;
+  --muted:     #9AA1AF;
+  --faint:     #9096A2;
+  --line:      #3B4048;
+  --line-soft: #31353D;
+  --accent:    #61AFEF;
+  --accent-dim:#61AFEF2E;
+  --stem:      #98C379;
+  --sel:       #61AFEF33;
+  --strong:    #D19A66;
+  --emph:      #C678DD;
+
+  --code-keyword:  #C678DD;
+  --code-atom:     #D19A66;
+  --code-number:   #D19A66;
+  --code-string:   #98C379;
+  --code-string2:  #56B6C2;
+  --code-comment:  #7F8694;
+  --code-function: #61AFEF;
+  --code-def:      #61AFEF;
+  --code-type:     #E5C07B;
+  --code-property: #ABB2BF;
+  --code-tag:      #E06C75;
+  --code-operator: #56B6C2;
+  --code-punct:    #7F8694;
+  --code-meta:     #9AA1AF;
+  --code-added:    #98C379;
+  --code-removed:  #E06C75;
+  --math:          #56B6C2;
+  --money:         #8AB971;
+  --code-inline:   #E5C07B;
+
+  --h1: #61AFEF;
+  --h2: #56B6C2;
+  --h3: #98C379;
+  --h4: #E5C07B;
+  --h5: #C678DD;
+  --h6: #D19A66;
+}
 
 [data-theme="dracula"] {
   --paper:     #282A36;
@@ -197,7 +514,7 @@
   --ink:       #F8F8F2;
   --ink-soft:  #D8D8D2;
   --muted:     #A3A9C8;
-  --faint:     #7B85AE;
+  --faint:     #8B94B8;
   --line:      #44475A;
   --line-soft: #363948;
   --accent:    #FF79C6;
@@ -242,7 +559,7 @@
   --ink:       #F8F8F2;
   --ink-soft:  #D9D8CE;
   --muted:     #ADA894;
-  --faint:     #8B8676;
+  --faint:     #949081;
   --line:      #3E3D32;
   --line-soft: #32332B;
   --accent:    #F92672;
@@ -332,7 +649,7 @@
   --ink:       #D7DEE7;
   --ink-soft:  #B0BAC6;
   --muted:     #8B95A3;
-  --faint:     #6C7684;
+  --faint:     #737E8C;
   --line:      #232A34;
   --line-soft: #1A1F28;
   --accent:    #6AA6F8;
@@ -389,8 +706,7 @@ html, body {
 }
 
 /**
- * Two cursors, and which one you get says what a click would do: an arrow
- * everywhere, a hand over anything a click acts on.
+ * One steady native arrow across the app chrome.
  *
  * The arrow is the ground state, stated rather than left to `cursor: auto`.
  *
@@ -404,12 +720,11 @@ html, body {
  * rules patching this widget by widget; this is the rule they were each a
  * local instance of.
  *
- * The hand is not one of the things this rule is protecting against. A tab, a
- * row of the tree, a chip, a card, a swatch: every one of them does something
- * when clicked, and each still names `cursor: pointer` for itself — `button`
- * says it once below for the great majority that are buttons. Chrome that a
- * click does nothing to keeps the arrow, and so does a disabled control, which
- * is the whole of what "disabled" has to say for itself.
+ * Tulip follows native macOS controls here: buttons, tabs, links and rows keep
+ * the arrow too. A hand over every control made the cursor alternate at every
+ * small gap in a toolbar and looked like flicker even when each button was
+ * internally correct. Shape changes are reserved for real text fields,
+ * drawing tools and genuine resize handles.
  *
  * A note is not an exception to it. The reading view and the editor once took
  * the I-beam, on the reasoning that they are things you select from — but a
@@ -418,8 +733,7 @@ html, body {
  * changed at. Over a table that meant a beam flickering several times per sweep
  * of the mouse. The caret already says where typing would land, and it says so
  * without moving with the mouse; the cursor saying it a second time bought
- * nothing and cost a steady pointer. So a note keeps the arrow, and the only
- * thing that changes it is the hand.
+ * nothing and cost a steady pointer. So a note keeps the arrow as well.
  *
  * Real text fields — the search box, a title field, the source textarea — keep
  * the beam. They are single-purpose boxes with nothing threaded through them,
@@ -433,7 +747,18 @@ input:not([type="checkbox"], [type="radio"], [type="button"], [type="range"],
           [type="color"], [type="file"], [type="submit"]),
 textarea { cursor: text; }
 input:is([type="checkbox"], [type="radio"], [type="button"], [type="range"],
-         [type="color"], [type="file"], [type="submit"]) { cursor: pointer; }
+         [type="color"], [type="file"], [type="submit"]) { cursor: default; }
+
+/* Clickable UI deliberately keeps the same arrow as the space around it. Name
+   descendants as well so an icon cannot reinstate a library cursor. */
+:where(
+  button, button *, a[href], a[href] *, summary, summary *, select,
+  [role="button"], [role="tab"], [role="switch"],
+  [role="checkbox"], [role="radio"], [role="option"],
+  [role="button"] *, [role="tab"] *, [role="switch"] *,
+  [role="checkbox"] *, [role="radio"] *, [role="option"] *,
+  .row, .row *
+) { cursor: default !important; }
 
 /* Inside a note the arrow is the default rather than the only cursor.
  *
@@ -456,7 +781,7 @@ input:is([type="checkbox"], [type="radio"], [type="button"], [type="range"],
   cursor: default !important;
 }
 
-/* The hand, for the things inside a document a click does something to.
+/* Clickable things inside a document keep the document's arrow.
  *
  * Named one by one rather than swept up by `a, button`, because the two views
  * do not agree on what a click means and the cursor should not claim they do.
@@ -486,16 +811,23 @@ input:is([type="checkbox"], [type="radio"], [type="button"], [type="range"],
   button *, [role="button"] *, [role="switch"] *, summary *, [data-wikilink] *,
   .callout.is-foldable > .callout-head *
 ) {
-  cursor: pointer !important;
+  cursor: default !important;
 }
 
-/* Resize handles, which are neither the arrow nor the hand. They come after
-   both, and carry `!important` for the same reason those do: a note sets a
+/* The picture handle, which is neither the arrow nor the hand. It comes after
+   both, and carries `!important` for the same reason those do: a note sets a
    cursor on everything it holds, this one included. */
 :where(.reading, .cm-scroller) .tk-embed-grip { cursor: nwse-resize !important; }
-:where(.cm-scroller) .tk-col-grip { cursor: col-resize !important; }
 
-button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+button { font: inherit; color: inherit; background: none; border: 0; cursor: default; }
+
+/* Disabled means inert everywhere, including the icon nested inside a button.
+   Keeping this global prevents third-party controls and newly added buttons
+   from retaining a hand merely because they have no component-specific rule. */
+:is(button:disabled, [aria-disabled="true"]),
+:is(button:disabled, [aria-disabled="true"]) * {
+  cursor: default !important;
+}
 
 :focus-visible {
   outline: 2px solid var(--accent);
@@ -506,6 +838,91 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 ::selection { background: var(--sel); }
 
 /* ------------------------------------------------------------ skeleton */
+
+/* The app shell stays hidden until its first vault snapshot is ready. This
+   surface is deliberately outside that shell, so a slow or failed startup can
+   still explain itself and offer a way forward. */
+.boot-screen {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-landing);
+  display: grid;
+  place-items: center;
+  padding: 36px;
+  background: var(--paper);
+}
+.boot-screen[hidden] { display: none; }
+.boot-card {
+  width: min(430px, calc(100vw - 56px));
+  padding: 30px 30px 28px;
+  border-top: 2px solid var(--accent);
+  background: var(--surface);
+  box-shadow: 0 18px 50px color-mix(in srgb, var(--ink) 10%, transparent);
+}
+.boot-mark {
+  display: block;
+  width: 34px;
+  height: 34px;
+  margin-bottom: 20px;
+  color: var(--accent);
+  animation: boot-breathe 1.8s ease-in-out infinite;
+}
+.boot-eyebrow {
+  margin: 0 0 8px;
+  color: var(--faint);
+  font: 600 10px/1 var(--font-ui);
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+.boot-title {
+  margin: 0;
+  color: var(--ink);
+  font: 400 25px/1.15 var(--font-body);
+  letter-spacing: -.018em;
+}
+.boot-message {
+  max-width: 34rem;
+  margin: 10px 0 0;
+  color: var(--muted);
+  font: 13px/1.55 var(--font-ui);
+}
+.boot-detail {
+  margin: 12px 0 0;
+  padding: 9px 10px;
+  border-left: 2px solid var(--strong);
+  background: var(--sunk);
+  color: var(--muted);
+  font: 11.5px/1.45 var(--font-mono);
+  overflow-wrap: anywhere;
+}
+.boot-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 24px;
+}
+.boot-action {
+  min-height: 32px;
+  padding: 7px 12px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--ink-soft);
+  font: 600 11.5px/1 var(--font-ui);
+  cursor: pointer;
+}
+.boot-action:hover { border-color: var(--accent); color: var(--ink); }
+.boot-action.is-primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+.boot-action.is-primary:hover { background: color-mix(in srgb, var(--accent) 86%, var(--ink)); }
+.boot-action:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@keyframes boot-breathe {
+  0%, 100% { opacity: .55; transform: translateY(0); }
+  50% { opacity: 1; transform: translateY(-2px); }
+}
 
 .app {
   display: grid;
@@ -520,12 +937,27 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
      the editor unable to scroll. minmax(0,1fr) pins it to the window. */
   grid-template-rows: minmax(0, 1fr);
   height: 100vh;
+  /* A grid track definition is not a composited property: every intermediate
+     frame of this is a relayout of the shell. What makes it affordable is that
+     the expensive consumers are pinned for the duration — `freezeStage` in
+     renderer.js fixes the main column's width in pixels and adds `is-sliding`,
+     so CodeMirror, a PDF and a <webview> are not handed a new width fifteen
+     times for one keypress; the slide becomes a translation of content that is
+     already laid out, and the one real reflow happens at a single moment.
+
+     That pinning is why this transition can exist at all, and it is also why
+     removing the transition is not the fix it looks like: without it the
+     columns snap while the stage stays pinned for the length of a slide that
+     is no longer happening. The two belong together. Every toggle goes through
+     `freezeStage` — the sidebar, the side pane and the copilot alike; the two
+     latter ones did not, which is where the toggle jank actually was. */
   transition: grid-template-columns .26s var(--ease);
 }
 .app > * { min-height: 0; }
 .app[data-sidebar="closed"] { --col-rail: 0; }
 .app[data-side="closed"] { --col-side: 0; }
 .app[data-ai="closed"] { --col-chat: 0; }
+
 
 .titlebar {
   position: fixed;
@@ -534,6 +966,19 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   -webkit-app-region: drag;
   z-index: var(--z-titlebar);
   pointer-events: none;
+}
+.app-version {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1;
+  color: var(--faint);
+  font: 500 10.5px/1 var(--font-ui);
+  letter-spacing: .035em;
+  opacity: .72;
+  white-space: nowrap;
+  user-select: none;
 }
 
 /* ------------------------------------------------------------- sidebar */
@@ -550,20 +995,32 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 
 /* ---------------------------------------------------------------- grips */
 
-/* Each panel carries the handle for its own edge, so a panel that is closed
-   takes its handle away with it. The strip is wider than the line it sits on:
-   a 1px target is a 1px target, and the hit area is what gets grabbed. */
+.drawer-scrim {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: calc(var(--z-panel) - 1);
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: color-mix(in srgb, var(--ink) 18%, transparent);
+  cursor: default;
+}
+
+/* panels.js moves these handles to the app shell and centres each one over its
+   panel edge. Keeping half the target on either side of the visible divider is
+   what stops the cursor alternating between the panel and document cursors. */
 .grip {
-  position: absolute;
+  position: fixed;
   top: 0;
   bottom: 0;
-  right: 0;
-  width: 7px;
+  right: auto;
+  width: 12px;
   z-index: var(--z-affordance);
   cursor: col-resize;
   -webkit-app-region: no-drag;
 }
-.grip-start { right: auto; left: 0; }
 
 /* The line under the cursor, not the whole strip — the panel edge is already
    drawn, so this only deepens it. */
@@ -572,21 +1029,24 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   position: absolute;
   top: 0;
   bottom: 0;
-  right: 0;
+  left: 50%;
   width: 2px;
+  transform: translateX(-50%);
   background: var(--accent);
   opacity: 0;
   transition: opacity .12s .06s;
 }
-.grip-start::after { right: auto; left: 0; }
 .grip:hover::after,
 .grip:focus-visible::after,
 .app[data-resizing] .grip.is-live::after { opacity: .55; transition-delay: 0s; }
 .grip:focus-visible { outline: none; }
 
 /* A drag reads as the panel following the cursor. Animating the columns turns
-   it into the panel chasing the cursor, so the transition steps aside. */
+   it into the panel chasing the cursor, a frame behind the hand, so the
+   transition steps aside for the duration of a drag. */
 .app[data-resizing] { transition: none; }
+.app[data-resizing],
+.app[data-resizing] * { cursor: col-resize !important; }
 
 .sidebar, .sidepane, .ai { position: relative; }
 /* A closed panel is a zero-wide column; its handle would sit over the editor. */
@@ -622,7 +1082,6 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .vault-name span:last-child {
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .sidebar-actions { display: flex; gap: 1px; }
@@ -641,10 +1100,13 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 
 /* ------------------------------------------------------- sidebar panes */
 
-/* Two words rather than two icons: there are two of them, they are read once,
-   and a rail of glyphs for a choice this small is a puzzle to solve. The
-   underline is what carries the state — the same hairline the panel already
-   uses, moved to say something. */
+/* Words rather than icons: they are read once, and a rail of glyphs for a
+   choice this small is a puzzle to solve. The underline is what carries the
+   state — the same hairline the panel already uses, moved to say something.
+
+   One strip, at the top of the lower panel, naming what is in it. The file
+   tree above has none, because it is not one of the choices: it is what the
+   sidebar is. */
 .pane-tabs {
   display: flex;
   align-items: center;
@@ -653,9 +1115,15 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   padding: 0 10px;
   margin-bottom: 2px;
   border-bottom: 1px solid var(--line-soft);
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
 }
+.pane-tabs::-webkit-scrollbar { display: none; }
 .pane-tab {
   position: relative;
+  flex: none;
   padding: 5px 8px 7px;
   border: 0;
   background: none;
@@ -680,7 +1148,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   background: var(--accent);
 }
 
-/* Only one pane is in the panel at a time, and each takes what is left of it. */
+/* Only one pane is in the lower panel at a time. */
 .pane[hidden] { display: none; }
 
 .tree {
@@ -689,6 +1157,13 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   padding: 2px 8px 16px;
   scrollbar-width: thin;
   scrollbar-color: var(--line) transparent;
+  /* The pane is a leaf as far as the rest of the shell is concerned: nothing
+     outside it depends on how tall the tree inside came out. Saying so keeps a
+     tree that regrows — a folder opening, a note arriving from a watcher —
+     from reaching back up into the sidebar and the app grid. No paint: the
+     scroller already clips, and there are no counters in this file for style
+     containment to strand. */
+  contain: layout style;
 }
 
 /* The row's box is square and its pill is round, which is not the same thing
@@ -730,7 +1205,30 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   cursor: pointer;
   user-select: none;
   white-space: nowrap;
+  /* The tree is not virtualised: every expanded row in the vault is in the
+     document, and a vault of a few thousand notes means a few thousand of
+     these. Without containment each style or layout pass walks the lot, and a
+     hover — which changes one row — is charged for all of them.
+
+     `contain` fences a row's layout and paint off from its neighbours, so a
+     change inside one cannot make the next one dirty. `content-visibility`
+     goes further and skips the contents of rows scrolled out of the pane
+     entirely; the row keeps a 25px placeholder, which is exactly the height it
+     is fixed at above, so the scrollbar tells the truth while it does.
+
+     `content-visibility` brings paint containment with it, which clips to the
+     border box — the notebook's cell toolbar was sliced in half by exactly
+     this. A row's pill is `inset: 0` and its ring is an `inset` shadow, so a
+     resting row has nothing outside its box, but its focus outline is drawn
+     around the pill rather than inside it. So the containment is lifted from
+     the row being pointed at or focused, the way `.nb-cell` lifts it: it is
+     there for the thousands that are neither, and the one under the cursor is
+     already laid out and painted. Anything added later that overhangs a row is
+     covered by the same escape hatch, provided it only appears on hover. */
+  content-visibility: auto;
+  contain-intrinsic-block-size: auto 25px;
 }
+.row:hover, .row:focus-within { content-visibility: visible; }
 
 /* Only the rows that have something to draw grow the layer that draws it. The
    tree is not virtualised — every expanded row in the vault is in the document
@@ -750,7 +1248,9 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   box-shadow: var(--row-ring, none);
 }
 /* The focus ring belongs to the pill for the same reason the tint does: an
-   outline follows its own element's corners, and the row no longer has any. */
+   outline follows its own element's corners, and the row no longer has any.
+   It is drawn outside the pill, which is why the rule above hands a focused
+   row its paint back. */
 .row:focus-visible { outline: none; }
 .row:focus-visible::before { outline: 2px solid var(--accent); }
 
@@ -765,6 +1265,9 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   text-overflow: ellipsis;
   min-width: 0;
   flex: 1;
+  /* Ellipsis clips the label box, so leave enough vertical room for UI fonts
+     with deep descenders (notably Futura's lowercase g). */
+  line-height: 1.25;
 }
 .row.is-folder { color: var(--muted); font-weight: 550; }
 
@@ -789,9 +1292,6 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   opacity: .92;
 }
 
-.tk-table th.is-locked {
-  user-select: none;
-}
 .row.is-active .file-ico { opacity: 1; }
 
 .row-input {
@@ -889,6 +1389,13 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   mask-image: linear-gradient(to right, #000 calc(100% - 18px), transparent);
 }
 .tabs::-webkit-scrollbar { display: none; }
+/* A tab from another window is over the strip. Inset rather than an outline:
+   the strip is already up against the window chrome on three sides, and a ring
+   drawn outside it lands under the titlebar. */
+.tabs.is-drop-target {
+  box-shadow: inset 0 0 0 1px var(--accent);
+  border-radius: 6px;
+}
 
 .tab {
   display: flex;
@@ -965,14 +1472,89 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .tabs .tab:only-child .tab-close { display: none; }
 .tabs .tab:only-child { padding-right: 10px; }
 
+/* A pinned tab is narrower than the rest, because it is meant to be recognised
+   rather than read: these are the few documents kept open all session, and the
+   reader knows them by the second or third letter. Shrinking them is also what
+   pays for pinning at all — the strip has a fixed width, and tabs held open for
+   ever would otherwise crowd out the ones being worked in. */
+.tab.is-pinned {
+  max-width: 108px;
+  padding-right: 8px;
+}
+/* Unlike the ×, the mark is not held back until hover: it says why this tab has
+   no × of its own, and an explanation that only appears once you have gone
+   looking for the thing it explains is no explanation. */
+.tab-pin {
+  display: flex;
+  align-items: center;
+  width: 13px; height: 13px;
+  color: var(--faint);
+  flex: none;
+}
+.tab.is-active .tab-pin { color: var(--accent); }
+/* The pinned block and the rest are one strip, not two, so the seam between
+   them is the lightest mark that can still be read as a seam. */
+.tab.is-pinned + .tab:not(.is-pinned) {
+  margin-left: 7px;
+  border-left: 1px solid var(--line-soft);
+  padding-left: 12px;
+}
+
 .stage {
   position: relative;
   flex: 1;
   min-height: 0;
   display: flex;
+  --tex-source: 50%;
 }
 
 .editor-host { position: relative; flex: 1; min-width: 0; overflow: hidden; }
+
+/* ---------------------------------------------------------- TeX workspace */
+
+.stage.is-tex > .editor-host {
+  flex: 0 0 clamp(160px, var(--tex-source), calc(100% - 172px));
+  min-width: 0;
+}
+.stage.is-tex > .tex-preview { flex: 1 1 0; min-width: 0; }
+.tex-divider {
+  position: relative;
+  flex: 0 0 12px;
+  min-width: 12px;
+  z-index: 2;
+  cursor: col-resize;
+  touch-action: none;
+  -webkit-app-region: no-drag;
+}
+.tex-divider[hidden] { display: none; }
+.tex-divider::after {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 50%;
+  width: 1px;
+  transform: translateX(-50%);
+  background: var(--line);
+  transition: width .12s, background .12s, opacity .12s;
+}
+.tex-divider:hover::after,
+.tex-divider:focus-visible::after,
+.tex-divider.is-live::after {
+  width: 2px;
+  background: var(--accent);
+  opacity: .7;
+}
+.tex-divider:focus-visible { outline: none; }
+.tex-preview {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--sunk);
+}
+.tex-pdf {
+  flex: 1;
+  min-height: 0;
+  cursor: text;
+}
 
 /* ------------------------------------------------------------- reading */
 
@@ -992,6 +1574,44 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   max-width: min(var(--measure), 100%);
   margin-inline: auto;
   padding-inline: 24px;
+}
+
+/* Where an enormous note stops being rendered — see READING_LIMIT in
+   renderer.js. Styled as a card rather than as prose so it is plainly the
+   app talking and not the note's own last paragraph. */
+.reading-more {
+  margin: 28px 0 64px;
+  padding: 16px 18px;
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  background: var(--surface);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+.reading-more-text {
+  margin: 0;
+  flex: 1 1 100%;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.reading-more-go, .reading-more-edit {
+  font-family: var(--font-ui);
+  font-size: 12px;
+  padding: 6px 12px;
+  border-radius: 7px;
+  border: 1px solid var(--line-soft);
+  background: var(--paper);
+  color: var(--ink);
+  cursor: pointer;
+}
+.reading-more-go:hover, .reading-more-edit:hover { border-color: var(--line); }
+.reading-more-go:focus-visible, .reading-more-edit:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 /* Only the blocks near the viewport are laid out and painted. The editing view
    gets this for free from CodeMirror's virtual viewport; the reading view is
@@ -1029,6 +1649,22 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .reading h5 { font-size: .94em;  color: var(--h5); }
 .reading h6 { font-size: .94em;  color: var(--h6); }
 .reading p, .reading ul, .reading ol, .reading blockquote { margin: 0 0 1.05em; }
+/* Numbered lists draw an explicit marker beside the item. The number comes from
+   Markdown's token stream rather than a CSS counter, which keeps it correct when
+   the reading view lays out only part of a long note. The marker travels with the
+   class, not with the view: anywhere this renderer's HTML lands — the reading
+   view, a notebook's markdown cell — the list's own marker has to go, or the
+   number is drawn twice. */
+ol.tk-ordered-list {
+  list-style: none;
+  padding-left: 2.3em;
+}
+ol.tk-ordered-list > li { position: relative; }
+ol.tk-ordered-list > li > .tk-olnum {
+  position: absolute;
+  left: -2.25em;
+  top: .07em;
+}
 .reading a { color: var(--accent); text-underline-offset: .18em; }
 /* The same pair of emphasis colours the editor sets on t.strong and t.emphasis,
    so a bold word does not change hue when the view does. Headings keep their
@@ -1037,6 +1673,14 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .reading em, .reading i { color: var(--emph); }
 .reading h1 strong, .reading h2 strong, .reading h3 strong,
 .reading h4 strong, .reading h5 strong, .reading h6 strong { color: inherit; }
+/* "Center headings" (Markdown settings): the titles sit on the column's
+   centre, over their own lines, like a paper's chapter titles. */
+.app[data-center-headings="on"] .reading h1,
+.app[data-center-headings="on"] .reading h2,
+.app[data-center-headings="on"] .reading h3,
+.app[data-center-headings="on"] .reading h4,
+.app[data-center-headings="on"] .reading h5,
+.app[data-center-headings="on"] .reading h6 { text-align: center; }
 
 /* `**bold**` and `*italic*` in the editor. The same colours as the reading
    view above, said in classes so the active-line rule further down has
@@ -1084,17 +1728,35 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
    are a small unordered set, not rows in a settings form; everything else in
    the YAML remains source data and stays in Raw view. */
 .tags-editor {
-  padding: 4px 8px 2px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
   font-family: var(--font-ui);
   font-size: 12px;
 }
 .tags-chips {
-  display: flex;
+  display: contents;
   flex-wrap: wrap;
-  gap: 5px;
-  margin-bottom: 5px;
 }
 .tags-chips:empty { display: none; }
+.file-tags-editor {
+  flex-direction: column;
+  align-items: stretch;
+  padding: 2px 8px 4px;
+}
+.file-tags-editor .tags-chips {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+  width: 100%;
+}
+.file-tags-editor .tag-input {
+  flex: none;
+  width: 100%;
+}
 .tag-chip {
   display: inline-flex;
   align-items: center;
@@ -1102,7 +1764,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   max-width: 100%;
   padding: 2px 3px 2px 7px;
   border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--line-soft));
-  border-radius: 999px;
+  border-radius: 6px;
   background: var(--accent-dim);
   color: var(--accent);
 }
@@ -1115,7 +1777,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   margin-left: 2px;
   padding: 0;
   border: 0;
-  border-radius: 50%;
+  border-radius: 4px;
   background: none;
   color: currentColor;
   cursor: pointer;
@@ -1124,19 +1786,21 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .tag-chip-remove:hover { background: color-mix(in srgb, var(--accent) 15%, transparent); opacity: 1; }
 .tag-chip-remove:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .tag-input {
-  width: 100%;
-  min-width: 0;
-  padding: 5px 7px;
-  border: 1px solid var(--line-soft);
-  border-radius: 5px;
+  flex: 1 1 100px;
+  width: auto;
+  min-width: 80px;
+  padding: 3px 1px 4px;
+  border: 0;
+  border-bottom: 1px solid var(--line-soft);
+  border-radius: 0;
   outline: none;
-  background: var(--surface);
+  background: transparent;
   color: var(--ink);
   font: inherit;
 }
 .tag-input::placeholder { color: var(--faint); }
-.tag-input:hover { border-color: var(--line); }
-.tag-input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-dim); }
+.tag-input:hover { border-bottom-color: var(--line); }
+.tag-input:focus { border-bottom-color: var(--accent); }
 
 /* Inline code, set as a chip. `--sunk` alone was within a few per cent of the
    paper in every theme, so a `code` span read as prose in a different face —
@@ -1333,7 +1997,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
    to sit inside, and the picture fills what is left (the fill itself is set for
    both views at once, further down — see `.has-image-only … .embed-img`). The
    editing view says the same thing with the same class — `.tk-table
-   td.has-image-only` above — and `markImageCells` in src/renderer.js is what
+   td.has-image-only` above — and `markImageCells` in src/assets.js is what
    puts the class here, along with the cell's width hint.
 
    The 1% is the table-layout hint for "minimum content", and what a picture
@@ -1390,6 +2054,12 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 
 /* --------------------------------------------------------------- empty */
 
+/* The static document necessarily contains the no-vault controls, but the
+   saved vault is resolved asynchronously. Keep that placeholder out of the
+   first visible frame; boot removes this marker once the real startup state
+   (including the restored note) is ready. */
+.app[data-booting] { visibility: hidden; }
+
 /* An empty tab has to say it is empty. Left blank it read as a window that had
    not finished loading rather than as a canvas waiting — so the pane carries
    the few things there are to do from a tab holding nothing, set as plain
@@ -1436,6 +2106,77 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   padding: 0;
 }
 
+/* ------------------------------------------------------------- landing
+
+   The first run, and the only screen that is not about a document. It takes
+   the whole window because with no vault there is no sidebar worth showing and
+   no tab worth keeping — one thing to say and one thing to do, set on the same
+   paper as a note so the app does not introduce itself in a different voice. */
+.landing {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-landing);
+  display: grid;
+  place-items: center;
+  padding: 32px;
+  background: var(--paper);
+}
+.landing[hidden] { display: none; }
+
+.landing-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  /* Wide enough for the lede to break where it means to, narrow enough that
+     the eye never has to travel back across the window to read it. */
+  max-width: 30rem;
+}
+
+.landing-title {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: 38px;
+  font-weight: 600;
+  letter-spacing: -.01em;
+  color: var(--ink);
+}
+.landing-lede {
+  margin: 10px 0 0;
+  font-family: var(--font-ui);
+  font-size: 14.5px;
+  line-height: 1.55;
+  color: var(--ink-soft);
+}
+/* The only action on the page, so it is filled rather than outlined — there is
+   nothing here for it to be told apart from, only something for it to be
+   found as. */
+.landing-connect {
+  margin-top: 26px;
+  height: 34px;
+  padding: 0 18px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: var(--accent);
+  color: var(--paper);
+  font-family: var(--font-ui);
+  font-size: 13.5px;
+  font-weight: 550;
+  cursor: pointer;
+  transition: background .12s;
+}
+.landing-connect:hover { background: color-mix(in srgb, var(--accent) 86%, var(--ink)); }
+.landing-connect:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* What happens after the button, in the smallest voice the palette has: it is
+   read once, and only by whoever wonders whether this is a one-time choice. */
+.landing-note {
+  margin: 18px 0 0;
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--faint);
+}
+
 .ghost {
   padding: 6px 12px;
   border-radius: 5px;
@@ -1460,17 +2201,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 /* -------------------------------------------------------------- status */
 
 .status {
-  flex: none;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  height: 26px;
-  padding: 0 16px;
-  font-size: 11px;
-  letter-spacing: .035em;
-  color: var(--faint);
-  border-top: 1px solid var(--line-soft);
-  font-variant-numeric: tabular-nums;
+  display: none;
 }
 
 /* ------------------------------------------------------- overlay panel */
@@ -1499,6 +2230,34 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   animation: rise .16s var(--ease);
 }
 @keyframes rise { from { opacity: 0; transform: translateY(-6px) } }
+
+/* The three previewing pickers — theme, markdown font, interface font — out of
+   the corner of the eye.
+   Every other picker is a list you read, so it takes the middle of the screen
+   and washes out what is behind it. These are previews of what is behind them:
+   dimming and blurring the note hides the only thing the arrows are choosing
+   between. So they move to the top right and the backdrop becomes nothing at
+   all — no wash, no blur, and no pointer target either, which is what leaves
+   the page under them live to scroll while the list is walked. The panel takes
+   its own pointer events back, so its rows still click. */
+.overlay.is-peek {
+  justify-items: end;
+  align-items: start;
+  padding: 12px 12px 0 0;
+  background: none;
+  backdrop-filter: none;
+  pointer-events: none;
+}
+.overlay.is-peek .panel {
+  pointer-events: auto;
+  width: min(300px, calc(100vw - 24px));
+}
+/* One height for all three, and a short one. These panels are looked past, not
+   read: what is being judged is the page behind them, so a list tall enough to
+   reach the bottom of the window is a list covering the thing it is previewing.
+   Ten rows or so, the same in each, so the corner looks the same whichever of
+   them is open — the longer font lists scroll inside it. */
+.overlay.is-peek .panel-list { max-height: min(42vh, 310px); }
 
 /* The query field and, for the vault search only, the switches that qualify
    it. One row: the switches belong to the field, not to the results under it,
@@ -1620,6 +2379,8 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   cursor: pointer;
 }
 .panel-list li[aria-selected="true"] { background: var(--accent-dim); }
+.panel-list li.has-file-icon { align-items: flex-start; }
+.panel-list li .file-ico { margin-top: 1px; }
 .panel-list li .title { color: var(--ink); }
 .panel-list li mark { background: none; color: var(--accent); font-weight: 650; }
 .panel-list li .dir {
@@ -1653,60 +2414,6 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 }
 .panel-list .empty-hint { padding: 14px 11px; color: var(--muted); font-size: 13px; }
 
-/* ------------------------------------------------- font specimen card
-
-   Sits to the right of the panel rather than inside it: the list is already
-   as tall as it wants to be, and a specimen that pushed it around would move
-   the row you are arrowing through. Absolute, off the panel's own centre
-   line, so nothing about the panel changes when the card is not there — every
-   other picker is laid out exactly as it was.
-
-   The text is set in the role's own custom property, which is the same
-   property the preview is already pointing at a new stack. So the card needs
-   no repainting of its own: it is simply the first thing on screen written in
-   the face being tried on. */
-
-.font-sample {
-  position: absolute;
-  top: 13vh;
-  left: calc(50% + min(560px, 100vw - 64px) / 2 + 14px);
-  width: min(290px, calc(50vw - min(560px, 100vw - 64px) / 2 - 28px));
-  max-height: 62vh;
-  overflow: hidden;
-  padding: 18px;
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  box-shadow: 0 1px 2px #0000000d, 0 12px 40px -8px #00000026;
-  font-family: var(--font-body);
-  animation: rise .16s var(--ease);
-}
-.font-sample.is-ui { font-family: var(--font-ui); }
-
-.font-sample-page { color: var(--ink); }
-.font-sample-page h3 {
-  margin: 0 0 6px;
-  font-size: 17px;
-  font-weight: 600;
-  line-height: 1.25;
-}
-.font-sample-page p {
-  margin: 0 0 8px;
-  font-size: 13.5px;
-  line-height: 1.55;
-  color: var(--muted);
-}
-.font-sample-glyphs {
-  color: var(--faint) !important;
-  font-variant-numeric: normal;
-}
-
-/* Under a certain width there is no right-hand side to put it on, and a card
-   overlapping the list it belongs to is worse than no card. */
-@media (max-width: 1040px) {
-  .font-sample { display: none; }
-}
-
 .panel-foot {
   padding: 8px 14px;
   border-top: 1px solid var(--line-soft);
@@ -1724,8 +2431,98 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
    to search". A shade firmer than the key hints: they qualify the results,
    and should be noticed without being shouted. */
 .panel-capped { color: var(--muted); }
+/* How much was found. First in the foot and in the plain colour, because it is
+   the answer to the query rather than a qualification of it; empty when there
+   is nothing to report, and `:empty` keeps the flex gap from showing then. */
+.panel-count { color: var(--muted); }
+.panel-count:empty { display: none; }
+/* A search that is still running. The rows on screen belong to the last query
+   until this clears, so they are dimmed rather than removed — a list that
+   blanks on every keystroke is harder to read than one that lags by one. */
+.panel.is-searching .panel-list { opacity: .55; }
+.panel-list { transition: opacity .12s var(--ease); }
 
 /* -------------------------------------------------------- ctx + toast */
+
+.ctx {
+  position: fixed;
+  z-index: var(--z-context);
+  min-width: 176px;
+  padding: 5px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 8px 28px -6px #00000026;
+  font-size: 13px;
+}
+.ctx button {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  width: 100%;
+  padding: 6px 10px;
+  border-radius: 5px;
+  text-align: left;
+}
+.ctx button:hover { background: var(--accent-dim); }
+.ctx button:disabled {
+  color: var(--faint);
+  opacity: .55;
+  pointer-events: none;
+}
+.ctx button.danger { color: var(--accent); }
+.ctx hr { border: 0; border-top: 1px solid var(--line-soft); margin: 4px 6px; }
+.ctx .key { color: var(--faint); font-family: var(--font-mono); font-size: 11px; }
+
+/* A row that is a switch, drawn as the box it is. A bare tick says what is on
+   but leaves what is off saying nothing at all — an empty box is a state, and
+   a row you can see is off is a row you can see is worth clicking. The box
+   keeps a column of its own so the labels stay in line either way. */
+.ctx button.check { padding-left: 30px; position: relative; }
+.ctx button.check::before {
+  content: "";
+  position: absolute;
+  left: 9px;
+  top: 50%;
+  width: 13px;
+  height: 13px;
+  transform: translateY(-50%);
+  border: 1px solid var(--line);
+  border-radius: 3.5px;
+  background: var(--sunk);
+  transition: background .12s var(--ease), border-color .12s var(--ease);
+}
+/* The tick itself: two sides of a square, turned. Drawn rather than typed so
+   it sits where the box is whatever the row's font does. */
+.ctx button.check::after {
+  content: "";
+  position: absolute;
+  left: 14px;
+  top: 50%;
+  width: 3.5px;
+  height: 7px;
+  border: solid var(--paper);
+  border-width: 0 1.7px 1.7px 0;
+  transform: translateY(-62%) rotate(45deg);
+  opacity: 0;
+}
+.ctx button.check.is-on::before { background: var(--accent); border-color: var(--accent); }
+.ctx button.check.is-on::after { opacity: 1; }
+
+.toast {
+  position: fixed;
+  bottom: 22px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: var(--z-panel);
+  padding: 9px 16px;
+  background: var(--ink);
+  color: var(--paper);
+  border-radius: 7px;
+  font-size: 12.5px;
+  box-shadow: 0 8px 26px -8px #00000059;
+  animation: rise .18s var(--ease);
+}
 
 /* --------------------------------------------------------- study cards */
 
@@ -1815,6 +2612,28 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   font-style: italic;
   color: var(--faint);
 }
+.study-summary {
+  display: flex;
+  margin-top: 28px;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+.study-summary-result {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  background: var(--hover);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  color: var(--muted);
+}
+.study-summary-result strong { font-size: 16px; color: currentColor; }
+.study-summary-result.is-correct { color: var(--code-added); }
+.study-summary-result.is-wrong { color: var(--code-removed); }
+.study-summary-mark { font-size: 18px; line-height: 1; }
 
 /* The word said aloud. Quiet until the pointer is on it: on most cards this is
    a way to hear the word again, and only on a dictation card is it the whole
@@ -1852,6 +2671,23 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .study-input::placeholder { color: var(--faint); font-size: 17px; }
 .study-input:focus { outline: none; border-bottom-color: var(--accent); }
 
+.study-feedback {
+  margin-top: 20px;
+  padding: 8px 13px;
+  border-radius: 8px;
+  font-family: var(--font-ui);
+  font-size: 15px;
+  font-weight: 700;
+}
+.study-feedback[data-result="correct"] {
+  color: var(--code-added);
+  background: color-mix(in srgb, var(--code-added) 12%, transparent);
+}
+.study-feedback[data-result="wrong"] {
+  color: var(--code-removed);
+  background: color-mix(in srgb, var(--code-removed) 12%, transparent);
+}
+
 /* What was typed, then what was wanted — with the characters that differ
    marked. Being told the answer after a near miss invites you to read the two
    as the same word, which is exactly the mistake being corrected. */
@@ -1878,165 +2714,11 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   text-decoration: underline;
   text-underline-offset: 3px;
 }
-.study-actions {
-  display: flex;
-  justify-content: center;
-  margin-top: 14px;
-}
-.study-reveal {
-  height: 34px;
-  padding: 0 16px;
-  border-radius: 7px;
-  font-size: 12.5px;
-  font-weight: 600;
-}
-.study-reveal { color: var(--paper); background: var(--accent); }
-
-/* Four answers in a row, each stating what it will schedule. The interval is
-   the point of the button as much as the word is — "Good" is a judgement,
-   "Good · 12d" is a decision — so it gets a line of its own rather than being
-   squeezed in beside the label. */
-.study-answer-actions { display: flex; gap: 8px; }
-.study-answer-actions button {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 1px;
-  min-width: 76px;
-  padding: 6px 12px 5px;
-  border-radius: 7px;
-  font-size: 12.5px;
-  font-weight: 600;
-}
-.study-grade { line-height: 1.2; }
-.study-when {
-  font-family: var(--font-mono);
-  font-size: 10px;
-  font-weight: 500;
-  opacity: .75;
-  line-height: 1.2;
-}
-/* Good is filled, because it is the answer most sessions are made of and the
-   one the hand should find without looking. The other three share the quiet
-   treatment and are told apart by their ink — Again in the colour this app
-   already uses for something that did not work (see `.run-out-verdict.is-bad`).
-   Not a filled red: forgetting a card is the ordinary business of reviewing,
-   not an error, and a page of red buttons would say otherwise. */
-.study-again { color: var(--code-removed); background: var(--hover); }
-.study-hard { color: var(--ink-soft); background: var(--hover); }
-.study-got { color: var(--paper); background: var(--accent); }
-.study-easy { color: var(--ink-soft); background: var(--hover); }
-.study-answer-actions kbd {
-  color: inherit;
-  opacity: .55;
-  font-family: var(--font-mono);
-  font-size: 9.5px;
-}
-/* Which button Enter will press. When the answer was typed, the grade has
-   already been decided by what was typed — so the ring says what is about to
-   happen rather than leaving the reader to remember that Enter means Good even
-   on a card they just got wrong. */
-.study-answer-actions button.is-suggested {
-  box-shadow: 0 0 0 1.5px var(--accent);
-}
-/* Once the typing has been judged, the grade it earned takes the filled
-   treatment and Good gives it up. Otherwise two buttons look like the default
-   at the same time — the one that is filled and the one that is ringed — and
-   the reader has to work out which of them Enter means. */
-.study-answer-actions[data-graded] .study-got {
-  color: var(--ink-soft);
-  background: var(--hover);
-}
-.study-answer-actions[data-graded] button.is-suggested {
-  color: var(--paper);
-  background: var(--accent);
-  box-shadow: none;
-}
 .study-hint {
   margin: 9px 0 0;
   text-align: center;
   font-size: 10.5px;
   color: var(--faint);
-}
-
-.ctx {
-  position: fixed;
-  z-index: var(--z-context);
-  min-width: 176px;
-  padding: 5px;
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  box-shadow: 0 8px 28px -6px #00000026;
-  font-size: 13px;
-}
-.ctx button {
-  display: flex;
-  justify-content: space-between;
-  gap: 20px;
-  width: 100%;
-  padding: 6px 10px;
-  border-radius: 5px;
-  text-align: left;
-}
-.ctx button:hover { background: var(--accent-dim); }
-.ctx button:disabled {
-  color: var(--faint);
-  opacity: .55;
-  pointer-events: none;
-}
-.ctx button.danger { color: var(--accent); }
-.ctx hr { border: 0; border-top: 1px solid var(--line-soft); margin: 4px 6px; }
-.ctx .key { color: var(--faint); font-family: var(--font-mono); font-size: 11px; }
-
-/* A row that is a switch, drawn as the box it is. A bare tick says what is on
-   but leaves what is off saying nothing at all — an empty box is a state, and
-   a row you can see is off is a row you can see is worth clicking. The box
-   keeps a column of its own so the labels stay in line either way. */
-.ctx button.check { padding-left: 30px; position: relative; }
-.ctx button.check::before {
-  content: "";
-  position: absolute;
-  left: 9px;
-  top: 50%;
-  width: 13px;
-  height: 13px;
-  transform: translateY(-50%);
-  border: 1px solid var(--line);
-  border-radius: 3.5px;
-  background: var(--sunk);
-  transition: background .12s var(--ease), border-color .12s var(--ease);
-}
-/* The tick itself: two sides of a square, turned. Drawn rather than typed so
-   it sits where the box is whatever the row's font does. */
-.ctx button.check::after {
-  content: "";
-  position: absolute;
-  left: 14px;
-  top: 50%;
-  width: 3.5px;
-  height: 7px;
-  border: solid var(--paper);
-  border-width: 0 1.7px 1.7px 0;
-  transform: translateY(-62%) rotate(45deg);
-  opacity: 0;
-}
-.ctx button.check.is-on::before { background: var(--accent); border-color: var(--accent); }
-.ctx button.check.is-on::after { opacity: 1; }
-
-.toast {
-  position: fixed;
-  bottom: 22px;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: var(--z-panel);
-  padding: 9px 16px;
-  background: var(--ink);
-  color: var(--paper);
-  border-radius: 7px;
-  font-size: 12.5px;
-  box-shadow: 0 8px 26px -8px #00000059;
-  animation: rise .18s var(--ease);
 }
 
 /* ------------------------------------------------------------ asking
@@ -2089,6 +2771,15 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   font-size: 12px;
   line-height: 1.45;
   color: var(--muted);
+  /* Written as lines by the one caller that has a list to show — the replace
+     preview, which names files and the line each would change. `textContent`
+     puts the newlines in; this is what makes them newlines. */
+  white-space: pre-wrap;
+  /* And a long list is scrolled rather than allowed to push the buttons off
+     the bottom of a short window. */
+  max-height: 40vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .ask-buttons {
@@ -2136,6 +2827,93 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 
    The same stage as .ask, one storey lower, so the confirmation that guards
    "Move all to Trash" can stand on top of it. */
+/* The keyboard sheet. Two columns of chords on a wide window, one on a narrow
+   one — it is a reference to scan, not a form to work through. */
+.shortcuts {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-shortcuts);
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: color-mix(in srgb, var(--ink) 26%, transparent);
+  backdrop-filter: blur(2px);
+  animation: fade .12s var(--ease);
+}
+.shortcuts-panel {
+  display: flex;
+  flex-direction: column;
+  width: min(720px, 100%);
+  max-height: min(720px, calc(100vh - 48px));
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: var(--surface);
+  box-shadow: 0 10px 40px -12px #00000059, 0 2px 6px #0000001a;
+  animation: rise .16s var(--ease);
+  overflow: hidden;
+}
+.shortcuts-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px 12px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.shortcuts-title {
+  margin: 0;
+  font-family: var(--font-ui);
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.shortcuts-close {
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--faint);
+  font-size: 18px;
+  line-height: 1;
+  padding: 2px 8px 4px;
+}
+.shortcuts-close:hover { background: var(--hover); color: var(--ink); }
+.shortcuts-body {
+  padding: 4px 16px 16px;
+  overflow-y: auto;
+  columns: 2;
+  column-gap: 28px;
+}
+@media (max-width: 620px) { .shortcuts-body { columns: 1; } }
+.shortcuts-group {
+  break-inside: avoid;
+  margin-top: 14px;
+}
+.shortcuts-group-name {
+  margin: 0 0 4px;
+  font-family: var(--font-ui);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.shortcuts-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 3px 0;
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  color: var(--ink-soft);
+}
+.shortcuts-key {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
 .orphans {
   position: fixed;
   inset: 0;
@@ -2271,6 +3049,27 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 /* Cursor, selection, and active-line colours are set in the CodeMirror theme
    layer (src/editor.js) — rules here lose to CodeMirror's own base theme. */
 .cm-content ::selection { background: var(--sel); }
+
+/* drawSelection paints the selection as rectangles in .cm-selectionLayer, a
+   sibling of .cm-content that the library parks at z-index -1 — behind the
+   text, which is right for prose because a prose line has no background of its
+   own. A code line does: .tk-code-block fills it with an opaque --sunk, and an
+   in-flow background paints over any negative-z-index layer in the same
+   stacking context. So every selection rectangle inside a fence was drawn and
+   then buried, and selecting a whole block showed a highlight only on the
+   lines that were not code.
+
+   Lifting the layer over the content fixes it for every themed line at once —
+   the active line and the diff washes included. The selection colours are all
+   translucent, so text reads through the band exactly as before; --z-raised
+   keeps it under the affordances that sit on top of a line. The z-index is set
+   inline by the layer plugin, hence !important, and the rectangles must not
+   take the pointer or a drag inside a code block would land on them instead of
+   on the text. */
+.cm-editor .cm-selectionLayer {
+  z-index: var(--z-raised) !important;
+  pointer-events: none;
+}
 
 /* The completion tooltip is styled in the CodeMirror theme layer
    (src/editor.js) — plain rules here lose to the library's base theme, which
@@ -2645,6 +3444,27 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 }
 
 .tk-bullet { color: var(--accent); }
+
+/* An ordered item's number, circled. The reading view and editor share this
+   element, so one look for a numbered list survives switching views. Tabular
+   figures keep 9 and 10 the same height, and a min-width lets a long count grow
+   into a pill instead of overflowing the ring. */
+.tk-olnum {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  min-width: 1.5em;
+  height: 1.5em;
+  padding: 0 .3em;
+  border-radius: 999px;
+  border: 1.5px solid var(--accent);
+  color: var(--accent);
+  font-size: 1.02em;
+  font-weight: 620;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
 /* The editor has no box to draw — a fenced block is a run of lines — so the
    frame the reading view gets from .code-wrap is assembled here from the first
    line, the last line, and the sides of everything between. The measurements
@@ -2730,6 +3550,14 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   background: color-mix(in srgb, var(--stem) 11%, transparent);
   border-radius: 3px;
   padding: .06em .3em;
+}
+/* In the reading view a tag is a question you can ask — see openTag. In the
+   editing view it is text under the caret, so the affordance is only offered
+   where the click does something. */
+.reading .tk-tag[data-tag] { cursor: pointer; }
+.reading .tk-tag[data-tag]:hover,
+.reading .tk-tag[data-tag]:focus-visible {
+  background: color-mix(in srgb, var(--stem) 20%, transparent);
 }
 /* The same chip in the editing view, and in a table's cells. The backticks
    themselves stay visible on the active line, which is what the chip is
@@ -2868,7 +3696,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 11px 14px 8px;
+  padding: 13px 18px 10px;
 }
 /* No language, no header — an empty bar is just a bar. */
 .reading .code-head:empty { display: none; }
@@ -2940,7 +3768,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .reading .code-nums {
   flex: none;
   margin: 0;
-  padding: 14px 16px 16px;
+  padding: 18px 18px 20px 20px;
   border: 0;
   border-radius: 0;
   background: none;
@@ -2957,7 +3785,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   flex: 1;
   min-width: 0;
   margin: 0;
-  padding: 14px 16px 16px 0;
+  padding: 18px 20px 20px 4px;
   border: 0;
   border-radius: 0;
   background: none;
@@ -3005,31 +3833,82 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .run-btn:hover { color: var(--accent); background: var(--accent-dim); }
 .run-btn.is-running { color: var(--accent); background: var(--accent-dim); }
 
-/* The sparkle's prompt is intentionally smaller than the Copilot panel: it
-   answers one question — what should this block become — then hands the sent
-   request to the normal conversation. */
+/* A compact prompt under the header and above the source. It stays in the code
+   block's flow, so neither the source nor the preceding document is covered.
+   One element, used by both views: reading puts it inside the block it built,
+   editing hands it to the editor to carry as a block widget between the fence
+   and the first line of code (codeAiForm in codeblock.js). In the editing view
+   it is a child of the editor's content, whose lines already carry the block's
+   own inline padding — hence the margins here rather than an inset. */
 .code-ai-popover {
-  position: fixed;
-  z-index: var(--z-dropdown);
-  width: min(390px, calc(100vw - 16px));
-  font-family: var(--font-ui);
+  width: calc(100% - 20px);
+  margin: 2px 10px 10px;
+}
+/* What the hint is measured from: the field's own box, which is the same in
+   both views even where the form's is not. */
+.code-ai-field { position: relative; }
+/* The editing view's copy of that place. There the block is not one element
+   with a surface — every line paints its own slice of --sunk between its own
+   side borders — so a widget dropped between two of them would show the page
+   through the middle of the block. It carries the same slice instead: the
+   frame's borders and fill on the outside, the reading view's 10px inset on
+   the inside, so the field lands on the same column in both views. */
+.code-ai-popover.in-frame {
+  width: auto;
+  margin: 0;
+  padding: 2px 10px 10px;
+  box-sizing: border-box;
+  background: var(--sunk);
+  border-inline: 1px solid var(--line-soft);
+}
+/* The header keeps 18px under it so the first line of code clears the tile.
+   With the form there instead, the gap wanted is the reading view's: measured
+   there, 13.7px of air between the bottom of the language tile and the top of
+   the field. The line's own leading under the tile accounts for ~4.9 of it and
+   the form's top padding for 2, which leaves this. */
+/* The class form is the one to keep. `:has()` with a sibling combinator is the
+   expensive kind: Chromium has to mark a subtree dirty for style recalculation
+   whenever any *following* sibling changes, and the subject here is `.cm-line`
+   — every line in the editor's viewport — while CodeMirror rewrites that
+   sibling list on every keystroke. The widget's own code already knows which
+   line it is being attached under, so it can say so on the line and this can be
+   a plain class match. Until it does, both forms are listed; delete the two
+   `:has()` lines once `tk-code-asking` is being set. */
+.cm-content .cm-line.tk-code-top.tk-code-asking,
+.cm-content .cm-line.tk-code-top:has(+ .code-ai-popover),
+.cm-content .cm-line.tk-code-top:has(+ .cm-widgetBuffer + .code-ai-popover) {
+  padding-bottom: 7px;
 }
 .code-ai-input {
   display: block;
   width: 100%;
-  min-height: 112px;
-  max-height: 260px;
+  min-height: 92px;
+  max-height: 200px;
   resize: vertical;
-  padding: 7px 8px;
-  border: 1px solid var(--line-soft);
-  border-radius: 6px;
+  padding: 10px 11px 30px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
   outline: none;
-  background: var(--sunk);
+  background: var(--surface);
   color: var(--ink);
   font: 12.5px/1.45 var(--font-ui);
+  box-shadow: 0 10px 24px #00000026, 0 2px 5px #0000001a;
+}
+.code-ai-hint {
+  position: absolute;
+  right: 11px;
+  bottom: 9px;
+  color: var(--faint);
+  font: 10.5px/1 var(--font-ui);
+  pointer-events: none;
+  user-select: none;
 }
 .code-ai-input::placeholder { color: var(--faint); }
-.code-ai-input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-dim); }
+.code-ai-input:focus {
+  border-color: color-mix(in srgb, var(--accent) 70%, var(--line));
+  box-shadow: 0 10px 24px #00000026, 0 2px 5px #0000001a,
+    0 0 0 2px var(--accent-dim);
+}
 
 /* The block above gives up its bottom edge so the two become one box. The
    :has() is what lets the frame respond to output it does not contain — the
@@ -3101,7 +3980,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   gap: 5px;
   padding: 2px 8px 2px 6px;
   border: 1px solid transparent;
-  border-radius: 999px;
+  border-radius: 6px;
   background: none;
   font: inherit;
   font-size: 10.5px;
@@ -3165,6 +4044,25 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 
 /* The closed fence line above hands its bottom edge to the panel — but only
    when there is output to hand it to. */
+/* One class for all three of the things that can be handed the edge — a run
+   panel with output in it, a tikz card, a drawing — because the edge they are
+   handed is the same edge. Declared once, here.
+
+   See the note above the `.tk-code-asking` rule for why the class form is the
+   one that matters: a `:has(+ …)` whose subject is `.cm-line` costs style
+   invalidation across the viewport on every keystroke.
+
+   Tikz and drawings are covered by the class alone — `pictureBlocks` in
+   src/blocks-editor.js marks the closing fence line as it draws the widget, so
+   the answer comes from the field that already knows it.
+
+   The run panel keeps its `:has()`, deliberately. Whether a panel is showing
+   is not editor state but DOM state — it flips when a block starts or finishes
+   printing — and the class form was tried and withdrawn: CodeMirror rebuilds
+   `.cm-line` elements as you type, so a class set from `drawOutput` is dropped
+   on the next keystroke and the border pops back until the next run. This is
+   the one place the selector earns its cost. */
+.cm-content .cm-line.tk-code-bottom.tk-code-joined,
 .cm-content .cm-line.tk-code-bottom:has(+ .tk-run:not([hidden])),
 .cm-content .cm-line.tk-code-bottom:has(+ .cm-widgetBuffer + .tk-run:not([hidden])) {
   border-bottom: 0;
@@ -3253,6 +4151,188 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   color: var(--faint);
   padding-top: 8px;
 }
+
+/* ------------------------------------------------------------- file runs
+   The popup the toolbar's Run streams into: the block panel's dress in a
+   window over the corner of the stage. It carries stream styles of its own
+   because the block ones are scoped to their surfaces (.reading, .tk-run) and
+   this is another.
+
+   A window rather than part of the document, which is where it lived for a
+   while. In the document the output was wherever the end of the file happened
+   to be, and the common output here is a picture — something to look at, not
+   to scroll to. Over the stage it also covers the document and nothing else:
+   the tab strip, the sidebar and the copilot stay reachable while it is up.
+
+   Its size is an inline style, written by `paintSize` in src/runcode.js from
+   the stored preference and from the grip in its top-left corner; the rules
+   here only say where it is pinned and what it is made of. */
+.file-run-pop {
+  position: absolute;
+  right: 14px;
+  bottom: 14px;
+  z-index: var(--z-panel-menu);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: 0 14px 40px #00000026, 0 2px 8px #00000014;
+}
+/* Pinned at the bottom right, so the corner that moves is the other one — and
+   the panel grows the way the pointer goes. It is the size of the app's other
+   drag targets and, like them, invisible: the corner of a panel is where a
+   hand already reaches. */
+.file-run-grip {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 16px;
+  height: 16px;
+  z-index: 2;
+  cursor: nwse-resize;
+}
+/* While the picture is edge to edge there is no border for the grip to sit
+   on, so it says where it is under the pointer. */
+.file-run-grip:hover {
+  background: linear-gradient(135deg, var(--accent) 40%, transparent 40%);
+  opacity: .55;
+}
+.file-run-pop .run-out {
+  margin: 0;
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  padding: 8px 20px 12px;
+  /* The popup is the bound now — a megabyte of output (MAX_RUN_BYTES in
+     electron/main.js) is read through it, however tall it has been dragged. */
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+/* A picture bleeds to the panel's edges: the popup is the frame, and one
+   render is not a transcript that needs bounding. A flex column, so the figure
+   below has a height to fit itself into. */
+.file-run-pop:has(.run-image) .run-out {
+  padding: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+/* A failed run tints the whole popup. The inset shadow the block panel
+   completes its frame with would draw a second line inside its border. */
+.file-run-pop .run-out.is-bad {
+  box-shadow: none;
+  background: color-mix(in srgb, var(--code-removed) 4%, var(--surface));
+}
+.file-run-pop .run-out-stream {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.62;
+  color: var(--ink-soft);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.file-run-pop .run-out-stream.is-stderr {
+  color: color-mix(in oklab, var(--code-removed) 55%, var(--ink-soft));
+}
+.file-run-pop .run-out-stream.is-empty { color: var(--faint); font-style: italic; }
+/* The two controls sit on the popup itself, outside the panel, so they stay in
+   the corner while a long transcript scrolls under them. The head keeps clear
+   of that corner so the verdict never slides beneath a button.
+
+   Close is outermost. It is the one that is always there — copy goes away with
+   the transcript, and a picture never has one — so putting it on the edge
+   keeps it in the same place whatever the run printed. */
+.file-run-pop > .tk-close,
+.file-run-pop > .tk-copy {
+  position: absolute;
+  top: 6px;
+  z-index: 1;
+}
+.file-run-pop > .tk-close { right: 8px; }
+.file-run-pop > .tk-copy { right: 33px; }
+.file-run-pop .run-out-head { padding-right: 62px; }
+/* With the picture edge to edge, the controls sit on the render itself. A
+   scrim under them, rather than a colour chosen for one theme: the thing
+   behind them is whatever the program drew. */
+.file-run-pop:has(.run-image) > .tk-close,
+.file-run-pop:has(.run-image) > .tk-copy {
+  background: rgb(0 0 0 / 0.42);
+  color: #fff;
+}
+.file-run-pop:has(.run-image) > .tk-close:hover,
+.file-run-pop:has(.run-image) > .tk-copy:hover {
+  /* The accent the copy control answers a hover with everywhere else — the
+     scrim above outweighs `.run-btn:hover`, so it is restated here rather
+     than lost. */
+  background: rgb(0 0 0 / 0.62);
+  color: var(--accent);
+}
+/* ------------------------------------------------------- a run's picture
+   A PPM on stdout is a bare figure: the picture and nothing else, no caption —
+   the run's shape rides on the picture's tooltip, and the only line ever
+   written above it is the truncation warning. It is hung without a mount or a
+   frame: the popup is a window onto what the program drew, and every pixel of
+   ground around the render was ground the render could have been using. The
+   popup's own border is the boundary a black-edged picture needs. */
+.run-image {
+  margin: 0;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+}
+/* The one line that is ever written above the picture carries its own room,
+   rather than the figure holding a margin open for a warning that almost never
+   comes. */
+.run-image-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-ui);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  /* Clear of the dock's corner controls. */
+  padding: 8px 76px 6px 16px;
+}
+.run-image-warn { color: var(--code-removed); }
+/* The well is a clip and a centring. The popup is a fixed size and the render
+   is whatever shape the program drew, so one of the two axes always has room
+   to spare; the picture sits in the middle of it. */
+.run-image-well {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+/* Edge to edge, with nothing of the popup showing around it. The popup has
+   already been given the render's own aspect (see `aspect` in src/runcode.js),
+   so `cover` is not a crop here — it is what stops the half-pixel the rounding
+   leaves from being a hairline of surface down one side. The picture is the
+   whole of the window, and dragging the window is the zoom. */
+.run-image-well > canvas,
+.run-image-well > .ppm-anim,
+.run-image-well > .ppm-anim > canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.run-image-well > .ppm-anim { line-height: 0; }
+
+/* The toolbar Run wears the accent while its file is going, the way a block's
+   own control does. */
+#doc-run.is-running { color: var(--accent); }
 
 /* ---------------------------------------------------------------- manim
    A rendered scene stands where its code did, so it is set as a figure and
@@ -3410,13 +4490,13 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   color: color-mix(in oklab, var(--code-removed) 55%, var(--ink-soft));
 }
 
-/* The fence line above hands its bottom edge to the drawing under it. */
-.cm-content .cm-line.tk-code-bottom:has(+ .cm-tikz),
-.cm-content .cm-line.tk-code-bottom:has(+ .cm-widgetBuffer + .cm-tikz) {
-  border-bottom: 0;
-  border-radius: 0;
-  padding-bottom: 4px;
-}
+/* The fence line above hands its bottom edge to the picture under it. Matched
+   on `tk-code-joined`, which pictureBlocks in src/blocks-editor.js puts on the
+   closing fence line of any fence it draws a widget beneath — see the rule it
+   shares with the run panel above. The `:has(+ .cm-tikz)` form this replaces
+   asked the same question of the sibling list, and a `:has()` with a sibling
+   combinator is re-checked for every line in the viewport each time CodeMirror
+   rewrites that list, which it does on every keystroke. */
 
 /* ----------------------------------------------------------------- svg
    An ```svg block, drawn. It is the tikz card in both views and for the same
@@ -3468,13 +4548,8 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   white-space: pre-wrap;
 }
 
-/* The fence line above hands its bottom edge to the drawing under it. */
-.cm-content .cm-line.tk-code-bottom:has(+ .cm-drawing),
-.cm-content .cm-line.tk-code-bottom:has(+ .cm-widgetBuffer + .cm-drawing) {
-  border-bottom: 0;
-  border-radius: 0;
-  padding-bottom: 4px;
-}
+/* A drawing is joined to its fence by the same `tk-code-joined` rule as tikz
+   and the run panel — pictureBlocks marks the line for both. */
 
 /* ------------------------------------------------------- inline title */
 /* The note's name, set where a title belongs. */
@@ -3580,7 +4655,48 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 }
 .view-option:active:not(:disabled),
 .doc-tool:active { transform: scale(.94); }
+
+/* The Copilot sparkle is the one button on the bar that summons something
+   rather than switching how the note is drawn, so it answers the pointer:
+   the glyph turns a little and swells, and a soft round tint comes up behind
+   it. The glyph is what moves, not the button — the press scale above stays
+   the button's own, and the two transforms never fight. Reduced motion is
+   handled globally further down, which flattens both to nothing. */
+#ai-toggle { position: relative; }
+#ai-toggle::before {
+  content: "";
+  position: absolute;
+  inset: 2px;
+  border-radius: 50%;
+  background: var(--accent);
+  opacity: 0;
+  transform: scale(.6);
+  transition: opacity .18s var(--ease), transform .18s var(--ease);
+}
+#ai-toggle:hover::before,
+#ai-toggle:focus-visible::before {
+  opacity: .12;
+  transform: scale(1);
+}
+#ai-toggle svg {
+  position: relative;
+  transition: transform .24s var(--ease);
+}
+#ai-toggle:hover svg,
+#ai-toggle:focus-visible svg { transform: rotate(90deg) scale(1.12); }
+#ai-toggle:active svg { transform: rotate(90deg) scale(1); }
 .view-option:disabled { opacity: .32; cursor: default; }
+
+/* The padlock beside a locked document's view switch. Muted rather than
+   coloured: it is the reason two buttons are greyed out, not an alarm. */
+.lock-mark {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 28px;
+  color: var(--muted);
+}
+.lock-mark[hidden] { display: none; }
 
 .doc-control-divider {
   width: 1px;
@@ -3593,8 +4709,10 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
    belong to a note, so the switch goes away for a PDF or a website — and the
    line that was keeping Copilot apart from it was left standing beside the one
    button, dividing it from the edge of the bar. Read off the switch's own
-   `hidden` rather than set alongside it, so the two cannot disagree. */
-.view-switch[hidden] + .doc-control-divider { display: none; }
+   `hidden` rather than set alongside it, so the two cannot disagree. A general
+   sibling: the padlock sits between the switch and the divider, so `+` never
+   matched and the line stood on a PDF anyway. */
+.view-switch[hidden] ~ .doc-control-divider { display: none; }
 
 .study-start {
   display: inline-flex;
@@ -3634,6 +4752,116 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
     animation-duration: .01ms !important;
     transition-duration: .01ms !important;
   }
+}
+
+/* ============================================================ contrast
+
+   Motion has a global blanket above and ten targeted exceptions after it.
+   Contrast gets the same shape: one block that moves the tokens, and a short
+   list of the places where a token cannot reach.
+
+   The tokens and not hex values, because there are eleven palettes and a
+   hard-coded grey would be right in one of them. Every theme declares --ink
+   and --paper, and every theme's --muted, --faint and rules sit somewhere
+   between the two — so "more contrast" is one instruction said once: push each
+   of them further toward the ink. Mixing in oklab keeps the hue the theme
+   chose while moving only the lightness, which is what makes this safe to
+   apply to a warm light palette and a cold dark one with the same numbers.
+
+   Where the ratios started: the tightest --faint on --paper across the eleven
+   themes was 4.57:1, on the default light one. It passes AA and nothing more,
+   which is the wrong place to be for a reader who has asked for contrast. At
+   80% these land in the 9-13:1 range instead.
+
+   Placed after every theme and before the print block, so it outranks the
+   palettes at equal specificity and print still outranks it. */
+@media (prefers-contrast: more) {
+  :root, [data-theme] {
+    /* Secondary text stops being secondary by colour; it stays secondary by
+       size, weight and position, which survive this mode intact. */
+    --ink-soft:  color-mix(in oklab, var(--ink) 94%, var(--paper));
+    --muted:     color-mix(in oklab, var(--ink) 88%, var(--paper));
+    --faint:     color-mix(in oklab, var(--ink) 80%, var(--paper));
+    /* Rules are the other half of it: a 1px hairline at 8% ink is a border
+       that only a good monitor has. */
+    --line:      color-mix(in oklab, var(--ink) 52%, var(--paper));
+    --line-soft: color-mix(in oklab, var(--ink) 34%, var(--paper));
+    /* The washes: a tint at 15% of an accent is a state nobody can see. */
+    --accent-dim: color-mix(in srgb, var(--accent) 34%, transparent);
+    --sel:        color-mix(in srgb, var(--accent) 40%, transparent);
+    /* Still translucent, only stronger: these two are laid over three
+       different surfaces (--paper, --sunk, --surface), and an opaque value
+       mixed against one of them would read as a patch on the other two. */
+    --hover:      color-mix(in srgb, var(--accent) 20%, transparent);
+    --selected:   color-mix(in srgb, var(--accent) 32%, transparent);
+  }
+
+  /* Dimming is the app's way of saying "not now". At .32 the word is gone as
+     well as the button, so unavailable is drawn nearer to available and left
+     to the cursor and the control's own dead state to finish the sentence. */
+  :is(button, [role="button"]):disabled,
+  [aria-disabled="true"],
+  .view-option:disabled { opacity: .62; }
+
+  /* The ring is the one mark that has to be found rather than read, so it is
+     the one that grows. */
+  :focus-visible { outline-width: 3px; }
+}
+
+/* ======================================================== forced colours
+
+   Windows' high contrast modes, and any other user palette the OS imposes.
+   Here the browser replaces our colours with the user's own — text, borders,
+   backgrounds and outlines all come from the system — and the app's job is
+   not to choose colours but to make sure everything it says is still said
+   after the colours are taken away.
+
+   Two things break in this mode and both are ours to fix. Box shadows are
+   dropped outright, so any edge or ring drawn as one vanishes. And every
+   background collapses to Canvas, so a state shown only as a tint — the open
+   note, the current heading, a pressed toolbar button — becomes invisible.
+   Both are answered the same way: with a real outline, which is a property
+   forced colours keeps and repaints in the user's own highlight. */
+@media (forced-colors: active) {
+  /* State that was a tint. Drawn inside the element, because several of these
+     rows now carry paint containment and clip at their own edge. */
+  .row.is-active,
+  .row.is-picked,
+  .row.is-drop-target,
+  .tab.is-active,
+  .pane-tab.is-on,
+  .outline-row.is-here,
+  .model-option.is-on,
+  .ai-menu-row.is-on,
+  .icon-btn[aria-pressed="true"],
+  .view-option[aria-pressed="true"],
+  .theme-card[aria-pressed="true"] {
+    outline: 1px solid Highlight;
+    outline-offset: -1px;
+  }
+
+  /* The file tree's pill is a `::before` with a background and an inset
+     shadow — nothing the user's palette will paint. The row says it itself. */
+  .row:is(:hover, :focus-visible) { outline: 1px solid CanvasText; outline-offset: -1px; }
+
+  /* Focus, restated as an outline everywhere, since the controls that drew
+     theirs as an inset shadow are now drawing nothing. */
+  :focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
+
+  /* The handful of places where the colour is the content rather than the
+     decoration: a theme's preview, a highlighter's ink, a file's kind mark.
+     Forcing these would leave a row of identical squares to choose between. */
+  .swatch i,
+  .pdf-swatch,
+  .file-ico,
+  .theme-card .swatch { forced-color-adjust: none; }
+
+  /* A swatch that opts out of the system palette also opts out of the border
+     the system would have given it, so the selected one needs its own. */
+  .pdf-swatch.is-on { outline: 2px solid Highlight; outline-offset: 2px; }
 }
 
 /* ---------------------------------------------------------------- maths
@@ -3712,9 +4940,11 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 
 /* ------------------------------------------------------------ zoom level */
 
-.status-end { display: flex; align-items: center; gap: 12px; }
-
 .zoom {
+  flex: none;
+  border: 0;
+  background: transparent;
+  font-family: var(--font-ui);
   font-size: 11px;
   letter-spacing: .035em;
   font-variant-numeric: tabular-nums;
@@ -3754,8 +4984,6 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
    a box outside the frame, where it counts towards the height the editor sees.
    Anything else puts every line below the table a line away from where it is
    drawn (see TableWidget.toDOM). */
-/* The room below was where the add-row control sat. With the control gone the
-   table wants the same air above and below as any other block. */
 .tk-table-box {
   position: relative;
   padding: .6em 0;
@@ -3785,25 +5013,19 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
    editing view and not in the reading one would make the same note two
    different shapes. */
 :is(.reading table, .tk-table).has-column-widths { table-layout: fixed; }
-/* A grid still has to reach the edge of its own frame, and where the slack can
-   go decides how.
+/* A grid always reaches the edge of its own frame — widths in the note or not.
+   Both views already say `min-width: 100%`, and where the slack goes depends
+   on what the columns say:
 
-   A table with a column nobody has dragged has somewhere to put it: both views
-   already say `min-width: 100%`, and under fixed layout the leftover space goes
-   to the columns with no width of their own — so the table fills the frame and
-   every dragged column keeps the exact width it was given.
+   A table with a column that has no width of its own has somewhere to put it:
+   under fixed layout the leftover space goes to those columns — so every sized
+   column keeps the exact width it was given.
 
-   A table where every column has been dragged has nowhere to put it. Sharing it
-   out would silently disagree with the numbers written in the note, so the grid
-   is let off the frame's width and the frame comes in to meet it — which is
-   also what lets a column be dragged narrower than the pane. */
-:is(.reading table, .tk-table).has-column-widths:not(.has-flexible-column) { min-width: 0; }
-:is(.reading .table-wrap, .tk-table-wrap):has(
-  > table.has-column-widths:not(.has-flexible-column)
-) {
-  width: max-content;
-  max-width: 100%;
-}
+   A table where every column has a width shares the leftover out in proportion,
+   which is what fixed layout does with a table wider than its columns. Letting
+   the grid off the frame's width instead left a band of empty paper down the
+   right-hand side of any table whose widths did not happen to add up to the
+   pane. */
 :is(.reading table, .tk-table).has-column-widths :is(th, td) {
   /* Both floors are the column's to overrule now: the editing view's caret
      minimum, and the header's refusal to wrap. */
@@ -3887,10 +5109,6 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .tk-table th:first-child, .tk-table td:first-child { padding-left: 16px; }
 .tk-table th:last-child, .tk-table td:last-child { padding-right: 16px; }
 .tk-table thead th {
-  /* The containing block for the column grip, which lives in the header row
-     and nowhere else — a table of a few hundred rows has no reason to promote
-     every body cell to a positioned box for it. */
-  position: relative;
   font-family: var(--font-ui);
   font-size: .82em;
   /* The reading view's header weight, kept in step — see `.reading thead th`. */
@@ -3900,6 +5118,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   color: var(--muted);
   background: color-mix(in srgb, var(--ink) 3.5%, transparent);
   border-bottom: 1px solid var(--table-rule-strong);
+  white-space: nowrap;
 }
 .tk-table td { font-variant-numeric: tabular-nums; }
 /* The focused cell is showing its own markdown rather than the formatted text,
@@ -3910,48 +5129,6 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   box-shadow: inset 0 0 0 1.5px var(--accent-dim);
   font-family: var(--font-mono);
   font-size: .84em;
-}
-/* The column grip: a spreadsheet's, on the seam between two columns. It sits
-   in the header cell rather than in an overlay because the cells are the only
-   thing that knows where a column's edge actually is, and an overlay would
-   have to be re-measured after every edit, scroll and redraw. */
-.tk-col-grip {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  right: -4px;
-  width: 9px;
-  z-index: 3;
-  cursor: col-resize;
-  /* The drag is driven by pointer events; without this it is a scroll on a
-     touch screen. */
-  touch-action: none;
-  user-select: none;
-}
-/* The seam itself, drawn on hover so the header is otherwise unchanged. */
-.tk-col-grip::after {
-  content: '';
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 3px;
-  width: 3px;
-  border-radius: 2px;
-  background: var(--accent);
-  opacity: 0;
-  transition: opacity .12s var(--ease);
-}
-.tk-col-grip:hover::after,
-.tk-table-wrap.is-resizing-column .tk-col-grip:active::after { opacity: .9; }
-/* The last column's grip has no cell to hang over: kept inside the frame, or
-   the wrap's own overflow would hide it. */
-.tk-table th:last-child > .tk-col-grip { right: 0; width: 7px; }
-/* Mid-drag the pointer is nowhere near the text, and a text caret over the
-   whole grid while dragging a column reads as a selection about to happen. */
-.tk-table-wrap.is-resizing-column,
-.tk-table-wrap.is-resizing-column :is(th, td) {
-  cursor: col-resize;
-  user-select: none;
 }
 .tk-table-wrap.is-selecting-cells .tk-table { user-select: none; }
 .tk-table th.tk-table-cell-selected,
@@ -3974,22 +5151,35 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
    suppressed. The active line is the same source position and has no meaning
    while the grid owns focus. */
 .cm-editor.has-table-cell-focus .cm-cursorLayer,
-.cm-editor.has-table-source-selection .cm-cursorLayer,
-.cm-editor.is-language-table-editor .cm-cursorLayer,
-.cm-editor:has(.tk-table-wrap[data-language="true"]) .cm-cursorLayer {
+.cm-editor.has-table-source-selection .cm-cursorLayer {
   display: none !important;
 }
-.cm-editor:has(.tk-table-wrap[data-language="true"]) > .cm-scroller > .cm-content {
+.cm-editor.has-table-cell-focus > .cm-scroller > .cm-content {
   caret-color: transparent !important;
 }
-.cm-editor:has(.tk-table-wrap[data-language="true"])
-  .tk-table [contenteditable="plaintext-only"] {
+.cm-editor.has-table-cell-focus .tk-table [contenteditable="plaintext-only"] {
   caret-color: var(--accent) !important;
 }
 .cm-editor.has-table-cell-focus .cm-activeLine,
-.cm-editor.has-table-source-selection .cm-activeLine,
-.cm-editor.is-language-table-editor .cm-activeLine,
-.cm-editor:has(.tk-table-wrap[data-language="true"]) .cm-activeLine {
+.cm-editor.has-table-source-selection .cm-activeLine {
+  background: transparent !important;
+}
+/* A language document is written through its cells — the transactionFilter in
+   src/editor.js drops any edit aimed at the source lines around the grid. A
+   click on the blank line under the table still lands a document selection
+   there, and a blinking caret over text that cannot be typed into reads as an
+   invitation; so in a language note the editor's own caret and active-line
+   paint are off everywhere, and only a cell shows one. */
+#app[data-kind="language"] .cm-editor .cm-cursorLayer {
+  display: none !important;
+}
+#app[data-kind="language"] .cm-editor > .cm-scroller > .cm-content {
+  caret-color: transparent !important;
+}
+#app[data-kind="language"] .tk-table [contenteditable="plaintext-only"] {
+  caret-color: var(--accent) !important;
+}
+#app[data-kind="language"] .cm-editor .cm-activeLine {
   background: transparent !important;
 }
 /* A language table is a grid, not prose, so the measure does not apply to it.
@@ -4056,6 +5246,26 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   background: var(--accent);
   border-color: var(--accent);
   color: var(--paper);
+}
+.lang-mode {
+  flex: none;
+  align-self: center;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--sunk);
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+.lang-mode:hover { border-color: var(--accent); color: var(--ink); }
+.lang-mode[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--selected);
+  color: var(--accent);
 }
 /* The letters are content, not chrome, so they are set in the document's own
    face — a Cyrillic or Greek key drawn in the interface font would not match
@@ -4349,7 +5559,15 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   padding-right: 16px;
   position: sticky;
   left: 0;
-  z-index: var(--z-raised);
+  /* Over the selection band as well as over the code. A multi-line selection is
+     drawn as one rectangle spanning the whole column — CodeMirror has no notion
+     of a gutter inside a line — so at --z-raised, which the selection layer now
+     also sits at, the band tied with the number and won on tree order: the
+     figures came out washed as though they were part of the selection. They are
+     chrome, and already user-select: none; --z-sticky says the same thing about
+     their place in the stack that `position: sticky` says about their place on
+     the line. */
+  z-index: var(--z-sticky);
   background: var(--sunk);
   /* The number sticks at the frame's padding edge, which leaves a strip of
      frame to its left for the code to slide through. The shadow extends the
@@ -4645,7 +5863,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 }
 .embed-file {
   border: 1px solid var(--line);
-  border-radius: 999px;
+  border-radius: 6px;
   color: var(--ink-soft);
   cursor: pointer;
   text-decoration: none;
@@ -4658,6 +5876,42 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   border: 1px dashed var(--line);
   border-radius: 5px;
   color: var(--faint);
+}
+
+/* The slash key's placeholder: the chip `![[ ]]` becomes in the editor, and
+   the target of "click into it and choose". A button the size of its own
+   label, in the same quiet chip language as the embed-file link. */
+.tk-embed-placeholder {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0 2px;
+  padding: 2px 8px 2px 7px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  background: var(--accent-dim);
+  color: var(--accent);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  line-height: 1.5;
+  cursor: pointer;
+  vertical-align: middle;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.tk-embed-placeholder:hover {
+  border-color: var(--accent-strong, var(--accent));
+  background: color-mix(in srgb, var(--accent-dim) 60%, var(--surface));
+}
+.tk-embed-placeholder svg { flex: none; }
+
+/* The inline autocomplete: the rest of the first matching name, greyed in
+   where it will land. A decoration, never text — it types nothing and saves
+   nothing, and the caret walks straight past it. */
+.tk-embed-ghost {
+  color: var(--faint);
+  opacity: .75;
+  pointer-events: none;
+  user-select: none;
 }
 
 /* ------------------------------------------------------- transclusion
@@ -5127,7 +6381,15 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   border-radius: 7px;
   opacity: .82;
 }
-.tk-embed-source svg {
+.tk-embed-change {
+  top: 8px;
+  right: 41px;
+  width: 29px;
+  height: 27px;
+  border-radius: 7px;
+  opacity: .82;
+}
+.tk-embed-control svg {
   width: 16px;
   height: 16px;
 }
@@ -5189,9 +6451,13 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   min-width: 0;
   background: var(--paper);
   border-left: 1px solid var(--line);
-  overflow: hidden;
+  /* The model popover hangs above the composer. Let it clear the panel edge
+     while open; the log owns its own scrolling, and the closed zero-width
+     column still clips its contents below. */
+  overflow: visible;
 }
 .app[data-ai="closed"] .ai { border-left-color: transparent; }
+.app[data-ai="closed"] .ai { overflow: hidden; }
 
 .ai-head {
   display: flex;
@@ -5237,13 +6503,31 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 .msg p { margin: 0 0 .6em; }
 
 /* Air between turns rather than between every line: a tool call belongs with
-   the reply it precedes, so only a change of speaker opens a gap. */
-.msg-you { margin-top: 15px; }
+   the reply it precedes, so only a change of speaker opens a gap.
+
+   The gap under a question is the larger one, and it is not only for air: the
+   question's controls hang below its bubble (see `.msg-you .msg-actions`), so
+   the room has to be there whatever comes next — a reply, a tool row, the busy
+   heartbeat, or the end of the transcript. Margins do not collapse in a flex
+   column, so it is stated once here rather than per following kind. */
+.msg-you { margin-top: 15px; margin-bottom: 27px; }
 .msg-bot, .msg-think, .msg-step { margin-top: 2px; }
-.msg-you + .msg-bot,
-.msg-you + .msg-think,
-.msg-you + .msg-step { margin-top: 9px; }
 .msg:first-child { margin-top: 0; }
+
+/* The messages a note switch left undrawn, folded behind one row — see
+   `earlierRow` in copilot.js. Styled as an aside rather than a message: it is
+   the panel speaking, and it goes away the moment it is taken up on. */
+.msg-earlier {
+  align-self: center;
+  margin: 6px 0 2px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font: 500 11.5px/1.5 var(--font-ui);
+  color: var(--muted);
+  background: var(--hover);
+  transition: color .12s;
+}
+.msg-earlier:hover { color: var(--ink); }
 
 .msg-you {
   align-self: flex-end;
@@ -5282,6 +6566,73 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   font: 10px/1 var(--font-mono);
   letter-spacing: .04em;
   color: var(--faint);
+}
+
+/* What can be done to a message that has already been said: copy an answer,
+   put a question back in the box. Out of the way until the pointer is on the
+   message — the transcript is for reading, and a row of controls beside every
+   line would compete with the words for it. Kept in the flow rather than
+   floated over the text, so a one-line reply is not covered by its own button.
+
+   Revealed by focus as well as hover, or the keyboard could tab to a control it
+   cannot see.
+
+   Against the right edge on every kind of message. Prose is read from the left,
+   so a control sitting under the first word is the thing the eye lands on after
+   the last line. One edge for all of them means the button is in the same place
+   whichever row the pointer is on. */
+.msg-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 2px;
+  margin-top: 3px;
+  opacity: 0;
+  transition: opacity .12s ease;
+}
+.msg:hover .msg-actions,
+.msg-actions:focus-within { opacity: 1; }
+@media (hover: none) { .msg-actions { opacity: 1; } }
+
+/* A question's controls sit under its bubble, not beside it. In the flow they
+   would open a band of empty box inside the tint — the bubble is sized to its
+   words — so they hang just below it instead, right-aligned to the same edge
+   the bubble ends on, which is where the eye leaves the last line. The gap
+   under a question (its `margin-bottom` above) reserves the room, so whatever
+   comes next is never sat on. Hover and focus still reveal them: they are the
+   bubble's own children, so the same rules above reach them. */
+.msg-you { position: relative; }
+.msg-you .msg-actions {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  margin: 3px 0 0;
+}
+
+.msg-action {
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  color: var(--faint);
+}
+.msg-action svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.msg-action:hover { color: var(--ink); background: var(--hover); }
+
+/* A copy that landed, said on the control itself and only for a moment — see
+   `copyMessage`. The tick replaces the mark rather than joining it, so the
+   button does not change width under the pointer. */
+.msg-action.is-done { color: var(--accent); }
+.msg-action.is-done svg { display: none; }
+.msg-action.is-done::after {
+  content: "✓";
+  font: 12px/1 var(--font-ui);
 }
 
 .msg-bot { padding: 1px 0; }
@@ -5323,6 +6674,18 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   overflow-x: auto;
 }
 .msg pre code { background: none; border: 0; color: inherit; padding: 0; font-size: 11.5px; }
+
+/* The tail of a reply that is still arriving inside a long code fence. There is
+   no seam to cut a fence at, so past a point it is appended as plain text
+   rather than re-parsed as markdown on every frame — see `LIVE_TAIL_LIMIT` in
+   copilot.js. Set as the block it is about to become, so the moment the stream
+   settles and the real render lands is not a visible jump. */
+.msg pre.stream-plain {
+  font: 11.5px/1.5 var(--font-mono);
+  color: var(--ink);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 
 /* Maths in a reply is set close to the prose size around it rather than at
    KaTeX's 1.21em default: that default assumes body text, and in a panel this
@@ -5719,6 +7082,32 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 }
 .ai-busy-time { flex: none; font-variant-numeric: tabular-nums; opacity: .75; }
 
+/* The turns running in conversations that are not on screen. There is a
+   copilot per file now, so the panel can be idle in front of you and busy
+   behind — this is the line that says so, and each name opens the file it is
+   working on. */
+.ai-elsewhere {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  margin-top: 6px;
+  font: 12px/1.5 var(--font-ui);
+  color: var(--faint);
+}
+.ai-elsewhere-label { opacity: .8; }
+.ai-elsewhere-note {
+  border: 0;
+  padding: 0;
+  background: none;
+  font: inherit;
+  font-weight: 550;
+  color: var(--accent);
+  cursor: pointer;
+}
+.ai-elsewhere-note:hover { text-decoration: underline; }
+.ai-elsewhere-note:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
 /* An arc rather than a ring: a circle of even weight looks the same at every
    angle, so it reads as still however fast it turns. */
 .ai-spinner {
@@ -5797,6 +7186,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
    caret. */
 .ai-compose {
   position: relative;
+  z-index: 1;
   flex: none;
   margin: 0 10px 11px;
   padding: 9px 9px 7px;
@@ -5835,7 +7225,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   min-width: 0;
   height: 48px;
   max-width: min(240px, 100%);
-  padding: 4px 28px 4px 4px;
+  padding: 4px 36px 4px 4px;
   border: 1px solid var(--line);
   border-radius: 11px;
   background: color-mix(in srgb, var(--paper) 78%, var(--surface));
@@ -5878,16 +7268,6 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 }
 .ai-attachment.is-pdf .ai-attachment-preview { background: #17191e; }
 .ai-attachment.is-pdf .ai-attachment-preview > svg { fill: #ff5c63; }
-.ai-attachment-fold { fill: #ffffff61; }
-.ai-attachment-kind {
-  position: absolute;
-  left: 50%;
-  bottom: 7px;
-  transform: translateX(-50%);
-  color: #fff;
-  font: 700 6px/1 var(--font-ui);
-  letter-spacing: -.02em;
-}
 
 .ai-attachment-copy {
   display: flex;
@@ -5910,26 +7290,36 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 
 .ai-attachment-remove {
   position: absolute;
-  top: 4px;
-  right: 4px;
-  display: grid;
-  place-items: center;
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  background: color-mix(in srgb, var(--surface) 88%, transparent);
-  color: var(--muted);
-  box-shadow: 0 1px 3px #00000025;
+  top: 50%;
+  right: 5px;
+  transform: translateY(-50%);
 }
-.ai-attachment-remove:hover { background: var(--hover); color: var(--ink); }
-.ai-attachment-remove svg { width: 12px; height: 12px; }
+.ai-attachment-remove svg {
+  display: block;
+  width: 15px;
+  height: 15px;
+}
 .ai-attachment-remove path {
   fill: none;
   stroke: currentColor;
-  stroke-width: 1.5;
+  stroke-width: 1.3;
   stroke-linecap: round;
 }
 .ai-attachment-remove:focus-visible { outline-offset: 1px; }
+
+/* A thumbnail needs its dismissal over the image; the document card has room
+   for the standard app close button beside its filename. */
+.ai-attachment.is-image .ai-attachment-remove {
+  top: 4px;
+  right: 4px;
+  width: 20px;
+  height: 20px;
+  transform: none;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  box-shadow: 0 1px 3px #00000025;
+}
+.ai-attachment.is-image .ai-attachment-remove svg { width: 12px; height: 12px; }
 
 .msg-you-copy:empty { display: none; }
 
@@ -6047,6 +7437,37 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   cursor: pointer;
 }
 .ai-chip:hover { background: var(--hover); color: var(--ink); }
+.ai-chip.ai-mode {
+  display: flex;
+  gap: 4px;
+  width: auto;
+  min-width: 27px;
+  padding: 0 7px;
+  font: 600 10px/1 var(--font-ui);
+  letter-spacing: .02em;
+}
+/* Three modes, three hues, one tint each: the colour is the fastest way to see
+   which permission is standing, and it has to say *which* rather than merely
+   "not the default". Cool for the mode that only reads, the accent for the one
+   that asks first, the warm end for the one that acts on its own — the same
+   warm/cool split bold and italic use, so the escalation reads as heat.
+   All three tokens are defined by every theme, so no theme loses the
+   distinction. */
+.ai-mode[data-mode="read"] { --mode-tint: var(--emph); }
+.ai-mode[data-mode="ask"]  { --mode-tint: var(--accent); }
+.ai-mode[data-mode="auto"] { --mode-tint: var(--strong); }
+.ai-mode[data-mode] { color: var(--mode-tint); }
+.ai-mode[data-mode]:hover {
+  color: var(--mode-tint);
+  background: color-mix(in srgb, var(--mode-tint) 12%, transparent);
+}
+/* Read is tinted but unringed: nothing has been granted, so there is no
+   standing condition to ring. */
+.ai-mode[data-mode][aria-pressed="true"] {
+  color: var(--mode-tint);
+  border-color: color-mix(in srgb, var(--mode-tint) 55%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--mode-tint) 16%, transparent);
+}
 
 /* A pressed control is ringed rather than filled: the copilot being allowed
    to write is a standing condition, and a solid block of accent down here
@@ -6057,9 +7478,10 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   box-shadow: 0 0 0 2px var(--accent-dim);
 }
 
-/* What is answering, and how hard. Always on show, and the way in to change
-   either — so the settings have one home rather than being strewn along the
-   toolbar. */
+/* What is answering, and how hard. A readout and nothing more: the model is
+   chosen by name at the message box and the level is stepped with ⌃T, so there
+   is no hover state and no press — a thing that lights up under the pointer
+   promises something to click. */
 .ai-config {
   display: flex;
   align-items: center;
@@ -6071,27 +7493,32 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   background: none;
   color: var(--muted);
   font: 500 11.5px/1 var(--font-ui);
-  cursor: pointer;
   white-space: nowrap;
 }
-/* The name is the part with somewhere to go: it trails off, while the effort
-   and the chevron hold their ground at their own min-content. */
+/* The name is the part with somewhere to go: it trails off, while the level
+   beside it holds its ground at its own min-content. */
 #ai-config-model { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.ai-config > svg { flex: none; }
-.ai-config:hover { background: var(--hover); color: var(--ink-soft); }
-.ai-config[aria-expanded="true"] {
-  background: var(--sunk);
-  border-color: var(--line);
-  color: var(--ink);
-}
+#ai-config-model.is-none { color: var(--faint); }
 .ai-config-sep { opacity: .5; }
 .ai-config-effort { color: var(--faint); }
-.ai-config:hover .ai-config-effort,
-.ai-config[aria-expanded="true"] .ai-config-effort { color: var(--muted); }
+/* ⌃T changes a word in the corner of a panel nobody is looking at. The flash is
+   what carries the change to the eye — the readout lights the accent and lets
+   go of it, so the level that has just been stepped to is the thing that moved.
+   Short, and once per press: a control that keeps pulsing reads as a warning. */
+.ai-config.is-bumped {
+  animation: ai-config-bump .42s ease-out;
+}
+@keyframes ai-config-bump {
+  0% { background: var(--accent-dim); color: var(--accent); }
+  100% { background: none; color: var(--muted); }
+}
+.ai-config.is-bumped .ai-config-effort { color: var(--accent); }
+@media (prefers-reduced-motion: reduce) {
+  .ai-config.is-bumped { animation-duration: .01s; }
+}
 
-/* Slash commands and past chats. Same footing as the settings popover — above
-   the composer, its full width — because it answers the same question: what
-   can I do from here. */
+/* Slash commands and past chats — above the composer, its full width, because
+   that is where an answer to "what can I do from here" belongs. */
 .ai-menu {
   position: absolute;
   left: 0;
@@ -6128,185 +7555,28 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 /* The name may be a whole sentence someone once asked; it gets the room, and
    what is left over goes to the aside on the right. */
 .ai-menu-name {
-  flex: 1;
+  /* `auto` rather than a zero basis, so the row overflows and the shrink rules
+     below get to decide what gives — with a zero basis the name simply took
+     whatever the aside left it, ellipsis and all, however long the aside was. */
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
+/* The aside gives way first. It was `flex: none`, which held a long hint —
+   `openrouter · 1000k · 5 levels` on a model row — at full width and spent the
+   difference on the name, so the rows of one shelf were cut off at the very
+   character that told them apart. Both may shrink now, the aside three times as
+   readily, so what goes is the qualifier rather than the name. */
 .ai-menu-hint {
-  flex: none;
+  flex: 0 3 auto;
+  min-width: 0;
+  overflow: hidden;
   color: var(--faint);
   font-size: 11px;
   white-space: nowrap;
-}
-
-/* Anchored to the composer rather than the button, because at this width
-   there is nowhere else for it to go — and it should never be clipped by the
-   panel's edge. */
-.ai-pop {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: calc(100% + 7px);
-  z-index: var(--z-panel-menu);
-  padding: 12px 13px 13px;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: var(--surface);
-  box-shadow: 0 10px 28px #0000001f, 0 2px 6px #00000014;
-}
-
-/* Three settings, one shape. The names sit in a column of their own and the
-   controls take everything left over, so all three share a left edge, a right
-   edge, a height and a radius — one block of settings rather than three
-   controls of different sizes drifting toward the right margin. */
-.ai-pop {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  align-items: center;
-  gap: 7px 14px;
-  --pop-control: 28px;
-}
-
-/* Rows are grid cells, not flex rows: the label column is as wide as its
-   widest name and no wider, and every control starts where that ends. */
-.pop-row {
-  display: contents;
-}
-.pop-name {
-  font: 500 11.5px/1 var(--font-ui);
-  color: var(--faint);
-  letter-spacing: .01em;
-}
-
-/* Same track as the segmented rows — the model list is a choice among named
-   things too, and a border here would make it the odd one out. */
-.ai-model-control { min-width: 0; }
-.ai-model-control .dd,
-.ai-model-control .dd-button { width: 100%; }
-.ai-model-control .dd-button {
-  height: var(--pop-control);
-  padding: 0 9px 0 10px;
-  border: 0;
-  border-radius: 8px;
-  background: var(--sunk);
-  font: 550 11.5px/1 var(--font-ui);
-}
-.ai-model-control .dd-button:hover { background: var(--hover); }
-
-/* Effort, as a slider over named stops.
-   The levels are an order, and what is being chosen is how far along it to go —
-   so the control is a track with a dot per stop and a thumb standing on one.
-   The names are not printed on it: five of them at this width was "Medi…" and
-   "High…", and the composer's own readout beside the model already spells out
-   the one in force.
-
-   Drawn the way the OS draws one — a thin line, an accent fill up to a small
-   round knob, ticks on the part still ahead — rather than as a full-height
-   bar. The bar version made the control the heaviest thing in the popover:
-   28px of dark surface with a blank grip-tile floating in it, next to rows
-   that are mostly text. A 4px line has the same hit area (the input still
-   spans the whole row) without the weight. */
-.ai-effort {
-  --thumb: 14px;
-  --track: 4px;
-  --dot: 4px;
-  min-width: 0;
-  position: relative;
-  height: var(--pop-control);
-}
-
-/* The track, on a pseudo-element so the element itself can stay hit-area
-   height. Filled to the thumb, plain beyond it: the reading is "how far
-   along", and a bar that fills says that without a number. The seam sits
-   under the middle of the thumb, whose centre travels from `thumb/2` to
-   `width − thumb/2` — a fill measured over the whole width instead ran
-   visibly ahead of the thumb at one end and behind at the other. */
-.ai-effort::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  margin: auto 0;
-  height: var(--track);
-  border-radius: calc(var(--track) / 2);
-  --seam: calc(var(--thumb) / 2 + var(--at, 0) * (100% - var(--thumb)));
-  background:
-    linear-gradient(to right,
-      var(--accent) var(--seam),
-      color-mix(in srgb, var(--ink-soft) 16%, var(--sunk)) var(--seam));
-}
-
-/* The stops, spaced where the thumb can actually stand: inset by exactly half
-   a thumb at each end, which is the travel Chromium gives a range input. */
-.ai-effort-stops {
-  position: absolute;
-  inset: 0 calc(var(--thumb) / 2);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  pointer-events: none;
-}
-.ai-effort-stop {
-  width: var(--dot);
-  height: var(--dot);
-  /* Half its own width off each side, so what `space-between` spaces evenly is
-     the dots' centres rather than their boxes: without it the first and last
-     sit a couple of pixels inside the thumb's travel, which is exactly the
-     distance the thumb then misses them by at the two ends. */
-  margin: 0 calc(var(--dot) / -2);
-  border-radius: 50%;
-  background: var(--faint);
-  opacity: .6;
-  transition: opacity .12s var(--ease), background .12s var(--ease);
-}
-/* Dots the fill has reached vanish rather than lighting up: the dot is the
-   same height as the track, so a "lit" dot under the fill was just a speck of
-   the wrong colour breaking an otherwise clean line. */
-.ai-effort-stop.is-passed { opacity: 0; }
-/* The top level is the one that spends the most of a subscription, so the dot
-   that stands for it is the accent — visible before you drag as well as after. */
-.ai-effort-stop.is-top { background: var(--accent); opacity: .9; }
-
-.ai-effort-range {
-  -webkit-appearance: none;
-  appearance: none;
-  position: relative;
-  width: 100%;
-  height: 100%;
-  margin: 0;
-  background: none;
-  cursor: pointer;
-}
-.ai-effort-range::-webkit-slider-runnable-track {
-  height: 100%;
-  background: none;
-}
-.ai-effort-range::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  appearance: none;
-  width: var(--thumb);
-  height: var(--thumb);
-  margin-top: calc((var(--pop-control) - var(--thumb)) / 2);
-  border-radius: 50%;
-  /* Light but not white: at this size a full-strength ink knob holds its own
-     against the accent fill without being the brightest thing in the popover,
-     the way the old full-width tile was. */
-  background: color-mix(in srgb, var(--ink-soft) 88%, var(--surface));
-  box-shadow: 0 1px 3px #00000038, 0 0 0 .5px #00000030;
-  transition: transform .12s var(--ease), background-color .12s var(--ease);
-}
-.ai-effort-range:hover::-webkit-slider-thumb {
-  background-color: var(--ink-soft);
-  transform: scale(1.1);
-}
-.ai-effort-range:active::-webkit-slider-thumb { transform: scale(1.18); }
-.ai-effort-range:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 8px; }
-
-@media (prefers-reduced-motion: reduce) {
-  .ai-effort-range::-webkit-slider-thumb { transition: none; }
-  .ai-effort-range:hover::-webkit-slider-thumb,
-  .ai-effort-range:active::-webkit-slider-thumb { transform: none; }
+  text-overflow: ellipsis;
 }
 
 /* One button, two jobs. Send and stop are never both available — the icon
@@ -6330,11 +7600,6 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 .ai[data-busy="yes"] .ai-go .ai-go-send { display: none; }
 .ai[data-busy="yes"] .ai-go .ai-go-stop { display: block; }
 
-/* While a turn is running, what is answering and how hard it is thinking are
-   fixed: all three are flags on the process still writing into the log, and
-   none of them can change without starting a new one. */
-.ai[data-busy="yes"] .ai-effort,
-.ai[data-busy="yes"] .ai-model-control { pointer-events: none; opacity: .45; }
 
 
 /* ------------------------------------------------------------- outline
@@ -6356,7 +7621,21 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 .outline-item {
   --depth: 0;
   position: relative;
+  /* One item per heading, flat siblings, and a long note runs to hundreds. As
+     with the file tree, containment stops a hover or a scroll-position change
+     on one item from dirtying the rest of the list, and rows scrolled out of
+     the pane keep a placeholder instead of a layout.
+
+     A resting item draws nothing outside its box — the guide rule is inset
+     four pixels top and bottom and the chevron sits in the row's own left
+     padding — but the global focus ring stands two pixels clear of whatever it
+     is on, and paint containment clips at the border box. So the containment
+     lifts under the pointer and under focus, as it does for a tree row and a
+     notebook cell. */
+  content-visibility: auto;
+  contain-intrinsic-block-size: auto 28px;
 }
+.outline-item:hover, .outline-item:focus-within { content-visibility: visible; }
 
 .outline-row {
   --depth: 0;
@@ -6522,6 +7801,20 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.info-value.is-copy {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  cursor: copy;
+}
+.info-value.is-copy:hover,
+.info-value.is-copy:focus-visible { color: var(--accent); }
+.info-value.is-copy:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
 .info-group.is-tags { margin-top: 12px; }
 
 /* ---------------------------------------------------------- backlinks
@@ -6572,6 +7865,39 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
    step less certain. */
 .link-group.is-unlinked .link-count { color: var(--muted); }
 
+/* A hub note's backlinks run to thousands of rows and the panel does not
+   virtualise, so both kinds of row are fenced off from one another and skipped
+   while off-screen. These two are the well-behaved case: their focus ring is
+   already drawn inside them (`outline-offset: -2px`, below) and the quote's
+   guide rule is inset four pixels, so the paint containment that comes with
+   `content-visibility` cuts nothing. The hover escape hatch is kept anyway, so
+   that a row control added later behaves the way it does everywhere else here.
+   The hit's two-line clamp makes its height vary; `auto` lets the first real
+   measurement replace the guess. */
+.link-note, .link-hit { content-visibility: auto; }
+.link-note:hover, .link-note:focus-within,
+.link-hit:hover, .link-hit:focus-within { content-visibility: visible; }
+.link-note { contain-intrinsic-block-size: auto 26px; }
+.link-hit { contain-intrinsic-block-size: auto 30px; }
+
+/* The foot of a section that stopped short. An index note is mentioned by
+   hundreds of others and the pane used to build a row for every one of them, so
+   it now draws the first fifty and offers the rest — this is the offer. Quiet:
+   it is a way on, not a result. */
+.link-more {
+  width: 100%;
+  margin-top: 6px;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: var(--faint);
+  font-family: var(--font-ui);
+  font-size: 11.5px;
+  text-align: left;
+}
+.link-more:hover { background: var(--hover); color: var(--ink-soft); }
+
 .link-note {
   display: flex;
   align-items: baseline;
@@ -6608,6 +7934,91 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 }
 .link-note.is-missing .link-note-name { font-style: italic; }
 .link-note-count.is-missing { color: var(--accent); font-size: 12px; }
+
+/* ------------------------------------------------------------- spelling pane
+   A word and, when it appears more than once, how many places it is in. The
+   teach button sits at the row's end and only comes out under the pointer:
+   "not a mistake" is the second thing you do with this list, and a `+` on every
+   row would compete with the words for the eye. */
+.spelling-item {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 2px;
+  padding-right: 4px;
+  border-radius: 5px;
+  /* A first pass over a long note can list a few thousand words. Same bargain
+     as the tree and the outline: each row's layout and paint is its own, and
+     rows below the fold are not laid out until they are scrolled to. The teach
+     button only comes out under the pointer and both focus rings stand clear
+     of their element, so the row hands its paint back on hover and on focus —
+     the same escape hatch `.nb-cell` uses. */
+  content-visibility: auto;
+  contain-intrinsic-block-size: auto 28px;
+}
+.spelling-item:hover, .spelling-item:focus-within { content-visibility: visible; }
+.spelling-item:hover { background: var(--hover); }
+
+.spelling-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: var(--ink-soft);
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  font-weight: 550;
+  text-align: left;
+  cursor: pointer;
+}
+.spelling-item:hover .spelling-row { color: var(--ink); }
+
+/* The word as it was written, under the same red squiggle the editor draws
+   under it — the panel and the page saying the same thing the same way. */
+.spelling-word {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  /* `--code-removed` is the theme's own red, defined by every one of them —
+     the colour a deletion is drawn in, which is the same "this is wrong" the
+     squiggle means. A red of this file's own would be right in one theme. */
+  text-decoration: underline wavy color-mix(in srgb, var(--code-removed) 70%, transparent);
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
+}
+.spelling-count {
+  margin-left: auto;
+  flex: none;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--faint);
+}
+
+.spelling-teach {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: var(--faint);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+}
+.spelling-item:hover .spelling-teach,
+.spelling-teach:focus-visible { opacity: 1; }
+.spelling-teach:hover { background: var(--sunk); color: var(--accent); }
 
 .link-hit {
   position: relative;
@@ -6881,8 +8292,10 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   display: grid;
   place-items: center;
   padding: 40px 20px;
-  background: color-mix(in srgb, var(--ink) 26%, transparent);
-  backdrop-filter: blur(2px);
+  /* A popup, not a modal: nothing is dimmed, nothing is blurred, and the app
+     behind stays fully usable — this wrapper only positions the box and lets
+     every event pass through itself. */
+  pointer-events: none;
 }
 
 .settings-box {
@@ -6893,8 +8306,11 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   border-radius: 10px;
   border: 1px solid var(--line);
   background: var(--surface);
-  box-shadow: 0 18px 60px rgb(0 0 0 / .28);
+  /* Carrying its own separation, since there is no scrim to lift it off the
+     page any more. */
+  box-shadow: 0 10px 24px rgb(0 0 0 / .16), 0 24px 70px rgb(0 0 0 / .30);
   overflow: hidden;
+  pointer-events: auto;
 }
 
 .settings-rail {
@@ -6906,6 +8322,18 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   border-right: 1px solid var(--line);
   overflow-y: auto;
 }
+/* The rail's group headings — Options, Documents, Features — the way
+   Obsidian breaks its own list up. Small and muted, so they read as
+   punctuation rather than as tabs. */
+.settings-rail-head {
+  margin: 14px 10px 4px;
+  font: 600 10.5px/1.4 var(--font-ui);
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.settings-rail-head:first-child { margin-top: 4px; }
+
 .settings-tab {
   padding: 7px 10px;
   border: 0;
@@ -6938,7 +8366,11 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   padding: 16px 14px 12px 22px;
   border-bottom: 1px solid var(--line-soft);
   flex: none;
+  /* The header is the popup's handle — see the drag wiring in settings.js. */
+  cursor: grab;
+  user-select: none;
 }
+.settings-head:active { cursor: grabbing; }
 .settings-heading {
   margin: 0;
   font-family: var(--font-ui);
@@ -6968,19 +8400,109 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 
 .settings-label { min-width: 0; }
 .settings-name {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   font-family: var(--font-ui);
   font-size: 13.5px;
   color: var(--ink);
 }
-.settings-control { flex: none; }
-.settings-note {
-  margin-top: 4px;
-  font-family: var(--font-mono);
-  font-size: 11.5px;
+/* A row's own button, beside its name: something that undoes the whole control
+   under it, which is not a thing to put among the control's own parts. Quiet
+   until pointed at — it is an escape hatch, not the row's subject. */
+.settings-action {
+  flex: none;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: none;
   color: var(--faint);
-  word-break: break-all;
+  font-family: var(--font-ui);
+  font-size: 11px;
+  cursor: pointer;
 }
+.settings-action:hover { color: var(--ink); background: var(--hover); }
+.settings-control { flex: none; }
 /* A row's own small print, under its name — prose, unlike the path above. */
+/* ------------------------------------------------------------- hotkeys
+   One row per rebindable command: its name, the menu it lives in, and the key
+   on the right as a chip. Clicking the chip records the next chord pressed —
+   see the `hotkeys` control in settings.js. */
+.hotkey-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.hotkey-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.hotkey-row:last-child { border-bottom: 0; }
+.hotkey-name {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font: 13px/1.5 var(--font-ui);
+  color: var(--ink);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.hotkey-menu {
+  font-size: 11px;
+  color: var(--faint);
+}
+.hotkey-chord {
+  flex: none;
+  min-width: 52px;
+  padding: 2px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--sunk);
+  color: var(--ink-soft);
+  font: 500 12px/1.7 var(--font-ui);
+  text-align: center;
+  cursor: pointer;
+  transition: border-color .12s, color .12s, background .12s;
+}
+.hotkey-chord:hover { border-color: var(--accent); color: var(--ink); }
+.hotkey-chord.is-blank { color: var(--faint); font-style: italic; }
+.hotkey-chord.is-custom {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  color: var(--accent);
+}
+.hotkey-chord.is-recording {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+  font-style: normal;
+}
+.hotkey-reset {
+  flex: none;
+  padding: 0 6px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+}
+.hotkey-reset:hover { color: var(--ink); }
+.hotkey-conflict {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+  font: 600 10.5px/1.7 var(--font-ui);
+}
+
 .settings-hint {
   margin-top: 2px;
   font-family: var(--font-ui);
@@ -7065,6 +8587,10 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
    the app opens. Callers that want a different button — the copilot's
    popover does — restyle `.dd-button` and leave the popup alone. */
 .dd { display: inline-flex; min-width: 0; }
+/* `display` here beats the browser's own rule for the attribute, so a caller
+   that hides the control — the grid's delimiter, which is on the bar only when
+   the answer is surprising — needs this to mean anything. */
+.dd[hidden] { display: none; }
 .dd-button {
   display: flex;
   align-items: center;
@@ -7094,6 +8620,13 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   white-space: nowrap;
   text-overflow: ellipsis;
 }
+/* Nothing chosen: the placeholder reads like a prompt, not a value. */
+.dd-button.is-empty { color: var(--faint); }
+/* What an option draws in front of its name, in the button and in its row. It
+   holds its width against a name long enough to ellipsise, and takes no space
+   at all in a list where no option has one. */
+.dd-lead, .dd-option > .lang-chip { display: inline-flex; align-items: center; flex: none; }
+.dd-lead:empty { display: none; }
 
 /* Fixed to the window, because both of its homes clip: the settings pane
    scrolls and the copilot popover has a composer under it. */
@@ -7242,17 +8775,13 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   border-bottom: 1px solid var(--line-soft);
   background: var(--sunk);
 }
-.model-picked-none {
-  font: 12px/1.4 var(--font-ui);
-  color: var(--faint);
-}
 .model-chip {
   display: inline-flex;
   align-items: baseline;
   gap: 5px;
   padding: 3px 6px 3px 8px;
   border: 1px solid var(--line);
-  border-radius: 999px;
+  border-radius: 7px;
   background: var(--surface);
   font: 500 11.5px/1.35 var(--font-ui);
   color: var(--ink-soft);
@@ -7263,6 +8792,89 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 .model-chip-group { color: var(--faint); font-weight: 400; }
 .model-chip-x { color: var(--faint); font-size: 12.5px; }
 .model-chip:hover .model-chip-x { color: var(--accent); }
+
+/* The dictionary, in a dialog of its own off the Settings row — the model
+   picker's chips with a field that both narrows them and takes a new word. */
+.dict-dialog {
+  width: min(460px, 90vw);
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: 0 12px 30px #00000026, 0 2px 6px #00000014;
+}
+.dict-dialog::backdrop { background: #090a0c66; }
+.dict-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.dict-title {
+  margin: 0;
+  font: 650 15px/1.3 var(--font-ui);
+}
+.dict-add { display: flex; gap: 6px; margin-bottom: 10px; }
+.dict-add .field { flex: 1; }
+.dict-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+/* One word per line, with its remove at the far end — a vocabulary of a few
+   hundred words wraps badly as a wall of pills, and a row apiece lets a word
+   be found by eye. */
+.dict-list .model-chip {
+  width: 100%;
+  justify-content: space-between;
+  align-items: center;
+}
+
+/* The settings search, between the pane's title and its close button. The
+   suggestions hang from the field in the dropdown menu's own dress. */
+.settings-search { position: relative; flex: 1; max-width: 250px; margin-left: auto; }
+.settings-search-field { width: 100%; }
+.settings-suggest {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  z-index: var(--z-dropdown);
+  display: flex;
+  flex-direction: column;
+  padding: 5px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--surface);
+  box-shadow: 0 12px 30px #00000026, 0 2px 6px #00000014;
+}
+.settings-suggest-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--ink);
+  font: 500 12.5px/1.35 var(--font-ui);
+  text-align: left;
+  cursor: pointer;
+}
+.settings-suggest-row:hover, .settings-suggest-row.is-picked { background: var(--hover); }
+.settings-suggest-section { color: var(--faint); font-size: 11px; }
+
+/* Where the search landed: the row glows accent for a moment, so the eye
+   finds it before the highlight lets go. */
+.settings-row.is-found { animation: settings-found 1.6s ease; }
+@keyframes settings-found {
+  0%, 55% { background: color-mix(in srgb, var(--accent) 13%, transparent); }
+  100% { background: transparent; }
+}
 
 .model-refresh {
   flex: none;
@@ -7277,13 +8889,6 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 }
 .model-refresh:hover:not(:disabled) { border-color: var(--accent); color: var(--ink) }
 .model-refresh:disabled { color: var(--faint); cursor: default; }
-.model-picker-count {
-  flex: none;
-  font-family: var(--font-ui);
-  font-size: 11.5px;
-  color: var(--faint);
-  font-variant-numeric: tabular-nums;
-}
 /* Bounded, and scrolling on its own: the pane behind it scrolls too, which is
    normally worth avoiding — but the alternative is the search box scrolling out
    of sight while you are reading the three hundred results it just found. */
@@ -7345,10 +8950,44 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 .model-group-all:hover { border-color: var(--faint); color: var(--ink); }
 
 .model-group-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px 10px 10px 22px;
+}
+/* One shelf inside the fold — a sub-provider under the copilot that offers it.
+   The heading carries what the old per-row badge repeated. */
+.model-shelf-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 8px 4px;
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.model-shelf-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-shelf-head::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--line-soft);
+}
+.model-shelf-count {
+  flex: none;
+  order: 2;
+  font-weight: 400;
+  letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+}
+.model-shelf-head .model-group-all { order: 3; }
+.model-shelf-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
   gap: 4px;
-  padding: 2px 10px 10px 22px;
 }
 .model-option {
   display: flex;
@@ -8011,7 +9650,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   height: 25px;
   padding: 0 10px;
   border: 1px solid var(--line);
-  border-radius: 999px;
+  border-radius: 7px;
   background: var(--surface);
   color: var(--ink-soft);
   font-family: var(--font-ui);
@@ -8039,6 +9678,1346 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
      should not flash the paper colour of a note. */
   background: #fff;
 }
+
+/* --------------------------------------------------------- whiteboard */
+.whiteboard {
+  position: absolute;
+  inset: 0;
+  display: block;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--paper);
+  container-type: inline-size;
+}
+.whiteboard[hidden] { display: none; }
+.whiteboard-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.whiteboard-canvas > .excalidraw { position: absolute; inset: 0; width: 100%; height: 100%; }
+
+/* Excalidraw changes the canvas cursor as tools change. Its toolbar sits over
+   that canvas, and moving across a button's nested SVG/label must not briefly
+   reveal the canvas cursor between DOM targets. */
+.whiteboard-canvas .excalidraw :is(.ToolIcon:not(:disabled), button:not(:disabled)),
+.whiteboard-canvas .excalidraw :is(.ToolIcon:not(:disabled), button:not(:disabled)) * {
+  cursor: default !important;
+}
+
+/* Excalidraw's own media queries see the Electron window, while Tulip can make
+   the document column much narrower by opening a right pane. Respond to the
+   canvas container as well so the desktop toolbar never disappears underneath
+   that pane. */
+@container (max-width: 1000px) {
+  .whiteboard-canvas .App-menu_top {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: 8px;
+  }
+}
+@container (max-width: 820px) {
+  .whiteboard-canvas .layer-ui__wrapper__top-right { display: none; }
+  .whiteboard-canvas .App-toolbar-container .ToolIcon__icon {
+    width: 2rem;
+    height: 2rem;
+  }
+}
+
+/* ------------------------------------------------------------ data grid
+
+   The pane a `.csv` opens into. Laid out in pixels rather than with a real
+   `<table>`, because the rows in view are the only ones built — see the
+   account at the top of src/csv.js — and a table element cannot hold a
+   scrollbar for rows that do not exist.
+
+   Row height here has to agree with ROW_HEIGHT in that file. It is the number
+   the virtual window's arithmetic is built on, so a cell that grew to fit its
+   text would put every row below it in the wrong place; cells clip instead. */
+.data {
+  position: absolute;
+  inset: 0;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--paper);
+}
+.data[hidden] { display: none; }
+
+/* ------------------------------------------------- the last-resort viewer
+
+   A picture, a recording, or a card saying plainly that this is a file Tulip
+   does not show. Laid out as one centred column: there is one thing on screen
+   and the pane's whole job is to present it. */
+.fileview {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  padding: 24px;
+  overflow: auto;
+  background: var(--sunk);
+  outline: none;
+}
+.fileview[hidden] { display: none; }
+
+/* Fit, until it is clicked. A picture in a vault is being looked at rather
+   than worked on, so the whole of the zoom is these two states — and the
+   scrollbars the pane already has carry the full-size one. */
+.fileview-image {
+  display: flex;
+  min-height: 0;
+  max-width: 100%;
+}
+.fileview-image img {
+  max-width: 100%;
+  max-height: 74vh;
+  object-fit: contain;
+  border-radius: 8px;
+  box-shadow: 0 2px 18px rgb(0 0 0 / 0.22);
+  cursor: zoom-in;
+  background: var(--paper);
+}
+.fileview-image.is-full img {
+  max-width: none;
+  max-height: none;
+  cursor: zoom-out;
+}
+
+.fileview-player {
+  max-width: 100%;
+  border-radius: 8px;
+  background: #000;
+}
+.fileview-player.is-video { max-height: 74vh; }
+/* An audio player given the video's black box would be a black bar; it takes
+   the surface it sits on and a width worth aiming a scrubber at. */
+.fileview-player.is-audio {
+  width: min(520px, 100%);
+  background: transparent;
+}
+
+.fileview-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  max-width: 460px;
+  padding: 28px 32px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--paper);
+  text-align: center;
+}
+.fileview-mark { width: 44px; height: 44px; color: var(--ink-soft); }
+.fileview-name {
+  font-weight: 600;
+  /* A long name wraps rather than stretching the card off the pane. */
+  overflow-wrap: anywhere;
+}
+.fileview-facts { color: var(--ink-soft); font-size: 12px; }
+.fileview-said { color: var(--ink-soft); font-size: 13px; }
+
+.fileview-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+.fileview-btn {
+  padding: 5px 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--paper);
+  color: var(--ink-soft);
+  font: inherit;
+  cursor: pointer;
+}
+.fileview-btn:hover { color: var(--ink); border-color: var(--line-strong, var(--line)); }
+.fileview-btn.is-primary { color: var(--accent); border-color: var(--accent); }
+.fileview-btn.is-primary:hover {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+/* ------------------------------------------------------------- notebook
+
+   The pane an `.ipynb` opens into: a column of cells, each one a source block
+   and whatever that source last printed. See the account at the top of
+   src/notebook.js.
+
+   The one measurement everything here depends on is that `.nb-ink` and
+   `.nb-input` set text identically. The `<pre>` holds the text and gives the
+   cell its height; the textarea lies on top of it with transparent ink, and
+   the caret is only over the letter it thinks it is over while the two wrap
+   the same way. Font, size, line height, padding, tab size and the wrapping
+   rules are therefore declared once, for both. */
+.nb {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--paper);
+}
+.nb[hidden] { display: none; }
+
+.nb-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 5px 14px;
+  border-bottom: 1px solid var(--line);
+  font: 12px/1.4 var(--font-ui);
+  color: var(--muted);
+}
+.nb-bar-actions { display: flex; gap: 6px; }
+.nb-find-wrap { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.nb-find {
+  width: 180px;
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+}
+.nb-find:focus { outline: none; border-color: var(--accent); }
+.nb-found { color: var(--faint); font-variant-numeric: tabular-nums; }
+/* The cell a find landed on, marked until the next search or the next paint.
+   The accent rather than a highlight behind the text: the source under it is
+   already coloured, and a wash over that is two colour systems at once. */
+.nb-cell.is-hit { border-color: var(--accent); background: var(--accent-dim); }
+.nb-btn {
+  padding: 3px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink-soft);
+  font: inherit;
+  cursor: pointer;
+}
+.nb-btn:hover { color: var(--ink); background: var(--hover); }
+.nb-btn:disabled { opacity: 0.45; cursor: default; }
+.nb-btn:disabled:hover { color: var(--ink-soft); background: var(--surface); }
+/* Interrupt is the one destructive thing in the bar, and the only one worth
+   colouring — everything beside it is additive. */
+.nb-btn.is-stop { color: var(--danger, #c0392b); border-color: currentColor; }
+/* The kernel had something to say — a substituted kernelspec, most often. The
+   whole summary carries it rather than a banner: it is one sentence about the
+   thing the summary already names, and it is in the title attribute. */
+.nb-shape.is-notice { color: var(--danger, #c0392b); cursor: help; }
+/* The kernel and what it is doing, with the separator drawn between them
+   rather than joined into a string. A part with nothing to say goes, and takes
+   its separator with it — the second rule, or a bar with no kernel yet would
+   open on a leading dot. */
+.nb-shape { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.nb-shape > *:empty { display: none; }
+.nb-shape > * + *::before { content: '·'; margin-right: 7px; color: var(--faint); }
+.nb-shape > *:empty + *::before { content: none; margin-right: 0; }
+/* What the kernel is doing, as a light and only as a light: no word beside it,
+   because three colours are the whole of the message and the state is on the
+   dot's own tooltip for anyone who wants it spelled out. It answers "can I run
+   something now" — green once the kernel is up, whether it is idle or mid-cell;
+   amber for everything before that; red for the notice. Red is `currentColor`
+   because the summary is already danger-coloured when there is one, and two
+   ways of spelling the same red drift apart.
+
+   The green is `--stem`, which every theme already spends on growth, so this
+   is themed without thirteen new variables. Only the amber is new, and
+   `light-dark()` reads the `color-scheme` the themes already declare.
+
+   Two things these rules have to beat, which is why they sit last: the
+   `:empty` rule above — a dot has no text, so it is always empty and would
+   always be hidden — and the suppressed separator, since the dot is a status
+   light rather than a mark between two things and stands whether or not there
+   is a kernel named to its left. Both are decided by order rather than by
+   weight: the specificity is a tie. */
+.nb-shape > .nb-shape-state { display: inline-flex; align-items: center; }
+.nb-shape > .nb-shape-state::before {
+  content: '';
+  flex: none;
+  width: 9px;
+  height: 9px;
+  margin-right: 0;
+  border-radius: 50%;
+  background: var(--faint);
+}
+.nb-shape > .nb-shape-state.is-ready::before { background: var(--stem); }
+.nb-shape > .nb-shape-state.is-waiting::before { background: light-dark(#B5761F, #E0A458); }
+.nb-shape > .nb-shape-state.is-error::before { background: currentColor; }
+/* The kernel's language, wearing the mark a fenced block of it wears — a shade
+   smaller, because the bar's text is smaller than a fence's chip. Unscoped by
+   the bar on purpose: the same mark is drawn in the menu's rows, and the menu
+   is a layer on the body rather than a child of anything here. */
+.nb-kernel-mark { flex: none; }
+.nb-kernel-mark .lang-mark { height: 13px; font-size: 9px; }
+.nb-kernel-mark .lang-logo { width: 13px; height: 13px; }
+.nb-shape-kernel { display: flex; align-items: center; gap: 6px; min-width: 0; }
+/* The kernel reads as part of the sentence until it is pointed at: no border,
+   no fill, and the caret only close up. It is a menu, not a form field. */
+.nb-kernel-pick {
+  min-width: 0;
+  gap: 4px;
+  padding: 1px 4px;
+  border-color: transparent;
+  background: none;
+  color: inherit;
+  font: inherit;
+}
+.nb-kernel-pick:hover { border-color: var(--line); background: var(--hover); }
+.nb-kernel-pick > svg { opacity: 0; transition: opacity .12s, transform .14s; }
+.nb-shape:hover .nb-kernel-pick > svg,
+.nb-kernel-pick:focus-visible > svg,
+.nb-kernel-pick[aria-expanded="true"] > svg { opacity: 1; }
+
+.nb-scroll {
+  flex: 1;
+  overflow: auto;
+  outline: none;
+  /* Room under the last cell, so the cell you are typing into can be scrolled
+     up to somewhere comfortable to read rather than sitting on the bottom
+     edge — the same courtesy the editor gives the last line of a note. */
+  padding: 16px 0 40vh;
+}
+.nb-col {
+  max-width: min(58rem, 100%);
+  margin-inline: auto;
+  padding-inline: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* Only the cells near the viewport are laid out and painted. A notebook of two
+   hundred cells, each with a plot under it, is otherwise a full layout pass
+   per hover anywhere in the window — the same argument, and the same fix, as
+   the reading view's blocks. */
+.nb-cell {
+  position: relative;
+  display: grid;
+  grid-template-columns: 3.4rem minmax(0, 1fr);
+  padding: 4px 6px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  content-visibility: auto;
+  contain-intrinsic-block-size: auto 120px;
+}
+.nb-cell:hover, .nb-cell:focus-within { border-color: var(--line-soft); }
+.nb-cell:focus-within { background: var(--active-line); }
+
+/* The cell the keyboard means. A bar down the left rather than a border,
+   because the border is already saying "the mouse is here" and these are
+   different facts — the chosen cell stays chosen while the pointer wanders.
+   Drawn on the padding edge so it does not move the content by a pixel. */
+.nb-cell.is-at::before {
+  content: "";
+  position: absolute;
+  inset-block: 2px;
+  left: -1px;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+.nb-cell.is-at { border-color: var(--line-soft); }
+
+/* Where a dragged cell would land. A line in the gap, which is the gap it
+   would go into — nothing moves until it is dropped. */
+.nb-cell.is-drop-before::after,
+.nb-cell.is-drop-after::after {
+  content: "";
+  position: absolute;
+  left: 3.4rem;
+  right: 6px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+.nb-cell.is-drop-before::after { top: -4px; }
+.nb-cell.is-drop-after::after { bottom: -4px; }
+.nb-grip { cursor: grab; }
+.nb-grip:active { cursor: grabbing; }
+
+.nb-gutter {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  padding: 8px 8px 0 0;
+  text-align: right;
+}
+.nb-prompt {
+  font: 11.5px/1.5 var(--font-mono);
+  color: var(--faint);
+  white-space: nowrap;
+}
+/* How long the cell took, under the number of the run it took it. Quieter
+   than the prompt: it is worth knowing and never worth reading first. */
+.nb-took {
+  font: 10.5px/1.4 var(--font-mono);
+  color: var(--faint);
+  white-space: nowrap;
+  opacity: 0.75;
+}
+/* The fold, on the same terms as Run — there when the cell is pointed at,
+   and always there once the cell is shut, because a fold you cannot see is a
+   cell that has silently lost its output. */
+.nb-fold {
+  opacity: 0;
+  transition: opacity 90ms ease, transform 120ms ease;
+}
+.nb-cell:hover .nb-fold, .nb-cell:focus-within .nb-fold { opacity: 0.5; }
+.nb-fold:hover { opacity: 1 !important; }
+.nb-fold.is-shut { opacity: 0.8; transform: rotate(-90deg); }
+/* A running cell's prompt is the one thing on screen someone watching a slow
+   cell is actually looking at, so it gets the accent and a pulse — `[*]` in
+   the same grey as `[ ]` is a state change nobody notices. */
+.nb-cell.is-running .nb-prompt {
+  color: var(--accent);
+  animation: nb-pulse 1.4s ease-in-out infinite;
+}
+@keyframes nb-pulse { 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) {
+  .nb-cell.is-running .nb-prompt { animation: none; }
+}
+
+/* Unlike the hover toolbar, Run is always there — see drawGutter for why. Dim
+   until the cell is hovered or focused, so a notebook at rest is still a
+   column of prose and code rather than a column of buttons. */
+.nb-run {
+  opacity: 0.35;
+  transition: opacity 90ms ease;
+}
+.nb-cell:hover .nb-run,
+.nb-cell:focus-within .nb-run,
+.nb-cell.is-running .nb-run { opacity: 1; }
+.nb-cell.is-running .nb-run { color: var(--accent); }
+.nb-body { min-width: 0; }
+
+/* Above the cell rather than over it, and still out of the flow: a toolbar
+   given a row of its own would put a strip of furniture between every pair of
+   cells in the notebook, which is most of what you would be looking at — but
+   laid over the top corner it covered the cell's first line, which in a code
+   cell is the line you read to know what the cell is. So it overhangs the top
+   edge into the gap between cells, which is space nothing else is using.
+
+   Overhanging means escaping the paint containment `content-visibility` brings
+   with it, which clips to the border box. So the containment is lifted from
+   the one cell being pointed at: it is there for the hundreds of cells that
+   are not, and the one under the cursor is already laid out and painted. */
+.nb-cell:hover, .nb-cell:focus-within { content-visibility: visible; }
+.nb-cell-tools {
+  position: absolute;
+  /* The cell's 4px of top padding, so the toolbar's underside sits exactly on
+     top of the source box rather than a hair over it. */
+  bottom: calc(100% - 4px);
+  right: 5px;
+  z-index: 2;
+  display: none;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 1px 6px rgb(0 0 0 / 0.10);
+}
+.nb-cell:hover > .nb-cell-tools,
+.nb-cell:focus-within > .nb-cell-tools { display: flex; }
+.nb-cell-btn {
+  display: flex;
+  padding: 3px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.nb-cell-btn:hover { color: var(--ink); background: var(--hover); }
+.nb-cell-ico { width: 15px; height: 15px; }
+.nb-cell-type {
+  min-width: 84px;
+  gap: 4px;
+  margin-right: 2px;
+  padding: 1px 4px;
+  border-color: var(--line-soft);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--ink-soft);
+  font: 11px/1.4 var(--font-ui);
+}
+
+.nb-source {
+  position: relative;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  background: var(--sunk);
+}
+.nb-ink, .nb-input {
+  margin: 0;
+  padding: 7px 10px;
+  border: 0;
+  font: 13px/1.55 var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  tab-size: 4;
+}
+.nb-ink { color: var(--ink); }
+.nb-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  resize: none;
+  /* Never its own scrollbar: the `<pre>` underneath has already grown to hold
+     this text, so anything the textarea scrolled would be text that is on
+     screen at a different offset from the ink drawn for it. */
+  overflow: hidden;
+  background: transparent;
+  color: transparent;
+  caret-color: var(--ink);
+  outline: none;
+}
+.nb-input::selection { background: var(--selected); }
+.nb-input::placeholder { color: var(--faint); }
+.nb-source.is-empty .nb-ink::after {
+  content: "Empty cell";
+  color: var(--faint);
+}
+
+.nb-tail {
+  align-self: start;
+  margin: 2px 0 0 3.4rem;
+  padding: 4px 10px;
+  border: 1px dashed var(--line);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  font: 12px/1.4 var(--font-ui);
+  cursor: pointer;
+}
+.nb-tail:hover { color: var(--ink); border-color: var(--line-strong, var(--line)); }
+
+/* --------------------------------------------------------- cell outputs */
+
+.nb-outputs {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+.nb-out-text {
+  margin: 0;
+  padding: 4px 10px;
+  /* Tall outputs get a scroller of their own rather than pushing the next
+     cell a screen and a half down the page. */
+  max-height: 32em;
+  overflow: auto;
+  font: 12.5px/1.5 var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  color: var(--ink-soft);
+}
+.nb-out-text.is-stderr {
+  color: var(--code-removed);
+  background: color-mix(in srgb, var(--code-removed) 7%, transparent);
+  border-radius: 5px;
+}
+.nb-out-error {
+  border-left: 2px solid var(--code-removed);
+  border-radius: 0 5px 5px 0;
+  background: color-mix(in srgb, var(--code-removed) 7%, transparent);
+}
+.nb-elided { color: var(--faint); font-style: italic; }
+
+.nb-out-image { display: flex; align-items: flex-start; }
+.nb-out-image img {
+  max-width: 100%;
+  border-radius: 4px;
+  /* A plot is drawn for a white page and ships with a transparent background;
+     on a dark theme it would otherwise be black axes on a black pane. */
+  background: #fff;
+}
+
+/* The same ceiling the text outputs get, for the same reason: one wide
+   DataFrame or one tall figure owning the whole page is not showing you the
+   notebook, it is showing you one cell of it. Both scroll inside themselves,
+   and the fold in the gutter is there when a reader wants the cell shut
+   entirely. */
+.nb-out-html, .nb-out-image, .nb-out-json, .nb-out-latex {
+  max-height: 32em;
+  overflow: auto;
+}
+.nb-out-html { font: 13px/1.5 var(--font-ui); color: var(--ink); }
+.nb-out-html table { border-collapse: collapse; font-size: 12.5px; }
+.nb-out-html th, .nb-out-html td {
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  text-align: right;
+}
+.nb-out-html th { background: var(--sunk); font-weight: 600; }
+
+/* ------------------------------------------------------------ JSON outputs
+
+   A tree that opens, rather than forty lines of it spelled out. `<details>`
+   does the opening, so it is keyboard-reachable and findable by the browser's
+   own find for free. */
+.nb-out-json {
+  padding: 4px 10px;
+  font: 12.5px/1.6 var(--font-mono);
+  color: var(--ink-soft);
+}
+.nb-json-node > * { margin-left: 1.1em; }
+.nb-json-node > summary { margin-left: 0; cursor: pointer; list-style-position: outside; }
+.nb-json-node > summary::marker { color: var(--faint); }
+.nb-json-key { color: var(--muted); }
+.nb-json-brace { color: var(--faint); }
+.nb-json-string { color: var(--code-added, var(--accent)); }
+.nb-json-number, .nb-json-boolean { color: var(--accent); }
+.nb-json-null { color: var(--faint); font-style: italic; }
+
+/* --------------------------------------------------------- folds and tags */
+
+/* A folded cell says what it is and opens on a click. Drawing nothing would
+   be a notebook that had quietly lost a cell. */
+.nb-folded, .nb-outputs-shut {
+  align-self: start;
+  max-width: 100%;
+  overflow: hidden;
+  padding: 3px 10px;
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font: 12px/1.5 var(--font-mono);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  text-align: left;
+  cursor: pointer;
+}
+.nb-outputs-shut { margin-top: 6px; font-family: var(--font-ui); }
+.nb-folded:hover, .nb-outputs-shut:hover { color: var(--ink); border-color: var(--line-strong, var(--line)); }
+
+.nb-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 4px; }
+.nb-tag {
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--sunk);
+  color: var(--muted);
+  font: 10.5px/1.6 var(--font-ui);
+}
+.nb-tag-edit {
+  width: 100%;
+  margin-bottom: 4px;
+  padding: 3px 8px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  font: 11.5px/1.5 var(--font-ui);
+  outline: none;
+}
+
+/* ------------------------------------------------------------------ stdin
+
+   The line a cell blocked on `input()` is answered on, under the prompt it is
+   answering — which is where it is in a terminal, and the only arrangement in
+   which the two read as one conversation. */
+.nb-stdin { margin-top: 6px; }
+.nb-stdin-label {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 4px 10px;
+  border-left: 2px solid var(--accent);
+  border-radius: 0 6px 6px 0;
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  color: var(--ink-soft);
+  font: 12.5px/1.5 var(--font-mono);
+  white-space: pre-wrap;
+}
+.nb-stdin-input {
+  flex: 1;
+  min-width: 4rem;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  outline: none;
+}
+.nb-stdin-input:focus { border-bottom-color: var(--accent); }
+
+/* --------------------------------------------- completion and inspection
+
+   One popup for both questions, positioned at the caret. `fixed` because it is
+   measured against the viewport — the caret's rectangle comes from a range in
+   the mirrored `<pre>`, which is already in viewport coordinates. */
+.nb-hint {
+  position: fixed;
+  z-index: 40;
+  max-width: min(46rem, 90vw);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 4px 18px rgb(0 0 0 / 0.16);
+  overflow: hidden;
+}
+.nb-hint-list { max-height: 16em; overflow-y: auto; }
+.nb-hint-row {
+  padding: 3px 12px;
+  font: 12.5px/1.6 var(--font-mono);
+  color: var(--ink-soft);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.nb-hint-row:hover { background: var(--hover); }
+.nb-hint-row.is-at { background: var(--selected); color: var(--ink); }
+.nb-hint-doc { max-width: 46rem; max-height: 22em; overflow: auto; }
+.nb-hint-text {
+  margin: 0;
+  padding: 8px 12px;
+  font: 12px/1.5 var(--font-mono);
+  color: var(--ink-soft);
+  white-space: pre-wrap;
+}
+
+/* ------------------------------------------------------------ bar controls */
+
+/* How far through a Run all is, beside the button that started it. */
+.nb-progress {
+  padding: 0 4px;
+  color: var(--muted);
+  font: 11.5px/1.4 var(--font-mono);
+  white-space: nowrap;
+}
+/* The two command menus. Sized and coloured as the buttons beside them, so
+   the bar reads as one row of controls rather than two kinds of thing. */
+.nb-run-pick, .nb-export-pick {
+  gap: 4px;
+  padding: 3px 8px;
+  border-color: var(--line-soft);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink-soft);
+  font: 11.5px/1.4 var(--font-ui);
+}
+.nb-run-pick:hover, .nb-export-pick:hover { border-color: var(--line); background: var(--hover); }
+
+/* ------------------------------------------------------- markdown cells
+
+   Prose, set the way the reading view sets prose. Its rules are scoped to
+   `.reading` and stay there — that pane carries furniture a notebook has no
+   use for, heading folds and embed slots among it — so what a markdown cell
+   needs is stated here, and only what a markdown cell can actually contain. */
+.nb-md {
+  padding: 2px 2px 4px;
+  font-family: var(--font-body);
+  font-size: 15.5px;
+  line-height: 1.6;
+  color: var(--ink);
+}
+.nb-md > :first-child { margin-top: 0; }
+.nb-md > :last-child { margin-bottom: 0; }
+.nb-md h1, .nb-md h2, .nb-md h3, .nb-md h4, .nb-md h5, .nb-md h6 {
+  margin: 1.2em 0 .4em;
+  font-weight: 600;
+  line-height: 1.24;
+}
+.nb-md h1 { font-size: 1.6em; color: var(--h1, var(--ink)); }
+.nb-md h2 { font-size: 1.3em; color: var(--h2, var(--ink)); }
+.nb-md h3 { font-size: 1.1em; color: var(--h3, var(--ink)); }
+.nb-md p, .nb-md ul, .nb-md ol, .nb-md blockquote, .nb-md table { margin: .6em 0; }
+.nb-md ul, .nb-md ol { padding-left: 1.5em; }
+/* Except a numbered list, whose padding is the room its circled marker hangs
+   in — see ol.tk-ordered-list. */
+.nb-md ol.tk-ordered-list { padding-left: 2.3em; }
+.nb-md li { margin: .2em 0; }
+.nb-md a { color: var(--accent); }
+.nb-md code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--sunk);
+  font: .88em var(--font-mono);
+  color: var(--code-inline);
+}
+.nb-md pre {
+  overflow-x: auto;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--sunk);
+}
+.nb-md pre code { padding: 0; background: none; color: inherit; }
+.nb-md blockquote {
+  padding-left: .9em;
+  border-left: 2px solid var(--line);
+  color: var(--ink-soft);
+}
+.nb-md table { border-collapse: collapse; }
+.nb-md th, .nb-md td { padding: 3px 10px; border: 1px solid var(--line); }
+.nb-md img { max-width: 100%; }
+.nb-empty { color: var(--faint); font-style: italic; }
+
+/* --------------------------------------------------------------- ansi
+
+   A kernel colours its own output and a traceback is nothing but colour. The
+   eight names are mapped onto the theme's own token hues rather than onto the
+   terminal's literal red and green: this text sits on the app's paper, next to
+   the app's code, and a raw #FF0000 in the middle of it reads as a rendering
+   fault. The bright variants share the hue — a second set of nearly-identical
+   colours buys nothing on a page that is not a terminal. */
+.nb-fg-black, .nb-fg-bright-black { color: var(--faint); }
+.nb-fg-red, .nb-fg-bright-red { color: var(--code-removed); }
+.nb-fg-green, .nb-fg-bright-green { color: var(--code-string); }
+.nb-fg-yellow, .nb-fg-bright-yellow { color: var(--code-atom); }
+.nb-fg-blue, .nb-fg-bright-blue { color: var(--code-function); }
+.nb-fg-magenta, .nb-fg-bright-magenta { color: var(--code-keyword); }
+.nb-fg-cyan, .nb-fg-bright-cyan { color: var(--code-string2); }
+.nb-fg-white, .nb-fg-bright-white { color: var(--ink); }
+.nb-bg-red, .nb-bg-bright-red { background: color-mix(in srgb, var(--code-removed) 18%, transparent); }
+.nb-bg-green, .nb-bg-bright-green { background: color-mix(in srgb, var(--code-string) 18%, transparent); }
+.nb-bg-yellow, .nb-bg-bright-yellow { background: color-mix(in srgb, var(--code-atom) 18%, transparent); }
+.nb-bg-blue, .nb-bg-bright-blue { background: color-mix(in srgb, var(--code-function) 18%, transparent); }
+.nb-bg-magenta, .nb-bg-bright-magenta { background: color-mix(in srgb, var(--code-keyword) 18%, transparent); }
+.nb-bg-cyan, .nb-bg-bright-cyan { background: color-mix(in srgb, var(--code-string2) 18%, transparent); }
+.nb-bold { font-weight: 700; }
+.nb-italic { font-style: italic; }
+.nb-underline { text-decoration: underline; }
+
+.csv-frame {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  font: 12.5px/1.4 var(--font-mono);
+  color: var(--ink);
+}
+/* A column being dragged wider must not select text on its way past. */
+.csv-frame.is-resizing { user-select: none; cursor: col-resize; }
+
+/* The grid proper — the headings and the body, which are two separately
+   scrolled strips that have to be one element for anything reading the page.
+   It carries no look of its own; it exists so `role="grid"` has something to
+   sit on that is neither half of the table. */
+.csv-table {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* ------------------------------------------------------------ the strip
+
+   Find, filter, undo and the shape of the selection. Interface rather than
+   document, so it is the UI font and not the table's mono. */
+.csv-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+  font: 12px/1.4 var(--font-ui);
+}
+.csv-bar-gap { flex: 1 1 auto; }
+
+.csv-search {
+  width: 190px;
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+}
+.csv-search:focus { outline: none; border-color: var(--accent); }
+
+.csv-btn {
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--paper);
+  color: var(--ink-soft);
+  font: inherit;
+  cursor: pointer;
+}
+.csv-btn:hover:not(:disabled) { color: var(--ink); border-color: var(--line-strong, var(--line)); }
+.csv-btn:disabled { opacity: 0.4; cursor: default; }
+.csv-btn.is-column-scroll {
+  width: 25px;
+  padding-inline: 0;
+  font-size: 17px;
+  line-height: 1;
+}
+
+/* What the file is separated by. Shaped like the buttons beside it, and on the
+   bar only when the answer is not the one the extension implies — so a comma
+   `.csv`, which is nearly all of them, never shows this at all. */
+.csv-delimiter {
+  min-width: 0;
+  gap: 5px;
+  padding: 3px 6px;
+  border-color: var(--accent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 10%, var(--paper));
+  color: var(--accent);
+  font: inherit;
+}
+.csv-delimiter:hover { border-color: var(--accent); }
+.csv-delimiter > svg { color: currentColor; }
+.csv-btn.is-on {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.csv-found {
+  color: var(--ink-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.csv-found.is-empty { color: var(--warn, var(--ink-soft)); }
+
+/* The heading strip scrolls sideways with the body but never up: it is
+   translated by the scroller's own offset rather than being sticky, which a
+   virtualized body cannot be. */
+.csv-head {
+  flex: 0 0 auto;
+  display: flex;
+  height: 30px;
+  border-bottom: 1px solid var(--line);
+  background: var(--sunk);
+  overflow: hidden;
+}
+
+.csv-scroller {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  outline: none;
+}
+.csv-scroller:focus-visible { box-shadow: inset 0 0 0 2px var(--accent-dim); }
+
+.csv-canvas { position: relative; }
+.csv-window { position: relative; }
+
+.csv-row {
+  position: absolute;
+  left: 0;
+  display: flex;
+  height: 28px;
+}
+.csv-row.is-odd { background: color-mix(in srgb, var(--sunk) 45%, transparent); }
+
+.csv-cell {
+  flex: 0 0 auto;
+  height: 100%;
+  padding: 0 8px;
+  display: flex;
+  align-items: center;
+  border-right: 1px solid var(--line-soft);
+  white-space: pre;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The width of the columns that are off screen and therefore not built. It
+   holds the row's total width steady whichever columns exist inside it, so the
+   horizontal scrollbar stays where it is while the table scrolls under it.
+   Nothing is drawn: no border, no background, and it is not a `.csv-cell`, so
+   nothing that walks the cells to decorate them ever sees it. */
+.csv-pad {
+  flex: 0 0 auto;
+  height: 100%;
+  pointer-events: none;
+}
+.csv-th {
+  position: relative;
+  gap: 4px;
+  font-weight: 600;
+  color: var(--ink-soft);
+  border-right-color: var(--line);
+  cursor: pointer;
+  user-select: none;
+}
+.csv-th:hover { color: var(--ink); }
+.csv-th.is-active { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.csv-th-label { overflow: hidden; text-overflow: ellipsis; }
+.csv-sort {
+  margin-left: auto;
+  font-size: 9px;
+  color: var(--accent);
+}
+/* The way into the column's filter. Invisible until the heading is hovered —
+   a funnel on every one of thirty headings is thirty pieces of furniture in a
+   strip whose job is to be read — and permanent once the column is hiding
+   rows, since that is a state the reader has to be able to see they are in. */
+.csv-funnel {
+  margin-left: 4px;
+  padding: 0 2px;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--ink-soft);
+  opacity: 0;
+  cursor: pointer;
+}
+.csv-th:hover .csv-funnel { opacity: 0.7; }
+.csv-funnel:hover { opacity: 1; color: var(--ink); }
+.csv-th.is-filtered .csv-funnel { opacity: 1; color: var(--accent); }
+.csv-th.is-filtered .csv-th-label { color: var(--accent); }
+/* The divider between two headings, widened into something a mouse can catch
+   without making the heading itself hard to click. */
+.csv-grip {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  width: 7px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 2;
+}
+.csv-grip:hover { background: var(--accent); opacity: 0.45; }
+
+/* The frozen strip of file line numbers. Sticky rather than a separate
+   column, so it stays put while the rest of the row scrolls under it. */
+.csv-gutter {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  flex: 0 0 auto;
+  width: 58px;
+  min-width: 58px;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 0 8px;
+  border-right: 1px solid var(--line);
+  background: var(--sunk);
+  color: var(--ink-faint, var(--ink-soft));
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  cursor: default;
+  user-select: none;
+}
+.csv-gutter.is-active { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, var(--sunk)); }
+.csv-corner { cursor: pointer; }
+
+/* Numbers read as quantities when they line up, which means to the right and
+   in a figure that does not change width with the digit. */
+.csv-cell.csv-num { justify-content: flex-end; font-variant-numeric: tabular-nums; }
+.csv-th.csv-num .csv-sort { margin-left: 4px; }
+
+/* And where a column has been pointed a way by hand, that way instead — the
+   heading with it, so the label and the cells under it read as one column. */
+.csv-cell.csv-left { justify-content: flex-start; }
+.csv-cell.csv-center { justify-content: center; }
+.csv-cell.csv-right { justify-content: flex-end; }
+.csv-th.csv-right .csv-sort, .csv-th.csv-center .csv-sort { margin-left: 4px; }
+/* The open cell fills the cell it replaces, so its text has to be pointed the
+   same way or committing an edit would visibly shift it. */
+.csv-cell.csv-num .csv-input, .csv-cell.csv-right .csv-input { text-align: right; }
+.csv-cell.csv-center .csv-input { text-align: center; }
+
+/* Dragging across a grid selects cells, not words — but the browser lays its
+   own text selection over whatever the pointer crossed as well, and that
+   highlight hugs the letters. A rectangle of cells came out as a ragged run of
+   text-shaped boxes with the real selection faintly underneath it.
+
+   The browser's selection is hidden rather than turned off. `user-select:
+   none` would take it away with the paint, and the window menu's Edit ▸ Copy
+   is a Chromium editing command that does nothing — and fires no `copy` event
+   for csv.js to answer — when there is no native selection to act on. So the
+   selection stays, and only its highlight goes; an open cell is a real text
+   field and keeps its own. */
+.csv-frame ::selection { background: transparent; }
+.csv-input::selection { background: var(--sel); }
+
+/* A selection is a tinted block with a line drawn round the outside of it, and
+   the cell the keys are pointing at ringed inside that — the arrangement every
+   spreadsheet uses, because the tint says how much is selected and only the
+   outline says where it stops.
+
+   All of it is one box-shadow. A cell can be a corner (two sides), a match and
+   the cursor at once, and separate rules for each would take turns overwriting
+   the others' shadow; layering them as custom properties lets every part of the
+   grid write its own slot and the composed rule draw all four. Cells with no
+   part in it match none of these rules and carry no shadow at all. */
+.csv-cell {
+  --edge-t: 0 0 0 0 transparent;
+  --edge-b: 0 0 0 0 transparent;
+  --edge-l: 0 0 0 0 transparent;
+  --edge-r: 0 0 0 0 transparent;
+  --edge-ring: 0 0 0 0 transparent;
+  --edge-match: 0 0 0 0 transparent;
+}
+.csv-cell.is-sel, .csv-cell.is-cursor, .csv-cell.is-match {
+  box-shadow:
+    inset var(--edge-t), inset var(--edge-b), inset var(--edge-l),
+    inset var(--edge-r), inset var(--edge-ring), inset var(--edge-match);
+}
+
+/* The tint stays light: it is read through, and the outline is what the eye
+   lands on. It still has to survive being laid over a striped row on ten
+   themes, which is what the colour mix is for. */
+.csv-cell.is-sel { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+.csv-cell.is-edge-t { --edge-t: 0 2px 0 0 var(--accent); }
+.csv-cell.is-edge-b { --edge-b: 0 -2px 0 0 var(--accent); }
+.csv-cell.is-edge-l { --edge-l: 2px 0 0 0 var(--accent); }
+.csv-cell.is-edge-r { --edge-r: -2px 0 0 0 var(--accent); }
+.csv-cell.is-match { --edge-match: 0 0 0 1px var(--accent-dim); }
+/* Inside a range the cursor is the cell being typed into rather than a second
+   selection, so it is a thin ring on the tint; alone, it is the filled box that
+   says "this cell is about to be written". */
+.csv-cell.is-cursor {
+  --edge-ring: 0 0 0 2px var(--accent);
+  background: var(--sel);
+}
+
+/* ------------------------------------------------------------ reading view
+
+   The same grid with the editing taken out of it, so what changes here is what
+   the table *offers*: nothing points at a cell as a thing to type into. The
+   cursor stays — it is what the arrow keys move and what a selection is
+   measured from — but as a quiet outline rather than the filled box that says
+   "this cell is about to be written". */
+.csv-frame.is-reading .csv-cell { cursor: default; }
+.csv-frame.is-reading .csv-cell.is-cursor {
+  /* The slot, not the whole shadow: this cell may also be a corner of the
+     selection, and overwriting `box-shadow` here took those two sides of the
+     outline away with it. */
+  --edge-ring: 0 0 0 1px var(--accent-dim);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+/* Rules between columns do the reading work; a full lattice is for aiming at
+   cells. The stripes and the frozen line numbers keep the rows apart. */
+.csv-frame.is-reading .csv-cell { border-right-color: transparent; }
+.csv-frame.is-reading .csv-th { border-right-color: var(--line-soft); }
+.csv-frame.is-reading .csv-gutter { color: var(--ink-faint, var(--ink-soft)); opacity: 0.75; }
+
+/* ------------------------------------------------------- the full lattice
+
+   Off by default — see the CSV tab in settings. The grid already draws rules
+   between the columns, and the striped rows are what keep the rows apart; this
+   closes the boxes for people who are aiming at cells rather than reading down
+   a column, which is the difference between a table and a spreadsheet.
+
+   Drawn from the shell's `data-csv-borders` rather than a class on each cell:
+   the body is virtualized, so cells come and go as it scrolls and every one of
+   them would have to be told. It also has to outrank the reading view's rule
+   above, which takes the column rules away — hence the frame in the selector,
+   not just the cell. */
+[data-csv-borders="on"] .csv-frame .csv-cell,
+[data-csv-borders="on"] .csv-frame .csv-gutter {
+  border-bottom: 1px solid var(--line-soft);
+}
+[data-csv-borders="on"] .csv-frame .csv-cell {
+  border-right: 1px solid var(--line-soft);
+}
+/* The heading strip keeps its own heavier line under it, and the gutter its
+   own heavier line beside it: both are edges of the frozen chrome rather than
+   part of the lattice. */
+[data-csv-borders="on"] .csv-frame .csv-gutter { border-right: 1px solid var(--line); }
+[data-csv-borders="on"] .csv-frame .csv-head .csv-cell,
+[data-csv-borders="on"] .csv-frame .csv-head .csv-gutter { border-bottom: 0; }
+
+/* The right-click menu. Inside the frame so it scrolls away with the pane it
+   belongs to rather than hanging over the window. */
+.csv-menu {
+  position: absolute;
+  z-index: 20;
+  min-width: 190px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 12px 34px #0005;
+  font: 12px/1.4 var(--font-ui);
+}
+.csv-menu[hidden] { display: none; }
+.csv-menu-item {
+  display: block;
+  width: 100%;
+  padding: 5px 9px;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.csv-menu-item:hover:not(:disabled) { background: var(--accent); color: #fff; }
+.csv-menu-item:disabled { opacity: 0.4; cursor: default; }
+.csv-menu-rule { height: 1px; margin: 4px 6px; background: var(--line); }
+
+/* The column filter. Shaped like the menu because it comes from the same
+   place, but it is a panel: it stays open while boxes are ticked, and the list
+   inside it scrolls rather than growing a popover taller than the window. */
+.csv-filter {
+  position: absolute;
+  z-index: 21;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 260px;
+  max-height: min(360px, 70%);
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 12px 34px #0005;
+  font: 12px/1.4 var(--font-ui);
+}
+.csv-filter[hidden] { display: none; }
+.csv-filter-head {
+  overflow: hidden;
+  color: var(--ink);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.csv-filter-search {
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+}
+.csv-filter-search:focus { outline: none; border-color: var(--accent); }
+.csv-filter-picks { display: flex; align-items: center; gap: 6px; }
+.csv-filter-kept { margin-left: auto; color: var(--ink-soft); }
+.csv-filter-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 2px;
+  background: var(--paper);
+}
+.csv-filter-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 5px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.csv-filter-row:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.csv-filter-row input { margin: 0; accent-color: var(--accent); }
+.csv-filter-value {
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: var(--ink);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* A cell with nothing in it is still a value to tick, so it is named rather
+   than shown as the emptiness it is. */
+.csv-filter-value.is-blank { color: var(--ink-soft); font-style: italic; }
+.csv-filter-count {
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+.csv-filter-note { color: var(--ink-soft); }
+.csv-filter-note[hidden] { display: none; }
+
+/* The open cell.
+
+   It leaves its column. A cell is as wide as the column it is in, and a value
+   longer than that was edited through a slot — the field kept the column's
+   width and scrolled, so the text began and ended mid-word and there was no way
+   to see the whole of what was being changed. So the field is laid over the
+   grid instead: out to the right edge, then down over the rows below, wrapping.
+   csv.js sizes it to the value; this is the frame it does that in.
+
+   Lifted off the surface — an outline in the accent, a shadow under it — for
+   the same reason a dialog is: it is covering things that still exist, and a
+   field flush with the cells it is drawn over reads as several cells having
+   merged. */
+.csv-cell.is-editing {
+  position: relative;
+  overflow: visible;
+  z-index: 6;
+}
+/* Rows are absolutely positioned siblings, so the one being edited has to be
+   raised as a whole — otherwise a field growing downwards is drawn under the
+   rows it grows over, which are painted after it. */
+.csv-row:has(.csv-cell.is-editing) { z-index: 6; }
+.csv-input {
+  position: absolute;
+  top: -1px;
+  left: -1px;
+  z-index: 7;
+  box-sizing: border-box;
+  min-width: calc(100% + 2px);
+  min-height: calc(100% + 2px);
+  /* 5px of top padding rather than centring, which a textarea cannot do: it
+     puts the first line where the cell's own single line sat, so opening a cell
+     does not move its text. */
+  padding: 5px 7px;
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  outline: none;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  resize: none;
+  overflow: auto;
+  white-space: pre-wrap;
+  /* A cell may hold one unbroken run of a thousand characters — a URL, a joined
+     list — and a wrap that only breaks at spaces would leave it overflowing
+     anyway. */
+  overflow-wrap: anywhere;
+  box-shadow: 0 6px 18px rgb(0 0 0 / 0.18);
+}
+/* The heading strip is a line taller than a row, so its field starts a line
+   lower to sit where the label did. It never grows downwards — see fitEditor. */
+.csv-th.is-editing .csv-input { padding-top: 6px; }
+
+.whiteboard-note-dialog {
+  width: min(440px, calc(100vw - 32px));
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: 0 18px 60px #0006;
+}
+.whiteboard-note-dialog::backdrop { background: #1117; }
+.whiteboard-note-dialog form { display: grid; gap: 12px; padding: 18px; }
+.whiteboard-note-dialog h2 { margin: 0; font: 600 15px/1.3 var(--font-ui); }
+.whiteboard-note-dialog input {
+  min-height: 34px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  outline: none;
+  background: var(--paper);
+  color: var(--ink);
+  font: 13px/1 var(--font-ui);
+}
+.whiteboard-note-dialog input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-dim); }
+.whiteboard-note-error { min-height: 1em; margin: -4px 0 0; color: var(--accent); font: 11.5px/1.3 var(--font-ui); }
+.whiteboard-note-actions { display: flex; justify-content: flex-end; gap: 7px; }
+.whiteboard-note-actions button {
+  padding: 6px 11px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--paper);
+}
+.whiteboard-note-actions button[value="default"] { border-color: var(--accent); background: var(--accent); color: white; }
+
+#app[data-kind="whiteboard"] .status { border-top-color: transparent; }
 
 /* `display: flex` because a <webview> lays out an internal shadow <iframe>
    with `flex: 1` — the same reason the embedded player needs it. Without it
@@ -8106,8 +11085,8 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
    size the heading is set at. */
 .tk-title-flag,
 .inline-title-flag {
-  font-size: 1.15em;
-  top: .58em;
+  font-size: 1.6em;
+  top: .42em;
   transform: translateY(-50%);
 }
 
@@ -8457,8 +11436,24 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   max-height: 180px;
   overflow: auto;
 }
-.merge-block.is-mine.is-picked .merge-code { color: var(--code-added); }
-.merge-block.is-theirs.is-picked .merge-code { color: var(--code-removed); }
+.merge-line { white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Only the lines that actually differ are coloured; the context around them
+   stays plain, so the eye lands on the choice rather than on the whole block. */
+.merge-block.is-mine .merge-line.is-changed {
+  color: var(--code-added);
+  background: color-mix(in srgb, var(--code-added) 12%, transparent);
+}
+.merge-block.is-theirs .merge-line.is-changed {
+  color: var(--code-removed);
+  background: color-mix(in srgb, var(--code-removed) 12%, transparent);
+}
+.merge-block:not(.is-picked) .merge-code { opacity: .55; }
+.merge-gap {
+  padding: 1px 0;
+  color: var(--faint);
+  font: 9.5px/1.6 var(--font-ui);
+  letter-spacing: .04em;
+}
 
 .merge-foot {
   display: flex;
@@ -8472,21 +11467,30 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 
 .msg-review {
   display: grid;
-  gap: 8px;
+  gap: 4px;
   margin: 9px 0 4px;
-  padding: 10px;
+  padding: 7px 8px;
   border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line));
-  border-radius: 8px;
+  border-radius: 7px;
   background: color-mix(in srgb, var(--accent) 5%, transparent);
 }
-.ai-review-head { display: flex; align-items: baseline; gap: 8px; }
-.ai-review-head strong { font-size: 12px; }
-.ai-review-files { display: grid; gap: 3px; }
+.ai-review-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.ai-review-head strong { font-size: 11px; }
+.ai-review-files { display: grid; }
 .ai-review-file {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 5px;
+  min-height: 22px;
+}
+.ai-review-file + .ai-review-file {
+  border-top: 1px solid var(--line-soft);
 }
 .ai-review-path {
   overflow: hidden;
@@ -8496,13 +11500,22 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.ai-review-actions { display: flex; justify-content: flex-end; gap: 6px; }
+/* Where a diff would have gone for a turn the history no longer holds. Sits in
+   the row's second line the way `.history-diff` does, so the Diff button
+   toggles one or the other and never nothing. */
+.ai-review-gone {
+  flex-basis: 100%;
+  padding: 4px 2px 2px;
+  color: var(--faint);
+  font: 11px/1.4 var(--font-ui);
+}
+.ai-review-actions { display: flex; align-items: center; gap: 3px; }
 .ai-review-keep {
-  padding: 3px 8px;
+  padding: 2px 8px;
   border-radius: 4px;
   color: var(--paper);
   background: var(--accent);
-  font-size: 10.5px;
+  font: 600 10.5px/1.4 var(--font-ui);
 }
 .ai-review-keep:disabled { opacity: .6; }
 /* The review block borrows the history panel's diff, so a change looks the
@@ -8553,7 +11566,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
     --ink:       #1A1815;
     --ink-soft:  #443F39;
     --muted:     #6B655E;
-    --faint:     #8A847B;
+    --faint:     #756F67;
     --line:      #E1DCD4;
     --line-soft: #EBE8E1;
     --accent:    #A63A5A;
@@ -8594,7 +11607,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   .titlebar, #sidebar, #grip-sidebar, .doc-head, footer.status,
   #sidepane, #grip-side, #ai, #grip-ai,
   #pdf-tools, #site-tools, .empty, #lang-keys,
-  #overlay, #toast, .dd-root, .export-curtain,
+  #overlay, #toast, .export-curtain, .boot-screen, .drawer-scrim,
   .editor-host, #pdf, #site { display: none !important; }
 
   /* The grid gives way to one flowing column, and the app shell's fixed,
@@ -8626,4 +11639,87 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   .reading h4, .reading h5, .reading h6 { break-after: avoid; }
   .reading pre, .reading blockquote, .reading table, .reading figure,
   .reading img, .reading .katex-display, .reading .footnotes { break-inside: avoid; }
+}
+
+/* ---------------------------------------------------------- narrow drawers
+
+   At desktop size the side document and Copilot earn permanent columns. Below
+   this point they become drawers instead: the note keeps the whole writing
+   surface, and a dimmed scrim makes the temporary overlap explicit. The width
+   variables still belong to panels.js, so a user's preferred width comes back
+   when the window grows again. */
+@media (max-width: 1040px) {
+  .app {
+    --col-side: 0;
+    --col-chat: 0;
+  }
+
+  .sidepane,
+  .ai {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: var(--z-panel);
+    width: min(var(--side), calc(100vw - 32px));
+    max-height: 100vh;
+    box-shadow: -18px 0 42px color-mix(in srgb, var(--ink) 16%, transparent);
+    transform: translateX(105%);
+    visibility: hidden;
+    pointer-events: none;
+    transition: transform .22s var(--ease), visibility 0s linear .22s;
+  }
+  .sidepane {
+    right: 0;
+    width: min(var(--side), calc(100vw - 32px));
+  }
+  .ai {
+    width: min(var(--chat), calc(100vw - 32px));
+  }
+  .app[data-side="open"] .sidepane,
+  .app[data-ai="open"] .ai {
+    transform: translateX(0);
+    visibility: visible;
+    pointer-events: auto;
+    transition-delay: 0s;
+  }
+  .app[data-ai="open"] .ai { overflow: visible; }
+  .app[data-side="open"][data-ai="open"] .sidepane {
+    right: var(--chat);
+    width: min(var(--side), calc(100vw - var(--chat) - 32px));
+  }
+
+  body:has(.app[data-side="open"]) .drawer-scrim,
+  body:has(.app[data-ai="open"]) .drawer-scrim { display: block; }
+}
+
+/* The file rail is the last panel to give up its column. At the smallest
+   supported window it becomes a left drawer too, with an explicit close affordance
+   in its header. */
+@media (max-width: 760px) {
+  .app { --col-rail: 0; }
+
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    z-index: var(--z-panel);
+    width: min(var(--rail), calc(100vw - 56px));
+    max-height: 100vh;
+    box-shadow: 18px 0 42px color-mix(in srgb, var(--ink) 16%, transparent);
+    transform: translateX(-105%);
+    visibility: hidden;
+    pointer-events: none;
+    transition: transform .22s var(--ease), visibility 0s linear .22s;
+  }
+  .app[data-sidebar="open"] .sidebar {
+    transform: translateX(0);
+    visibility: visible;
+    pointer-events: auto;
+    transition-delay: 0s;
+  }
+  .app[data-sidebar="closed"] .doc-head { padding-left: 18px; }
+
+  body:has(.app[data-sidebar="open"]) .drawer-scrim { display: block; }
 }

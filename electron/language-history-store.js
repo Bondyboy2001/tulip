@@ -23,6 +23,9 @@ const { cells, delimiter } = require('./language-row')
 const STATE_DIR = '.tulip'
 const STATE_FILE = 'language-history.json'
 
+/** @typedef {{ id: string, row: number, cells: string[], addedAt: number | null, editedAt: number | null }} RowRecord */
+/** @typedef {{ version: number, notes: Record<string, { rows: RowRecord[] }> }} HistoryState */
+
 /** Complete body rows in the first Markdown table, with their visible index. */
 function languageRows (markdown) {
   const lines = String(markdown || '').split(/\r?\n/)
@@ -103,7 +106,9 @@ function matchRows (current, previous) {
 
 function makeStore ({ vault, now = Date.now, makeId = randomUUID }) {
   const file = () => path.join(vault(), STATE_DIR, STATE_FILE)
+  /** @type {HistoryState | null} */
   let state = null
+  /** @type {string | null} */
   let loadedFor = null
   const writer = makeCoalescedWriter()
 
@@ -114,7 +119,9 @@ function makeStore ({ vault, now = Date.now, makeId = randomUUID }) {
      with today's date — the whole note's Added and Edited dates gone, and gone
      durably, since the next flush wrote the invention back. Nothing sees
      `state` now until it holds what was on disk. */
+  /** @type {Promise<HistoryState> | null} */
   let loading = null
+  /** @type {string | null} */
   let loadingFor = null
 
   async function load () {
@@ -129,7 +136,9 @@ function makeStore ({ vault, now = Date.now, makeId = randomUUID }) {
 
     loadingFor = forVault
     loading = (async () => {
+      /** @type {HistoryState} */
       const fresh = { version: 1, notes: {} }
+      /** @type {string | null} */
       let raw = null
       try { raw = await fs.readFile(target, 'utf8') } catch {}
       if (raw !== null) {
@@ -177,6 +186,7 @@ function makeStore ({ vault, now = Date.now, makeId = randomUUID }) {
    */
   async function sync (notePath, markdown, { trackNew = true } = {}) {
     await load()
+    if (!state) throw new Error('language history vault changed during load')
     const current = languageRows(markdown)
     const previous = Array.isArray(state.notes[notePath]?.rows)
       ? state.notes[notePath].rows
@@ -220,6 +230,7 @@ function makeStore ({ vault, now = Date.now, makeId = randomUUID }) {
 
   async function rows (notePath) {
     await load()
+    if (!state) throw new Error('language history vault changed during load')
     const records = state.notes[notePath]?.rows || []
     return records.map((record) => ({
       row: record.row, id: record.id, addedAt: record.addedAt, editedAt: record.editedAt
@@ -228,6 +239,7 @@ function makeStore ({ vault, now = Date.now, makeId = randomUUID }) {
 
   async function relocate (from, to) {
     await load()
+    if (!state) throw new Error('language history vault changed during load')
     const moves = Object.keys(state.notes)
       .filter((key) => key === from || key.startsWith(`${from}/`))
       .map((key) => [key, key === from ? to : `${to}${key.slice(from.length)}`])
@@ -242,6 +254,7 @@ function makeStore ({ vault, now = Date.now, makeId = randomUUID }) {
 
   async function remove (notePath) {
     await load()
+    if (!state) throw new Error('language history vault changed during load')
     const keys = Object.keys(state.notes)
       .filter((key) => key === notePath || key.startsWith(`${notePath}/`))
     if (!keys.length) return { dropped: 0 }

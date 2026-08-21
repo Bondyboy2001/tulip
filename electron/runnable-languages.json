@@ -10,7 +10,8 @@
     "go": ["go", "golang"],
     "lean": ["lean", "lean4"],
     "rust": ["rs", "rust"],
-    "cpp": ["cpp", "c++", "cxx", "cc"]
+    "cpp": ["cpp", "c++", "cxx", "cc"],
+    "cuda": ["cuda", "cu"]
   },
   "drawn": {
     "mermaid": "mermaid",

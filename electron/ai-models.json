@@ -1,130 +1,24 @@
 {
-  "comment": "The three CLIs the copilot can be, and what they offer before they are asked. Shared because both processes need it: electron/ai.js decides what it will spawn, src/models.js decides what the dropdown shows, and two copies of that is how the two disagree. `offerByDefault` is false for opencode alone — its catalogue is an account property running to several hundred entries, which is what the Models-offered setting exists to keep out of the list. The Claude labels and context figures below are the fallback: at catalogue time ai.js asks the CLI itself (`claude models list`) and writes its labels over these, because an id like `opus` is an alias that follows the newest model of that name — the stale label used to have to be moved by hand on every Anthropic release. The fallback still decides which aliases are offered and which effort levels each takes, neither of which the lineup table publishes. `grants` is what each CLI can actually do in each of the two modes, in the user's words: Claude takes a tool allowlist and so gets no shell at all, while Codex and opencode have no per-tool switch and are fenced only by a sandbox — one toggle, three blast radii, and the panel says which one it is handing over.",
+  "comment": "The CLI the copilot is, and what it offers before it is asked. Shared because both processes need it: electron/ai.js decides what it will spawn, src/models.js decides what the dropdown shows, and two copies of that is how the two disagree. Same arrangement as vault-contract.json and zoom-steps.json. `command` is the binary spawned — one process per turn, with the vault as its working directory. There is no HTTP client here and no key of ours to keep: every model, and every gateway (OpenRouter, z.ai), is reached by configuring it inside opencode, where its key already lives. `fallbacks` is what the dropdown shows before the CLI has been asked — a seed, not a limit, because the catalogue is an account property this file cannot check a name against, so what the panel offers is what gets spawned. `offerByDefault` is false because opencode's four hundred-odd entries are what the Models-offered setting exists to keep out of the dropdown. `auth` is the argument list that answers whether the CLI is signed in. `grants` is what it can actually do in the read-only or write-capable provider mode, in the user's words: it takes no per-tool allowlist, so it is fenced only by that mode — the UI's Ask and Auto choices decide whether write access is confirmed first.",
   "providers": [
-    {
-      "id": "claude",
-      "label": "Claude",
-      "command": "claude",
-      "offerByDefault": true,
-      "default": "opus",
-      "grants": {
-        "read": "read and search your notes",
-        "write": "read, edit and create notes"
-      }
-    },
-    {
-      "id": "codex",
-      "label": "Codex",
-      "command": "codex",
-      "offerByDefault": true,
-      "default": "gpt-5.6-sol",
-      "grants": {
-        "read": "read and search your notes",
-        "write": "read, edit and create notes, and run shell commands inside the vault"
-      }
-    },
     {
       "id": "opencode",
       "label": "opencode",
       "command": "opencode",
       "offerByDefault": false,
-      "default": "",
+      "auth": [
+        "auth",
+        "list"
+      ],
       "grants": {
-        "read": "read and search your notes",
+        "read": "read and search your notes, and fetch web pages",
+        "ask": "read, edit and create notes, run shell commands inside the vault, and fetch web pages",
+        "auto": "read, edit and create notes, run shell commands anywhere on this Mac, and fetch web pages",
         "write": "read, edit and create notes, run shell commands inside the vault, and fetch web pages"
       }
     }
   ],
   "fallbacks": {
-    "claude": [
-      {
-        "id": "opus",
-        "label": "Opus 5",
-        "effort": "high",
-        "efforts": [
-          "low",
-          "medium",
-          "high",
-          "xhigh",
-          "max"
-        ],
-        "context": 1000000
-      },
-      {
-        "id": "sonnet",
-        "label": "Sonnet 5",
-        "effort": "high",
-        "efforts": [
-          "low",
-          "medium",
-          "high",
-          "xhigh",
-          "max"
-        ],
-        "context": 1000000
-      },
-      {
-        "id": "haiku",
-        "label": "Haiku 4.5",
-        "effort": "high",
-        "efforts": [
-          "low",
-          "medium",
-          "high",
-          "xhigh",
-          "max"
-        ],
-        "context": 200000
-      },
-      {
-        "id": "fable",
-        "label": "Fable 5",
-        "effort": "high",
-        "efforts": [
-          "low",
-          "medium",
-          "high",
-          "xhigh",
-          "max"
-        ],
-        "context": 1000000
-      }
-    ],
-    "codex": [
-      {
-        "id": "gpt-5.6-sol",
-        "label": "GPT-5.6-Sol",
-        "effort": "low",
-        "efforts": [
-          "low",
-          "medium",
-          "high"
-        ],
-        "context": 272000
-      },
-      {
-        "id": "gpt-5.6-terra",
-        "label": "GPT-5.6-Terra",
-        "effort": "low",
-        "efforts": [
-          "low",
-          "medium",
-          "high"
-        ],
-        "context": 272000
-      },
-      {
-        "id": "gpt-5.6-luna",
-        "label": "GPT-5.6-Luna",
-        "effort": "low",
-        "efforts": [
-          "low",
-          "medium",
-          "high"
-        ],
-        "context": 272000
-      }
-    ],
     "opencode": []
   },
   "efforts": [

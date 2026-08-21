@@ -12,7 +12,8 @@
    ================================================================== */
 
 import { Decoration, WidgetType } from '@codemirror/view'
-import { codeCopilotButton, copyButton, eachFence, fenceField } from './blocks.js'
+import { codeCopilotButton, copyButton } from './blocks.js'
+import { eachFence, fenceField } from './blocks-editor.js'
 import { isRunnable, retirePainters, runButtonUI, runPanelUI } from './runcode.js'
 import { htmlFence, isHtmlRun } from './htmlrun.js'
 import { isThree, threeFence } from './threejs.js'
@@ -34,6 +35,11 @@ const BLOCK_KINDS = [
 ]
 
 const uiFor = (lang) => BLOCK_KINDS.find((kind) => kind.matches(lang))
+
+/* The widgets only ask once a kind HAS claimed the language — the button hides
+   behind `runs`, and the panel is not built at all otherwise (see below) — so
+   this lookup cannot come back empty. */
+const claimedUiFor = (lang) => /** @type {(typeof BLOCK_KINDS)[number]} */ (uiFor(lang))
 
 /* Both widgets are equal while the block's text is unchanged, so typing
    elsewhere in the note maps them rather than rebuilding them — and a running
@@ -57,7 +63,7 @@ class RunButtonWidget extends WidgetType {
   toDOM () {
     const slot = document.createElement('span')
     slot.className = 'tk-run-top'
-    if (this.runs) slot.append(uiFor(this.lang).button(this.lang, this.code))
+    if (this.runs) slot.append(claimedUiFor(this.lang).button(this.lang, this.code))
     slot.append(codeCopilotButton(this.lang, this.code))
     slot.append(copyButton(this.code))
     return slot
@@ -77,7 +83,7 @@ class RunPanelWidget extends WidgetType {
   // block's output under the other.
   eq (other) { return other.lang === this.lang && other.code === this.code }
   toDOM (view) {
-    return uiFor(this.lang).panel(this.lang, this.code, 'tk-run', () => view.requestMeasure())
+    return claimedUiFor(this.lang).panel(this.lang, this.code, 'tk-run', () => view.requestMeasure())
   }
   // A panel holds everything the block has printed; left registered, so does
   // the painter that was drawing into it.

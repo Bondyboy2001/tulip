@@ -13,8 +13,6 @@
  * page, because a forgotten document is a worker that never exits.
  */
 
-import { loadPdfjs, PDF_DATA, renderPageToCanvas } from './pdf.js'
-
 /* How tall the box is unless the note says otherwise — enough for most of an
    A4 page at column width, small enough that the note stays a note — lives in
    the stylesheet, as the fallback of `--embed-pdf-h`. Keeping it there is what
@@ -62,6 +60,10 @@ export function renderPdfEmbed (spec, onReady = () => {}, fileChip) {
   const state = {
     dead: false,
     doc: null,
+    /* What actually closes the document — a document proxy has no `destroy` of
+       its own; the loading task it came from does, and it takes the worker and
+       the buffer with it. Same reasoning as src/pdf-text.js. */
+    loading: null,
     watcher: null,   // the IntersectionObserver over page wrappers
     sizer: null,     // the ResizeObserver watching the box's width
     opening: false,
@@ -91,10 +93,13 @@ export function renderPdfEmbed (spec, onReady = () => {}, fileChip) {
     state.dead = true
     state.watcher?.disconnect()
     state.sizer?.disconnect()
-    const doc = state.doc
+    const loading = state.loading
     state.doc = null
+    state.loading = null
     // After the render in flight settles; destroying under one wedges pdf.js.
-    if (doc) Promise.resolve(state.inFlight).catch(() => {}).then(() => doc.destroy()).catch(() => {})
+    if (loading) {
+      Promise.resolve(state.inFlight).catch(() => {}).then(() => loading.destroy()).catch(() => {})
+    }
   }
 
   /** The whole embed becomes a plain chip if the document cannot be shown —
@@ -155,15 +160,19 @@ export function renderPdfEmbed (spec, onReady = () => {}, fileChip) {
   }
 
   async function open () {
-    const [source, pdfjs] = await Promise.all([
+    const [source, runtime] = await Promise.all([
       window.tulip.pdf.source(spec.path),
-      loadPdfjs()
+      import('./pdf.js')
     ])
+    const pdfjs = await runtime.loadPdfjs()
     if (state.dead) return
 
-    const doc = await pdfjs.getDocument({ url: source, ...PDF_DATA }).promise
-    if (state.dead) { doc.destroy(); return }
+    state.runtime = runtime
+    const loading = pdfjs.getDocument({ url: source, ...runtime.PDF_DATA })
+    const doc = await loading.promise
+    if (state.dead) { loading.destroy().catch(() => {}); return }
     state.doc = doc
+    state.loading = loading
     count.textContent = doc.numPages === 1 ? '1 page' : `${doc.numPages} pages`
 
     /* Fit to the box's width, sized from page 1 the way the tab viewer is; a
@@ -245,7 +254,7 @@ export function renderPdfEmbed (spec, onReady = () => {}, fileChip) {
 
     // The viewer's own render, so the resolution and the canvas ceiling are one
     // rule rather than two — the copy this had made did not carry the ceiling.
-    const { canvas } = await renderPageToCanvas(page, scale)
+    const { canvas } = await state.runtime.renderPageToCanvas(page, scale)
     if (state.dead || !state.visible.has(wrap)) {
       releaseCanvas(canvas)
       return

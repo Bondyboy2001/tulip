@@ -28,13 +28,35 @@
   <link rel="stylesheet" href="renderer.css" />
 </head>
 <body>
-  <div id="app" class="app" data-sidebar="open" data-side="closed" data-ai="closed">
+  <!-- Only ever seen when the launch fails. There is no loading state: the
+       window itself is held back until the note is on the page (see the reveal
+       in electron/main.js), so a normal launch never has a screen to cover. -->
+  <section class="boot-screen" id="boot-screen" aria-label="Tulip could not open" hidden>
+    <div class="boot-card">
+      <svg class="boot-mark" viewBox="0 0 32 32" aria-hidden="true">
+        <path d="M16 29V16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+        <path d="M16 16c-5.8 0-9.2-3.4-8.7-9.2C13.1 7.1 16 10.2 16 16Z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
+        <path d="M16 16c5.8 0 9.2-3.4 8.7-9.2C18.9 7.1 16 10.2 16 16Z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
+      </svg>
+      <p class="boot-eyebrow">Tulip</p>
+      <h1 class="boot-title" id="boot-title">Tulip could not open</h1>
+      <p class="boot-message" id="boot-message" role="status">Your workspace is safe. Try again or choose another vault.</p>
+      <p class="boot-detail" id="boot-detail" role="alert" hidden></p>
+      <div class="boot-actions">
+        <button class="boot-action is-primary" id="boot-retry" type="button" hidden>Try again</button>
+        <button class="boot-action" id="boot-connect" type="button" hidden>Choose a vault…</button>
+      </div>
+    </div>
+  </section>
+
+  <div id="app" class="app" data-sidebar="open" data-side="closed" data-ai="closed" data-booting>
 
     <div class="titlebar"></div>
 
     <aside class="sidebar" id="sidebar">
+      <span class="app-version" id="app-version" aria-label="Tulip version"></span>
       <header class="sidebar-head">
-        <button class="vault-name" id="vault-name" title="Open another vault">
+        <button class="vault-name" id="vault-name" title="Switch vault">
           <span id="vault-label">No vault</span>
         </button>
         <div class="sidebar-actions">
@@ -51,39 +73,57 @@
                the one that applies — chevrons drawn together to shut the tree,
                apart to open it. Which it is now is read from the tree itself in
                paintFoldToggle, so it can never offer the thing that just
-               happened. Only on the Files pane; the other two have no folders. -->
+               happened. The tree is always on screen now, so it always is. -->
           <button class="icon-btn" id="btn-fold-all" title="Collapse all folders"
                   aria-label="Collapse all folders">
             <svg class="fold-ico-collapse" viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M4.8 2.8 8 5.6l3.2-2.8M4.8 13.2 8 10.4l3.2 2.8" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            <svg class="fold-ico-expand" viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M4.8 5.6 8 2.8l3.2 2.8M4.8 10.4 8 13.2l3.2-2.8" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/></svg>
+           <svg class="fold-ico-expand" viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M4.8 5.6 8 2.8l3.2 2.8M4.8 10.4 8 13.2l3.2-2.8" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/></svg>
+           </button>
+          <!-- Not a pane control: it does not choose what the sidebar shows,
+               it decides whether there is a second panel under the tree at
+               all. Which is why it sits with the header's other verbs rather
+               than in the strip below, where it would read as a sixth tab. -->
+          <button class="icon-btn" id="pane-split-toggle" type="button"
+                  aria-pressed="false" title="Show a second panel below"
+                  aria-label="Show a second panel below">
+            <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><rect x="2.5" y="2.5" width="11" height="11" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M2.5 8h11" stroke="currentColor" stroke-width="1.2"/></svg>
           </button>
-        </div>
-      </header>
-
-      <!-- The sidebar holds more than one thing now, so it says which. Files
-           is the vault; Outline is whatever the open document offers as a map
-           of itself — a note's headings, or a PDF's contents and the passages
-           marked in it; Links is the other direction, the notes that point at
-           this one and the ones that say its name without pointing. -->
-      <nav class="pane-tabs" role="tablist" aria-label="Sidebar">
-        <button class="pane-tab is-on" id="pane-files-tab" role="tab" data-pane="files"
-                aria-selected="true">Files</button>
-        <button class="pane-tab" id="pane-outline-tab" role="tab" data-pane="outline"
-                aria-selected="false">Outline</button>
-        <button class="pane-tab" id="pane-links-tab" role="tab" data-pane="links"
-                aria-selected="false">Links</button>
-        <button class="pane-tab" id="pane-info-tab" role="tab" data-pane="info"
-                aria-selected="false">Info</button>
-      </nav>
+         </div>
+       </header>
 
       <section class="saved-searches" id="saved-searches" hidden></section>
-      <nav class="tree pane" id="tree" aria-label="Notes"></nav>
+      <nav class="tree pane" id="tree" role="tree" aria-label="Notes"></nav>
       <nav class="outline-list pane" id="outline-list" aria-label="Outline" hidden></nav>
       <nav class="links-list pane" id="links-list" aria-label="Backlinks" hidden></nav>
-      <!-- Info is everything about the open document that is not the document:
-           the facts the filesystem keeps, the ones its text gives up to a
-           count, and its tags — the one piece of metadata edited here. -->
+      <nav class="spelling-list pane" id="spelling-list" aria-label="Spelling" hidden></nav>
       <div class="info-pane pane" id="info-pane" aria-label="Document info" hidden></div>
+
+      <!-- The second panel's header: a handle to size it by and a strip to
+           choose what is in it. The panel body itself is one of the four above,
+           moved below this block when it is the lower one — which is why this
+           sits between them in the markup rather than wrapping anything.
+
+           Files is not among them. The tree is the upper panel and always is,
+           so offering it here would be offering to show the vault twice — and
+           it is the reason the strip that used to sit above the tree, naming
+           the same five panels, is gone.
+
+           Outline is whatever the open document offers as a map of itself — a
+           note's headings, or a PDF's contents and the passages marked in it;
+           Links is the other direction, the notes that point at this one and
+           the ones that say its name without pointing. -->
+      <div class="pane-split" id="pane-split" hidden>
+        <div class="pane-split-grip" id="pane-split-grip" role="separator" tabindex="0"
+             aria-orientation="horizontal" aria-label="Resize the lower panel"
+             title="Drag to resize · double-click to reset"></div>
+        <nav class="pane-tabs is-lower" id="pane-tabs-below" role="tablist"
+             aria-label="Lower panel">
+          <button class="pane-tab" id="pane-outline-tab" role="tab" data-pane="outline" aria-selected="false">Outline</button>
+          <button class="pane-tab" id="pane-links-tab" role="tab" data-pane="links" aria-selected="false">Links</button>
+          <button class="pane-tab" id="pane-spelling-tab" role="tab" data-pane="spelling" aria-selected="false">Spelling</button>
+          <button class="pane-tab" id="pane-info-tab" role="tab" data-pane="info" aria-selected="false">Info</button>
+        </nav>
+      </div>
 
       <!-- Drag the panel's own edge. Arrow keys nudge it, double-click puts
            it back where it started. -->
@@ -113,7 +153,7 @@
         </div>
         <!-- One tab per open note. The strip is the note's identity now: the
              name, the folder it is in as a tooltip, and the unsaved dot. -->
-        <nav class="tabs" id="tabs" aria-label="Open notes"></nav>
+        <nav class="tabs" id="tabs" role="tablist" aria-label="Open notes"></nav>
         <div class="doc-tools">
           <button class="study-start" id="study-start" hidden title="Study this language table">
             <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
@@ -144,15 +184,37 @@
                 <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M5.9 4.3 2.6 8l3.3 3.7M10.1 4.3 13.4 8l-3.3 3.7" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
               </button>
             </div>
+            <!-- Why the two editing views are greyed out. An indicator, not a
+                 control: the lock is put on and taken off from the command
+                 palette, which asks first, and a padlock you could click would
+                 be a way past it that never asks. -->
+            <span class="lock-mark" id="lock-mark" hidden role="img"
+                  aria-label="Locked — unlock it from the command palette"
+                  title="This file is locked — unlock it from the command palette to edit it">
+              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><rect x="3.4" y="7" width="9.2" height="6.2" rx="1.4" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M5.6 7V5.4a2.4 2.4 0 0 1 4.8 0V7" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+            </span>
+            <!-- Run the source file on screen. Only for a file in a language
+                 the run machinery accepts — renderer.js shows and hides it —
+                 and drawn by drawRunFace, so it is the same triangle-or-square
+                 as every fenced block's own control. -->
+            <button class="doc-tool" id="doc-run" title="Run this file"
+                    aria-label="Run this file" hidden></button>
+            <!-- The dock the run printed into, shown and put away. Only on
+                 screen once there is output to show — before that there is
+                 nothing to toggle. -->
+            <button class="doc-tool" id="doc-out" title="Show or hide the output"
+                    aria-label="Show or hide the output" aria-pressed="false" hidden>
+              <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><rect x="2.4" y="3.2" width="11.2" height="9.6" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="m5 6.7 1.9 1.6L5 9.9M8.7 10h2.5" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
             <!-- The ⌘⇧A the command palette carries, as a button — the panel
                  can be opened without its chord being remembered. -->
             <span class="doc-control-divider" aria-hidden="true"></span>
+            <button class="zoom" id="zoom" title="Back to the default size">100%</button>
             <button class="doc-tool" id="ai-toggle" title="Toggle Copilot (⌘⇧A)"
                     aria-label="Toggle Copilot" aria-controls="ai" aria-pressed="false">
               <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M8 2.4c.4 3 2.6 5.2 5.6 5.6-3 .4-5.2 2.6-5.6 5.6-.4-3-2.6-5.2-5.6-5.6 3-.4 5.2-2.6 5.6-5.6z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>
             </button>
           </div>
-
         </div>
       </div>
 
@@ -238,7 +300,20 @@
 
       <div class="stage" id="stage">
         <div class="editor-host" id="editor-host"></div>
-        <article class="reading" id="reading" hidden></article>
+        <!-- A tab stop because it scrolls: the reading view is `overflow-y:
+             auto`, and a scroll container the keyboard cannot focus is a page
+             only a mouse can read. -->
+        <article class="reading" id="reading" role="document"
+                 aria-label="Reading view" tabindex="0" hidden></article>
+        <div class="tex-divider" id="tex-divider" role="separator" tabindex="0"
+             aria-orientation="vertical" aria-label="Resize TeX source and PDF preview"
+             title="Drag to resize · double-click to reset" hidden></div>
+        <!-- A TeX document is source and result together. The ordinary editor
+             keeps the left half; this second PDF viewer owns the compiled
+             artifact on the right without putting build files in the vault. -->
+        <section class="tex-preview" id="tex-preview" hidden>
+          <div class="pdf tex-pdf" id="tex-pdf" tabindex="-1"></div>
+        </section>
         <!-- The PDF's pages. Its own scroller, so the reading position of a
              note and of a PDF in the same window do not fight over one. -->
         <!-- Focusable so the arrow keys, space and Page Up/Down scroll it the
@@ -251,12 +326,44 @@
              to show — no address yet, or one that would not load. -->
         <div class="site" id="site" hidden></div>
 
+        <!-- A first-class vault document, mounted lazily. Excalidraw owns the
+             canvas inside this host; Tulip owns its tab, file, toolbar and
+             persistence just as it does for PDF and website viewers. -->
+        <div class="whiteboard" id="whiteboard" tabindex="-1" hidden></div>
+
+        <!-- A separated-values file, shown as the table it is rather than as
+             the quoted text it is stored as. Mounted lazily by src/csv.js,
+             which owns everything inside; Tulip owns the tab, the file and the
+             saving, exactly as it does for the whiteboard. Focusable because
+             it scrolls and is navigated with the arrow keys. -->
+        <div class="data" id="data" tabindex="-1" hidden></div>
+
+        <!-- A Jupyter notebook, shown as its cells rather than as the JSON it
+             is stored as. Mounted lazily by src/notebook.js, which owns
+             everything inside; Tulip owns the tab, the file and the saving,
+             exactly as it does for the grid. -->
+        <div class="nb" id="notebook" hidden></div>
+
+        <!-- Everything else the vault holds: a picture, a recording, a file
+             the desktop opens and Tulip does not. Built by src/fileview.js.
+             Focusable because a tall picture scrolls. -->
+        <div class="fileview" id="fileview" tabindex="-1" hidden></div>
+
         <!-- The letters a language has and a US keyboard does not, docked under
              the table. Which letters is decided from the folder's flag and
              name — there is nothing to fill in. See src/keyboard.js. Inside the
              stage rather than the toolbar so it sits against the document it
              types into. -->
         <div class="lang-keys" id="lang-keys" hidden>
+          <button class="lang-mode" id="lang-mode" type="button" hidden
+                  aria-label="Toggle language typing" aria-pressed="false"
+                  title="Convert Latin typing into this language">
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+              <path d="M4 5h9M8.5 3v2M6 5c.6 3.1 2.5 5.7 5.5 7.5M11 5c-.7 3.3-3 6.3-6.5 8M14 19h7M17.5 11l4 10M17.5 11l-4 10"
+                    fill="none" stroke="currentColor" stroke-width="1.6"
+                    stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
           <!-- Sticky, because a mouse cannot hold a modifier while it clicks.
                The real Shift key works too, and drives the same face. -->
           <button class="lang-key is-shift" id="lang-keys-shift" type="button"
@@ -265,27 +372,37 @@
                aria-label="Letters for this language"></div>
         </div>
 
+        <!-- What the toolbar's Run printed, as a panel laid over the corner of
+             the stage. It was in the document for a while — a block widget
+             after the last line — which put the code and its output in one
+             column at the cost of the output being wherever the end of the
+             file happened to be. A picture is the common case here and a
+             picture wants to be looked at, not scrolled to.
+
+             Inside the stage, so it covers the document and nothing else: the
+             sidebar, the tab strip and the copilot stay reachable while it is
+             up. Filled and emptied by mountFileRun (src/runcode.js), which
+             also puts its close and copy controls in. -->
+        <div class="file-run-pop" id="file-run-out" role="dialog"
+             aria-label="Run output" hidden></div>
       </div>
 
-      <!-- Two answers, one pane: with no vault there is a vault to open, and
-           with one open there is a tab holding nothing, which is offered the
-           three ways out of it. Which shows is decided in paintEmpty — see
-           renderer.js. -->
+      <!-- A tab holding nothing has to say it is holding nothing, so it carries
+           the ways out of it. There is no second answer here for "no vault":
+           without one the landing page below stands in front of the whole app,
+           and this pane is never reached. -->
       <div class="empty" id="empty">
-        <div class="empty-actions" id="empty-actions" hidden>
+        <div class="empty-actions" id="empty-actions">
           <button class="empty-action" data-command="new-note">Create new note <kbd>⌘N</kbd></button>
+          <button class="empty-action" data-command="new-whiteboard">Create new whiteboard</button>
           <button class="empty-action" data-command="switcher">Go to file <kbd>⌘O</kbd></button>
           <button class="empty-action" data-command="search">Search the vault <kbd>⌘⇧F</kbd></button>
         </div>
-        <button class="ghost" id="btn-open-vault">Open a vault</button>
       </div>
 
       <footer class="status">
         <span id="status-left" hidden></span>
-        <span class="status-end">
-          <span id="status-right"></span>
-          <button class="zoom" id="zoom" hidden title="Back to the default size">100%</button>
-        </span>
+        <span id="status-right"></span>
       </footer>
     </main>
 
@@ -314,7 +431,16 @@
         </div>
       </header>
 
-      <div class="ai-log" id="ai-log" role="log" aria-live="polite"></div>
+      <!-- A log, but deliberately not a live region. A reply is written into
+           this element token by token and re-rendered once a frame, and
+           `aria-live` over that is not an announcement but a firehose: the
+           whole growing answer, read again from the top on every frame, over
+           the top of whatever the reader was actually listening to. The busy
+           strip inside it is the live region instead — one short line, changing
+           a handful of times a turn, saying which phase the turn is in and when
+           it ends. Screen-reader users read the reply by navigating into it,
+           the way they would any other document. -->
+      <div class="ai-log" id="ai-log" role="log" aria-live="off"></div>
 
       <form class="ai-compose">
         <!-- Slash commands, the past conversations /history offers, and the
@@ -333,10 +459,10 @@
                     title="Attach files or images" aria-label="Attach files or images">
               <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="m6.1 8.9 4.5-4.5a2.15 2.15 0 0 1 3 3l-6.2 6.2a3.4 3.4 0 0 1-4.8-4.8l6.1-6.1" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/></svg>
             </button>
-            <button type="button" class="ai-chip" id="ai-write" aria-pressed="true"
-                    title="Let the copilot edit notes" aria-label="Let the copilot edit notes">
+            <button type="button" class="ai-chip ai-mode" id="ai-write" aria-pressed="false"
+                    title="Copilot permission mode" aria-label="Copilot permission mode: Read">
               <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M10.4 2.7 13.3 5.6 6 12.9l-3.4.5.5-3.4z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M9 4.1 11.9 7" stroke="currentColor" stroke-width="1.3"/></svg>
-              <span class="ai-write-label">Can edit</span>
+              <span id="ai-write-label">Read</span>
             </button>
           </div>
 
@@ -345,22 +471,24 @@
             <!-- What is answering, and how hard it is thinking — visible
                  without opening anything, and the way in to change either. -->
             <!-- The ring is how much of the model's context this conversation
-                 is carrying; it stays away until a turn has reported a figure,
-                 and for any model whose CLI does not publish a window. The
-                 figures behind it are a hover away — drawn here rather than
-                 left to the system's own tooltip, which arrives a second late
-                 in a font from outside the app. -->
+                 is carrying; it stays away when the CLI cannot report that
+                 measurement accurately. The figures behind it are a hover
+                 away rather than delayed in a system tooltip. -->
             <span class="ai-context-wrap" id="ai-context-wrap" hidden>
               <span class="ai-context" id="ai-context" role="img" tabindex="0"></span>
               <span class="ai-context-pop" id="ai-context-pop" aria-hidden="true"></span>
             </span>
 
-            <button type="button" class="ai-config" id="ai-config" aria-expanded="false">
-              <span id="ai-config-model">Opus</span>
-              <span class="ai-config-sep" id="ai-config-sep">·</span>
-              <span class="ai-config-effort" id="ai-config-effort">High</span>
-              <svg viewBox="0 0 16 16" width="10" height="10" aria-hidden="true"><path d="m4.6 6.3 3.4 3.4 3.4-3.4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            </button>
+            <!-- A readout, not a control: both settings it names are changed
+                 by typing or by chord — `/model` at the message box, ⌃T for
+                 the thinking level — so there is nothing here to press. It
+                 flashes when ⌃T steps the level, which is the whole of its
+                 feedback. -->
+            <span class="ai-config" id="ai-config">
+              <span id="ai-config-model">Default model</span>
+              <span class="ai-config-sep" id="ai-config-sep" hidden>·</span>
+              <span class="ai-config-effort" id="ai-config-effort" hidden></span>
+            </span>
 
             <!-- One button. It sends, and while a turn is running the same
                  button stops it — there is only ever one thing to do here. -->
@@ -371,47 +499,6 @@
           </div>
         </div>
 
-        <!-- Two rows, one shape: the name in a column of its own so the
-             controls share a left edge, and every control the full remaining
-             width. The model list refreshes itself when the panel restores,
-             so there is nothing here to press to make it current. -->
-        <div class="ai-pop" id="ai-pop" hidden role="dialog" aria-label="Copilot settings">
-          <!-- One list, not a CLI and then one of its models: picking Opus or
-               Sol or glm-5.2 picks the program that answers along with it.
-               Which models the list holds is a setting — Settings ▸ Copilot —
-               because opencode alone offers several hundred.
-
-               The list is built in copilot.js from the same dropdown the settings
-               pane uses; a native select would draw its popup with the system
-               rather than with the theme. -->
-          <div class="pop-row">
-            <span class="pop-name">Model</span>
-            <div class="ai-model-control" id="ai-model"></div>
-          </div>
-
-          <!-- A slider over named stops: the levels are ordered, and what you
-               are choosing is how far along that order to go — which a thumb
-               says at a glance and five buttons of equal weight do not. The
-               name of the stop is not lost, because the composer's own readout
-               beside the model spells out the one in force, and the thumb
-               carries it as a tooltip.
-
-               A real range input, not a div: dragging, arrow keys, Home/End and
-               the screen reader's announcement all come with it, and a thumb
-               built out of pointer events reimplements every one of them badly.
-               Its stops are drawn in copilot.js, because how many there are is
-               the chosen model's business — Claude states five, Codex publishes
-               a different set per model up to `ultra`, and most of opencode's
-               have none at all, which hides this row. -->
-          <div class="pop-row" id="ai-effort-row">
-            <span class="pop-name">Effort</span>
-            <div class="ai-effort" id="ai-effort">
-              <div class="ai-effort-stops" id="ai-effort-stops" aria-hidden="true"></div>
-              <input type="range" class="ai-effort-range" id="ai-effort-range"
-                     min="0" max="1" step="1" value="0" aria-label="Effort">
-            </div>
-          </div>
-        </div>
       </form>
 
       <div class="grip grip-start" id="grip-ai" role="separator" tabindex="0"
@@ -419,6 +506,8 @@
            title="Drag to resize · double-click to reset"></div>
     </aside>
   </div>
+
+  <button class="drawer-scrim" id="drawer-scrim" type="button" aria-label="Close panel"></button>
 
   <div class="overlay" id="overlay" hidden>
     <div class="panel" id="panel" role="dialog" aria-modal="true" aria-label="Quick switcher">
@@ -428,7 +517,11 @@
            again a panel later. They show for the vault search only; the
            switcher and the palette have nothing to qualify. -->
       <div class="panel-head">
-        <input id="panel-input" class="panel-input" type="text" autocomplete="off" spellcheck="false" />
+        <!-- The field owns the list below it and says which row is highlighted,
+             so arrowing through results reads them out instead of leaving a
+             screen reader on a text box that silently changed something. -->
+        <input id="panel-input" class="panel-input" type="text" autocomplete="off" spellcheck="false"
+               role="combobox" aria-expanded="true" aria-autocomplete="list" aria-controls="panel-list" />
         <div class="panel-chips" id="panel-chips" hidden>
           <button type="button" class="panel-chip" id="opt-case" aria-pressed="false"
                   title="Match case" aria-label="Match case">Aa</button>
@@ -453,38 +546,27 @@
         <button type="button" class="panel-replace-go" id="panel-replace-go">Replace all</button>
       </div>
 
-      <ul class="panel-list" id="panel-list" role="listbox"></ul>
-      <div class="panel-foot" id="panel-foot"></div>
+      <ul class="panel-list" id="panel-list" role="listbox" aria-label="Results"></ul>
+      <!-- The count is announced, the caveats beside it are not: the caveats
+           are read from the foot when the reader gets there, whereas how much
+           was found is the answer to what they just typed. -->
+      <div class="panel-foot" id="panel-foot">
+        <span class="panel-count" id="panel-count" role="status" aria-live="polite"></span>
+      </div>
     </div>
 
-    <!-- Beside the two font pickers only: a page of text set in whichever face
-         the highlighted row names. The row already names itself in its own
-         letters, which tells you what the face is; a paragraph tells you what
-         reading a note in it will actually be like, which is the thing being
-         chosen. It follows the arrow keys, so a run down the list is a run
-         through specimens. No heading over it, for the same reason: the row
-         names the face and the placeholder says which of the two is being
-         chosen, so the card is the specimen and nothing else. -->
-    <aside class="font-sample" id="font-sample" hidden aria-hidden="true">
-      <!-- Lorem ipsum, because a specimen is for looking at rather than
-           reading: real sentences pull the eye into what they say, and what is
-           being judged here is the shape of the letters. -->
-      <div class="font-sample-page">
-        <h3>Lorem ipsum</h3>
-        <p>Dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor
-           incididunt ut labore et <em>dolore</em> magna aliqua.</p>
-        <p>Ut enim ad minim veniam, quis <strong>nostrud</strong> exercitation
-           ullamco laboris nisi ut aliquip ex ea commodo.</p>
-        <p class="font-sample-glyphs">0123456789 · fi ffl · “quoted” · a—b</p>
-      </div>
-    </aside>
+    <!-- There was a specimen card here, beside the two font pickers: a page of
+         lorem ipsum set in whichever face the highlighted row named. The note
+         itself does that job better now — the font pickers leave the page
+         uncovered and unblurred while they preview (see `.is-peek`), so the
+         specimen is the reader's own writing at its own measure. -->
   </div>
 
   <div class="study" id="study" hidden>
     <section class="study-box" role="dialog" aria-modal="true" aria-labelledby="study-title">
       <header class="study-head">
         <div>
-          <h2 id="study-title">Study vocabulary</h2>
+          <h2 id="study-title">Study words</h2>
           <span class="study-progress" id="study-progress"></span>
         </div>
         <button class="icon-btn" id="study-close" title="Close (esc)" aria-label="Close study mode">
@@ -510,46 +592,29 @@
                   fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
           </svg>
         </span>
-        <!-- Typed rather than revealed, wherever the card is asking you to
-             produce the word rather than recognise it. See src/study-match.js
-             for why the grading forgives an accent and not a letter. -->
+        <!-- The language's word is the prompt; its English meaning is typed. -->
         <input class="study-input" id="study-input" type="text" hidden
                autocomplete="off" autocapitalize="off" autocorrect="off"
                spellcheck="false" aria-label="Your answer" placeholder="Type it">
+        <span class="study-feedback" id="study-feedback" role="status" aria-live="polite" hidden></span>
         <span class="study-verdict" id="study-verdict" hidden></span>
         <span class="study-english" id="study-english" hidden></span>
         <span class="study-aside" id="study-aside" hidden></span>
+        <div class="study-summary" id="study-summary" aria-label="First attempt results" hidden>
+          <span class="study-summary-result is-correct">
+            <span class="study-summary-mark" aria-hidden="true">✓</span>
+            <strong id="study-first-correct">0</strong>
+            <span>correct first try</span>
+          </span>
+          <span class="study-summary-result is-wrong">
+            <span class="study-summary-mark" aria-hidden="true">✕</span>
+            <strong id="study-first-wrong">0</strong>
+            <span>missed first try</span>
+          </span>
+        </div>
       </div>
 
-      <footer class="study-actions">
-        <button class="study-reveal" id="study-reveal" type="button">Show answer</button>
-        <!-- Four answers, not two. "Got it" cannot tell a word you dredged up
-             from one you knew instantly, and those two deserve very different
-             next dates. Each button carries the interval it will schedule. -->
-        <div class="study-answer-actions" id="study-answer-actions" hidden>
-          <button class="study-again" id="study-again" type="button">
-            <span class="study-grade">Again</span>
-            <span class="study-when" id="study-again-when"></span>
-            <kbd>1</kbd>
-          </button>
-          <button class="study-hard" id="study-hard" type="button">
-            <span class="study-grade">Hard</span>
-            <span class="study-when" id="study-hard-when"></span>
-            <kbd>2</kbd>
-          </button>
-          <button class="study-got" id="study-got" type="button">
-            <span class="study-grade">Good</span>
-            <span class="study-when" id="study-good-when"></span>
-            <kbd>3</kbd>
-          </button>
-          <button class="study-easy" id="study-easy" type="button">
-            <span class="study-grade">Easy</span>
-            <span class="study-when" id="study-easy-when"></span>
-            <kbd>4</kbd>
-          </button>
-        </div>
-      </footer>
-      <p class="study-hint" id="study-hint">Space reveals the answer</p>
+      <p class="study-hint" id="study-hint">Type the answer · Enter checks it</p>
     </section>
   </div>
 
@@ -557,7 +622,7 @@
        themselves are built in src/settings.js, where each one states its
        config key and its control together. -->
   <div class="settings" id="settings" hidden>
-    <div class="settings-box" role="dialog" aria-modal="true" aria-label="Settings">
+    <div class="settings-box" role="dialog" aria-label="Settings">
       <nav class="settings-rail" id="settings-rail" aria-label="Settings sections"></nav>
       <div class="settings-pane">
         <header class="settings-head">
@@ -605,8 +670,43 @@
     </div>
   </div>
 
-  <div class="toast" id="toast" hidden></div>
-  <div class="ctx" id="ctx" hidden></div>
+  <!-- The whole app, until there is a folder for it to be about. Tulip keeps no
+       vault of its own and creates none: a vault is a folder that already
+       exists on your disk, so the first run has exactly one thing to offer and
+       this is it. The folder chosen here is the one Tulip opens from then on —
+       connecting another simply replaces it — so this page is one most people
+       see once. Shown and hidden in paintLanding; see renderer.js. It stands
+       over the app rather than inside it, which is why it carries a drag strip
+       of its own: the window's is behind it. -->
+  <section class="landing" id="landing" hidden aria-label="Connect a vault">
+    <div class="titlebar"></div>
+    <div class="landing-card">
+      <h1 class="landing-title">Tulip</h1>
+      <p class="landing-lede">A vault is an ordinary folder of markdown files —
+        one you already have, or an empty one to start in.</p>
+      <button class="landing-connect" id="btn-connect-vault" type="button">Connect a vault…</button>
+      <p class="landing-note">Tulip reopens it each time. Connect a different
+        folder whenever you like, from the vault's name in the sidebar or ⇧⌘O.</p>
+    </div>
+  </section>
+
+  <!-- What the app answers to. Every one of these already existed in the menu
+       or in a pane's own wiring; there was simply nowhere to read them all at
+       once, in an app whose whole interface is chords. Help > Keyboard
+       Shortcuts, or ⌘/. The rows are built in the renderer so the chords can be
+       spelt for the platform — see src/platform.js. -->
+  <div class="shortcuts" id="shortcuts" hidden>
+    <div class="shortcuts-panel" role="dialog" aria-modal="true" aria-labelledby="shortcuts-title">
+      <div class="shortcuts-head">
+        <h2 class="shortcuts-title" id="shortcuts-title">Keyboard shortcuts</h2>
+        <button type="button" class="shortcuts-close" id="shortcuts-close" aria-label="Close">×</button>
+      </div>
+      <div class="shortcuts-body" id="shortcuts-body"></div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  <div class="ctx" id="ctx" role="menu" hidden></div>
 
   <aside class="history-panel" id="history-panel" hidden aria-label="Note history">
     <header class="history-head">

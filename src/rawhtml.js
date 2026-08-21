@@ -28,7 +28,7 @@
 
 /* The same escaper the reading view writes its own markup with. A sanitiser
    holding a private copy of one is a copy that misses the fix. */
-import { escapeHtml as escapeAttr } from './blocks.js'
+import { escapeHtml as escapeAttr } from './dom.js'
 /* And the same schemes the click router will act on — see below. */
 import { EXTERNAL_SCHEME as SAFE_SCHEME } from './links.js'
 
@@ -197,9 +197,14 @@ const TAG = /<!--[\s\S]*?(?:-->|$)|<[!?][^>]*>|<\/\s*([a-zA-Z][a-zA-Z0-9:-]*)\s*
 
 /**
  * @param {string} html   what the note wrote
- * @param {(src: string) => string|null} resolve  vault asset -> URL
+ * @param {(src: string) => string|null} [resolve]  vault asset -> URL
+ *
+ * Exported for the notebook viewer, which faces the same problem from the
+ * other side: a `text/html` output was written by whatever code the notebook
+ * ran, and lands in this document exactly as a note's own markup does. One
+ * allowlist for both, so a tag ruled out here cannot arrive through there.
  */
-function sanitizeHtml (html, resolve) {
+export function sanitizeHtml (html, resolve) {
   return html.replace(CODE_ELEMENTS, '').replace(TAG, (_whole, closing, opening, attrs) => {
     if (closing) return ALLOWED.has(closing.toLowerCase()) ? `</${closing.toLowerCase()}>` : ''
     if (!opening) return ''                                   // comment, doctype, PI
@@ -222,13 +227,14 @@ function withLine (html, line) {
 }
 
 /**
- * @param {object} md
+ * @param {import('markdown-it').MarkdownIt} md
  * @param {{resolve?: (src: string) => string|null}} options
  */
 export function rawHtmlPlugin (md, { resolve } = {}) {
   md.renderer.rules.html_block = (tokens, i) => {
     const html = sanitizeHtml(tokens[i].content, resolve)
-    return tokens[i].map ? withLine(html, tokens[i].map[0]) : html
+    const map = tokens[i].map
+    return map ? withLine(html, map[0]) : html
   }
   md.renderer.rules.html_inline = (tokens, i) => sanitizeHtml(tokens[i].content, resolve)
 }

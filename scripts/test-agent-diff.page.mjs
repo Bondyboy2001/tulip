@@ -20,6 +20,24 @@ const AFTER = [
   'Second paragraph stays.', ''
 ].join('\n')
 
+const CODE_BEFORE = [
+  '```rust',
+  'fn main() {',
+  '    let x: i32;',
+  '    assert_eq!(x, 5);',
+  '}',
+  '```'
+].join('\n')
+
+const CODE_AFTER = [
+  '```rust',
+  'fn main() {',
+  '    let x: i32 = 5;',
+  '    assert_eq!(x, 5);',
+  '}',
+  '```'
+].join('\n')
+
 /* Every Copilot-mark currently on the document's decorations, with what it
    covers — decoration sets only, so this needs no layout pass. */
 function agentMarks (view) {
@@ -100,6 +118,41 @@ export async function run () {
 
   view.destroy()
   host.remove()
+
+  /* Fenced code keeps the same compact mono metrics on both halves of the
+     diff, and its added marker must sit above the sticky line-number gutter. */
+  const codeHost = document.createElement('div')
+  document.body.append(codeHost)
+  const codeView = createEditor({
+    parent: codeHost,
+    onChange: () => {},
+    onOpenLink: () => {},
+    noteNames: () => [],
+    noteTitle: () => 'Code',
+    onRename: () => {},
+    resolveEmbed: (path) => path,
+    resolveNoteEmbed: () => null,
+    languageTable: () => false,
+    noteFlag: () => '',
+    titleEditable: () => true
+  })
+  codeView.setDoc(CODE_BEFORE)
+  codeView.patch(CODE_AFTER, { agent: true, before: CODE_BEFORE })
+  await new Promise((resolve) => {
+    codeView.requestMeasure?.()
+    requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 60)))
+  })
+  const codeDeleted = codeHost.querySelector('.cm-agent-deleted')
+  const codeAdded = codeHost.querySelector('.cm-agent-added-line')
+  const codeStyle = {
+    deletedFontFamily: codeDeleted ? getComputedStyle(codeDeleted).fontFamily : null,
+    deletedFontSize: codeDeleted ? getComputedStyle(codeDeleted).fontSize : null,
+    addedMarker: codeAdded ? getComputedStyle(codeAdded, '::before').content : null,
+    addedMarkerZIndex: codeAdded ? getComputedStyle(codeAdded, '::before').zIndex : null
+  }
+  codeView.destroy()
+  codeHost.remove()
+
   return {
     lines: stateMarks.lines,
     wordTexts: stateMarks.words,
@@ -108,6 +161,7 @@ export async function run () {
     rawLines: rawMarks.lines,
     rawWords: rawMarks.words.length,
     inEditView,
-    inRawView
+    inRawView,
+    codeStyle
   }
 }

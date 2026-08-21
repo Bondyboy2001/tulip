@@ -1,0 +1,53 @@
+{
+  "//": [
+    "Not a TypeScript project. This is `checkJs` pointed at plain JavaScript,",
+    "and it is deliberately NOT part of `npm run verify` or of CI.",
+    "",
+    "Why it exists: the class of bug it sees is the one that has actually cost",
+    "this app time. `let editor = null` followed by `editor.state` in a function",
+    "reachable before the editor is built is a type error and nothing else —",
+    "eslint cannot see it, the bundler cannot see it, and three of them shipped",
+    "and threw on every launch for a fortnight.",
+    "",
+    "Why it does not gate: run today it reports about 2,100 errors, of which",
+    "roughly 630 are that class (TS18047, 'possibly null') and roughly 900 are",
+    "the DOM's own typing — `querySelector` answers `Element`, so every",
+    "`.focus()` and `.value` on a result is an error until the code says which",
+    "kind of element it expects. Both are worth fixing and neither is worth",
+    "blocking a build on until they are. A gate that is red on the day it is",
+    "installed is a gate that gets turned off.",
+    "",
+    "So: `npm run typecheck`, read the null-safety findings, fix them a module",
+    "at a time. What HOLDS a module once it is clean is `npm run typecheck:gate`",
+    "(scripts/typecheck-gate.mjs), which is in verify and in CI: it runs this",
+    "same config and fails on findings in a named list of already-clean modules,",
+    "44 of them today. It filters the OUTPUT rather than narrowing `include`,",
+    "because `include` does not mean 'report only these' — tsc reports on every",
+    "file it pulls into the program, so a clean module would fail for the errors",
+    "of a messy one it imports. Widen the list, do not loosen the config.",
+    "",
+    "scripts/ and bench/ are left out on purpose: they are test harnesses, and",
+    "their job is to be thrown away and rewritten."
+  ],
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+
+    /* The one check worth having on, and the reason for the whole file.
+       Everything else in `strict` is about a style of writing this codebase
+       does not use. */
+    "strict": false,
+    "strictNullChecks": true,
+
+    "skipLibCheck": true,
+    "types": [],
+    "lib": ["ES2022", "DOM", "DOM.Iterable"]
+  },
+  "include": ["src/**/*.js", "electron/**/*.js", "types/**/*.d.ts"]
+}

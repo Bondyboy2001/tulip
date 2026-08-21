@@ -16,47 +16,37 @@
 
 import { EditorView, Decoration, ViewPlugin, WidgetType } from '@codemirror/view'
 import { Facet, StateField } from '@codemirror/state'
+import { MIN_COLUMN_WIDTH, parseColumnWidths, padWidths, columnWidth } from './table-widths.js'
 import { undo, redo } from '@codemirror/commands'
 import { getSearchQuery, searchPanelOpen } from '@codemirror/search'
-import { escapeHtml } from './blocks.js'
+import { escapeHtml } from './dom.js'
 import { MONEY_SOURCE, moneyNode } from './money.js'
 import { findMath, renderMathInto } from './math.js'
 import {
   findEmbeds, specForEmbed, renderEmbed, withEmbedSize,
-  embedResizeGrip, wireEmbedResize, wireResizeHandle, fitImageCell
+  embedResizeGrip, wireEmbedResize, fitImageCell
 } from './assets.js'
 
 const DELIMITER = /^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)*\|?\s*$/
 
 /* ------------------------------------------------------- column widths
 
-   A dragged column has to be remembered somewhere, and GFM has no syntax for
-   one: a table is pipes and dashes and nothing else. The width is written on
-   the line above the table instead, as an HTML comment — valid Markdown that
-   every other renderer ignores, so the note still opens as a plain table
-   anywhere else, and so the width survives the round trip through disk and
-   git the way an image's `|400` does.
+   A column that has been given a width has to be remembered somewhere, and
+   GFM has no syntax for one: a table is pipes and dashes and nothing else. The
+   width is written on the line above the table instead, as an HTML comment —
+   valid Markdown that every other renderer ignores, so the note still opens as
+   a plain table anywhere else, and so the width survives the round trip through
+   disk and git the way an image's `|400` does.
+
+   Widths are set by the Fit columns command (`fitAllColumns`) and carried along
+   when a column is added, removed or moved. There is no drag: the header's
+   right-hand seam used to be one, and the menu is the whole of it now.
 
    The line is hidden in both views: the editing view's block widget starts at
    the comment rather than at the header, and the reading view's raw-HTML
    sanitiser already drops comments (src/rawhtml.js) — the widths are read off
    the token before that happens.
    ================================================================== */
-
-const WIDTHS = /^\s*<!--\s*tk-widths:\s*([\d\s.]*?)\s*-->\s*$/
-
-/** The smallest a dragged column may be made — narrower than this and the
- *  padding alone fills it, so there is nowhere left for the text. */
-const MIN_COLUMN_WIDTH = 44
-
-/** The widths a marker line names, or null if the line is not one. A column
- *  the reader never dragged is written `0`, meaning "size to the content". */
-function parseColumnWidths (text) {
-  const found = WIDTHS.exec(text || '')
-  if (!found) return null
-  const widths = found[1].split(/\s+/).filter(Boolean).map(Number)
-  return widths.every((w) => Number.isFinite(w) && w >= 0) ? widths : null
-}
 
 /** The marker line for a set of widths, or '' when every column is automatic
  *  again — the line is deleted rather than left saying nothing. */
@@ -69,13 +59,9 @@ function widthsSource (widths) {
   return `<!-- tk-widths: ${kept.map((w) => Math.round(w) || 0).join(' ')} -->`
 }
 
-/** One column's width as CSS, in the one form both views write it. `0` is a
- *  column that was never dragged: no width at all, size to the content. */
-const columnWidth = (width) => (width ? `${Math.round(width)}px` : '')
-
 /** The change that rewrites an existing marker line — or takes it away, newline
- *  and all, when there are no widths left to write, so a table dragged back to
- *  its natural shape leaves the note exactly as it found it. */
+ *  and all, when there are no widths left to write, so a table back at its
+ *  natural shape leaves the note exactly as it found it. */
 function widthsChange (state, lineNumber, source) {
   const line = state.doc.line(lineNumber)
   return source
@@ -83,8 +69,15 @@ function widthsChange (state, lineNumber, source) {
     : { from: line.from, to: Math.min(state.doc.length, line.to + 1) }
 }
 
-/** Whether the open note is a `.language.md` document. A function is carried
- *  rather than a captured boolean because the same editor opens many notes. */
+/**
+ * Whether the open note is a `.lang` document. A function is carried
+ * rather than a captured boolean because the same editor opens many notes.
+ *
+ * It says nothing about how the grid may be edited. A language table is a
+ * Markdown file with a Markdown table in it, and every table in this file is
+ * edited the same way — headers and all. What it decides is presentation: a
+ * document that exists to be a grid is given the pane rather than the measure.
+ */
 export const languageTableMode = Facet.define({
   combine: (values) => values[0] || (() => false)
 })
@@ -148,74 +141,18 @@ function alignments (delimiterRow) {
   })
 }
 
-/** How many columns a token stream's table has, counted off its header row.
- *  The token stream is the only place the reading view can be asked. */
-function headerCells (tokens, open) {
-  let cells = 0
-  for (let at = open + 1; at < tokens.length; at++) {
-    if (tokens[at].type === 'tr_close') break
-    if (tokens[at].type === 'th_open') cells++
-  }
-  return cells
-}
-
 /**
- * The reading view's half of the same feature: the marker line above a table
- * is read off the token stream, hidden, and turned into the `<colgroup>` the
- * editing view draws from its own copy of the widths.
+ * Every table between line `first` and line `last`, as line ranges plus their
+ * parsed contents — and whether the scan ended inside a code fence.
  *
- * A core rule rather than a pass over the rendered DOM, because the comment
- * does not survive that far — src/rawhtml.js drops every comment on its way
- * out, which is exactly why the marker is invisible everywhere else.
+ * `last` bounds the header candidates exclusively and the rows inclusively,
+ * because a header on the final line has no line left to hold its delimiter.
+ * The fence is reported so a caller scanning part of a document can tell that
+ * what follows the part is code.
  */
-export function columnWidthPlugin (md) {
-  md.core.ruler.push('tk_column_widths', (state) => {
-    const tokens = state.tokens
-    for (let i = 0; i < tokens.length - 1; i++) {
-      if (tokens[i].type !== 'html_block') continue
-      const widths = parseColumnWidths(tokens[i].content)
-      if (!widths) continue
-      if (tokens[i + 1].type !== 'table_open') continue
-      /* Emptied as well as hidden: `hidden` is honoured by markdown-it's own
-         token renderer, and raw HTML has a rule of its own (src/rawhtml.js)
-         that never sees the flag. */
-      tokens[i].hidden = true
-      tokens[i].content = ''
-      /* Padded to the table's real width, so a marker written when the table
-         was narrower still describes every column — and so the two views agree
-         about which columns are content-sized, which is what decides whether
-         the grid fills its frame. */
-      tokens[i + 1].meta = {
-        ...(tokens[i + 1].meta || {}),
-        widths: padWidths(widths, Math.max(widths.length, headerCells(tokens, i + 1)))
-      }
-    }
-  })
-
-  const renderOpen = md.renderer.rules.table_open ||
-    ((tokens, i, options, _env, self) => self.renderToken(tokens, i, options))
-
-  md.renderer.rules.table_open = (tokens, i, options, env, self) => {
-    const widths = tokens[i].meta?.widths
-    if (!widths?.some(Boolean)) return renderOpen(tokens, i, options, env, self)
-    tokens[i].attrJoin('class', 'has-column-widths')
-    if (widths.some((width) => !width)) tokens[i].attrJoin('class', 'has-flexible-column')
-    const cols = widths
-      .map((w) => (w ? `<col style="width:${columnWidth(w)}">` : '<col>'))
-      .join('')
-    return `${renderOpen(tokens, i, options, env, self)}<colgroup>${cols}</colgroup>`
-  }
-}
-
-/** Widths as long as the table is wide: a marker written for a narrower table
- *  — or one a column was added to since — still answers for every column. */
-const padWidths = (widths, cols) =>
-  Array.from({ length: cols }, (_, c) => widths[c] || 0)
-
-/** Every table in the document, as line ranges plus their parsed contents. */
-function findTables (state) {
+function scanTables (state, first, last) {
   const tables = []
-  const total = state.doc.lines
+  const total = last
 
   /* Which fence the scan is inside, if any. Without this a table written
      *inside* a code block became a live editable grid in the editing view
@@ -226,7 +163,7 @@ function findTables (state) {
      own character, so ``` does not end a ~~~ block. */
   let fence = null
 
-  for (let n = 1; n < total; n++) {
+  for (let n = first; n < total; n++) {
     const head = state.doc.line(n)
 
     const marker = /^\s{0,3}(`{3,}|~{3,})/.exec(head.text)
@@ -285,8 +222,11 @@ function findTables (state) {
     n = last
   }
 
-  return tables
+  return { tables, fence }
 }
+
+/** Every table in the document, as line ranges plus their parsed contents. */
+const findTables = (state) => scanTables(state, 1, state.doc.lines).tables
 
 /**
  * The same answer for one document version, computed once.
@@ -344,11 +284,34 @@ const cellPattern = new RegExp(CELL_PATTERN, 'g')
 /** The line break above, recognised again once the scanner has found one. */
 const BREAK = /^<br\s*\/?>$/i
 
+/* Every character that can begin anything the scanner below draws: emphasis,
+   code, a link, an embed, a price, a break. A cell holding none of them is
+   plain words, which in a vocabulary table is nearly every cell — and finding
+   that out with one pass of a character class is worth it, because the
+   alternative is two span-finders, a regex loop and a node-by-node rebuild for
+   a string that was only ever going to be text. */
+const MARKUP = /[*_`[\]($<]/
+
 function renderCell (td, text, {
   resolve = () => null,
   onReady = () => {},
   onResize = null
 } = {}) {
+  if (!MARKUP.test(text)) {
+    /* The same end state the loop below would reach, arrived at directly: one
+       text node, no picture, no width of the cell's own. `textContent` on a
+       cell that already holds exactly this text is a no-op in Chromium, which
+       is the case on every keystroke in the *other* cells of the row. */
+    if (td.firstChild?.nodeType !== Node.TEXT_NODE || td.childNodes.length !== 1) {
+      td.replaceChildren(text)
+    } else if (td.firstChild.data !== text) {
+      td.firstChild.data = text
+    }
+    td.classList.remove('has-image-only')
+    if (td.style.width) td.style.width = ''
+    return
+  }
+
   const pattern = cellPattern
   pattern.lastIndex = 0
   const embeds = findEmbeds(text)
@@ -631,7 +594,7 @@ function selectionOffsets (cell) {
 /**
  * A grid's rows, header first, in the order their `data-row` numbers them.
  *
- * The `colgroup` a dragged table carries is skipped for free: it holds `col`
+ * The `colgroup` a sized table carries is skipped for free: it holds `col`
  * elements and no `tr`.
  */
 const gridRows = (wrap) => wrap?.querySelectorAll(':scope > table > * > tr') || []
@@ -726,6 +689,8 @@ const selectedCells = (wrap) =>
 
 function clearCellSelection (wrap) {
   for (const cell of selectedCells(wrap)) cell.classList.remove('tk-table-cell-selected')
+  // Whatever `selectCellRectangle` believed is lit, nothing is now.
+  SELECTED_RECTANGLE.delete(wrap)
 }
 
 /**
@@ -758,17 +723,62 @@ function watchForPressesAway () {
   }, true)
 }
 
+/* What each grid is currently showing as selected. Keyed by the frame, which is
+   replaced whenever the widget is rebuilt — so a rebuilt grid, whose cells have
+   lost the class with the rest of their DOM, is simply one this has never heard
+   of and gets painted in full. */
+const SELECTED_RECTANGLE = new WeakMap()
+
+/**
+ * Light the cells between two corners, and put out the ones that fell outside.
+ *
+ * Written as a difference rather than a repaint. A drag reports a rectangle per
+ * pointer move, and each one used to clear every lit cell — found by searching
+ * the whole grid — and then light every cell of the new rectangle: two class
+ * changes per cell per frame, for a rectangle that had usually grown by a
+ * single row. Over a vocabulary table that is most of the cost of dragging.
+ *
+ * Only the cells that changed side are touched now: extending a 40-row
+ * selection by one row is four class changes rather than three hundred and
+ * twenty, and no search at all.
+ */
 function selectCellRectangle (wrap, from, to) {
-  clearCellSelection(wrap)
-  const top = Math.min(from.r, to.r)
-  const bottom = Math.max(from.r, to.r)
-  const left = Math.min(from.c, to.c)
-  const right = Math.max(from.c, to.c)
+  const next = {
+    top: Math.min(from.r, to.r),
+    bottom: Math.max(from.r, to.r),
+    left: Math.min(from.c, to.c),
+    right: Math.max(from.c, to.c)
+  }
+  const had = SELECTED_RECTANGLE.get(wrap)
+  SELECTED_RECTANGLE.set(wrap, next)
 
   const rows = gridRows(wrap)
-  for (let r = top; r <= bottom; r++) {
+  const light = (r, c, on) =>
+    cellAt(rows, r, c)?.classList.toggle('tk-table-cell-selected', on)
+
+  if (!had) {
+    for (let r = next.top; r <= next.bottom; r++) {
+      for (let c = next.left; c <= next.right; c++) light(r, c, true)
+    }
+    return
+  }
+
+  const inside = (rect, r, c) =>
+    r >= rect.top && r <= rect.bottom && c >= rect.left && c <= rect.right
+
+  /* Every row either rectangle covers. A row both of them cover has at most a
+     band of columns to change; a row only one of them covers is that row's
+     whole width either way. */
+  for (let r = Math.min(had.top, next.top); r <= Math.max(had.bottom, next.bottom); r++) {
+    const was = r >= had.top && r <= had.bottom
+    const is = r >= next.top && r <= next.bottom
+    if (!was && !is) continue
+    const left = was && is ? Math.min(had.left, next.left) : (is ? next.left : had.left)
+    const right = was && is ? Math.max(had.right, next.right) : (is ? next.right : had.right)
     for (let c = left; c <= right; c++) {
-      cellAt(rows, r, c)?.classList.add('tk-table-cell-selected')
+      const lit = was && inside(had, r, c)
+      const wanted = is && inside(next, r, c)
+      if (lit !== wanted) light(r, c, wanted)
     }
   }
 }
@@ -838,6 +848,18 @@ function caretInCellAt (cell, x, y) {
   const caret = document.caretRangeFromPoint?.(x, y)
   if (!caret || !cell.contains(caret.startContainer)) return null
   return { node: caret.startContainer, offset: caret.startOffset }
+}
+
+/** Put the native contenteditable caret at a hit-tested position. */
+function placeCaret (caret) {
+  if (!caret?.node?.isConnected) return false
+  const selection = window.getSelection()
+  const range = document.createRange()
+  range.setStart(caret.node, caret.offset)
+  range.collapse(true)
+  selection.removeAllRanges()
+  selection.addRange(range)
+  return true
 }
 
 /**
@@ -949,6 +971,8 @@ function pullEdge (band, axis, at) {
 function wireCellSelection (wrap, view) {
   let drag = null
   let frame = 0
+  let moveFrame = 0
+  let pendingMove = null
   watchForPressesAway()
 
   /* Grow the rectangle to whatever the pointer stands over now. Kept apart
@@ -1002,7 +1026,10 @@ function wireCellSelection (wrap, view) {
   const endDrag = () => {
     document.removeEventListener('mousemove', onMove)
     if (frame) cancelAnimationFrame(frame)
+    if (moveFrame) cancelAnimationFrame(moveFrame)
     frame = 0
+    moveFrame = 0
+    pendingMove = null
     const finished = drag
     drag = null
     wrap.classList.remove('is-selecting-cells')
@@ -1012,17 +1039,19 @@ function wireCellSelection (wrap, view) {
   /* On the document, not the wrap: past the last row the pointer is over the
      note, the pane, or nothing at all, and a listener on the grid stops
      hearing about a drag exactly when it leaves the grid. */
-  const onMove = (event) => {
-    if (!drag || !(event.buttons & 1)) return
-    drag.at = { x: event.clientX, y: event.clientY }
+  const applyMove = () => {
+    moveFrame = 0
+    const at = pendingMove
+    pendingMove = null
+    if (!drag || !at) return
+    drag.at = at
 
     if (!drag.selectingCells) {
-      const point = cellPointNear(wrap, event.clientX, event.clientY)
+      const point = cellPointNear(wrap, at.x, at.y)
       if (point && point.r === drag.anchor.r && point.c === drag.anchor.c) {
         const anchor = caretInCellAt(drag.cell, drag.down.x, drag.down.y)
-        const head = caretInCellAt(drag.cell, event.clientX, event.clientY)
+        const head = caretInCellAt(drag.cell, at.x, at.y)
         if (!anchor || !head) return
-        event.preventDefault()
         /* A contenteditable cell is nested through CodeMirror's non-editable
            block widget. Chromium focuses and edits that cell correctly, but it
            does not begin a native drag range through the widget boundary. Make
@@ -1035,8 +1064,18 @@ function wireCellSelection (wrap, view) {
       }
     }
 
+    extendTo(at.x, at.y)
+  }
+
+  const onMove = (event) => {
+    if (!drag || !(event.buttons & 1)) return
     event.preventDefault()
-    extendTo(event.clientX, event.clientY)
+    pendingMove = { x: event.clientX, y: event.clientY }
+    /* Pointer devices routinely send several moves between two paints. Each
+       hit-test after the previous move's class changes forces Chromium to lay
+       the grid out again, although only the last coordinate can be seen. Keep
+       one update for the frame and flush it on release below. */
+    if (!moveFrame) moveFrame = requestAnimationFrame(applyMove)
   }
 
   wrap.addEventListener('mousedown', (event) => {
@@ -1066,10 +1105,22 @@ function wireCellSelection (wrap, view) {
        so it has to claim the press immediately rather than beginning a native
        text selection that will be discarded a moment later. */
     const extended = event.shiftKey
+    /* The browser cannot place its own caret because this handler claims the
+       press for same-cell text drags and cross-cell rectangles. Reveal the
+       cell's Markdown now, then ask Chromium which character is under the
+       pointer in that editable source. Previously mouse-up always called
+       `caretToEnd`, making direct placement impossible. */
+    let pressedCaret = null
+    if (!extended) {
+      cell.focus({ preventScroll: true })
+      pressedCaret = caretInCellAt(cell, event.clientX, event.clientY)
+      placeCaret(pressedCaret)
+    }
     drag = {
       anchor,
       point,
       cell,
+      pressedCaret,
       down: { x: event.clientX, y: event.clientY },
       at: { x: event.clientX, y: event.clientY },
       bounds: dragBounds(wrap),
@@ -1089,6 +1140,12 @@ function wireCellSelection (wrap, view) {
     if (!frame) frame = requestAnimationFrame(autoScroll)
 
     document.addEventListener('mouseup', () => {
+      /* The release may arrive before the scheduled frame. Apply its last
+         coordinate now so the rectangle never finishes one event behind. */
+      if (pendingMove) {
+        if (moveFrame) cancelAnimationFrame(moveFrame)
+        applyMove()
+      }
       const finished = endDrag()
       if (!finished) return
       if (finished.selectingCells) {
@@ -1102,8 +1159,8 @@ function wireCellSelection (wrap, view) {
       } else if (!finished.selectingText) {
         /* A click still enters the cell for editing; a drag leaves its text
            range intact so the following Copy command can use it. */
-        finished.cell.focus()
-        caretToEnd(finished.cell)
+        finished.cell.focus({ preventScroll: true })
+        if (!placeCaret(finished.pressedCaret)) caretToEnd(finished.cell)
       }
     }, { once: true })
   })
@@ -1238,20 +1295,13 @@ function clipboardMatrix (data) {
 function pasteMatrix (view, wrap, active, matrix) {
   const table = tableAt(view.state, view.posAtDOM(wrap))
   if (!table) return
-  const language = wrap.dataset.language === 'true'
   const start = { r: Number(active.dataset.row), c: Number(active.dataset.col) }
   const width = Math.max(...matrix.map((row) => row.length))
   const needRows = start.r + matrix.length
   const needCols = start.c + width
 
-  /* A language table's columns are its schema — the study surface reads the
-     note by them — so a wide paste fills what is there and says what it left
-     behind rather than growing a column nothing would know how to name. */
-  const cols = language ? table.cols : Math.max(table.cols, needCols)
+  const cols = Math.max(table.cols, needCols)
   const many = matrix.length > 1 || width > 1
-  if (language && needCols > table.cols) {
-    notify(active, `Pasted into the ${table.cols} columns this table has.`)
-  }
 
   if (needRows <= table.rows.length && cols === table.cols) {
     const assignments = []
@@ -1452,9 +1502,10 @@ const padAligns = (aligns, cols) =>
  * so a rewrite of the grid can carry them in its own transaction.
  *
  * The one place that knows the marker line sits above the table and has to be
- * made when a table that was never dragged acquires a width. `commitColumnWidths`
- * is a drag's worth of that same question and goes through here too; when the
- * two were spelled separately they had already drifted over padding.
+ * made when a table without one acquires a width. Both callers come through
+ * here — the fit command and the splice that follows a column being added or
+ * removed — because when the question was spelled separately in each of them
+ * they had already drifted over padding.
  *
  * No padding of its own: `widthsSource` drops trailing automatic columns, so a
  * short array and a padded one write the same line.
@@ -1510,16 +1561,6 @@ function refocus (view, tableIndex, r, c) {
   })
 }
 
-/** Something the reader has to be told. The toast itself belongs to the app —
- *  what it looks like and where it appears are not this module's business — so
- *  the message is handed over rather than shown. */
-function notify (cell, message) {
-  cell.dispatchEvent(new CustomEvent('tulip:table-notice', {
-    bubbles: true,
-    detail: { message }
-  }))
-}
-
 /**
  * Move a body row up or down.
  *
@@ -1544,29 +1585,47 @@ function moveRow (view, cell, delta) {
 }
 
 /**
- * Move a column left or right — with its alignment and its width, which are
- * written elsewhere and would otherwise stay behind and land on its neighbour.
+ * Put a column somewhere else in the table — with its alignment and its width,
+ * which are written elsewhere and would otherwise stay behind and land on its
+ * neighbour.
+ *
+ * A move rather than a swap: dragging a column three places left puts it there
+ * and shuffles the three it passed one place right, which is what dropping a
+ * column into a gap means. Between neighbours the two are the same operation,
+ * so the menu's "Move left" is this with `to = from - 1`.
+ *
+ * Alignments and widths are padded to the table's width first. Both are stored
+ * short — a delimiter row can name fewer columns than the header, and the width
+ * marker drops trailing automatic ones — and splicing a short array moves the
+ * wrong entry, which put a column's alignment on the column beside it.
  */
-function moveColumn (view, cell, delta) {
-  const found = locate(view, cell)
-  if (!found || cell.closest('.tk-table-wrap')?.dataset.language === 'true') return
-  const { table } = found
-  const from = Number(cell.dataset.col)
-  const to = from + delta
-  if (to < 0 || to >= table.cols) return
+function reorderColumn (view, table, from, to, focusRow = 0) {
+  if (from === to || from < 0 || to < 0 || from >= table.cols || to >= table.cols) return false
 
-  const cells = tableMatrix(table)
-  for (const row of cells) [row[from], row[to]] = [row[to], row[from]]
-  const aligns = [...table.aligns]
-  ;[aligns[from], aligns[to]] = [aligns[to], aligns[from]]
-  const widths = table.widths ? [...table.widths] : null
-  if (widths) [widths[from], widths[to]] = [widths[to], widths[from]]
+  const shift = (list) => {
+    const next = [...list]
+    next.splice(to, 0, ...next.splice(from, 1))
+    return next
+  }
+  const cells = tableMatrix(table).map(shift)
+  const aligns = shift(padAligns(table.aligns, table.cols))
+  const widths = table.widths ? shift(padWidths(table.widths, table.cols)) : null
 
   const index = tablesIn(view.state).indexOf(table)
+  writeTable(view, table, cells, aligns, widths)
+  refocus(view, index, focusRow, to)
+  return true
+}
+
+/** One place at a time, which is the whole of what the menu and alt-arrow ask
+ *  for. `reorderColumn` below does the splicing. */
+function moveColumn (view, cell, delta) {
+  const found = locate(view, cell)
+  if (!found) return
+  const from = Number(cell.dataset.col)
   const row = Number(cell.dataset.row)
   cell.blur()
-  writeTable(view, table, cells, aligns, widths)
-  refocus(view, index, row, to)
+  reorderColumn(view, found.table, from, from + delta, row)
 }
 
 /* Sorting reads the value a reader sees, not the source behind it: `**dog**`
@@ -1601,7 +1660,7 @@ const canSort = (table) => table.rows.length > 2
  * Equal keys keep the order they had, so sorting by one column and then by
  * another leaves the first sort standing inside the second.
  */
-function sortRows (view, cell, direction) {
+function sortRows (view, cell, direction, { restoreFocus = true } = {}) {
   const found = locate(view, cell)
   if (!found || !canSort(found.table)) return
   const { table } = found
@@ -1626,7 +1685,38 @@ function sortRows (view, cell, direction) {
   const index = tablesIn(view.state).indexOf(table)
   cell.blur()
   writeTable(view, table, [cells[0], ...body.map((entry) => entry.row)])
-  refocus(view, index, lands < 0 ? 1 : lands + 1, col)
+  if (restoreFocus) refocus(view, index, lands < 0 ? 1 : lands + 1, col)
+}
+
+/**
+ * Double-clicking a heading sorts the rows beneath it. The direction belongs
+ * to the live heading rather than the Markdown: reopening a note starts with
+ * the unsurprising first gesture, ascending, while a second gesture reverses
+ * the order. `aria-sort` both records that state and tells assistive software
+ * which column currently orders the table.
+ */
+function wireHeaderSort (cell, view) {
+  cell.addEventListener('dblclick', (event) => {
+    event.preventDefault()
+    event.stopPropagation()
+    const direction = cell.getAttribute('aria-sort') === 'ascending' ? 'desc' : 'asc'
+    const wrap = cell.closest('.tk-table-wrap')
+    const col = Number(cell.dataset.col)
+
+    sortRows(view, cell, direction, { restoreFocus: false })
+
+    /* A whole-table rewrite is applied synchronously by CodeMirror and keeps
+       this widget when its shape is unchanged. Resolve the headings again so
+       this remains correct if a later widget policy replaces the DOM. */
+    requestAnimationFrame(() => {
+      const headings = wrap?.querySelectorAll('thead th') || []
+      for (const heading of headings) heading.removeAttribute('aria-sort')
+      const heading = headings[col]
+      if (!heading) return
+      heading.setAttribute('aria-sort', direction === 'desc' ? 'descending' : 'ascending')
+      heading.title = `Double-click to sort ${direction === 'desc' ? 'ascending' : 'descending'}`
+    })
+  })
 }
 
 /**
@@ -1704,9 +1794,8 @@ function insertColumn (view, cell, after) {
  */
 function rowsToDelete (view, cell) {
   const found = locate(view, cell)
-  if (!found) return { rows: [], language: false, table: null }
+  if (!found) return { rows: [], table: null }
   const wrap = cell.closest('.tk-table-wrap')
-  const language = wrap?.dataset.language === 'true'
   const selectedRows = new Set(
     selectedCells(wrap).map((selected) => Number(selected.dataset.row))
   )
@@ -1717,16 +1806,15 @@ function rowsToDelete (view, cell) {
 
   // Bottom of the selection first, so selecting every body row keeps the
   // earliest one when the table's one-row minimum prevents the final deletion.
-  const candidates = [...selectedRows]
-    .filter((row) => !language || row > 0)
-    .sort((a, b) => b - a)
-  const minimum = language ? 2 : 1 // header + one body row for language tables
-  const room = Math.max(0, found.table.rows.length - minimum)
-  return { rows: candidates.slice(0, room), language, table: found.table }
+  const candidates = [...selectedRows].sort((a, b) => b - a)
+  // The header is the one row whose position means something to the format, so
+  // a table always keeps it.
+  const room = Math.max(0, found.table.rows.length - 1)
+  return { rows: candidates.slice(0, room), table: found.table }
 }
 
 function deleteRow (view, cell) {
-  const { rows, language, table } = rowsToDelete(view, cell)
+  const { rows, table } = rowsToDelete(view, cell)
   if (!table) return
 
   const deleting = new Set(rows)
@@ -1750,7 +1838,7 @@ function deleteRow (view, cell) {
 
   requestAnimationFrame(() => {
     const nextWrap = view.dom.querySelectorAll('.tk-table-wrap')[tableIndex]
-    const nextRow = Math.max(language ? 1 : 0, Math.min(firstDeleted, remaining.length - 1))
+    const nextRow = Math.max(0, Math.min(firstDeleted, remaining.length - 1))
     focusCell(nextWrap, nextRow, Number(cell.dataset.col))
   })
 }
@@ -1759,12 +1847,16 @@ const deletableRowCount = (view, cell) => rowsToDelete(view, cell).rows.length
 
 function deleteColumn (view, cell) {
   const found = locate(view, cell)
-  const language = cell.closest('.tk-table-wrap')?.dataset.language === 'true'
-  if (!found || language || found.table.cols <= 1) return
+  if (!found || found.table.cols <= 1) return
+  const tableIndex = tablesIn(view.state).indexOf(found.table)
   const col = Number(cell.dataset.col)
+  const row = Number(cell.dataset.row)
   cell.blur()
   rewriteColumns(view, found.table, col, false)
-  view.focus()
+  requestAnimationFrame(() => {
+    const wrap = view.dom.querySelectorAll('.tk-table-wrap')[tableIndex]
+    focusCell(wrap, row, Math.max(0, col - 1))
+  })
 }
 
 /* ------------------------------------------------------ column resizing */
@@ -1790,9 +1882,9 @@ function syncColumnWidths (table, widths) {
   table.classList.toggle('has-column-widths', Boolean(signature))
   /* Whether anything in this table can still take up slack. A column nobody
      dragged is written `0` and sized by its content — under fixed layout it is
-     also the one column that can absorb the space between the dragged widths
-     and the frame, which is what keeps a band of empty paper from appearing
-     down the right-hand side. See the stylesheet. */
+     also the column that absorbs the space between the dragged widths and the
+     frame, one column at its own width rather than every column stretched in
+     proportion. Either way the grid fills its frame; this only says how. */
   table.classList.toggle(
     'has-flexible-column',
     Boolean(signature) && widths.some((width) => !width)
@@ -1811,120 +1903,50 @@ function syncColumnWidths (table, widths) {
   })
 }
 
-/** What every column currently measures, as the drag's starting point. Read
- *  from the header row, which is the row `table-layout: fixed` sizes from and
- *  the row that says how many columns there are. */
-function measuredWidths (wrap) {
-  return [...wrap.querySelectorAll('thead th')]
-    .map((head) => Math.round(head.getBoundingClientRect().width))
-}
+/** Measure the grid at its natural, unwrapped width without flashing it on
+ *  screen. This is what "fit" means; making a column automatic merely lets the
+ *  table's 100% minimum distribute spare pane width back into it. */
+function fittedWidths (wrap, host = wrap?.closest('.cm-scroller')) {
+  const table = wrap?.querySelector('table')
+  if (!table || !host) return []
 
-/**
- * Write a table's column widths into the note, as the marker line above it.
- *
- * The first drag records *every* column, not just the one dragged: the grid
- * switches to `table-layout: fixed` the moment any width exists, and under
- * fixed layout a column with nothing to say takes a share of the leftover
- * rather than its own content's width — so the other columns would jump the
- * first time one of them was touched. Measured and written down, they stay
- * exactly where the reader last saw them.
- */
-function commitColumnWidths (view, wrap, widths) {
-  const table = tableAt(view.state, view.posAtDOM(wrap))
-  if (!table) return
-  // Where the marker goes, and whether it has to be made, is `widthChanges`'s
-  // question — a drag is just the caller that has nothing else to write.
-  const changes = widthChanges(view, table, padWidths(widths, table.cols))
-  if (changes.length) view.dispatch({ changes, userEvent: 'input.table' })
-}
-
-/**
- * The handle on a column's right edge, and the drag behind it.
- *
- * It lives inside the header cell, which is `contenteditable`, so it is marked
- * as not editable and carries no text: `writeCell` reads the cell's text back
- * into the note, and anything with characters in it would be typed into the
- * document. It is re-attached after every redraw of the cell for the same
- * reason the cell is redrawn at all — `renderCell` replaces the children.
- */
-function ensureColumnGrip (cell, view) {
-  // The grip is appended last and nothing follows it, so this is the whole
-  // question — asked once per header cell per keystroke, which is why it is a
-  // property read rather than a selector match.
-  if (cell.lastElementChild?.classList.contains('tk-col-grip')) return
-
-  const grip = document.createElement('span')
-  grip.className = 'tk-col-grip'
-  grip.contentEditable = 'false'
-  grip.setAttribute('role', 'separator')
-  grip.setAttribute('aria-orientation', 'vertical')
-  grip.setAttribute('aria-label', 'Resize column')
-  grip.title = 'Drag to set this column’s width · double-click to fit the content'
-  cell.append(grip)
-
-  /* The drag itself is the shared one — pointer capture, pacing, cancelling —
-     so a column and a picture are dragged by the same gesture. All this has to
-     add is what a column's width means. */
-  let live = null
-
-  wireResizeHandle(grip, {
-    begin: () => {
-      const wrap = cell.closest('.tk-table-wrap')
-      const grid = wrap?.querySelector('table')
-      if (!grid) return null
-
-      const widths = measuredWidths(wrap)
-      const col = Number(cell.dataset.col)
-      if (!widths.length || !(col in widths)) return null
-
-      /* Resolved once, not per frame: the class and the column elements are
-         the same for the length of the drag, and re-deriving them was a
-         selector match and an array allocation at 120Hz. */
-      syncColumnWidths(grid, widths)
-      live = {
-        wrap,
-        grid,
-        widths,
-        col,
-        columns: [...grid.querySelector(':scope > colgroup').children]
-      }
-      wrap.classList.add('is-resizing-column')
-
-      return {
-        from: widths[col],
-        min: MIN_COLUMN_WIDTH,
-        // Horizontal only: a column has one dimension, and the row height is
-        // the tallest cell's business.
-        read: (dx) => dx
-      }
-    },
-    paint: (width) => {
-      live.widths[live.col] = width
-      live.columns[live.col].style.width = columnWidth(width)
-      // The grid's record of what it is wearing, kept true so the sync that
-      // follows the drag can still tell whether anything changed.
-      live.grid.dataset.widths = live.widths.join(' ')
-    },
-    commit: () => commitColumnWidths(view, live.wrap, live.widths),
-    restore: () => {
-      // The drag was taken away: back to whatever the note says.
-      const table = tableAt(view.state, view.posAtDOM(live.wrap))
-      syncColumnWidths(live.grid, table?.widths)
-    },
-    // Double-click hands the column back to its content, the way
-    // double-clicking a picture's grip hands it back its natural size.
-    reset: () => {
-      const wrap = cell.closest('.tk-table-wrap')
-      const widths = measuredWidths(wrap)
-      if (!widths.length) return
-      widths[Number(cell.dataset.col)] = 0
-      commitColumnWidths(view, wrap, widths)
-    },
-    settle: () => {
-      live?.wrap.classList.remove('is-resizing-column')
-      live = null
-    }
+  const probe = table.cloneNode(true)
+  probe.querySelector(':scope > colgroup')?.remove()
+  probe.classList.remove('has-column-widths', 'has-flexible-column')
+  Object.assign(probe.style, {
+    position: 'fixed',
+    left: '-100000px',
+    top: '0',
+    width: 'max-content',
+    minWidth: '0',
+    tableLayout: 'auto',
+    visibility: 'hidden',
+    pointerEvents: 'none'
   })
+  /* Measured under the editor's own scroller, not on `document.body`. Every
+     type size in the table is relative — the grid is `.92em` of the scroller's
+     17px, a header is `.82em` of that — so a probe parented to the body
+     inherits the 16px page default instead and measures a header ~6% narrower
+     than the one on screen. The width written down was then a few pixels short
+     of the text it was fitted to, and a one-word header like NOTES came back
+     wrapped.
+
+     The scroller rather than the grid itself, near as that is: the grid lives
+     inside a block widget, and a node appended under `contentDOM` — even one
+     taken away in the same breath — is a mutation CodeMirror answers by
+     rebuilding the widget, which would throw away the caret mid-measure. The
+     scroller is outside what the editor watches and carries the same
+     inherited type. */
+  host.append(probe)
+  const widths = [...probe.querySelectorAll('thead th')]
+    /* One row of headers, so the bound is the table's column count — and
+       measuring them is the whole errand: fitting a column means asking how
+       wide its heading came out. The probe is laid out by the append above and
+       nothing here writes, so this is one settle and then n known answers. */
+    // eslint-disable-next-line tulip/no-layout-thrash
+    .map((head) => Math.max(MIN_COLUMN_WIDTH, Math.ceil(head.getBoundingClientRect().width)))
+  probe.remove()
+  return widths
 }
 
 function wire (cell, view, source) {
@@ -1965,9 +1987,6 @@ function wire (cell, view, source) {
        here made a newly learned word appear indented until it was entered a
        second time. The document span is the canonical, padding-free value. */
     renderTableCell(view, cell, decode(currentText(view, cell)))
-    // Typing in a header replaced its children with its own source, the grip
-    // among them; the redraw above is where it comes back.
-    if (cell.dataset.row === '0') ensureColumnGrip(cell, view)
     requestAnimationFrame(() => {
       const active = document.activeElement
       if (!active || !view.dom.contains(active) || !active.closest?.('.tk-table-wrap')) {
@@ -2010,20 +2029,33 @@ function wire (cell, view, source) {
   })
 
   cell.addEventListener('contextmenu', (event) => {
-    /* Images have their own vault-level menu. Let that gesture reach the
-       renderer instead of replacing it with the surrounding cell's menu. */
-    if (event.target instanceof Element &&
-        event.target.closest('.embed-img[data-vault-image]')) return
+    /* Images have their own vault-level menu. A contenteditable nested inside
+       CodeMirror is not a dependable route for letting a native contextmenu
+       bubble all the way to the stage, so hand the resolved path over through
+       the same explicit custom-event boundary the cell menu uses below. */
+    const image = event.target instanceof Element &&
+                  event.target.closest('.embed-img[data-vault-image]')
+    if (image) {
+      event.preventDefault()
+      event.stopPropagation()
+      cell.dispatchEvent(new CustomEvent('tulip:image-contextmenu', {
+        bubbles: true,
+        detail: {
+          path: image.dataset.vaultImage,
+          x: event.clientX,
+          y: event.clientY
+        }
+      }))
+      return
+    }
     event.preventDefault()
     event.stopPropagation()
     const found = locate(view, cell)
     if (!found) return
     const wrap = cell.closest('.tk-table-wrap')
-    const language = wrap?.dataset.language === 'true'
     const row = Number(cell.dataset.row)
     const col = Number(cell.dataset.col)
     const rows = wrap?.querySelectorAll('tr').length || 1
-    const firstEditableRow = language ? 1 : 0
     if (!cell.classList.contains('tk-table-cell-selected')) clearCellSelection(wrap)
     const selection = selectedCells(wrap)
     const deleteRowCount = deletableRowCount(view, cell)
@@ -2036,8 +2068,8 @@ function wire (cell, view, source) {
         deleteRowCount,
         canDeleteRow: deleteRowCount > 0,
         canAddRowBefore: row > 0,
-        canAddColumn: !language,
-        canDeleteColumn: !language && found.table.cols > 1,
+        canAddColumn: true,
+        canDeleteColumn: found.table.cols > 1,
         /* Which way the chosen columns read now, so the menu can show the
            three alignments as a set with the current one ticked. Null when
            they disagree: a tick against "Center" while only half the selection
@@ -2048,13 +2080,12 @@ function wire (cell, view, source) {
           return cols.every((c) => (found.table.aligns[c] || null) === first) ? first : null
         })(),
         /* What the row and column commands are allowed to do from here. The
-           header neither moves nor moves through, and a language table's
-           columns are fixed, so the menu says so rather than offering an entry
-           that quietly does nothing. */
+           header neither moves nor moves through, so the menu says so rather
+           than offering an entry that quietly does nothing. */
         canMoveRowUp: row > 1,
         canMoveRowDown: row > 0 && row < rows - 1,
-        canMoveColumnLeft: !language && col > 0,
-        canMoveColumnRight: !language && col < found.table.cols - 1,
+        canMoveColumnLeft: col > 0,
+        canMoveColumnRight: col < found.table.cols - 1,
         canSort: canSort(found.table),
         columnName: sortKey(found.table.rows[0]?.cells[col]?.text || '') ||
                     `column ${col + 1}`,
@@ -2064,8 +2095,8 @@ function wire (cell, view, source) {
           selectCellRectangle(wrap, { r: row, c: 0 }, { r: row, c: found.table.cols - 1 })
         },
         selectColumn: () => {
-          setCellAnchor(wrap, { r: firstEditableRow, c: col })
-          selectCellRectangle(wrap, { r: firstEditableRow, c: col }, { r: rows - 1, c: col })
+          setCellAnchor(wrap, { r: 0, c: col })
+          selectCellRectangle(wrap, { r: 0, c: col }, { r: rows - 1, c: col })
         },
         addRowBefore: () => insertRow(view, cell, false),
         addRowAfter: () => insertRow(view, cell, true),
@@ -2107,7 +2138,6 @@ function wireGridKeys (wrap, view) {
     const r = Number(cell.dataset.row)
     const c = Number(cell.dataset.col)
     const cols = Number(wrap.dataset.cols || 1)
-    const firstEditableRow = wrap.dataset.language === 'true' ? 1 : 0
     const mod = event.metaKey || event.ctrlKey
 
     // Both of these are DOM queries over the whole grid, and most keystrokes
@@ -2151,7 +2181,7 @@ function wireGridKeys (wrap, view) {
         return
       }
       window.getSelection()?.removeAllRanges()
-      const from = { r: firstEditableRow, c: 0 }
+      const from = { r: 0, c: 0 }
       setCellAnchor(wrap, from)
       selectCellRectangle(wrap, from, { r: rowCount() - 1, c: cols - 1 })
       return
@@ -2175,7 +2205,7 @@ function wireGridKeys (wrap, view) {
     /* Excel's own two: the column of the cell you are in, and its row. */
     if (event.key === ' ' && (event.ctrlKey || event.shiftKey) && !event.altKey && !event.metaKey) {
       event.preventDefault()
-      const from = event.ctrlKey ? { r: firstEditableRow, c } : { r, c: 0 }
+      const from = event.ctrlKey ? { r: 0, c } : { r, c: 0 }
       const to = event.ctrlKey ? { r: rowCount() - 1, c } : { r, c: cols - 1 }
       setCellAnchor(wrap, from)
       selectCellRectangle(wrap, from, to)
@@ -2211,7 +2241,7 @@ function wireGridKeys (wrap, view) {
       // it on the edge, rather than a second set of edge arithmetic.
       const reach = mod ? Math.max(rowCount(), cols) : 1
       const target = {
-        r: clamp(r + dr * reach, firstEditableRow, rowCount() - 1),
+        r: clamp(r + dr * reach, 0, rowCount() - 1),
         c: clamp(c + dc * reach, 0, cols - 1)
       }
 
@@ -2236,7 +2266,7 @@ function wireGridKeys (wrap, view) {
       let nc = c + (event.shiftKey ? -1 : 1)
       if (nc >= cols) { nc = 0; nr++ }
       if (nc < 0) { nc = cols - 1; nr-- }
-      if (nr < firstEditableRow) return
+      if (nr < 0) return
       // Tab off the last cell grows the table, which is the cheapest way to add
       // a row and the one every spreadsheet has trained people to expect.
       if (nr >= rowCount()) addRow(view, cell)
@@ -2279,7 +2309,8 @@ class TableWidget extends WidgetType {
      of the table per keystroke — and the comparison it fed stops at the first
      cell that differs anyway. */
   eq (other) {
-    if (other.language !== this.language || other.cols !== this.cols) return false
+    if (other.language !== this.language ||
+        other.cols !== this.cols) return false
     if (other.aligns.length !== this.aligns.length) return false
     if (other.cells.length !== this.cells.length) return false
     for (let c = 0; c < this.aligns.length; c++) {
@@ -2334,10 +2365,6 @@ class TableWidget extends WidgetType {
     wireCellSelection(wrap, view)
     wireGridKeys(wrap, view)
 
-    /* Nothing hangs off the edges of the table. Growing one is what the right
-       button offers — insert row above/below, column left/right — and Tab past
-       the last cell already appends. Two hover buttons saying a third time
-       what those two say was chrome sitting over the note. */
     box.append(wrap)
     return box
   }
@@ -2347,28 +2374,22 @@ class TableWidget extends WidgetType {
     tr.dataset.row = String(r)
     for (let c = 0; c < this.cols; c++) {
       const cell = document.createElement(r === 0 ? 'th' : 'td')
-      const locked = this.language && r === 0
-      cell.contentEditable = locked ? 'false' : 'plaintext-only'
+      cell.contentEditable = 'plaintext-only'
       cell.spellcheck = false
       cell.dataset.row = String(r)
       cell.dataset.col = String(c)
       if (r === 0) cell.scope = 'col'
       cell.setAttribute('aria-rowindex', String(r + 1))
       cell.setAttribute('aria-colindex', String(c + 1))
-      if (locked) {
-        cell.classList.add('is-locked')
-        cell.dataset.locked = 'true'
-        cell.setAttribute('aria-readonly', 'true')
-        cell.title = 'Language table columns are fixed'
-      }
       if (this.aligns[c]) cell.style.textAlign = this.aligns[c]
       renderTableCell(view, cell, decode(this.cells[r]?.[c] ?? ''))
-      // Every column is draggable, including a locked language-table header:
-      // the width of a column is not its contents.
-      if (r === 0) ensureColumnGrip(cell, view)
+      if (r === 0) {
+        cell.title = 'Double-click to sort · right-click for the column\u2019s menu'
+        wireHeaderSort(cell, view)
+      }
       // The source is read at focus time, not captured here: by then the widget
       // may be several edits old.
-      if (!locked) wire(cell, view, () => currentText(view, cell))
+      wire(cell, view, () => currentText(view, cell))
       tr.append(cell)
     }
     return tr
@@ -2436,9 +2457,6 @@ class TableWidget extends WidgetType {
         const stale = cell !== document.activeElement && !cell.dataset.editing &&
                       cell.dataset.src !== source
         if (stale) renderTableCell(view, cell, source)
-        /* After the redraw, not before: `renderCell` replaces the cell's
-           children, and the grip is one of them. */
-        if (r === 0) ensureColumnGrip(cell, view)
       })
     })
     return true
@@ -2463,40 +2481,25 @@ function currentText (view, cell) {
 
 /* ------------------------------------------------------- the extension */
 
-/**
- * The lines of a note's opening `---` block, or null.
- *
- * Hidden in a language document, where the grid *is* the document: what the
- * frontmatter holds there is which columns the cards come from and which kinds
- * of card to make — settings about the table rather than text in it, and three
- * lines of `study-stages: f` above the letters is scaffolding left on the
- * building. It is still in the file, still the first thing ⌘↑ reaches, and
- * still what anything reading the note off disk sees.
- */
-function frontmatterLines (state) {
-  if (state.doc.lines < 3 || state.doc.line(1).text.trim() !== '---') return null
-  for (let n = 2; n <= state.doc.lines; n++) {
-    const line = state.doc.line(n)
-    if (line.text.trim() !== '---') continue
-    // Never the whole document: a replacement covering every line leaves the
-    // editor with nothing to put a cursor in.
-    return n < state.doc.lines ? { from: 0, to: line.to } : null
-  }
-  return null
-}
+/* A note's head is hidden by src/properties.js, in every note alike. This
+   field used to hide it again in a language document, from a second block
+   replacement over the same lines — which is why properties.js stood down
+   there. One curtain now, so a language note's `study-front:` is edited in
+   the Info pane exactly like any other note's frontmatter. */
 
 function buildTables (state) {
   const ranges = []
   const language = Boolean(state.facet(languageTableMode)())
 
-  if (language) {
-    const head = frontmatterLines(state)
-    if (head) ranges.push(Decoration.replace({ block: true }).range(head.from, head.to))
-  }
-
   for (const [index, table] of tablesIn(state).entries()) {
     ranges.push(
-      Decoration.replace({ widget: new TableWidget(table, language && index === 0), block: true })
+      Decoration.replace({
+        widget: new TableWidget(
+          table,
+          language && index === 0
+        ),
+        block: true
+      })
         // From `deco`: the width marker above the table is the widget's first
         // line, which is what keeps the comment off the page.
         .range(table.deco, table.to)
@@ -2631,23 +2634,54 @@ export const tableSearchHighlight = ViewPlugin.fromClass(class {
 })
 
 /**
- * Hand every column in the note back to its content.
+ * Fit every column in the note to its widest cell.
  *
- * A dragged column is a fixed width written into the note, and a fixed width
- * does not follow what is typed into it: a vocabulary table that has been
- * resized once and added to fifty times ends up with words cut off in a column
- * that was the right size in March. The grip's double-click already says
- * "fit this one" — this is that, for the whole note at once, and it is the only
- * way to reach it without hunting down every column that was ever dragged.
+ * A column's width is a fixed number written into the note, and a fixed width
+ * does not follow what is typed into it: a vocabulary table that was sized once
+ * and added to fifty times ends up with words cut off in a column that was the
+ * right size in March. This is the way back, for the whole note at once — and,
+ * since the header seam stopped being a drag, the only thing that writes a
+ * width at all. Everything else merely carries the widths already there along
+ * when a column is added, removed or moved.
  *
- * Taking the widths off rather than measuring and writing new ones: a table
- * with no marker line is laid out by the browser from its contents, so the fit
- * stays true as the table grows instead of being right once.
+ * Fit writes exact widths. Removing them would make the table's 100% minimum
+ * share the pane's spare width between columns, which is automatic layout but
+ * is not a content fit.
+ *
+ * Every table in the note, not every table on the screen. The editor only
+ * builds widgets for the part of the document near the viewport, so a note with
+ * a table at the top and another two screens down usually has one grid in the
+ * DOM — and pairing the note's tables to that list by position in it handed the
+ * first table the second one's measurements, or no measurements at all, which
+ * erased the widths it already had. A table nobody has scrolled to is built for
+ * the measurement and thrown away.
  */
 export function fitAllColumns (view) {
-  const changes = tablesIn(view.state)
-    .filter((table) => table.widthsLine != null)
-    .map((table) => widthsChange(view.state, table.widthsLine, ''))
+  const language = Boolean(view.state.facet(languageTableMode)())
+
+  /* Which grid on screen is which table, asked of the document rather than of
+     the order the two lists happen to be in. */
+  const drawn = new Map()
+  for (const wrap of view.dom.querySelectorAll('.tk-table-wrap')) {
+    const table = tableAt(view.state, view.posAtDOM(wrap))
+    if (table) drawn.set(table.from, wrap)
+  }
+
+  const changes = tablesIn(view.state).flatMap((table, index) => {
+    const wrap = drawn.get(table.from)
+    /* Off screen: the same widget the editor would have built, measured
+       detached and against the scroller's type. Pictures in it have not
+       loaded, so a picture column is measured from the width hint the cell
+       carries — which is what sizes it on screen too. */
+    const widths = wrap
+      ? fittedWidths(wrap)
+      : fittedWidths(
+        new TableWidget(table, language && index === 0)
+          .toDOM(view).querySelector('.tk-table-wrap'),
+        view.scrollDOM
+      )
+    return widths.length ? widthChanges(view, table, padWidths(widths, table.cols)) : []
+  })
   if (!changes.length) return false
   view.dispatch({ changes, userEvent: 'input.table' })
   return true
@@ -2700,13 +2734,11 @@ export const tableCursorGuard = ViewPlugin.fromClass(class {
 
   sync (view) {
     const head = view.state.selection.main.head
-    const language = Boolean(view.state.facet(languageTableMode)())
-    view.dom.classList.toggle('is-language-table-editor', language)
     view.dom.classList.toggle('has-table-source-selection', Boolean(tableAt(view.state, head)))
   }
 
   destroy () {
-    this.view.dom.classList.remove('has-table-source-selection', 'is-language-table-editor')
+    this.view.dom.classList.remove('has-table-source-selection')
   }
 })
 
@@ -2758,6 +2790,83 @@ function shiftTables (tables, changes) {
   }))
 }
 
+/* One table slid down the page by an edit above it, which — unlike
+   `shiftTables` — may have made or unmade lines, so the line numbers move too. */
+function slideTable (t, changes, lines) {
+  const map = (pos) => changes.mapPos(pos)
+  return {
+    ...t,
+    from: map(t.from),
+    to: map(t.to),
+    deco: map(t.deco),
+    widthsLine: t.widthsLine === null ? null : t.widthsLine + lines,
+    lastLine: t.lastLine + lines,
+    rows: t.rows.map((row) => ({
+      line: row.line + lines,
+      cells: row.cells.map((c) => ({ ...c, from: map(c.from), to: map(c.to) }))
+    }))
+  }
+}
+
+/**
+ * The document's tables when every change landed inside one of them — which is
+ * every keystroke typed in a cell, and so the case that matters most.
+ *
+ * `shiftOnly` above covers prose typed far from any pipe; this covers the other
+ * half, where the walk over every line of the note was being paid to rebuild
+ * one grid. Only the edited table's own line range is scanned again; the tables
+ * before it are untouched by an edit that begins after them, and the ones after
+ * it are slid.
+ *
+ * Returns null — meaning take the full walk — whenever anything about the edit
+ * could reach outside that range:
+ *
+ * - a change outside the table, or spread across two of them;
+ * - a pipe on the line above, which a rescan could turn into a header and so
+ *   start a table one line higher than this is allowed to look;
+ * - a line below the table that could read as a delimiter row, which would let
+ *   a table start on the region's last line and run out the far side;
+ * - a fence opened inside the region and not closed there, which puts every
+ *   line under it in code and invalidates the tables being slid.
+ */
+function rebuiltTable (tr, tables) {
+  const before = tr.startState.doc
+  const doc = tr.state.doc
+
+  let table = null
+  let ok = true
+  tr.changes.iterChanges((fromA, toA) => {
+    if (!ok) return
+    const found = tables.find((t) => fromA >= t.from && toA <= t.to)
+    if (!found || (table && found !== table)) { ok = false; return }
+    table = found
+  })
+  if (!ok || !table) return null
+
+  const first = before.lineAt(table.from).number
+  if (first > 1 && doc.line(first - 1).text.includes('|')) return null
+
+  // Association forward, so text typed at the very end of the last row is
+  // inside the region rather than after it.
+  const last = doc.lineAt(tr.changes.mapPos(table.to, 1)).number
+  if (last <= first) return null
+  if (last < doc.lines) {
+    const next = doc.line(last + 1).text
+    if (DELIMITER.test(next) && next.includes('-')) return null
+  }
+
+  const region = scanTables(tr.state, first, last)
+  if (region.fence) return null
+
+  const at = tables.indexOf(table)
+  const lines = doc.lines - before.lines
+  return [
+    ...tables.slice(0, at),
+    ...region.tables,
+    ...tables.slice(at + 1).map((t) => slideTable(t, tr.changes, lines))
+  ]
+}
+
 export const tablePreview = StateField.define({
   create: (state) => buildTables(state),
   update (value, tr) {
@@ -2767,9 +2876,16 @@ export const tablePreview = StateField.define({
        once for this field and again for the version cache behind locate().
        Both are slid instead; the cache is refilled here so the next locate()
        finds the new doc already answered. */
-    if (cache.doc === tr.startState.doc && shiftOnly(tr)) {
-      cache = { doc: tr.state.doc, tables: shiftTables(cache.tables, tr.changes) }
-      return value.map(tr.changes)
+    if (cache.doc === tr.startState.doc) {
+      if (shiftOnly(tr)) {
+        cache = { doc: tr.state.doc, tables: shiftTables(cache.tables, tr.changes) }
+        return value.map(tr.changes)
+      }
+      /* Typing in a cell is the other whole-note walk, and the one the widget
+         below is rebuilt from anyway. Refilled here so `buildTables` and the
+         next `locate()` both find the new doc already answered. */
+      const rebuilt = rebuiltTable(tr, cache.tables)
+      if (rebuilt) cache = { doc: tr.state.doc, tables: rebuilt }
     }
     return buildTables(tr.state)
   },

@@ -1,30 +1,230 @@
+# Tulip runs a real Electron window in several of its test suites — the table,
+# reading and UI-contract tests drive an offscreen BrowserWindow rather than a
+# DOM emulation — so CI runs on the same operating systems the app ships on
+# rather than on a Linux container.
 name: CI
 
 on:
   push:
-    branches: [main]
+    branches: ['**']
+    # A tag is what turns a run into a release; see the `release` job.
+    tags: ['v*']
   pull_request:
+  workflow_dispatch:
 
-permissions:
-  contents: read
-
+# A second push to the same branch makes the first run's answer worthless.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   verify:
-    name: Verify (${{ matrix.os }})
+    name: verify (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
+      # One platform failing should not hide the other's result.
       fail-fast: false
       matrix:
-        os: [macos-14, windows-latest]
-    runs-on: ${{ matrix.os }}
+        os: [macos-latest, windows-latest]
+
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 22
+          cache: npm
+
+      # `npm ci` and not `npm install`: the lockfile is the thing under test,
+      # and a run that silently resolves a different tree proves nothing.
+      - name: Install
+        run: npm ci
+
+      # Before the suite, because it is the cheap half: a `no-undef` takes two
+      # seconds to find and a test run takes minutes to fail on the same thing.
+      # The rule set is small and every rule in it fires only on a defect —
+      # see the account in eslint.config.mjs, including the one rule written
+      # for this codebase after three launch-time crashes got through.
+      - name: Lint
+        run: npm run lint
+
+      # The whole-tree `npm run typecheck` still does not gate — it reports
+      # ~2,570 findings, most of them the DOM's own typing, and tsconfig.json
+      # says why at length. This gates the 44 modules that are already clean
+      # under strictNullChecks, so the class of bug that has actually shipped
+      # here twice (a null deref reachable before the thing is built) cannot
+      # come back in them. Widening the list is the ongoing work; see the
+      # header of scripts/typecheck-gate.mjs.
+      - name: Typecheck (gated modules)
+        run: npm run typecheck:gate
+
+      # test:kernel spawns a real `jupyter server` and speaks the real protocol
+      # to it — there is no mock, on purpose, because the failures it exists to
+      # catch are the ones a mock would be written not to have. Without Jupyter
+      # installed that suite skips itself, and a skip in CI is indistinguishable
+      # from a pass: the only place the kernel is covered would report green for
+      # a machine that never asked. So CI installs it and sets
+      # TULIP_REQUIRE_JUPYTER, which turns the skip into a failure.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Jupyter
+        run: python -m pip install --disable-pip-version-check jupyter-server ipykernel
+
+      - name: Test
+        run: npm test
+        env:
+          TULIP_REQUIRE_JUPYTER: '1'
+
+      - name: Build
+        run: npm run build
+
+      # The production build swaps a staged directory into place. This asserts
+      # that a build failing midway leaves the previous dist intact instead of
+      # a half-written one.
+      - name: Staged-swap failure is safe
+        run: npm run test:build-staging
+
+      # After the build, because the boot bench launches the built app. A slow
+      # launch is the regression this project keeps having — `npm run verify`
+      # has gated on these numbers all along, and CI not running them meant the
+      # one check nobody remembers to run locally was also the one check CI
+      # skipped. The thresholds have headroom over a developer machine; if a
+      # hosted runner turns out not to fit under them, the answer is to raise
+      # the number in the bench with a note saying why, not to drop the step.
+      - name: Performance gates
+        run: npm run test:performance
+
+      # Advisories are a build failure, not a notice someone scrolls past. The
+      # overrides in package.json exist to keep this green; when it goes red,
+      # the fix is a new override or an upstream bump, not a lowered threshold.
+      - name: Audit
+        run: npm audit --audit-level=moderate
+
+  package:
+    name: package (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm run verify
+
+      # Packaging is where signing, the icon pipeline and the Info.plist are
+      # exercised. Ad-hoc signed and left in build/ — no secrets are needed for
+      # CI to prove the bundle still assembles.
+      - name: Package the app
+        run: ./scripts/build-app.sh --no-install
+
+      # A bundle that assembles but will not launch is the failure mode worth
+      # catching: the payload must be present and the signature must verify.
+      - name: The bundle is well formed
+        run: |
+          test -f build/Tulip.app/Contents/MacOS/Tulip
+          test -f build/Tulip.app/Contents/Resources/app/electron/main.js
+          test -f build/Tulip.app/Contents/Resources/app/dist/renderer.js
+          codesign --verify --deep --strict --verbose=2 build/Tulip.app
+
+      # Zipped rather than uploaded as a directory: the upload action does not
+      # preserve the executable bit or the symlinks inside a .app, and a bundle
+      # that arrives without either is a bundle that will not launch. `ditto`
+      # is the tool that gets macOS bundles into an archive intact.
+      - name: Archive the bundle
+        run: ditto -c -k --keepParent build/Tulip.app build/Tulip-macos.zip
+
+      # Until now every build CI made was thrown away at the end of the job,
+      # and the only way to have Tulip was to clone it and build it yourself.
+      # This is still not a release — the bundle is ad-hoc signed, so another
+      # machine has to be told to trust it (see the README) — but it is a
+      # download, and a download is what makes a bug report reproducible.
+      - name: Keep it
+        uses: actions/upload-artifact@v4
+        with:
+          name: Tulip-macos
+          path: build/Tulip-macos.zip
+          # Long enough to bisect a regression across a few weeks of pushes,
+          # short enough that the account is not storing every build ever made.
+          retention-days: 30
+
+  package-windows:
+    name: package (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      # rcedit is what stamps the icon and version strings into the .exe. The
+      # packager runs without it, so it is installed here rather than carried as
+      # a dependency of the project.
+      - run: npm i -D rcedit --no-save
+
+      - name: Package the app
+        run: npm run app:win
+
+      - name: The folder is well formed
+        shell: bash
+        run: |
+          test -f build/Tulip-win32-x64/Tulip.exe
+          test ! -f build/Tulip-win32-x64/electron.exe
+          test -f build/Tulip-win32-x64/resources/app/electron/main.js
+          test -f build/Tulip-win32-x64/resources/app/dist/renderer.js
+          test ! -f build/Tulip-win32-x64/resources/default_app.asar
+
+      # A portable folder, so it goes up as it is — the upload action zips it,
+      # and Windows has no executable bit to lose on the way.
+      - name: Keep it
+        uses: actions/upload-artifact@v4
+        with:
+          name: Tulip-windows
+          path: build/Tulip-win32-x64
+          retention-days: 30
+
+  # A tagged commit becomes a downloadable release, built by the same two jobs
+  # that already prove the packaging works — so what is published is the thing
+  # CI verified, not a second build made specially for the occasion.
+  #
+  # `v0.1.26` is the shape of the tag. The version in package.json is advanced
+  # by the release scripts themselves (build-app.sh and build-win.mjs, behind
+  # `--release`), so tagging is the last step and not the first: tag the commit
+  # whose package.json already says what it is.
+  release:
+    name: release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [verify, package, package-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      # The only write this workflow asks for anywhere, and only on a tag.
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/Tulip-macos/Tulip-macos.zip
+            artifacts/Tulip-windows/**
+          # Both builds are ad-hoc signed unless the signing secrets are set,
+          # and a download that has to be argued past Gatekeeper should say so
+          # where somebody will read it rather than in a README they have not
+          # opened yet.
+          body: |
+            Built by CI from ${{ github.sha }}.
+
+            **macOS** — unzip and move `Tulip.app` to Applications. Unless this
+            build was signed with a Developer ID, macOS will refuse it as
+            "damaged" or from an "unidentified developer"; clear the quarantine
+            attribute with `xattr -cr /Applications/Tulip.app`.
+
+            **Windows** — a portable folder. Unzip it anywhere and run
+            `Tulip.exe`. SmartScreen will warn about an unsigned binary.
+          generate_release_notes: true

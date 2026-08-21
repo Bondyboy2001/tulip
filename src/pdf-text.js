@@ -23,8 +23,8 @@
 
    Declared before pdf.js loads, which is why the import below is dynamic: a
    static one is hoisted above this and the library would evaluate first. */
-if (!globalThis.DOMMatrix) globalThis.DOMMatrix = class DOMMatrix {}
-if (!globalThis.Path2D) globalThis.Path2D = class Path2D {}
+if (!globalThis.DOMMatrix) globalThis.DOMMatrix = /** @type {typeof DOMMatrix} */ (class DOMMatrix {})
+if (!globalThis.Path2D) globalThis.Path2D = /** @type {typeof Path2D} */ (class Path2D {})
 
 import fs from 'node:fs/promises'
 import path from 'node:path'
@@ -55,6 +55,10 @@ class LocalBinaryDataFactory {
  * @param {string} [opts.fonts]  `dist/pdfjs/standard_fonts/`, for documents that
  *   name a standard font rather than embedding one — without it their glyphs
  *   have no character codes to come back as.
+ * @param {string} [opts.cmaps]  `dist/pdfjs/cmaps/`, the same story for CJK
+ *   documents, whose character codes live in maps rather than fonts.
+ * @param {string} [opts.wasm]   `dist/pdfjs/wasm/`, the decoders pdf.js ships
+ *   as wasm files.
  * @returns {Promise<{ text: string, pageTexts: string[], pages: number, sparsePages: number[] }>}
  */
 export async function extract (bytes, { name = 'document.pdf', fonts, cmaps, wasm } = {}) {
@@ -77,9 +81,8 @@ export async function extract (bytes, { name = 'document.pdf', fonts, cmaps, was
     cMapPacked: true,
     wasmUrl: wasm,
     BinaryDataFactory: LocalBinaryDataFactory,
-    // No `eval`, and nothing fetched: this parses files the user did not write,
-    // in the process that has the filesystem.
-    isEvalSupported: false,
+    // Nothing fetched from the system: this parses files the user did not
+    // write, in the process that has the filesystem.
     useSystemFonts: false,
     disableFontFace: true
   })

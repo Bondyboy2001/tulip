@@ -1,0 +1,259 @@
+/* Feature-owned surfaces extracted from the shell stylesheet. New modules put
+ * their layout here so styles.css remains the shared frame, not every feature. */
+
+.saved-searches {
+  flex: none;
+  padding: 5px 8px 7px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.saved-searches-head {
+  padding: 3px 7px 5px;
+  color: var(--faint);
+  font: 600 10.5px/1 var(--font-ui);
+  letter-spacing: .055em;
+  text-transform: uppercase;
+}
+.saved-search-row { display: flex; align-items: center; gap: 2px; }
+.saved-search-open {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 7px;
+  border-radius: 5px;
+  color: var(--ink-soft);
+  font: 12px/1.2 var(--font-ui);
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.saved-search-open::before { content: '⌕'; margin-right: 7px; color: var(--accent); }
+.saved-search-open:hover { background: var(--hover); color: var(--ink); }
+/* The input takes the button's own box so the row does not move when a rename
+   starts — the same metrics, minus the ⌕ the button draws before its label. */
+.saved-search-name {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 7px;
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  background: var(--sunk);
+  color: var(--ink);
+  font: 12px/1.2 var(--font-ui);
+}
+.saved-search-remove {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  color: var(--faint);
+  opacity: 0;
+}
+.saved-search-row:is(:hover, :focus-within) .saved-search-remove { opacity: 1; }
+.saved-search-remove:hover { background: var(--hover); color: var(--ink); }
+
+.ai-doctor { display: grid; gap: 10px; }
+.ai-doctor-results { display: grid; gap: 4px; }
+.ai-doctor-provider {
+  display: grid;
+  grid-template-columns: 82px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 30px;
+  padding: 4px 8px 4px 22px;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  font: 11.5px/1.2 var(--font-ui);
+  position: relative;
+}
+.ai-doctor-provider::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--strong);
+  position: absolute;
+}
+.ai-doctor-provider.is-ready::before { background: var(--stem); }
+.ai-doctor-name { font-weight: 650; color: var(--ink); }
+.ai-doctor-version { overflow: hidden; color: var(--faint); text-overflow: ellipsis; white-space: nowrap; }
+.ai-doctor-status { color: var(--muted); }
+
+
+/* ========================================================== review statistics
+   The panel built in src/review-panel.js. Its own block rather than rules
+   folded into styles.css because it is the only surface in the app the window
+   does not carry until somebody asks for it, and because everything here is
+   about one page. Tokens only — no colour appears in this file that is not a
+   variable, so the eleven themes get it for free. */
+
+.stats-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgb(0 0 0 / 34%);
+  backdrop-filter: blur(2px);
+}
+.stats-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  width: min(680px, 100%);
+  max-height: 100%;
+  overflow: auto;
+  padding: 22px 24px 18px;
+  border: 1px solid var(--line-soft);
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: 0 24px 60px rgb(0 0 0 / 26%), 0 3px 10px rgb(0 0 0 / 12%);
+  font-family: var(--font-ui);
+}
+.stats-headline { display: flex; flex-direction: column; gap: 3px; }
+.stats-title { margin: 0; font-size: 1.15rem; font-weight: 650; color: var(--ink); }
+.stats-sub { font-size: 0.82rem; color: var(--muted); }
+
+/* Auto-fit rather than a fixed column count: the same six tiles sit three by
+   two on a narrow window and six across on a wide one without a media query. */
+.stats-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+  gap: 8px;
+}
+.stats-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 9px;
+  background: var(--sunk);
+}
+.stats-value {
+  font-size: 1.35rem;
+  font-weight: 620;
+  line-height: 1.1;
+  color: var(--ink);
+  /* Tabular figures so a row of tiles does not shuffle sideways as the numbers
+     change under it — the same reason the status bar uses them. */
+  font-variant-numeric: tabular-nums;
+}
+.stats-label { font-size: 0.72rem; color: var(--faint); }
+
+.stats-chart { display: flex; flex-direction: column; gap: 7px; }
+.stats-head {
+  margin: 0;
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.stats-empty, .stats-note { margin: 0; font-size: 0.82rem; color: var(--muted); }
+
+.stats-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 84px;
+  padding: 0 1px;
+  border-bottom: 1px solid var(--line-soft);
+}
+/* Each day is a full-height slot with the bar sitting at the bottom of it, so
+   the hover target is the whole column and not just the ink. */
+.stats-bar-slot { display: flex; flex: 1; align-items: flex-end; min-width: 3px; height: 100%; }
+.stats-bar {
+  width: 100%;
+  min-height: 0;
+  border-radius: 2px 2px 0 0;
+  background: var(--accent);
+  transition: height 140ms var(--ease);
+}
+.stats-bar-slot:hover .stats-bar { background: color-mix(in srgb, var(--accent) 78%, var(--ink)); }
+.stats-scale { display: flex; justify-content: space-between; }
+.stats-scale-end { font-size: 0.68rem; color: var(--faint); }
+
+.stats-leeches { display: flex; flex-direction: column; gap: 2px; }
+.stats-leech {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: baseline;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.stats-leech:hover { background: var(--hover); }
+.stats-leech:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.stats-leech-term { overflow: hidden; color: var(--ink); text-overflow: ellipsis; white-space: nowrap; }
+.stats-leech-note { overflow: hidden; font-size: 0.78rem; color: var(--faint); text-overflow: ellipsis; white-space: nowrap; }
+.stats-leech-count { font-size: 0.78rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.stats-foot { display: flex; justify-content: flex-end; gap: 8px; padding-top: 2px; }
+
+/* ======================================================= the second panel
+   The optional lower half of the sidebar — see setPaneBelow in renderer.js.
+
+   The panel bodies are flex children of `.sidebar` with `flex: 1`, so the file
+   tree fills whatever is left. When one of the four is opened below it, that
+   one is given a share of the sidebar's height and the tree takes the rest;
+   `--pane-below` is that share, a number between 0 and 1 rather than a length,
+   because the sidebar is as tall as the window and a panel fixed at 240px is
+   most of a short one and a strip of a tall one. */
+
+.sidebar { --pane-below: 0.4; }
+
+.pane-split {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+}
+
+/* The divider is a hairline with a comfortable grab area around it: a 1px
+   target is a target you miss, and the padding is what the pointer actually
+   lands on. */
+.pane-split-grip {
+  position: relative;
+  flex: none;
+  height: 9px;
+  margin: 2px 0 0;
+  cursor: row-resize;
+}
+.pane-split-grip::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  left: 0;
+  top: 4px;
+  height: 1px;
+  background: var(--line);
+}
+.pane-split-grip:hover::after,
+.pane-split-grip.is-dragging::after,
+.pane-split-grip:focus-visible::after { background: var(--accent); }
+.pane-split-grip:focus-visible { outline: none; }
+
+/* The sidebar's only strip, sitting under the divider and naming what is in
+   the panel below it. It was shrunk when there was a second strip above the
+   tree for it to defer to; there is not one now. */
+.pane-tabs.is-lower { padding-top: 0; }
+.pane-tabs.is-lower .pane-tab { padding-top: 4px; padding-bottom: 6px; }
+
+/* The lower body: a fixed share of the height, scrolling within itself, so the
+   panel above keeps its own scroll position rather than the two sharing one. */
+.sidebar > .pane-split ~ .pane {
+  flex: none;
+  height: calc(var(--pane-below) * 100%);
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* The control that opens and shuts the lower panel is one of the header's
+   icon buttons and is styled as one — including the pressed state, which
+   `.icon-btn[aria-pressed="true"]` already carries. It had rules of its own
+   while it lived in a row beside a tab strip; there is no such row now. */

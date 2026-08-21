@@ -1,0 +1,518 @@
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import path from 'node:path'
+import { normalizeSavedSearches } from '../src/saved-searches.js'
+
+const repo = process.cwd()
+const target = path.resolve(process.argv[2] || repo)
+const source = fs.existsSync(path.join(target, 'src', 'renderer.js'))
+
+const read = (...parts) => fs.readFileSync(path.join(target, ...parts), 'utf8')
+const renderer = read(source ? 'src' : 'dist', 'renderer.js')
+const panelState = source ? read('src', 'panel-state.js') : renderer
+const copilot = source ? read('src', 'copilot.js') : renderer
+const settings = source ? read('src', 'settings.js') : renderer
+const ask = source ? read('src', 'ask.js') : renderer
+const runcode = source ? read('src', 'runcode.js') : renderer
+const styles = read(source ? 'src' : 'dist', source ? 'styles-features.css' : 'renderer.css')
+const html = read(source ? 'src' : 'dist', 'index.html')
+const main = read('electron', 'main.js')
+const ai = read('electron', 'ai.js')
+const preload = read('electron', 'preload.js')
+
+for (const id of ['saved-searches', 'panel-save-search', 'ai-write']) {
+  assert.match(html, new RegExp(`id=["']${id}["']`), `${id} is part of the installed shell`)
+}
+for (const id of ['tex-divider', 'tex-preview', 'tex-pdf']) {
+  assert.match(html, new RegExp(`id=["']${id}["']`), `${id} is part of the installed shell`)
+}
+/* Every viewed kind needs a pane of its own in the shell, and one that is
+   shipped rather than merely written: a pane missing from the built HTML is a
+   tab that opens onto the last document. */
+for (const id of ['data', 'notebook', 'fileview']) {
+  assert.match(html, new RegExp(`id=["']${id}["']`), `${id} is part of the installed shell`)
+}
+assert.match(html, /id="reading"[^>]*role="document"[^>]*aria-label="Reading view"[^>]*tabindex="0"/)
+
+/* The shell is one hand-written document, and an unbalanced tag in it does not
+   fail anything: the parser closes what it must and carries on. A stray
+   </div> once closed <main> early, which closed .app early, which left the
+   copilot and the side pane as children of <body> — outside the grid that
+   gives them their column, so opening the copilot showed an empty window with
+   the panel laid out below the fold. Nothing threw and nothing looked wrong
+   until the panel was opened. Count the tags instead. */
+const tagBalance = (doc) => {
+  /* Comments and <svg> subtrees are blanked rather than parsed: both are full
+     of things that are not shell structure, and SVG is XML, where <path/> and
+     <path></path> are both fine and neither is an HTML void element. */
+  const body = doc
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<svg[\s\S]*?<\/svg>/g, '')
+  const VOID = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img',
+                        'input', 'link', 'meta', 'source', 'track', 'wbr'])
+  const open = []
+  for (const [, slash, name, attrs] of body.matchAll(/<(\/?)([a-zA-Z][\w-]*)([^>]*)>/g)) {
+    if (VOID.has(name.toLowerCase()) || attrs.trimEnd().endsWith('/')) continue
+    if (!slash) { open.push(name); continue }
+    const top = open.pop()
+    if (top !== name) return `</${name}> closes <${top || 'nothing'}>`
+  }
+  return open.length ? `<${open.join('>, <')}> left open` : ''
+}
+assert.equal(tagBalance(html), '', 'every tag in the shell is closed by its own')
+assert.doesNotMatch(html, /tex-preview-head|tex-preview-status|>PDF preview</)
+assert.match(renderer, /Search notes, PDFs, and highlights/)
+assert.match(renderer, /Saved searches|saved-searches/)
+assert.match(panelState, /aria-hidden/)
+assert.match(main, /searchPdfDocuments/)
+assert.match(main, /ai:doctor/)
+assert.match(preload, /doctor:\s*\(\)/)
+assert.match(preload, /tex:compile/)
+assert.match(main, /createTexCompiler/)
+assert.match(source ? read('src', 'styles.css') : styles, /\.tex-preview/)
+/* KaTeX's stylesheet is emitted beside index.html, so it is resolved against
+   the document. `import.meta.url` is wherever esbuild's splitting last put
+   math.js — and when that was a shared chunk, the link asked for
+   `chunks/katex.css`, 404ed, and every expression in the app rendered as its
+   own source with nothing thrown. */
+if (source) {
+  const math = read('src', 'math.js')
+  assert.match(math, /new URL\('katex\.css', document\.baseURI\)/)
+  assert.doesNotMatch(math, /new URL\('katex\.css', import\.meta\.url\)/)
+}
+
+/* The window's own bundle is served over `tulip-app` for one reason: it is the
+   only way Chromium will keep a V8 code cache for it, and `codeCache` is
+   ignored unless `standard` is set beside it. Both are asserted because losing
+   either has NO visible symptom — the app opens, everything works, and every
+   launch quietly recompiles 570KB from source again. Measured with
+   bench/boot-bench.mjs; the numbers are in the comment beside the handler. */
+assert.match(main, /scheme:\s*'tulip-app'/)
+assert.match(main, /codeCache:\s*true/)
+assert.match(main, /standard:\s*true/)
+assert.match(main, /loadURL\(`\$\{APP_ORIGIN\}\/index\.html`\)/)
+
+if (source) {
+  const whiteboard = read('src', 'whiteboard.js')
+  const build = read('build.mjs')
+  const csv = read('src', 'csv.js')
+  assert.match(renderer, /el\.reading\.setAttribute\('aria-labelledby', title\.id\)/)
+  assert.match(csv, /\[scrollBack, 'Scroll to earlier columns'\]/)
+  assert.match(csv, /\[scrollForward, 'Scroll to later columns'\]/)
+  assert.match(csv, /const paintColumnScroll = \(\) =>/)
+  assert.match(renderer, /loadFeatureStyles\('copilot'\)/)
+  assert.match(renderer, /loadFeatureStyles\('settings'\)/)
+  assert.match(renderer, /loadFeatureStyles\('notebook'\)/)
+  assert.match(renderer, /loadFeatureStyles\('csv'\)/)
+  assert.match(build, /splitFeatureStyles/)
+  assert.doesNotMatch(renderer, /import \{ mountSettings \} from ['"]\.\/settings\.js['"]/)
+  assert.match(renderer, /import\(['"]\.\/settings\.js['"]\)/)
+  /* The thinking level has no control of its own any more — ⌃T is the whole
+     of it, so the chord and the readout it flashes are the contract. */
+  assert.match(copilot, /event\.code !== 'KeyT'/)
+  assert.match(copilot, /cycleEffort\(event\.shiftKey \? -1 : 1\)/)
+  assert.doesNotMatch(copilot, /effortRange|effortStops/)
+  assert.match(renderer, /code-ai-hint[^\n]*⌘ Enter to send/)
+  assert.match(renderer, /host: el\.texPdf,\s*selectionMenu: false/)
+  assert.match(renderer, /id: 'new-file', title: 'New file…'/)
+  for (const id of ['fold-all-headings', 'unfold-all-headings', 'lint-file', 'export-pdf']) {
+    assert.match(renderer, new RegExp(`id: '${id}', title: [^\\n]+scope: 'markdown'`), `${id} is limited to Markdown files`)
+  }
+  assert.match(renderer, /id: 'note-history', title: [^\n]+scope: 'text'/)
+  assert.match(renderer, /COMMANDS\.filter\(\(\{ scope \}\)/)
+  /* A locked file is held in its reading view, and the hold is written in one
+     place each: `setView` refuses to leave reading, and `applyPanes` puts a
+     locked document back into it however it was opened. Both are one line to
+     lose and neither shows up in a screenshot of an unlocked note. */
+  assert.match(renderer, /if \(lockedHere\(\)\) \{[\s\S]{0,320}if \(view !== 'read'\)/)
+  assert.match(renderer, /const show = lockedHere\(\) \? 'read' :/)
+  /* The palette offers whichever of the two the file is not, and both run the
+     same command — a row that cannot act on what is open is not offered. */
+  assert.match(renderer, /id: 'unlock-file'[\s\S]{0,80}id: 'lock-file'/)
+  assert.match(renderer, /case 'lock-file':\s*\n\s*case 'unlock-file': toggleLock\(\)/)
+  // Locking and unlocking are both asked about before they happen.
+  assert.match(renderer, /await ask\(locking[\s\S]{0,400}go: 'Unlock'/)
+  // The lock survives a rename, which is the one move nobody checks afterwards.
+  assert.match(renderer, /state\.locked\]\.map\(moved\)/)
+  // The `.csv` lattice is a fact about the shell — the grid is virtualized.
+  assert.match(renderer, /dataset\.csvBorders = cfg\.csvBorders === true \? 'on' : 'off'/)
+  assert.match(read('src', 'styles.css'), /\[data-csv-borders="on"\] \.csv-frame \.csv-cell/)
+  /* A command that cannot act on what is open is not offered: the study record
+     belongs to the language tables, and there is no file to move with nothing
+     open. Both are scopes rather than checks inside the handler, so the row
+     itself disappears. */
+  assert.match(renderer, /id: 'review-stats', title: [^\n]+scope: 'language'/)
+  assert.match(renderer, /id: 'move-file', title: [^\n]+scope: 'file'/)
+  assert.match(renderer, /id: 'toggle-spellcheck', title: [^\n]+scope: 'markdown'/)
+  /* The overlay's selection: the ends are ends, and a row arriving under a
+     still mouse is not a hover. Both regressions are one line each to
+     reintroduce and neither is visible in a screenshot. */
+  assert.match(renderer, /Math\.max\(0, Math\.min\(count - 1, state\.overlay\.index \+ by\)\)/)
+  assert.doesNotMatch(renderer, /state\.overlay\.index [+-] 1( \+ count)?\) % count/)
+  assert.match(renderer, /mouseenter[\s\S]{0,60}if \(overlayHoverMuted\) return/)
+  assert.match(renderer, /el\.panelList\.addEventListener\('mousemove'/)
+  assert.ok(
+    html.indexOf('id="zoom"') > html.indexOf('class="doc-tools"') &&
+    html.indexOf('id="zoom"') < html.indexOf('<!-- A PDF'),
+    'the zoom badge lives in the document header'
+  )
+  assert.doesNotMatch(html, /class="status-end"/)
+  const newFileCommands = /const NEW_FILE_COMMANDS = \[([\s\S]*?)\n\]/.exec(renderer)?.[1] || ''
+  for (const id of ['new-note', 'new-tex', 'new-whiteboard', 'new-website', 'new-table',
+    'new-notebook']) {
+    assert.match(renderer, new RegExp(`id: '${id}', title:`), `${id} is offered by the nested new-file palette`)
+  }
+  assert.doesNotMatch(newFileCommands, /id: 'new-folder'/)
+  assert.doesNotMatch(newFileCommands, /id: 'new-language'/)
+  assert.match(newFileCommands, /id: 'new-tex'[^\n]*kind: 'tex'/)
+  assert.match(renderer, /mode === 'new-files'[\s\S]{0,320}noteRef\(item\.path\)\.kind/)
+  assert.match(renderer, /isSitePath\(relPath\) \|\| isWhiteboardPath\(relPath\)/)
+  assert.doesNotMatch(renderer, /infoRow\('Reading time'/)
+  assert.match(renderer, /infoRow\('Folder',[\s\S]{0,180}\(\) => copyPaths\(\[folder\]\)/)
+  assert.match(renderer, /api\.fileTags\.get\(path\)/)
+  assert.match(renderer, /api\.fileTags\.set\(path, next\)/)
+  assert.match(preload, /get: \(p\) => ipcRenderer\.invoke\('file-tags:get', p\)/)
+  assert.match(main, /ipcMain\.handle\('file-tags:set'/)
+  assert.match(renderer, /if \(viewingWhiteboard\(\)\) \{[\s\S]{0,180}whiteboardInstance\?\.open\(relPath/)
+  assert.doesNotMatch(ai, /turn-end', processed:/)
+  assert.doesNotMatch(copilot, /tokens processed this turn/)
+  /* The copilots Tulip no longer runs. Their threads cannot be resumed and
+     their context readings are about conversations nothing here can reopen, so
+     a restored chat of theirs must come back with its gauge cleared. */
+  assert.match(copilot, /const gone = new Set\(\['codex', 'claude', 'devin'\]\)/)
+  assert.match(copilot, /const stale = gone\.has\(convo\.threadOf\)/)
+  /* Through `docIcon`, not `fileIcon` directly: the tint a source file's row
+     is drawn with comes from its path, and a call site that skipped the helper
+     would show every language in the same grey. */
+  assert.match(renderer, /li\.append\(docIcon\(fileKind, item\.path\)\)/)
+  assert.match(renderer, /row\.append\(docIcon\(node\.kind, node\.path\)\)/)
+  assert.match(preload, /create: \(dir\) => ipcRenderer\.invoke\('tex:create', dir\)/)
+  assert.match(main, /ipcMain\.handle\('tex:create'/)
+  assert.match(main, /EMPTY_TEX_DOCUMENT/)
+  assert.match(renderer, /case 'new-file': openOverlay\('new-files', \{ dir \}\)/)
+  /* Creating a source or data file is the difference between the vault opening
+     these and merely tolerating them. Both routes in are asserted: the picker
+     that chooses a language, and the import filter that lets one be dragged. */
+  assert.match(renderer, /case 'new-source': openOverlay\('new-source', \{ dir \}\)/)
+  assert.match(renderer, /case 'new-csv': createSource\(dir, '\.csv'\)/)
+  assert.match(renderer, /case 'new-notebook': createSource\(dir, '\.ipynb'\)/)
+  /* A table and a notebook are each read and edited in one pane, so the view
+     switch is on the bar while either is open and the viewer is told which of
+     the two it is in. Without the second and third lines the control would
+     move and the document would not. */
+  assert.match(renderer,
+    /el\.viewSwitch\.hidden = \(!text && !dataOpen && !notebookOpen\) \|\| sourceOnly/)
+  assert.match(renderer, /if \(dataOpen\) dataInstance\?\.setReadonly\(state\.view === 'read'\)/)
+  assert.match(renderer, /if \(notebookOpen\) notebookInstance\?\.setReadonly\(state\.view === 'read'\)/)
+  /* A notebook's run commands are the only things in the app that need a live
+     kernel, and they were an API nothing called: `mountNotebook` returned a
+     `run` object and no menu, palette or key ever reached it. All three legs
+     are asserted — the menu item, the command the renderer answers it with,
+     and the bridge the viewer runs it over — because any one of them missing
+     is a menu entry that silently does nothing. */
+  for (const [item, command] of [
+    ['Run All Above', 'nb-run-above'],
+    ['Run All Below', 'nb-run-below'],
+    ['Restart and Run All…', 'nb-restart-all']
+  ]) {
+    assert.match(main, new RegExp(`label: '${item}'[^\\n]*'${command}'`), `${item} is in the menu`)
+    /* Routed through `onNotebook`, which is where "only while a notebook is
+       open" now lives — and which also says so when one is not, instead of
+       going silent. These items are always enabled (the menu is built once at
+       launch and would have to be rebuilt on every tab switch to grey them out
+       per document), so choosing one over a note is a thing that happens, and
+       answering it with nothing at all reads as a broken command. */
+    assert.match(renderer, new RegExp(`case '${command}': onNotebook\\(`),
+      `${command} goes through the notebook guard`)
+  }
+  assert.match(renderer, /function onNotebook \([\s\S]{0,220}viewingNotebook\(\) && notebookInstance/,
+    'the notebook guard tests for an open notebook')
+  assert.match(renderer, /function onNotebook \([\s\S]{0,320}else toast\(/,
+    'and says so when there is not one')
+  /* The keyboard sheet, asserted leg by leg for the same reason the notebook
+     menu is: the Help item, the command the renderer answers it with, and the
+     markup it fills. A menu entry whose command nobody handles is silence, and
+     this one cannot be driven from a probe — ⌘P and the Help menu are native
+     accelerators, which CDP input events do not reach. */
+  assert.match(main, /label: 'Keyboard Shortcuts'[^\n]*'shortcuts'/, 'Help offers the sheet')
+  assert.match(main, /role: 'help'/, 'and there is a Help menu to offer it in')
+  assert.match(renderer, /case 'shortcuts': openShortcuts\(\); break/, 'the renderer answers it')
+  assert.match(renderer, /function openShortcuts \(\)[\s\S]{0,1200}el\.shortcuts\.hidden = false/,
+    'and opening it shows the sheet')
+  assert.match(html, /id="shortcuts-body"/, 'which has somewhere to be drawn')
+  assert.match(html, /id="shortcuts"[\s\S]{0,200}aria-modal="true"/, 'and says it is modal')
+  /* The chords are written out rather than derived, so they can drift from what
+     actually answers them — and a sheet is read precisely by someone who does
+     not already know the chord, so a row nothing handles sends them to press a
+     key combination that does nothing at all.
+
+     ⌃⌘S was that row for a while: the palette entry and the chord that studied
+     the open language table were both deliberately removed when studying became
+     the toolbar button's job, and the sheet went on advertising the chord. So
+     this reads every row out of the sheet itself and insists each one is
+     answered somewhere — no list here to keep in step, which is the failure the
+     old hand-written half-list of ten claims allowed. */
+  const sheetBlock = renderer.slice(renderer.indexOf('const SHORTCUTS = ['))
+  const sheetRows = [...sheetBlock.slice(0, sheetBlock.indexOf('\n]\n'))
+    .matchAll(/\['([^']+)', '([^']+)'\]/g)].map((m) => [m[1], m[2]])
+  assert.ok(sheetRows.length > 30, 'the sheet was found and read')
+
+  /* A chord as the menu spells it. Both orders and both spellings of every
+     modifier, because main writes `Alt+Cmd+Left` in one place and `Cmd+Alt+P`
+     in another, and reaches for `CmdOrCtrl` on the chords Windows shares. */
+  const MODS = { '⌘': ['Cmd', 'CmdOrCtrl'], '⇧': ['Shift'], '⌥': ['Alt'], '⌃': ['Ctrl', 'Control'] }
+  const KEYS = { '←': ['Left'], '→': ['Right'], '↵': ['Enter'], '⏎': ['Enter'], '+': ['Plus', '='], '-': ['-'] }
+  const orders = (list) => list.length < 2
+    ? [list]
+    : list.flatMap((item, i) => orders(list.filter((_, j) => j !== i)).map((rest) => [item, ...rest]))
+
+  const accelerators = (chord) => {
+    const marks = [...chord].filter((ch) => MODS[ch])
+    const key = [...chord].filter((ch) => !MODS[ch]).join('')
+    const keys = KEYS[key] || [key.toUpperCase()]
+    const out = []
+    for (const order of orders(marks)) {
+      const spellings = order.map((mark) => MODS[mark])
+      const combine = (at, prefix) => {
+        if (at === spellings.length) {
+          for (const k of keys) out.push([...prefix, k].join('+'))
+          return
+        }
+        for (const spelling of spellings[at]) combine(at + 1, [...prefix, spelling])
+      }
+      combine(0, [])
+    }
+    return out
+  }
+
+  /* The chords no menu declares, each with the handler that answers it. A row
+     may only sit here with proof, so deleting the handler fails the test rather
+     than quietly widening the exemption. */
+  const HANDLED_IN_APP = new Map([
+    ['↵', ['the file tree', renderer, /e\.key === 'F2' \|\| \(e\.key === 'Enter' && !e\.metaKey/]],
+    ['⌘↵', ['the file tree', renderer, /if \(e\.key === 'Enter'\) \{\s*\n\s*e\.preventDefault\(\)\s*\n\s*node\.type === 'folder'/]],
+    ['⌥⌘F', ['the grid', csv, /event\.altKey && \(event\.code === 'KeyF'/]],
+    ['⌘⏎', ['the grid', csv, /if \(mod\) insertRows\(/]],
+    ['⌃T', ['the copilot', copilot, /if \(event\.code !== 'KeyT'\) return[\s\S]{0,200}cycleEffort\(/]]
+  ])
+
+  for (const [chord, what] of sheetRows) {
+    const declared = accelerators(chord).some((accel) => main.includes(`accelerator: '${accel}'`))
+    if (declared) continue
+    const proof = HANDLED_IN_APP.get(chord)
+    assert.ok(proof, `the sheet advertises ${chord} for "${what}" and nothing handles it`)
+    assert.match(proof[1], proof[2],
+      `${chord} ("${what}") is answered in ${proof[0]}, and that handler is gone`)
+  }
+  /* Completion, inspection and the answer to an `input()` all need the live
+     kernel, so all three cross the bridge rather than being guessed at here. */
+  for (const call of ['input', 'complete', 'inspect']) {
+    assert.match(preload, new RegExp(`ipcRenderer\\.invoke\\('kernel:${call}'`))
+    assert.match(main, new RegExp(`ipcMain\\.handle\\('kernel:${call}'`))
+  }
+  /* The one thing a notebook has to stop and ask about — a restart throws away
+     every variable in the session — asked in the app's own dialog. */
+  assert.match(renderer, /\n\s*ask,\n\s*notify: \(text\) => toast\(text\),/)
+  /* Auto-resize is offered for both grids and routed to whichever is open —
+     the palette row and the thing it calls, which are easy to add one of. */
+  assert.match(renderer,
+    /if \(viewingLanguageTable\(\) \|\| viewingData\(\)\) \{\s*commands\.push\(\{ id: 'fit-columns'/)
+  assert.match(renderer, /viewingData\(\) \? dataInstance\?\.fitColumns\(\) : editor\?\.fitAllColumns\(\)/)
+  assert.match(preload, /create: \(dir, name, ext\) => ipcRenderer\.invoke\('source:create', dir, name, ext\)/)
+  assert.match(main, /ipcMain\.handle\('source:create'/)
+  assert.match(main, /!isCode\(source\) && !isData\(source\)\) \{ skipped\+\+; return \}/)
+  assert.match(renderer, /mode === 'new-files'\) \{ runCommand\(item\.id, dir\)/)
+  assert.doesNotMatch(renderer, /title = 'Press ⌘Enter to send'/)
+  assert.match(renderer, /codeAiPop\.isConnected && codeAiSession\?\.anchor === anchor/)
+  assert.doesNotMatch(renderer, /document\.addEventListener\('pointerdown',[\s\S]{0,180}codeAiPop/)
+  assert.doesNotMatch(renderer, /codeAiPop\.addEventListener\('keydown',[\s\S]{0,160}Escape/)
+  assert.match(copilot, /element\('button', 'ghost is-compact', 'Reject'\)/)
+  assert.match(copilot, /const name = entry\.name \|\| noteName\(entry\.path\)/)
+  assert.match(copilot, /run: \(\) => selectMention\(from, entry\.path\)/)
+  assert.match(copilot, /box\.value = box\.value\.slice\(0, from\) \+ box\.value\.slice\(to\)/)
+  assert.match(copilot, /addAttachments\(\[path\], true\)/)
+  assert.match(copilot, /function attachmentKind \(path\)/)
+  /* Fenced code in a reply is coloured by the reading view's own painter, from
+     the class markdown-it's fence rule leaves the language in — and on every
+     path that writes prose into the panel, including the settled half of a
+     reply still streaming. A block dressed on one of them and not the others is
+     a reply whose colours come and go as the log is rebuilt. */
+  assert.match(copilot, /import \{ highlightInto \} from '\.\/highlight\.js'/)
+  assert.match(copilot,
+    /querySelectorAll\('pre > code\[class\*="language-"\]'\)[\s\S]{0,220}highlightInto\(code, code\.textContent, lang\)/)
+  // The four call sites: repaint, first draw, a question's own copy, and the
+  // settled head of a stream. (The definition writes `dressCode (root)`.)
+  assert.equal(copilot.match(/\bdressCode\(/g)?.length, 4)
+  assert.match(copilot, /preview\.append\(fileIcon\(kind\)\)/)
+  assert.match(copilot, /element\('button', 'icon-btn ai-attachment-remove'\)/)
+  assert.match(read('src', 'file-icons.js'), /export function fileIcon \(kind, \{ color = null \} = \{\}\)/)
+  assert.doesNotMatch(copilot, /isPdfPath\(entry\.path\) \|\| isSitePath\(entry\.path\)/)
+  assert.doesNotMatch(copilot, /element\('button', 'ghost is-compact is-accent', 'Restore'\)/)
+  assert.doesNotMatch(copilot, /'Undo turn'/)
+  assert.doesNotMatch(settings, /of \$\{all\.length\} offered/)
+  assert.match(settings, /const open = opened\.has\(group\.name\)[\s\S]*?: !!query/)
+  assert.doesNotMatch(read('src', 'styles.css'), /\.model-picker-count\s*\{/)
+  const baseStyles = read('src', 'styles.css')
+  const texSplit = read('src', 'tex-split.js')
+  assert.match(baseStyles, /body\s*\{\s*cursor:\s*default/)
+  /* A selected rectangle is filled cell by cell. The browser's own text
+     highlight over the same cells hugs the letters instead, and two selections
+     drawn at once read as a ragged mess — so the grid's is the one that
+     paints. Hidden rather than switched off: `user-select: none` would take
+     the menu's Edit ▸ Copy with it. */
+  assert.match(baseStyles, /\.csv-frame ::selection \{ background: transparent; \}/)
+  assert.doesNotMatch(baseStyles, /\.csv-(row|cell)[^\n]*user-select: none/)
+  assert.match(baseStyles, /a\[href\][\s\S]{0,220}\[role="button"\][\s\S]{0,220}cursor:\s*default\s*!important/)
+  assert.match(baseStyles, /\.reading, \.reading \*[\s\S]{0,190}cursor:\s*default\s*!important/)
+  assert.match(baseStyles, /\.grip\s*\{[\s\S]{0,190}cursor:\s*col-resize/)
+  assert.match(baseStyles, /\.tex-divider\s*\{[\s\S]{0,220}cursor:\s*col-resize/)
+  assert.match(baseStyles, /\.tex-pdf\s*\{[\s\S]{0,100}cursor:\s*text/)
+  assert.match(baseStyles, /\.file-tags-editor \.tag-input\s*\{[\s\S]{0,80}flex:\s*none/)
+  assert.match(baseStyles, /\.file-tags-editor\s*\{[\s\S]{0,100}padding:\s*2px 8px 4px/)
+  assert.match(baseStyles, /\.pane-tabs\s*\{[\s\S]{0,300}overflow-x:\s*auto/)
+  assert.match(baseStyles, /\.pane-tab\s*\{[\s\S]{0,100}flex:\s*none/)
+  assert.match(baseStyles, /\.ai\s*\{[\s\S]{0,360}overflow:\s*visible;/)
+  assert.match(baseStyles, /\.app\[data-ai="closed"\] \.ai\s*\{\s*overflow:\s*hidden;/)
+  assert.match(baseStyles, /\.ai-menu\s*\{[\s\S]{0,300}max-height:\s*260px/)
+  /* Run output is a window over the stage, sized by the grip in its corner.
+     Its position is the stylesheet's and its size is the script's, so each
+     half is pinned where it lives: absolute against the stage here, and both
+     dimensions written and stored there. */
+  assert.match(baseStyles, /\.file-run-pop\s*\{[\s\S]{0,200}position:\s*absolute/)
+  assert.match(baseStyles, /\.file-run-grip\s*\{[\s\S]{0,220}cursor:\s*nwse-resize/)
+  assert.match(runcode, /host\.style\.width = `\$\{Math\.round\(w\)\}px`/)
+  /* A picture's popup is the picture's shape, so nothing of the panel shows
+     around the render — the one thing this whole panel is for. */
+  assert.match(runcode, /h = w \/ aspect/)
+  assert.match(runcode, /api\.config\.set\(\{ runWidth: size\.w, runHeight: size\.h \}\)/)
+  assert.match(runcode, /grip\.setPointerCapture\(event\.pointerId\)/)
+  assert.match(renderer, /tab\.scrollIntoView\(\{ inline: 'nearest', block: 'nearest' \}\)/)
+  assert.match(baseStyles, /--tex-source/)
+  assert.match(texSplit, /setPointerCapture/)
+  assert.match(texSplit, /ArrowLeft[\s\S]*ArrowRight/)
+  assert.match(texSplit, /dblclick[\s\S]*DEFAULT_RATIO/)
+  assert.match(texSplit, /texSourceRatio/)
+  assert.match(baseStyles, /\.app\[data-resizing\] \*\s*\{\s*cursor:\s*col-resize\s*!important/)
+  assert.match(baseStyles, /button:disabled[\s\S]{0,140}cursor:\s*default\s*!important/)
+  assert.match(baseStyles, /\.ToolIcon:not\(:disabled\)/)
+  assert.match(baseStyles, /\.reading \.code-nums\s*\{[\s\S]{0,100}padding:\s*18px 18px 20px 20px/)
+  assert.match(baseStyles, /pre\.code-text\s*\{[\s\S]{0,100}padding:\s*18px 20px 20px 4px/)
+  assert.match(html, /<aside class="sidebar"[^>]*>[\s\S]{0,180}id="app-version"/)
+  assert.match(html, /<div class="titlebar"><\/div>/)
+  /* Return takes the filled action wherever focus is — EXCEPT on a question
+     that destroys something, where it presses whatever is focused and `ask`
+     has focused Cancel.
+
+     This reverses what was pinned here before, deliberately. The old contract
+     said Return always answers yes, on the reasoning that the colour and not
+     the focus ring is the dialog's statement of intent. That holds right up
+     until the action is "Move to Trash": these dialogs arrive unbidden and
+     mid-keystroke, a reflex Return is the whole of the mistake, and every
+     platform's destructive alert lands on Cancel for exactly that reason. The
+     filled styling stays on the destructive button either way. */
+  assert.match(ask, /if \(danger\) el\.askCancel\.focus\(\)/)
+  assert.match(ask, /else el\.askGo\.focus\(\)/)
+  assert.match(ask, /const armed = \(\) => !asking\?\.danger/)
+  assert.match(renderer, /answer\(armed\(\) \? true : document\.activeElement === el\.askGo\)/)
+  // And the questions that destroy something say so, or none of the above runs.
+  assert.match(renderer, /go: 'Move to Trash',\s*\n\s*danger: true/)
+  assert.match(renderer, /go: 'Replace all',\s*\n\s*danger: true/)
+  /* The dormant horizontal scroll is still reset when wrapping is turned off —
+     but only on that transition. Writing `scrollLeft` forces layout on the
+     element written to, so doing it for every code block on every applyConfig
+     (which includes boot, with wrapping off by default) walked and laid out
+     the whole page: on a note with 13,000 fenced blocks the window wedged and
+     never came back. The `wasWrappingCode &&` is the whole fix, so it is what
+     is pinned here. */
+  assert.match(renderer, /if \(wasWrappingCode && !wrapsCode\)[\s\S]{0,150}pre\.scrollLeft = 0/)
+  assert.match(renderer, /const wasWrappingCode = el\.app\.dataset\.codeWrap === 'on'/)
+  /* And the same class of mistake in the reading view's place-keeping, which
+     is what found it: `viewportLine` must bisect the raw NodeList, never a
+     copy filtered by `offsetParent` — that filter cannot be answered without
+     laying out every block it asks about. */
+  assert.doesNotMatch(renderer, /querySelectorAll\('\[data-line\]'\)\)\s*\n?\s*\.filter/)
+  /* And the collection itself is made once per render, not once per scroll
+     frame. `querySelectorAll('[data-line]')` is an unindexed attribute match
+     over the whole rendered note that materialises every block in it; both
+     readers of that list go through the cache, and the one place that rebuilds
+     the reading view is the one place that drops it. */
+  assert.match(renderer, /function readingLineNodes \(\)/)
+  assert.match(renderer, /el\.reading\.replaceChildren\(col\)\s*\n\s*invalidateReadingLines\(\)/)
+  for (const site of ['function viewportLine', 'function readingNodeAt']) {
+    const body = renderer.slice(renderer.indexOf(site))
+    assert.match(body.slice(0, 900), /readingLineNodes\(\)/)
+  }
+  assert.match(renderer, /function laidOutNear \(nodes, mid, lo, hi\)/)
+  assert.match(whiteboard, /whiteboardElementsText\(latest\.elements\)/)
+  assert.match(whiteboard, /revision === writingRevision/)
+  assert.match(whiteboard, /saveScene\(\{ flush: true \}\)/)
+  assert.match(whiteboard, /aiEnabled: false/)
+  assert.match(preload, /write: \(p, content, metadata\)/)
+  assert.match(main, /lastSearch\.whiteboardKeys/)
+  /* Carried in `lastSearch` so a narrowing query can reuse it. Pinned as a
+     field of that object rather than as the last line of it — it was written
+     as `whiteboardKeys\n}` when it happened to be last, and the PDF pass then
+     took the same treatment and moved it. */
+  assert.match(main, /lastSearch = \{[\s\S]{0,400}\n\s*whiteboardKeys,/)
+  /* And PDFs narrow too. That pass was the one thing a shrinking query never
+     got cheaper for: it re-statted and re-parsed the sidecar of every PDF in
+     the vault on every keystroke. `pdfAt` is what makes reuse safe — a PDF
+     that changed while the pass ran invalidates the list. */
+  assert.match(main, /lastSearch = \{[\s\S]{0,400}\n\s*pdfKeys: pdfAnswer\.keys,/)
+  assert.match(main, /lastSearch = \{[\s\S]{0,600}\n\s*pdfAt: pdfsAt/)
+  assert.match(build, /name: 'lean-excalidraw'/)
+  assert.match(build, /const pdfOcrCache = path\.join\(os\.homedir\(\), 'Library', 'Caches', 'Tulip', 'native'\)/)
+  assert.doesNotMatch(build, /path\.join\('node_modules', '\.cache', 'tulip-native'\)/)
+  const watchStart = build.indexOf('if (watch) {')
+  const watchBuild = build.slice(watchStart, build.indexOf('} else {', watchStart))
+  assert.ok(
+    watchBuild.indexOf('await ctx.watch()') < watchBuild.indexOf('await buildPdfOcr()'),
+    'source watchers must start before PDF OCR compilation'
+  )
+  /* A focused block fix is a self-contained request, and the whole point of it
+     is that it does not drag the open conversation along behind it — a chat of
+     its own, and no excerpt of the open document. What that mode *does* is
+     tested behaviourally in test-ai.mjs, through `promptFor`; what is pinned
+     here is only the thing a behavioural test cannot see, which is that all
+     four files name the mode through the shared constant rather than spelling
+     the string out. A literal that drifted would not fail a behavioural test —
+     it would quietly stop matching, and the excerpt would come back with no
+     symptom beyond a bigger bill. */
+  for (const file of [renderer, copilot]) {
+    assert.match(file, /CONTEXT_MODES/, 'the code-task mode is named, not spelled out')
+    assert.doesNotMatch(file, /'code-task'/, 'no bare code-task literals outside models.js')
+  }
+  /* Both ways in. A fix asked while the panel was idle goes out from `submit`;
+     one asked mid-turn is queued and goes out from `drain` minutes later, and
+     it is the same self-contained request either way — the queued path used to
+     be the one that silently kept paying for the history. Both must route
+     through the one place that decides which conversation a turn belongs to. */
+  assert.equal(copilot.match(/convoFor\(/g)?.length, 2,
+               'submit and drain both choose their conversation through convoFor')
+  assert.match(copilot, /function convoFor \(/, 'and convoFor is where that rule lives')
+  /* Source is dense and tool reads are cheap; a note is neither. The contract
+     is that the two stay apart, not what either number happens to be — pinning
+     the values would make a deliberate re-tune a test failure. */
+  const budgets = renderer.match(/code: \{ whole: (\d+), window: (\d+) \}/)
+  const notes = renderer.match(/note: \{ whole: (\d+), window: (\d+) \}/)
+  assert.ok(budgets && notes, 'both excerpt budgets must be readable')
+  assert.ok(Number(budgets[1]) < Number(notes[1]),
+            'a source file must start being windowed long before a note does')
+  /* Compaction acts well below the red ring, because a thread that is resumed
+     re-sends itself on every turn: waiting costs the whole context again. */
+  const roomy = Number(copilot.match(/const ROOMY = ([\d.]+)/)?.[1])
+  const full = Number(copilot.match(/const FULL = ([\d.]+)/)?.[1])
+  assert.ok(roomy > 0 && full > 0, 'both context thresholds must be readable')
+  assert.ok(roomy < full, 'compaction must act below the point the ring calls full')
+
+  assert.deepEqual(
+    normalizeSavedSearches([{ query: 'type:pdf climate' }, { query: 'TYPE:PDF CLIMATE' }, 'tag:book'])
+      .map(({ name, query }) => ({ name, query })),
+    [
+      { name: 'type:pdf climate', query: 'type:pdf climate' },
+      { name: 'tag:book', query: 'tag:book' }
+    ]
+  )
+}
+
+console.log(`ui contracts: ${source ? 'source' : target}`)

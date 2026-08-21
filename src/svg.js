@@ -18,8 +18,8 @@
    into the page. See sanitise().
    ================================================================== */
 
-import { WidgetType } from '@codemirror/view'
-import { el, pictureBlock, pictureBlocks } from './blocks.js'
+import { pictureBlock } from './blocks.js'
+import { el } from './dom.js'
 import { DRAWN } from './languages.js'
 
 export function isSvg (lang) {
@@ -187,8 +187,8 @@ function readSvg (code) {
   /* A drawing that gives a size but no viewBox cannot be scaled to the column,
      and one that gives neither has no size at all — both are worth fixing here
      rather than leaving to look broken. */
-  const width = parseFloat(root.getAttribute('width'))
-  const height = parseFloat(root.getAttribute('height'))
+  const width = parseFloat(root.getAttribute('width') || '')
+  const height = parseFloat(root.getAttribute('height') || '')
   if (!root.getAttribute('viewBox') && width > 0 && height > 0) {
     root.setAttribute('viewBox', `0 0 ${width} ${height}`)
   }
@@ -212,7 +212,8 @@ function readSvg (code) {
  * Fills a host element with the drawing, or with why there isn't one.
  * Shared by both views so a broken block reads the same in each.
  */
-function drawInto (host, code) {
+/* Exported for the editing half next door, not for general use. */
+export function drawInto (host, code) {
   const { svg, error } = readSvg(code)
   host.replaceChildren()
 
@@ -241,31 +242,3 @@ export function attachSvg (wrap, code) {
 }
 
 /* ------------------------------------------------------- editing view */
-
-/**
- * The same drawing, under the fence you are typing into.
- *
- * A StateField rather than a ViewPlugin: block widgets change line geometry,
- * and a plugin cannot be consulted before the viewport it would change has
- * been measured. Same rule the diagrams and run controls follow.
- */
-class DrawingWidget extends WidgetType {
-  constructor (code) { super(); this.code = code }
-
-  // Equal while the source is unchanged, so typing elsewhere in the note maps
-  // the widget across rather than re-reading every drawing.
-  eq (other) { return other.code === this.code }
-
-  toDOM () {
-    const host = document.createElement('div')
-    host.className = 'cm-drawing'
-    // Unlike mermaid there is no wait, so nothing lands after the editor has
-    // measured — the widget is its final height before it is ever handed back.
-    drawInto(host, this.code)
-    return host
-  }
-
-  ignoreEvent () { return true }
-}
-
-export const svgBlocks = pictureBlocks(isSvg, (code) => new DrawingWidget(code))

@@ -14,15 +14,21 @@ import { history, historyKeymap, defaultKeymap } from '@codemirror/commands'
 import { search, openSearchPanel, setSearchQuery, SearchQuery } from '@codemirror/search'
 import {
   tablePreview, tableCursorGuard, tableSearchHighlight,
-  tableAssetResolver, languageTableMode, insertTable, fitAllColumns
+  tableAssetResolver, languageTableMode,
+  insertTable, fitAllColumns
 } from '../src/table.js'
-import { propertiesPreview, tagsPanel } from '../src/properties.js'
-import { slashCommands } from '../src/slash.js'
+import { propertiesPreview } from '../src/properties.js'
+import { slashEmbed, slashCommands, embedChoices as embedChoicesFacet } from '../src/slash.js'
 import { CompletionContext } from '@codemirror/autocomplete'
+import { markdown } from '@codemirror/lang-markdown'
 
 const results = []
 
 async function test (name, run) {
+  /* What the harness watches to tell a stalled test from a starved renderer,
+     and what it names when it gives up. Without it a suite that stops has
+     nothing to say but "never finished". */
+  window.__tableProgress = { name, done: results.length }
   const parent = document.createElement('div')
   document.body.append(parent)
   try {
@@ -44,7 +50,10 @@ function equal (actual, expected, message) {
   if (a !== b) throw new Error(`${message || 'not equal'}\n  actual:   ${a}\n  expected: ${b}`)
 }
 
-function mount (parent, doc, { language = false } = {}) {
+function mount (parent, doc, {
+  language = false,
+  resolve = () => null
+} = {}) {
   return new EditorView({
     doc,
     parent,
@@ -52,7 +61,7 @@ function mount (parent, doc, { language = false } = {}) {
       history(),
       keymap.of([...defaultKeymap, ...historyKeymap]),
       search(),
-      tableAssetResolver.of(() => null),
+      tableAssetResolver.of(resolve),
       languageTableMode.of(() => language),
       tablePreview,
       tableCursorGuard,
@@ -66,6 +75,23 @@ function mount (parent, doc, { language = false } = {}) {
 
 const frame = () => new Promise((resolve) =>
   requestAnimationFrame(() => requestAnimationFrame(resolve)))
+
+/**
+ * Wait for something to become true, rather than for a fixed number of frames.
+ *
+ * Two frames is how long CodeMirror's measure phase takes when the machine is
+ * idle, and a test that assumes it will always be two fails on a loaded one for
+ * no better reason than that the redraw had not happened yet — which is a
+ * flake, not a finding. Frames are still what is waited on, so this stays in
+ * step with the redraw; only the number of them is allowed to vary.
+ *
+ * @param {() => any} ready  checked after every frame
+ * @param {number} frames    how many to allow before giving up
+ */
+async function until (ready, frames = 60) {
+  for (let i = 0; i < frames && !ready(); i++) await frame()
+  return ready()
+}
 
 const cellAt = (view, r, c) =>
   view.dom.querySelector(`.tk-table-wrap [data-row="${r}"][data-col="${c}"]`)
@@ -104,6 +130,17 @@ const menuFor = (cell, view) => new Promise((resolve) => {
 
 const selectedCount = (view) =>
   view.dom.querySelectorAll('.tk-table-cell-selected').length
+
+function caretOffsetIn (cell) {
+  const selection = window.getSelection()
+  assert(selection?.rangeCount === 1 && selection.isCollapsed, 'the cell has a caret')
+  const active = selection.getRangeAt(0)
+  assert(cell.contains(active.startContainer), 'the caret belongs to the cell')
+  const before = document.createRange()
+  before.selectNodeContents(cell)
+  before.setEnd(active.startContainer, active.startOffset)
+  return before.toString().length
+}
 
 const TABLE = [
   '| Word | Meaning |',
@@ -144,6 +181,32 @@ async function run () {
 
     key(cell, 'a', { metaKey: true })
     equal(selectedCount(view), 6, 'the whole grid is selected')
+  })
+
+  // A normal click uses its character position; entering a rendered cell must
+  // not force the caret to the end of its source.
+  await test('clicking text places the caret between characters', async (parent) => {
+    const view = mount(parent, '| Word | Meaning |\n| --- | --- |\n| alphabet | letters |')
+    const cell = cellAt(view, 1, 0)
+    await frame()
+    const text = cell.firstChild
+    assert(text?.nodeType === Node.TEXT_NODE, 'the test cell is plain text')
+    const point = document.createRange()
+    point.setStart(text, 3)
+    point.collapse(true)
+    const box = point.getBoundingClientRect()
+    const cellBox = cell.getBoundingClientRect()
+    const x = box.x
+    const y = cellBox.top + cellBox.height / 2
+
+    cell.dispatchEvent(new MouseEvent('mousedown', {
+      bubbles: true, cancelable: true, button: 0, buttons: 1, clientX: x, clientY: y
+    }))
+    document.dispatchEvent(new MouseEvent('mouseup', {
+      bubbles: true, cancelable: true, button: 0, buttons: 0, clientX: x, clientY: y
+    }))
+
+    equal(caretOffsetIn(cell), 3, 'the caret landed after alp, not at the end')
   })
 
   // A paste taller than the table grows it instead of dropping the overflow.
@@ -321,6 +384,51 @@ async function run () {
     )
   })
 
+  // The header itself is the direct sorting control: first ascending, then
+  // descending, with every other cell travelling with its row.
+  await test('double-clicking a heading toggles whole-row sorting', async (parent) => {
+    const view = mount(parent, '| W | N |\n| --- | --- |\n| pear | 9 |\n| apple | 10 |\n| fig | 2 |')
+    cellAt(view, 0, 0).dispatchEvent(new MouseEvent('dblclick', {
+      bubbles: true, cancelable: true
+    }))
+    await frame()
+    equal(
+      [3, 4, 5].map((n) => view.state.doc.line(n).text),
+      ['| apple | 10 |', '| fig | 2 |', '| pear | 9 |'],
+      'the first double-click sorts ascending and keeps rows together'
+    )
+    equal(cellAt(view, 0, 0).getAttribute('aria-sort'), 'ascending', 'the heading records ascending')
+
+    cellAt(view, 0, 0).dispatchEvent(new MouseEvent('dblclick', {
+      bubbles: true, cancelable: true
+    }))
+    await frame()
+    equal(
+      [3, 4, 5].map((n) => view.state.doc.line(n).text),
+      ['| pear | 9 |', '| fig | 2 |', '| apple | 10 |'],
+      'the second double-click reverses the same whole rows'
+    )
+    equal(cellAt(view, 0, 0).getAttribute('aria-sort'), 'descending', 'the heading records descending')
+  })
+
+  // Images use the app-level image menu, not the surrounding cell menu. The
+  // table relays the resolved path explicitly across the CodeMirror widget.
+  await test('right-clicking a cell image requests the image menu', async (parent) => {
+    const view = mount(parent, '| Picture |\n| --- |\n| ![Cat](cat.png) |', {
+      resolve: (path) => path
+    })
+    const image = view.dom.querySelector('.tk-table-image[data-vault-image="cat.png"]')
+    assert(image, 'the cell contains a resolved vault image')
+    const request = new Promise((resolve) => {
+      view.dom.addEventListener('tulip:image-contextmenu', (event) => resolve(event.detail), { once: true })
+    })
+    const claimed = !image.dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true, cancelable: true, clientX: 37, clientY: 52
+    }))
+    equal(await request, { path: 'cat.png', x: 37, y: 52 }, 'the image path and menu position were relayed')
+    assert(claimed, 'the table suppressed the native context menu')
+  })
+
   // Shift+Enter writes the only line break a Markdown cell has.
   await test('shift-enter inserts a break', async (parent) => {
     const view = mount(parent, TABLE)
@@ -333,7 +441,11 @@ async function run () {
       `the break reached the note: ${view.state.doc.line(4).text}`
     )
     cell.blur()
-    await frame()
+    /* Blurring hands the cell back to the renderer, which draws the break as a
+       <br>. Waited for rather than counted in frames: on a loaded machine that
+       redraw is late, not absent, and the difference is what a flake is made
+       of. */
+    await until(() => cellAt(view, 2, 1)?.querySelector('br'))
     assert(
       cellAt(view, 2, 1).querySelector('br'),
       `and renders as a break, not as text: ${cellAt(view, 2, 1).innerHTML}`
@@ -403,18 +515,19 @@ async function run () {
     equal(document.activeElement?.dataset?.row, '0', 'the caret is in its first cell')
   })
 
-  // A language table's columns are its schema: a wide paste is clipped, and the
-  // clipping is said out loud rather than silently dropped.
-  await test('a wide paste into a language table is clipped and reported', async (parent) => {
+  /* A language table's columns used to be a fixed schema, and a paste wider
+     than it was clipped to fit. It is a Markdown table like any other now, so
+     a wide paste grows it. */
+  await test('a wide paste into a language table grows it', async (parent) => {
     const view = mount(parent, TABLE, { language: true })
-    let notice = ''
-    view.dom.addEventListener('tulip:table-notice', (event) => { notice = event.detail.message })
     const cell = cellAt(view, 1, 0)
     cell.focus()
     paste(cell, { text: 'drei\tthree\textra' })
     await frame()
-    equal(view.state.doc.line(3).text, '| drei | three |', 'the columns it has were filled')
-    assert(notice.includes('2 columns'), `the reader was told: ${notice || '(nothing)'}`)
+    equal(view.state.doc.line(3).text, '| drei | three | extra |',
+      'the paste brought a column with it')
+    equal(view.state.doc.line(1).text, '| Word | Meaning |  |',
+      'and the header grew to match')
   })
 
   // The grid a screen reader sees.
@@ -427,9 +540,9 @@ async function run () {
     equal(cellAt(view, 2, 1).getAttribute('aria-rowindex'), '3', 'cells know where they are')
   })
 
-  // Fitting every column: the marker line goes, and the tables it did not
-  // describe are left alone.
-  await test('fitting all columns takes the widths off', async (parent) => {
+  // Fitting writes the content widths instead of making one automatic column
+  // absorb all the unused width in the pane.
+  await test('fitting all columns writes compact content widths', async (parent) => {
     const view = mount(parent, [
       '<!-- tk-widths: 120 300 -->',
       '| A | B |',
@@ -443,16 +556,170 @@ async function run () {
 
     equal(fitAllColumns(view), true, 'there was something to fit')
     const text = view.state.doc.toString()
-    assert(!text.includes('tk-widths'), `no widths are left:\n${text}`)
-    assert(text.startsWith('| A | B |'), `the marker line went with them:\n${text}`)
-    assert(text.includes('| C | D |'), 'the other table is untouched')
+    const markers = text.match(/<!-- tk-widths: ([\d ]+) -->/g) || []
+    equal(markers.length, 2, `each table has fitted widths:\n${text}`)
+    assert(markers.every((marker) => !/(?:^| )0(?: |$)/.test(marker)),
+      `every fitted column has an exact width:\n${text}`)
     equal(fitAllColumns(view), false, 'and there is nothing left to do')
   })
 
-  /* A dragged table still fills the frame drawn round it. The widths here add
-     up to far less than the window, which is the shape the bug had: a band of
-     empty paper down the right of a language table. */
-  await test('a dragged table has no empty band beside it', async (parent) => {
+  /* A fitted width has to be the width the column actually needs, and every
+     type size in the grid is relative to the editor's own — the grid is `.92em`
+     of the scroller, a header `.82em` of that. Measured against the page around
+     the editor instead, the numbers came back a few per cent short, and a
+     column whose header was its widest thing wrapped that header onto two
+     lines. */
+  await test('fitted widths are measured in the editor’s own type', async (parent) => {
+    parent.style.width = '900px'
+    const view = mount(parent, [
+      // Headers wider than anything under them: what wrapped, in the shape it
+      // wrapped in.
+      '| Word | Notes | Example |',
+      '| --- | --- | --- |',
+      '| ναι | yes | ok |'
+    ].join('\n'))
+    /* The editor carries its own type size on the scroller (17px in the app)
+       while the page around it is left at the 16px default. Exaggerated here so
+       a fit taken in the wrong one is unmistakable rather than marginal. */
+    view.scrollDOM.style.fontSize = '21px'
+    await frame()
+
+    equal(fitAllColumns(view), true, 'there was something to fit')
+    await frame()
+    const written = (view.state.doc.line(1).text.match(/\d+/g) || []).map(Number)
+    equal(written.length, 3, `a width per column:\n${view.state.doc.line(1).text}`)
+
+    /* What each column needs, measured the way the eye does: the same grid, in
+       the same place, with nothing allowed to wrap. */
+    const probe = view.dom.querySelector('.tk-table').cloneNode(true)
+    probe.querySelector(':scope > colgroup')?.remove()
+    probe.classList.remove('has-column-widths')
+    Object.assign(probe.style, {
+      position: 'fixed', left: '-100000px', top: '0', width: 'max-content',
+      minWidth: '0', tableLayout: 'auto', visibility: 'hidden'
+    })
+    view.scrollDOM.append(probe)
+    const needed = [...probe.querySelectorAll('thead th')]
+      .map((head) => head.getBoundingClientRect().width)
+    probe.remove()
+
+    needed.forEach((need, c) => assert(written[c] >= need - 1,
+      `column ${c} was written ${written[c]}px for content needing ${Math.ceil(need)}px`))
+  })
+
+  /* Only the tables near the viewport are built, so a note's tables and the
+     grids on screen are not the same list — and read as though they were, the
+     first table was given the second one's measurements or none at all. */
+  await test('fitting reaches a table below the viewport', async (parent) => {
+    const filler = Array.from({ length: 3000 }, (_, n) => `line ${n}`).join('\n')
+    const view = mount(parent, [
+      '<!-- tk-widths: 120 300 -->',
+      '| A | B |',
+      '| --- | --- |',
+      '| 1 | 2 |',
+      '',
+      filler,
+      '',
+      '<!-- tk-widths: 90 90 -->',
+      '| Word | Notes |',
+      '| --- | --- |',
+      '| ναι | yes |'
+    ].join('\n'))
+    await frame()
+    equal(view.dom.querySelectorAll('.tk-table-wrap').length, 1,
+      'only the first grid was built')
+
+    equal(fitAllColumns(view), true, 'there was something to fit')
+    const markers = view.state.doc.toString().match(/<!-- tk-widths: ([\d ]+) -->/g) || []
+    equal(markers.length, 2, 'both tables still name their widths')
+    assert(markers[0] !== '<!-- tk-widths: 120 300 -->', 'the drawn table was fitted')
+    assert(markers[1] !== '<!-- tk-widths: 90 90 -->', 'so was the one off screen')
+    equal(fitAllColumns(view), false, 'and there is nothing left to do')
+  })
+
+  /* ------------------------------------------------ moving a column
+
+     The header seam and the drag bar are gone; a column is moved from the menu
+     the right button puts up, or with alt-arrow (tested above). These are the
+     assertions the drag used to make, asked of the menu instead — what a move
+     has to carry with it is a property of the move, not of the gesture. */
+
+  const WIDE = [
+    '<!-- tk-widths: 120 140 90 -->',
+    '| A | B | C |',
+    '| --- | :---: | ---: |',
+    '| 1 | 2 | 3 |',
+    '| 4 | 5 | 6 |'
+  ].join('\n')
+
+  /** Move column `from` one place at a time until it sits at `to`, each step
+   *  through the menu entry a reader would pick. */
+  async function moveColumnTo (view, from, to) {
+    const step = to > from ? 1 : -1
+    for (let col = from; col !== to; col += step) {
+      const menu = await menuFor(cellAt(view, 0, col), view)
+      const run = step > 0 ? menu.moveColumnRight : menu.moveColumnLeft
+      assert(run, `column ${col} can be moved`)
+      run()
+      await frame()
+    }
+  }
+
+  await test('moving a column right takes its rows with it', async (parent) => {
+    const view = mount(parent, WIDE)
+    await frame()
+    await moveColumnTo(view, 0, 2)
+    const doc = view.state.doc.toString().split('\n')
+    equal(doc[1], '| B | C | A |', 'the header ended where it was sent')
+    equal(doc[3], '| 2 | 3 | 1 |', 'and every row beneath it followed')
+    equal(doc[4], '| 5 | 6 | 4 |', 'all of them')
+  })
+
+  /* A move, not a swap: the two columns it passed each came back one place
+     rather than one of them jumping to the far end. */
+  await test('moving a column left shuffles the ones it passed', async (parent) => {
+    const view = mount(parent, WIDE)
+    await frame()
+    await moveColumnTo(view, 2, 0)
+    equal(view.state.doc.line(2).text, '| C | A | B |', 'C went to the front')
+  })
+
+  /* Alignment and width are written elsewhere — the delimiter row and the
+     marker line above the table — so a move that forgot them left a column's
+     shape behind on its neighbour. */
+  await test('a moved column keeps its alignment and its width', async (parent) => {
+    const view = mount(parent, WIDE)
+    await frame()
+    await moveColumnTo(view, 1, 0)
+    const doc = view.state.doc.toString().split('\n')
+    equal(doc[0], '<!-- tk-widths: 140 120 90 -->', 'the widths moved with the columns')
+    equal(doc[2], '| :---: | --- | ---: |', 'and so did the alignments')
+  })
+
+  /* The ends of the row have nowhere further to go, and the menu says so rather
+     than offering a move that would do nothing. */
+  await test('the outermost columns cannot be moved past the edge', async (parent) => {
+    const view = mount(parent, WIDE)
+    await frame()
+    const first = await menuFor(cellAt(view, 0, 0), view)
+    assert(!first.canMoveColumnLeft, 'the first column has no left')
+    assert(first.canMoveColumnRight, 'but it can go right')
+    const last = await menuFor(cellAt(view, 0, 2), view)
+    assert(last.canMoveColumnLeft, 'the last can go left')
+    assert(!last.canMoveColumnRight, 'and no further right')
+  })
+
+  await test('a language table column can be moved too', async (parent) => {
+    const view = mount(parent, TABLE, { language: true })
+    await frame()
+    await moveColumnTo(view, 0, 1)
+    equal(view.state.doc.line(1).text, '| Meaning | Word |', 'the fixed schema is gone')
+  })
+
+  /* A table with widths on it still fills the frame drawn round it. The widths
+     here add up to far less than the window, which is the shape the bug had: a
+     band of empty paper down the right of a language table. */
+  await test('a sized table has no empty band beside it', async (parent) => {
     parent.style.width = '900px'
     const view = mount(parent, [
       '<!-- tk-widths: 120 140 0 90 -->',
@@ -470,21 +737,24 @@ async function run () {
 
     const header = [...wrap.querySelectorAll('thead th')]
       .map((th) => Math.round(th.getBoundingClientRect().width))
-    equal(header[0], 120, 'the first dragged column kept its width')
+    equal(header[0], 120, 'the first sized column kept its width')
     equal(header[1], 140, 'and so did the second')
     equal(header[3], 90, 'and the last')
-    // Every pixel the dragged columns did not claim went to the one that had
-    // no width of its own, rather than being left as paper beside the grid.
+    // Every pixel the sized columns did not claim went to the one that had no
+    // width of its own, rather than being left as paper beside the grid.
     const spare = Math.round(wrap.clientWidth) - (120 + 140 + 90)
-    assert(spare > 80, `the frame is wider than the dragged columns (${spare}px spare)`)
+    assert(spare > 80, `the frame is wider than the sized columns (${spare}px spare)`)
     assert(
       Math.abs(header[2] - spare) < 2,
-      `the slack went to the column nobody dragged (${header[2]}px of ${spare}px)`
+      `the slack went to the column with no width of its own (${header[2]}px of ${spare}px)`
     )
   })
 
-  // And when there is no such column, the frame comes in to meet the grid.
-  await test('a fully dragged table draws its frame around itself', async (parent) => {
+  /* And when there is no such column, the grid still fills its frame — the
+     widths are shared out in proportion instead of leaving a band of paper.
+     A table always spans its row; the numbers say how the row is divided, not
+     how much of it is used. */
+  await test('a fully sized table still fills its frame', async (parent) => {
     parent.style.width = '900px'
     const view = mount(parent, [
       '<!-- tk-widths: 120 140 -->',
@@ -496,10 +766,14 @@ async function run () {
 
     const wrap = view.dom.querySelector('.tk-table-wrap')
     const grid = wrap.querySelector('table.tk-table')
-    assert(!grid.classList.contains('has-flexible-column'), 'every column is dragged')
-    equal(Math.round(grid.getBoundingClientRect().width), 260, 'the grid is exactly its widths')
+    assert(!grid.classList.contains('has-flexible-column'), 'every column has a width')
     const slack = wrap.clientWidth - grid.getBoundingClientRect().width
-    assert(Math.abs(slack) < 2, `the frame came in to meet it (${slack}px of band)`)
+    assert(Math.abs(slack) < 2, `the grid reaches the frame (${slack}px of band)`)
+
+    const header = [...wrap.querySelectorAll('thead th')]
+      .map((th) => th.getBoundingClientRect().width)
+    assert(Math.abs(header[1] / header[0] - 140 / 120) < .05,
+      `the columns kept their proportions (${Math.round(header[0])}:${Math.round(header[1])})`)
   })
 
   /* A rectangle drawn towards the bottom of the window takes the page with it.
@@ -550,16 +824,51 @@ async function run () {
     equal(scroller.scrollTop, scrolled, 'letting go did not throw the page back')
   })
 
-  // Clearing a rectangle leaves a locked header alone.
-  await test('a locked language header cannot be cleared', async (parent) => {
+  await test('a language table header can be edited', async (parent) => {
     const view = mount(parent, TABLE, { language: true })
-    const cell = cellAt(view, 1, 0)
-    cell.focus()
-    key(cell, 'a', { metaKey: true })
-    key(cell, 'a', { metaKey: true })
-    key(cell, 'Backspace')
+    const header = cellAt(view, 0, 0)
+    equal(header.contentEditable, 'plaintext-only', 'the custom header is editable')
+    header.focus()
+    type(header, 'Letter')
     await frame()
-    equal(view.state.doc.line(1).text, '| Word | Meaning |', 'the header still names the columns')
+    equal(view.state.doc.line(1).text, '| Letter | Meaning |', 'the new header was saved')
+  })
+
+  await test('the menu deletes the active row', async (parent) => {
+    const view = mount(parent, TABLE, { language: true })
+    const cell = cellAt(view, 2, 0)
+    cell.focus()
+    const menu = await menuFor(cell, view)
+    assert(menu.canDeleteRow, 'the row entry is available')
+    menu.deleteRow()
+    await frame()
+    assert(!view.state.doc.toString().includes('zwei'), 'the active row was deleted')
+    equal(view.dom.querySelectorAll('tbody tr').length, 1, 'one body row remains')
+  })
+
+  await test('the menu deletes a custom table column', async (parent) => {
+    const view = mount(parent, TABLE, { language: true })
+    const cell = cellAt(view, 1, 1)
+    cell.focus()
+    const menu = await menuFor(cell, view)
+    assert(menu.canDeleteColumn, 'the custom column entry is available')
+    menu.deleteColumn()
+    await frame()
+    equal(view.dom.querySelector('table').getAttribute('aria-colcount'), '1', 'one column remains')
+    equal(view.state.doc.line(1).text, '| Word |', 'the active column was deleted')
+  })
+
+  /* A language table is a Markdown file with a Markdown table in it, and every
+     table is edited the same way. Vocabulary used to hold a fixed study schema
+     its columns could not be added to, removed from or moved. */
+  await test('a language table has no fixed columns', async (parent) => {
+    const view = mount(parent, TABLE, { language: true })
+    const cell = cellAt(view, 1, 1)
+    cell.focus()
+    const menu = await menuFor(cell, view)
+    assert(menu.canDeleteColumn, 'a column can be deleted')
+    assert(menu.canAddColumn, 'and one can be added')
+    assert(menu.canMoveColumnLeft, 'and this one can be moved left')
   })
 
   /* In a language document the grid is the document, and the frontmatter is
@@ -591,36 +900,6 @@ async function run () {
       'and yet it must still be in the document')
   })
 
-  await test('the tags panel adds a tag and preserves other YAML', async (parent) => {
-    const doc = '---\ntitle: Before\ntags: [one, two]\nscore: 1 # measured\n---\nA note.'
-    const view = mount(parent, doc)
-    const panel = tagsPanel(view)
-    parent.append(panel)
-    equal([...panel.querySelectorAll('.tag-chip-label')].map((chip) => chip.textContent),
-      ['#one', '#two'], 'the existing tags were not shown')
-    const input = panel.querySelector('.tag-input')
-    input.value = 'three'
-    key(input, 'Enter')
-    await frame()
-    const text = view.state.doc.toString()
-    assert(text.includes('tags: [one, two, three]'), `the tag was not added:\n${text}`)
-    assert(text.includes('title: Before'), 'a neighbouring property was changed')
-    assert(text.includes('score: 1 # measured'), 'an inline comment was removed')
-  })
-
-  await test('the tags panel creates frontmatter only after a tag is entered', async (parent) => {
-    const view = mount(parent, 'A note.')
-    const panel = tagsPanel(view)
-    parent.append(panel)
-    equal(view.state.doc.toString(), 'A note.', 'opening the tag editor wrote placeholder YAML')
-    const input = panel.querySelector('.tag-input')
-    input.value = '#tulip'
-    key(input, 'Enter')
-    await frame()
-    assert(view.state.doc.toString().startsWith('---\ntags: [tulip]\n---\n'),
-      `the tag head was not created:\n${view.state.doc.toString()}`)
-  })
-
   await test('a note that is only frontmatter still has a cursor', async (parent) => {
     for (const doc of ['---\nlang: el\n---', '---\nlang: el\n---\n']) {
       const view = mount(parent, doc)
@@ -633,52 +912,163 @@ async function run () {
     }
   })
 
-  /* ------------------------------------------------------- the slash menu */
+  /* ------------------------------------------------------- the slash key
 
-  /** The menu as it would open at the cursor: the options, in order. */
-  function slashOptions (view) {
-    const pos = view.state.selection.main.head
-    const result = slashCommands(new CompletionContext(view.state, pos, false))
-    return result ? result.options : []
-  }
+     `/` at the start of a line makes an embed placeholder instead of opening
+     a menu; the chip it leaves is clickable, and `![[` targets answer typing
+     with an inline ghost. The old suite for the completion-menu version of
+     this (its options, /table, /tags) tested a surface this one removed. */
 
-  function choose (view, label) {
-    const pos = view.state.selection.main.head
-    const result = slashCommands(new CompletionContext(view.state, pos, false))
-    const option = result?.options.find((one) => one.label === label)
-    assert(option, `no ${label} in the menu`)
-    option.apply(view, option, result.from, pos)
-  }
-
-  await test('the menu offers no syntax on the right of a row', async (parent) => {
-    const view = mount(parent, '/')
-    view.dispatch({ selection: { anchor: 1 } })
-    const options = slashOptions(view)
-    assert(options.length, 'the menu did not open')
-    assert(options.every((one) => !one.detail),
-      'a row still carries the syntax the menu exists to spare its reader')
+  /** Type one character the way the browser would. */
+  const typeChar = (view, char) => view.dispatch({
+    changes: { from: view.state.selection.main.head, insert: char },
+    selection: { anchor: view.state.selection.main.head + char.length },
+    userEvent: 'input.type'
   })
 
-  await test('/table writes a grid and lands in it', async (parent) => {
-    const view = mount(parent, '/')
-    view.dispatch({ selection: { anchor: 1 } })
-    choose(view, 'Table')
+  /** What the slash menu offers with the caret at the end of the document —
+   *  the labels in the order they would be listed, or null for no menu. */
+  const slashMenu = (view) => {
+    const result = slashCommands(
+      new CompletionContext(view.state, view.state.selection.main.head, false))
+    return result ? result.options.map((o) => o.label) : null
+  }
+
+  /** The editor the slash behaviour lives in: the placeholder field, the
+   *  ghost, and a small vault to complete against. */
+  function slashMount (parent, doc, choices = [], extra = []) {
+    return new EditorView({
+      doc,
+      parent,
+      extensions: [
+        history(),
+        keymap.of([...defaultKeymap, ...historyKeymap]),
+        search(),
+        embedChoicesFacet.of(() => choices),
+        ...slashEmbed,
+        ...extra
+      ]
+    })
+  }
+
+  const ghostText = (view) =>
+    view.dom.querySelector('.tk-embed-ghost')?.textContent ?? null
+
+  await test('typing / at the start of a line opens the menu', async (parent) => {
+    const view = slashMount(parent, '')
+    typeChar(view, '/')
     await frame()
-    assert(!view.state.doc.toString().startsWith('/'), 'the slash was left in the note')
-    assert(view.state.doc.line(2).text.includes('---'), 'no delimiter row')
-    assert(cellAt(view, 0, 0), 'the grid was not drawn')
+    equal(view.state.doc.toString(), '/', 'the slash stayed in the text for the menu to filter')
+    const labels = slashMenu(view)
+    assert(labels?.includes('Table') && labels.includes('Code block'),
+      `the menu did not offer its commands: ${JSON.stringify(labels)}`)
   })
 
-  await test('/tags opens the tag editor without placeholder YAML', async (parent) => {
-    const view = mount(parent, 'A note.\n\n/')
+  await test('typing after the slash narrows the menu', async (parent) => {
+    const view = slashMount(parent, '')
+    for (const char of '/tab') typeChar(view, char)
+    await frame()
+    equal(slashMenu(view), ['Table'], 'the query left only the command it names')
+  })
+
+  await test('the menu answers to a command’s aliases', async (parent) => {
+    const view = slashMount(parent, '')
+    for (const char of '/img') typeChar(view, char)
+    equal(slashMenu(view), ['Image or file'], 'an alias found its command')
+    const warn = slashMount(parent, '/warn')
+    warn.dispatch({ selection: { anchor: warn.state.doc.length } })
+    equal(slashMenu(warn), ['Callout'], 'a callout kind found the Callout command')
+  })
+
+  await test('choosing a command replaces the slash and its query', async (parent) => {
+    const view = slashMount(parent, '')
+    for (const char of '/tab') typeChar(view, char)
+    const result = slashCommands(
+      new CompletionContext(view.state, view.state.selection.main.head, false))
+    equal(result.from, 0, 'the completion replaces from the slash itself')
+    result.options[0].apply(view, result.options[0], result.from, view.state.doc.length)
+    await frame()
+    assert(!view.state.doc.toString().includes('/'), 'the slash was left behind in the note')
+    assert(view.state.doc.toString().includes('|'), 'the table was not written')
+  })
+
+  await test('a slash mid-sentence opens nothing', async (parent) => {
+    const view = slashMount(parent, 'and/or')
+    view.dispatch({ selection: { anchor: 4 } })
+    equal(slashMenu(view), null, 'a prose slash is not a command')
+  })
+
+  await test('a slash inside a code fence opens nothing', async (parent) => {
+    const view = slashMount(parent, '```\n/usr', [], [markdown()])
+    view.dispatch({ selection: { anchor: 5 } })
+    equal(slashMenu(view), null, 'a code slash is not a command')
+  })
+
+  await test('an empty embed still renders its chip', async (parent) => {
+    const view = slashMount(parent, '![[ ]]')
+    await frame()
+    assert(view.dom.querySelector('.tk-embed-placeholder'), 'no chip rendered for the placeholder')
+  })
+
+  await test('the ghost completes an embed target and Tab takes it', async (parent) => {
+    const view = slashMount(parent, '![[di', [{ label: 'diagram.png', name: 'diagram.png' }])
     view.dispatch({ selection: { anchor: view.state.doc.length } })
-    let opened = false
-    view.dom.addEventListener('tulip:tags', () => { opened = true })
-    choose(view, 'Tags')
     await frame()
-    const text = view.state.doc.toString()
-    equal(text, 'A note.\n\n', `the command wrote metadata before a tag existed:\n${text}`)
-    assert(opened, 'the tag editor was not asked to open')
+    equal(view.state.doc.toString(), '![[di', 'the target so far')
+    equal(ghostText(view), 'agram.png]]', 'the ghost shows the rest of the first match')
+    key(view.contentDOM, 'Tab')
+    await frame()
+    equal(view.state.doc.toString(), '![[diagram.png]]', 'Tab wrote the ghost and closed the embed')
+    equal(ghostText(view), null, 'nothing left to complete')
+  })
+
+  await test('a hand-written ![[ target autocompletes the same way', async (parent) => {
+    const view = slashMount(parent, '![[di', [{ label: 'diagram.png', name: 'diagram.png' }])
+    view.dispatch({ selection: { anchor: view.state.doc.length } })
+    await frame()
+    equal(ghostText(view), 'agram.png]]', 'no slash needed for the inline ghost')
+  })
+
+  await test('backspace takes the whole placeholder in one press', async (parent) => {
+    const view = slashMount(parent, '![[ ]]')
+    view.dispatch({ selection: { anchor: view.state.doc.length } })
+    key(view.contentDOM, 'Backspace')
+    await frame()
+    equal(view.state.doc.toString(), '', 'one backspace removed the whole placeholder')
+  })
+
+  await test('the picker offers the vault’s files and a choice embeds it', async (parent) => {
+    const view = slashMount(parent, '![[ ]]', [
+      { label: 'img/diagram.png', name: 'img/diagram.png' },
+      { label: 'Spanish', name: 'Spanish' }
+    ])
+    await frame()
+    view.dom.querySelector('.tk-embed-placeholder').click()
+    await frame()
+    const menu = document.querySelector('.dd-menu')
+    assert(menu, 'the picker did not open')
+    const labels = [...menu.querySelectorAll('.dd-option-name')].map((n) => n.textContent)
+    equal(labels, ['Add website URL…', 'Add YouTube video…', 'img/diagram.png', 'Spanish'],
+      'the picker lists the URL actions and every embeddable file')
+    ;[...menu.querySelectorAll('.dd-option')]
+      .find((b) => b.textContent.includes('diagram.png')).click()
+    await frame()
+    equal(view.state.doc.toString(), '![[img/diagram.png]]', 'the choice became the embed')
+    assert(!document.querySelector('.dd-menu'), 'the picker closed itself')
+  })
+
+  await test('the URL actions leave a skeleton to finish', async (parent) => {
+    const view = slashMount(parent, '![[ ]]')
+    await frame()
+    view.dom.querySelector('.tk-embed-placeholder').click()
+    await frame()
+    ;[...document.querySelectorAll('.dd-option')]
+      .find((b) => b.textContent.includes('website')).click()
+    await frame()
+    equal(view.state.doc.toString(), '![[https://', 'the website skeleton')
+    equal(view.state.selection.main.head, '![[https://'.length, 'the caret waits inside the target')
+    typeChar(view, 'e')
+    equal(view.state.doc.toString(), '![[https://e', 'typing continues the URL')
   })
 
   await test('a language table that is only frontmatter still has a cursor', async (parent) => {

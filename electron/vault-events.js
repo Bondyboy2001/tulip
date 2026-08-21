@@ -9,8 +9,12 @@ function classifyVaultEvent (filename, {
   ignoredDirs,
   attachmentDirs,
   noteExtensions,
+  texExtension,
   pdfExtension,
   siteExtension,
+  whiteboardExtension,
+  notebookExtension,
+  documentExtensions,
   assetExtensions
 }) {
   if (!filename) {
@@ -35,8 +39,33 @@ function classifyVaultEvent (filename, {
   if (noteExtensions.has(extension)) {
     return { ignore: false, index: true, snapshot: true, notify: true, pdf: null, path: relative }
   }
+  if (extension === texExtension) {
+    return { ignore: false, index: false, snapshot: true, notify: true, pdf: null, path: relative }
+  }
+  if (extension === whiteboardExtension) {
+    return { ignore: false, index: true, snapshot: true, notify: true, pdf: null, path: relative }
+  }
   if (extension === pdfExtension) {
     return { ignore: false, index: false, snapshot: true, notify: true, pdf: relative, path: relative }
+  }
+  /* A notebook is not indexed — the index is built from headings, wikilinks
+     and tags, and nbformat has none of them — but it is a document on screen,
+     so a Jupyter running beside Tulip and writing to the same file has to
+     reach the renderer. Named rather than left to the fallback below, which
+     would answer every autosave from that Jupyter with a full re-index and a
+     sweep of every PDF in the vault. */
+  if (extension === notebookExtension) {
+    return { ignore: false, index: false, snapshot: true, notify: true, pdf: null, path: relative }
+  }
+  /* Source, data and plain-text files: documents in every way the app cares
+     about — they open in the editor, they are autosaved, they are versioned —
+     but not in the index, which is built from headings, wikilinks and tags.
+     Named for the same reason the notebook above is: left to the fallback, one
+     `.py` written by an agent working beside Tulip answered with a full
+     recursive re-index of the vault *and* an extraction sweep of every PDF in
+     it, once per write. */
+  if (documentExtensions?.has(extension)) {
+    return { ignore: false, index: false, snapshot: true, notify: true, pdf: null, path: relative }
   }
   if (extension === siteExtension || assetExtensions.has(extension)) {
     return { ignore: false, index: false, snapshot: true, notify: true, pdf: null, path: relative }

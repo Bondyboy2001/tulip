@@ -15,9 +15,9 @@ import {
   siSass, siJson, siYaml, siToml, siMarkdown, siGnubash, siLua, siR, siDart,
   siVuedotjs, siSvelte, siHaskell, siElixir, siErlang, siClojure, siScala,
   siZig, siNim, siPerl, siJulia, siOcaml, siGraphql, siDocker, siNixos,
-  siSolidity, siPostgresql, siXml, siThreedotjs
+  siSolidity, siPostgresql, siXml, siThreedotjs, siNvidia
 } from 'simple-icons'
-import { svgIcon } from './blocks.js'
+import { svgIcon } from './dom.js'
 
 /** Tulip's language id → the brand mark that belongs to it. */
 const MARKS = {
@@ -34,6 +34,9 @@ const MARKS = {
   java: siOpenjdk,
   c: siC,
   cpp: siCplusplus,
+  // CUDA has no mark of its own in the set; the vendor's is what the toolkit
+  // is actually recognised by.
+  cuda: siNvidia,
   php: siPhp,
   html: siHtml5,
   css: siCss,

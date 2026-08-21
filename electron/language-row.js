@@ -51,7 +51,7 @@ const delimiter = (line) => {
 /**
  * Where the first table is, and what its columns are called.
  *
- * @returns {{header: string[], at: number, first: number, end: number}|null}
+ * @returns {{header: string[], at: number, first: number, end: number, lines: string[]}|null}
  *   `at` is the header line, `first` the first body line, `end` one past the
  *   last — the half-open range the body occupies.
  */
