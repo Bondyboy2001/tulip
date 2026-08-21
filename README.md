@@ -8,6 +8,13 @@
   A calm, local-first workspace for notes, papers, and study.
 </p>
 
+<p align="center">
+  <a href="https://github.com/Bondyboy2001/tulip/actions/workflows/ci.yml"><img src="https://github.com/Bondyboy2001/tulip/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows-informational" alt="platform: macOS | Windows">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="license: MIT"></a>
+  <img src="https://img.shields.io/badge/node-%3E%3D22-brightgreen" alt="node: >=22">
+</p>
+
 Tulip is a Markdown editor built with Electron and CodeMirror. Your vault is an
 ordinary folder: notes stay as portable files on disk, with no database and no
 lock-in.
