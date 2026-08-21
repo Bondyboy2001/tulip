@@ -21,6 +21,11 @@ const MAX_BYTES = 4 * 1024 * 1024
    row for a paragraph of typing instead of one per pause. */
 const COALESCE_MS = 120000
 
+/* How long after the last change the store is written out, and the longest it
+   may be put off by changes that keep arriving. See `schedule`. */
+const FLUSH_IDLE_MS = 4000
+const FLUSH_MAX_MS = 30000
+
 /* What gets kept: the copilot's turns, the snapshot a restore leaves behind
    so a restore can itself be undone, the copy an autosave leaves of the note
    it replaced, and the two bulk rewrites — replace-across-the-vault and the
@@ -29,6 +34,11 @@ const COALESCE_MS = 120000
    Applied on load as well, so a store written by an older build sheds anything
    else the first time it is opened. */
 const KEPT = new Set(['copilot', 'restore', 'save', 'replace', 'rename'])
+
+/** @typedef {{ path: string, before: string | null, after: string | null, added: number, removed: number }} Change */
+/** @typedef {{ id: string, at: number, source: string, changes: Change[] }} Operation */
+
+/** @returns {{ operations: Operation[], created: Record<string, number> }} */
 const emptyData = () => ({ operations: [], created: {} })
 
 const digest = (value) =>
@@ -51,7 +61,10 @@ class TrustStore {
     this.vault = ''
     this.inVault = false
     this.data = emptyData()
+    /** @type {ReturnType<typeof setTimeout> | null} */
     this.timer = null
+    // When the oldest change still only in memory arrived — see `schedule`.
+    this.pendingSince = 0
     this.writer = makeCoalescedWriter()
   }
 
@@ -77,6 +90,7 @@ class TrustStore {
     this.data = emptyData()
     if (!this.vault) return
 
+    /** @type {{ operations?: Operation[], created?: Record<string, number> } | null} */
     let parsed = null
     try { parsed = JSON.parse(fsSync.readFileSync(this.file(), 'utf8')) } catch {}
     /* A location that has never been written to inherits what the other one
@@ -96,16 +110,31 @@ class TrustStore {
     }
   }
 
+  /* Written after the typing stops, not 250ms after each save.
+     Serialising the store is serialising every version of every note it holds
+     — megabytes — and an atomic write of that is a rename plus a directory
+     sync. On the autosave path that landed once per save for as long as anyone
+     kept typing, to record an entry that `COALESCE_MS` is going to keep
+     extending in memory for the next two minutes anyway.
+
+     `FLUSH_MAX_MS` is the promise the delay must not break: however long the
+     typing goes on, the store on disk is never more than that far behind. The
+     one guarantee that matters — a crash-free quit loses nothing — is
+     `flushSync` on before-quit, which is untouched. */
   schedule () {
-    clearTimeout(this.timer)
+    clearTimeout(this.timer ?? undefined)
+    if (!this.pendingSince) this.pendingSince = Date.now()
+    const waited = Date.now() - this.pendingSince
+    const delay = Math.max(0, Math.min(FLUSH_IDLE_MS, FLUSH_MAX_MS - waited))
     this.timer = setTimeout(() => this.flush().catch((err) => {
       console.error('note history write failed', err)
-    }), 250)
+    }), delay)
   }
 
   async flush () {
-    clearTimeout(this.timer)
+    clearTimeout(this.timer ?? undefined)
     this.timer = null
+    this.pendingSince = 0
     if (!this.vault) return
     const file = this.file()
     const data = this.data
@@ -114,8 +143,9 @@ class TrustStore {
 
   flushSync () {
     if (!this.vault) return
-    clearTimeout(this.timer)
+    clearTimeout(this.timer ?? undefined)
     this.timer = null
+    this.pendingSince = 0
     try {
       writeAtomicSync(this.file(), this.serialized(this.data))
     } catch (err) {
@@ -126,18 +156,34 @@ class TrustStore {
   /* The store as text, pruned to the byte budget. Pruning here rather than in
      `record` keeps the hot save path free of a full stringify per autosave —
      a save during a session only ever appends, and the bill is paid when the
-     store is next written out. */
+     store is next written out.
+
+     Each operation is measured once and the total is kept by arithmetic while
+     entries are dropped, so a store that has to shed twenty entries stringifies
+     itself once rather than twenty-one times. It was the whole store each time
+     — every entry holding two full copies of a note — which is quadratic in
+     the size of the thing this budget exists to bound, and it ran on the
+     before-quit path.
+
+     The accounting is exact, not an estimate: an element inside a JSON array
+     serialises to exactly what it serialises to alone, plus the one comma that
+     separates it from its neighbour. */
   serialized (data = this.data) {
-    while (data.operations.length) {
-      let size = 0
-      try { size = Buffer.byteLength(JSON.stringify(data)) } catch { break }
-      if (size <= MAX_BYTES) break
+    const operations = data.operations
+    const costs = operations.map((operation) => Buffer.byteLength(JSON.stringify(operation)) + 1)
+    // The object around them: `created`, the keys, the brackets. Measured by
+    // asking for the same shape with no operations in it.
+    const shell = Buffer.byteLength(JSON.stringify({ ...data, operations: [] }))
+    let size = shell + costs.reduce((total, cost) => total + cost, 0) - (costs.length ? 1 : 0)
+
+    while (operations.length && size > MAX_BYTES) {
       let drop = -1
-      for (let i = data.operations.length - 1; i >= 0; i--) {
-        if (data.operations[i].source === 'save') { drop = i; break }
+      for (let i = operations.length - 1; i >= 0; i--) {
+        if (operations[i].source === 'save') { drop = i; break }
       }
       if (drop === -1) break
-      data.operations.splice(drop, 1)
+      operations.splice(drop, 1)
+      size -= costs.splice(drop, 1)[0]
     }
     return JSON.stringify(data)
   }

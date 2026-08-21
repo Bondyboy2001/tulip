@@ -181,15 +181,22 @@ const codeLineNumbers = ViewPlugin.fromClass(
             if (node.name !== 'FencedCode') return
             const first = state.doc.lineAt(node.from).number
             const last = state.doc.lineAt(node.to).number
+            /* Only the part of the fence this visible range actually covers.
+               The tree iteration is already viewport-scoped, but entering one
+               node used to number the whole block: a 5,000-line fence produced
+               10,000 widgets on every keystroke and every scroll frame, nearly
+               all of them for lines nobody could see. The printed number is
+               `ln - first` rather than a running counter, so it stays the
+               number the whole fence would have given. */
+            const head = Math.max(first + 1, state.doc.lineAt(Math.max(from, node.from)).number)
+            const tail = Math.min(last - 1, state.doc.lineAt(Math.min(to, node.to)).number)
             // The fence lines themselves are chrome, not code, so numbering
             // starts on the line after the opening ```.
-            let n = 0
-            for (let ln = first + 1; ln < last; ln++) {
+            for (let ln = head; ln <= tail; ln++) {
               if (seen.has(ln)) continue
               seen.add(ln)
-              n++
               ranges.push(
-                Decoration.widget({ widget: new LineNumberWidget(n), side: -1 })
+                Decoration.widget({ widget: new LineNumberWidget(ln - first), side: -1 })
                   .range(state.doc.line(ln).from),
                 Decoration.widget({ widget: new RunSpacerWidget(), side: 1 })
                   .range(state.doc.line(ln).to)

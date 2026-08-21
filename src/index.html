@@ -153,7 +153,7 @@
         </div>
         <!-- One tab per open note. The strip is the note's identity now: the
              name, the folder it is in as a tooltip, and the unsaved dot. -->
-        <nav class="tabs" id="tabs" aria-label="Open notes"></nav>
+        <nav class="tabs" id="tabs" role="tablist" aria-label="Open notes"></nav>
         <div class="doc-tools">
           <button class="study-start" id="study-start" hidden title="Study this language table">
             <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
@@ -193,6 +193,19 @@
                   title="This file is locked — unlock it from the command palette to edit it">
               <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><rect x="3.4" y="7" width="9.2" height="6.2" rx="1.4" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M5.6 7V5.4a2.4 2.4 0 0 1 4.8 0V7" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
             </span>
+            <!-- Run the source file on screen. Only for a file in a language
+                 the run machinery accepts — renderer.js shows and hides it —
+                 and drawn by drawRunFace, so it is the same triangle-or-square
+                 as every fenced block's own control. -->
+            <button class="doc-tool" id="doc-run" title="Run this file"
+                    aria-label="Run this file" hidden></button>
+            <!-- The dock the run printed into, shown and put away. Only on
+                 screen once there is output to show — before that there is
+                 nothing to toggle. -->
+            <button class="doc-tool" id="doc-out" title="Show or hide the output"
+                    aria-label="Show or hide the output" aria-pressed="false" hidden>
+              <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><rect x="2.4" y="3.2" width="11.2" height="9.6" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="m5 6.7 1.9 1.6L5 9.9M8.7 10h2.5" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
             <!-- The ⌘⇧A the command palette carries, as a button — the panel
                  can be opened without its chord being remembered. -->
             <span class="doc-control-divider" aria-hidden="true"></span>
@@ -290,7 +303,8 @@
         <!-- A tab stop because it scrolls: the reading view is `overflow-y:
              auto`, and a scroll container the keyboard cannot focus is a page
              only a mouse can read. -->
-        <article class="reading" id="reading" tabindex="0" hidden></article>
+        <article class="reading" id="reading" role="document"
+                 aria-label="Reading view" tabindex="0" hidden></article>
         <div class="tex-divider" id="tex-divider" role="separator" tabindex="0"
              aria-orientation="vertical" aria-label="Resize TeX source and PDF preview"
              title="Drag to resize · double-click to reset" hidden></div>
@@ -358,6 +372,19 @@
                aria-label="Letters for this language"></div>
         </div>
 
+        <!-- What the toolbar's Run printed, as a panel laid over the corner of
+             the stage. It was in the document for a while — a block widget
+             after the last line — which put the code and its output in one
+             column at the cost of the output being wherever the end of the
+             file happened to be. A picture is the common case here and a
+             picture wants to be looked at, not scrolled to.
+
+             Inside the stage, so it covers the document and nothing else: the
+             sidebar, the tab strip and the copilot stay reachable while it is
+             up. Filled and emptied by mountFileRun (src/runcode.js), which
+             also puts its close and copy controls in. -->
+        <div class="file-run-pop" id="file-run-out" role="dialog"
+             aria-label="Run output" hidden></div>
       </div>
 
       <!-- A tab holding nothing has to say it is holding nothing, so it carries
@@ -452,12 +479,16 @@
               <span class="ai-context-pop" id="ai-context-pop" aria-hidden="true"></span>
             </span>
 
-            <button type="button" class="ai-config" id="ai-config" aria-expanded="false">
+            <!-- A readout, not a control: both settings it names are changed
+                 by typing or by chord — `/model` at the message box, ⌃T for
+                 the thinking level — so there is nothing here to press. It
+                 flashes when ⌃T steps the level, which is the whole of its
+                 feedback. -->
+            <span class="ai-config" id="ai-config">
               <span id="ai-config-model">Default model</span>
               <span class="ai-config-sep" id="ai-config-sep" hidden>·</span>
               <span class="ai-config-effort" id="ai-config-effort" hidden></span>
-              <svg viewBox="0 0 16 16" width="10" height="10" aria-hidden="true"><path d="m4.6 6.3 3.4 3.4 3.4-3.4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            </button>
+            </span>
 
             <!-- One button. It sends, and while a turn is running the same
                  button stops it — there is only ever one thing to do here. -->
@@ -468,47 +499,6 @@
           </div>
         </div>
 
-        <!-- Two rows, one shape: the name in a column of its own so the
-             controls share a left edge, and every control the full remaining
-             width. The model list refreshes itself when the panel restores,
-             so there is nothing here to press to make it current. -->
-        <div class="ai-pop" id="ai-pop" hidden role="dialog" aria-label="Copilot settings">
-          <!-- One list, not a CLI and then one of its models: picking Opus or
-               Sol or glm-5.2 picks the program that answers along with it.
-               Which models the list holds is a setting — Settings ▸ Copilot —
-               because opencode alone offers several hundred.
-
-               The list is built in copilot.js from the same dropdown the settings
-               pane uses; a native select would draw its popup with the system
-               rather than with the theme. -->
-          <div class="pop-row">
-            <span class="pop-name">Model</span>
-            <div class="ai-model-control" id="ai-model"></div>
-          </div>
-
-          <!-- A slider over named stops: the levels are ordered, and what you
-               are choosing is how far along that order to go — which a thumb
-               says at a glance and five buttons of equal weight do not. The
-               name of the stop is not lost, because the composer's own readout
-               beside the model spells out the one in force, and the thumb
-               carries it as a tooltip.
-
-               A real range input, not a div: dragging, arrow keys, Home/End and
-               the screen reader's announcement all come with it, and a thumb
-               built out of pointer events reimplements every one of them badly.
-               Its stops are drawn in copilot.js, because how many there are is
-               the chosen model's business — it publishes the variants it
-               takes, and most of the catalogue has none at all, which hides
-               this row. -->
-          <div class="pop-row" id="ai-effort-row">
-            <span class="pop-name">Effort</span>
-            <div class="ai-effort" id="ai-effort">
-              <div class="ai-effort-stops" id="ai-effort-stops" aria-hidden="true"></div>
-              <input type="range" class="ai-effort-range" id="ai-effort-range"
-                     min="0" max="1" step="1" value="0" aria-label="Effort">
-            </div>
-          </div>
-        </div>
       </form>
 
       <div class="grip grip-start" id="grip-ai" role="separator" tabindex="0"
@@ -527,7 +517,11 @@
            again a panel later. They show for the vault search only; the
            switcher and the palette have nothing to qualify. -->
       <div class="panel-head">
-        <input id="panel-input" class="panel-input" type="text" autocomplete="off" spellcheck="false" />
+        <!-- The field owns the list below it and says which row is highlighted,
+             so arrowing through results reads them out instead of leaving a
+             screen reader on a text box that silently changed something. -->
+        <input id="panel-input" class="panel-input" type="text" autocomplete="off" spellcheck="false"
+               role="combobox" aria-expanded="true" aria-autocomplete="list" aria-controls="panel-list" />
         <div class="panel-chips" id="panel-chips" hidden>
           <button type="button" class="panel-chip" id="opt-case" aria-pressed="false"
                   title="Match case" aria-label="Match case">Aa</button>
@@ -552,31 +546,20 @@
         <button type="button" class="panel-replace-go" id="panel-replace-go">Replace all</button>
       </div>
 
-      <ul class="panel-list" id="panel-list" role="listbox"></ul>
-      <div class="panel-foot" id="panel-foot"></div>
+      <ul class="panel-list" id="panel-list" role="listbox" aria-label="Results"></ul>
+      <!-- The count is announced, the caveats beside it are not: the caveats
+           are read from the foot when the reader gets there, whereas how much
+           was found is the answer to what they just typed. -->
+      <div class="panel-foot" id="panel-foot">
+        <span class="panel-count" id="panel-count" role="status" aria-live="polite"></span>
+      </div>
     </div>
 
-    <!-- Beside the two font pickers only: a page of text set in whichever face
-         the highlighted row names. The row already names itself in its own
-         letters, which tells you what the face is; a paragraph tells you what
-         reading a note in it will actually be like, which is the thing being
-         chosen. It follows the arrow keys, so a run down the list is a run
-         through specimens. No heading over it, for the same reason: the row
-         names the face and the placeholder says which of the two is being
-         chosen, so the card is the specimen and nothing else. -->
-    <aside class="font-sample" id="font-sample" hidden aria-hidden="true">
-      <!-- Lorem ipsum, because a specimen is for looking at rather than
-           reading: real sentences pull the eye into what they say, and what is
-           being judged here is the shape of the letters. -->
-      <div class="font-sample-page">
-        <h3>Lorem ipsum</h3>
-        <p>Dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor
-           incididunt ut labore et <em>dolore</em> magna aliqua.</p>
-        <p>Ut enim ad minim veniam, quis <strong>nostrud</strong> exercitation
-           ullamco laboris nisi ut aliquip ex ea commodo.</p>
-        <p class="font-sample-glyphs">0123456789 · fi ffl · “quoted” · a—b</p>
-      </div>
-    </aside>
+    <!-- There was a specimen card here, beside the two font pickers: a page of
+         lorem ipsum set in whichever face the highlighted row named. The note
+         itself does that job better now — the font pickers leave the page
+         uncovered and unblurred while they preview (see `.is-peek`), so the
+         specimen is the reader's own writing at its own measure. -->
   </div>
 
   <div class="study" id="study" hidden>
@@ -639,7 +622,7 @@
        themselves are built in src/settings.js, where each one states its
        config key and its control together. -->
   <div class="settings" id="settings" hidden>
-    <div class="settings-box" role="dialog" aria-modal="true" aria-label="Settings">
+    <div class="settings-box" role="dialog" aria-label="Settings">
       <nav class="settings-rail" id="settings-rail" aria-label="Settings sections"></nav>
       <div class="settings-pane">
         <header class="settings-head">
@@ -707,7 +690,22 @@
     </div>
   </section>
 
-  <div class="toast" id="toast" hidden></div>
+  <!-- What the app answers to. Every one of these already existed in the menu
+       or in a pane's own wiring; there was simply nowhere to read them all at
+       once, in an app whose whole interface is chords. Help > Keyboard
+       Shortcuts, or ⌘/. The rows are built in the renderer so the chords can be
+       spelt for the platform — see src/platform.js. -->
+  <div class="shortcuts" id="shortcuts" hidden>
+    <div class="shortcuts-panel" role="dialog" aria-modal="true" aria-labelledby="shortcuts-title">
+      <div class="shortcuts-head">
+        <h2 class="shortcuts-title" id="shortcuts-title">Keyboard shortcuts</h2>
+        <button type="button" class="shortcuts-close" id="shortcuts-close" aria-label="Close">×</button>
+      </div>
+      <div class="shortcuts-body" id="shortcuts-body"></div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
   <div class="ctx" id="ctx" role="menu" hidden></div>
 
   <aside class="history-panel" id="history-panel" hidden aria-label="Note history">

@@ -753,5 +753,44 @@ export async function run () {
   await wait()
   result.afterOnlyMatchesOff = shown()
 
+  /* ------------------------------------------------------- the alignment
+
+     Which way a column reads is a view of the file, like the sort and the
+     widths: the menu points it, the cells and the heading follow, and not a
+     byte of the file moves. */
+
+  const classesOf = (c) => ({
+    head: heading(c)?.className,
+    cell: cell(0, c)?.className
+  })
+
+  result.alignByContent = { text: classesOf(0), numbers: classesOf(1) }
+
+  const writesBeforeAligning = writes
+  headMenuItem('Align right', 0).click()
+  await wait()
+  result.alignedRight = classesOf(0)
+
+  // Three headings picked out, then one item pointing all of them at once.
+  click(heading(0))
+  click(heading(2), { metaKey: true })
+  await wait()
+  const centre = headMenuItem('Align centre (2 columns)', 0)
+  result.alignManyLabel = centre.textContent
+  centre.click()
+  await wait()
+  result.alignedMany = [classesOf(0), classesOf(2)]
+
+  // The menu says which way the columns it is about are already pointed.
+  result.alignTicked = headMenuItem('✓ Align centre (2 columns)', 0)?.textContent
+
+  headMenuItem('Align automatically (2 columns)', 0).click()
+  await wait()
+  result.alignedAuto = [classesOf(0), classesOf(2)]
+
+  await grid.save({ flush: true })
+  result.writesFromAligning = writes - writesBeforeAligning
+  result.fileAfterAligning = onDisk
+
   return result
 }

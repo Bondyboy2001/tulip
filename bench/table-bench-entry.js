@@ -144,7 +144,10 @@ async function main () {
         clientY: from.y + ((to.y - from.y) * step) / 8
       }))
     }
-  }, () => {
+    /* Release inside the measurement. The selection path coalesces moves to a
+       frame and synchronously flushes the final coordinate here; measuring the
+       moves while settling the release afterwards would hide the work whose
+       latency the gesture actually exposes. */
     document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, button: 0 }))
   })
 

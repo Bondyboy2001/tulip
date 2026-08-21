@@ -140,7 +140,13 @@ export function merge3 (base, ours, theirs) {
         const ours = [...baseLines.slice(i, a.s), ...a.lines, ...baseLines.slice(a.e, e)]
         const theirs = b.lines.slice()
         conflicts.push({ s: out.length, count: ours.length, ours, theirs })
-        out.push(...theirs)
+        /* Ours, like every other conflicting region: `count` is measured off
+           `ours`, and `resolveMerge` splices that many lines away to put
+           `theirs` in. Pushing `theirs` here instead left the two disagreeing —
+           choosing "keep mine" returned the other side's text, and choosing
+           theirs spliced `ours.length` lines out of a region holding
+           `theirs.length`, eating whatever followed the conflict. */
+        out.push(...ours)
         i = e
         ai++; bi++
       } else {
@@ -154,6 +160,30 @@ export function merge3 (base, ours, theirs) {
     // Defensive: no hunk starts at `i` although the scan said one did.
     i++
   }
+
+  /* What either side added past the last base line. The walk above advances
+     through base lines and stops when it runs out of them, so a hunk anchored
+     at `baseLines.length` — an append — never had a line to be reached on, and
+     was dropped whole: not merged, not conflicted, just gone. That covers the
+     commonest sync edit there is, a line added at the bottom of a note on
+     another device, and it went for our own appends as much as theirs.
+
+     A note ending in a newline hid it for years, because splitting one leaves
+     an empty final element for the insertion to sit before, which puts the hunk
+     inside the loop's reach. A note saved without a trailing newline had no
+     such luck. */
+  const ourTail = A[ai] && A[ai].s >= i ? A[ai].lines : null
+  const theirTail = B[bi] && B[bi].s >= i ? B[bi].lines : null
+  if (ourTail && theirTail) {
+    if (sameLines(ourTail, theirTail)) {
+      out.push(...ourTail)
+    } else {
+      // Two different endings, settled the way every other disagreement is.
+      conflicts.push({ s: out.length, count: ourTail.length, ours: ourTail, theirs: theirTail })
+      out.push(...ourTail)
+    }
+  } else if (ourTail) out.push(...ourTail)
+  else if (theirTail) out.push(...theirTail)
 
   return { lines: out, text: out.join('\n'), conflicts }
 }

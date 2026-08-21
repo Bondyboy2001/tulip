@@ -29,7 +29,10 @@ import {
   COPILOT_MODES, copilotModeFromConfig
 } from '../src/models.js'
 
-const { detailOf, tokensIn, tokensOf, readLines, parseOpencode, contextSize, policyEnv } = ai.parsers
+const {
+  detailOf, tokensIn, tokensOf, usageOf, readLines, parseOpencode, contextSize,
+  policyEnv, commandCandidates, escapeForCmd, invocation
+} = ai.parsers
 const { systemPrompt, turnRules, promptFor, nothingSent } = prompt
 
 let failures = 0
@@ -211,6 +214,11 @@ check('CJK counts far nearer one character to a token',
 check('and is not counted as though it were English',
       tokensIn('日本語のテキスト') > tokensIn('x'.repeat(8)))
 same('nothing is nothing', tokensIn(''), 0)
+same('OpenCode usage includes cached input and generated output',
+     usageOf({ input: 1005, output: 99, reasoning: 0, cache: { read: 31126, write: 17 } })?.used,
+     32247)
+same('legacy total usage remains supported', usageOf({ total: 420 })?.used, 420)
+check('missing usage is ignored', usageOf({ cache: {} }) === null)
 
 const noteTurn = promptFor('What does the introduction say?', {
   note: 'notes/lecture.md', kind: 'note', line: 12, heading: 'Introduction',
@@ -233,6 +241,57 @@ check('a note that fits is sent whole, and said to be whole',
       wholeNoteTurn.includes('notes/short.md, in full:') &&
       wholeNoteTurn.includes('A short note.') &&
       !wholeNoteTurn.includes('read the file for the rest'))
+
+const sourceMemo = nothingSent()
+const sourceContext = {
+  note: 'src/main.cpp', kind: 'c++', line: 8, sourceContext: true,
+  excerpt: 'int main() { return 0; }', excerptCut: false, noteChars: 25
+}
+promptFor('Explain this.', sourceContext, sourceMemo)
+const movedSource = promptFor('And this?', {
+  ...sourceContext, line: 80, excerpt: 'std::vector<int> values;'
+}, sourceMemo)
+check('a moved source window is not re-quoted',
+      !movedSource.includes('std::vector<int> values;') &&
+      movedSource.includes('Read the file selectively for the current code.'))
+
+/* The window moves on every turn a source file is asked about, so the notice
+   is not a one-off: there is no point at which the earlier excerpt becomes
+   current again, and saying it did would send the agent back to a quote of a
+   part of the file it is no longer looking at. */
+check('and it says so again for as long as the window keeps moving',
+      promptFor('And now?', { ...sourceContext, line: 200, excerpt: 'delete[] buffer;' }, sourceMemo)
+        .includes('Read the file selectively for the current code.'))
+
+/* Order matters here, and only shows up at length. A source window that has
+   not moved is still current and must be named as such — the unchanged branch
+   sits above the source branch — while one that has moved must reach the
+   source branch before the long-note branch below it, or two unrelated windows
+   of the same file get diffed against each other and the "here is what
+   changed" quote is assembled out of two different parts of the file. */
+const sameWindow = promptFor('Explain it again.', sourceContext, sourceMemo)
+check('an unchanged source window is named rather than described as moved',
+      sameWindow.includes('is still current') &&
+      !sameWindow.includes('Read the file selectively for the current code.'))
+
+const longSource = 'int value = 0;\n'.repeat(4000)
+const longMemo = nothingSent()
+promptFor('Explain this.', { ...sourceContext, excerpt: longSource, noteChars: longSource.length }, longMemo)
+const longMoved = promptFor('And this?', {
+  ...sourceContext, line: 900, excerpt: `${longSource}int other = 1;\n`, noteChars: longSource.length + 15
+}, longMemo)
+check('a long source window that moved is sent to the file, not diffed',
+      longMoved.includes('Read the file selectively for the current code.') &&
+      !longMoved.includes('characters replaced by'))
+
+const codeTask = promptFor('Edit this block.', {
+  ...sourceContext,
+  excerpt: 'int main() { return 0; }',
+  skipExcerpt: true
+})
+check('a focused code task omits the open source excerpt',
+      !codeTask.includes('int main() { return 0; }') &&
+      codeTask.includes('<open-note>src/main.cpp'))
 
 /* The text is its own block, so a selection can travel with the note rather
    than in place of it: three highlighted lines do not say what they contradict
@@ -330,6 +389,59 @@ promptFor('When?', pages, askedOnce)
 check('the same ranked PDF pages are not re-sent',
       !promptFor('And where?', pages, askedOnce).includes('TIME: 16:00'))
 
+/* The ranking runs against each question, so the block is different every
+   turn — the dedupe has to work by page, or a follow-up that surfaces one new
+   page pays for the five it shares with the last question all over again. */
+const coda = 'Use these pages first. The complete page-marked text files are listed above; search or read them if the answer depends on omitted material.'
+const rankedFirst = [
+  'Relevant PDF pages selected locally from extracted text and OCR:',
+  '--- book.pdf page 4 of 90 ---\nThe tide table says 16:00.',
+  '--- book.pdf page 5 of 90 ---\nThe harbour closes at dusk.',
+  coda
+].join('\n\n')
+const rankedNext = [
+  'Relevant PDF pages selected locally from extracted text and OCR:',
+  '--- book.pdf page 5 of 90 ---\nThe harbour closes at dusk, sliced differently.',
+  '--- book.pdf page 6 of 90 ---\nMoorings are numbered from the west.',
+  coda
+].join('\n\n')
+const pageMemo = nothingSent()
+promptFor('When is high tide?', { pdfContext: rankedFirst }, pageMemo)
+const followUp = promptFor('And the moorings?', { pdfContext: rankedNext }, pageMemo)
+check('only the pages new to the thread are quoted',
+      followUp.includes('Moorings are numbered') &&
+      !followUp.includes('harbour closes') &&
+      followUp.includes('Already quoted earlier in this conversation'))
+check('a re-ranked slice of a sent page does not smuggle the page back in',
+      !followUp.includes('sliced differently'))
+
+/* The patch path now covers notes of any size: the reader editing the note
+   they are asking about is the ordinary case, and requoting thirty thousand
+   characters for one retyped line was most of what such a chat spent. */
+const living = nothingSent()
+const draft = 'A line of prose in a living note under forty thousand.\n'.repeat(560)
+const livingNote = { note: 'notes/living.md', kind: 'note', line: 3,
+                     excerpt: draft, excerptCut: false, noteChars: draft.length }
+check('a small note is quoted whole the first time',
+      promptFor('First question.', livingNote, living).includes(draft))
+const grown = { ...livingNote, excerpt: `${draft}A remark added at the foot.\n` }
+const patched = promptFor('And after my edit?', grown, living)
+check('an edit to a small note sends the change, not the note',
+      patched.includes('characters replaced by') && patched.length < 700)
+check('the patched small note is current from then on',
+      promptFor('Still?', grown, living)
+        .includes('The copy of notes/living.md quoted earlier'))
+
+/* One memo, two documents: a diff of one note against another is not a
+   change, and must never be dressed up as one. */
+const swapped = promptFor('Another note now.', {
+  note: 'notes/other.md', kind: 'note',
+  excerpt: 'Fresh text of a different note.', excerptCut: false, noteChars: 31
+}, living)
+check('a different note is quoted fresh, never diffed against the last one',
+      swapped.includes('Fresh text of a different note.') &&
+      !swapped.includes('characters replaced by'))
+
 check('a caller with no memory still gets the whole context',
       promptFor('What does this say?', chat).includes('The introduction starts here.'))
 
@@ -391,6 +503,12 @@ same('and delivered when its newline arrives', lines(['{"a":1}', '\n']), [{ a: 1
    what a mistake in this function would silently drop data through. */
 same('the remainder after several lines is kept whole',
      lines(['{"a":1}\n{"a":2}\n{"a":', '3}\n']), [{ a: 1 }, { a: 2 }, { a: 3 }])
+
+/* A line that never ends must not grow the buffer for the length of a turn:
+   past the cap it is dropped whole, and the stream picks itself up at the
+   next real line. */
+same('a runaway line is dropped rather than held',
+     lines(['x'.repeat(8 * 1024 * 1024 + 1), 'tail\n{"a":1}\n']), [{ a: 1 }])
 
 /* ------------------------------------------------------------- catalogues */
 
@@ -570,6 +688,67 @@ const opened = JSON.parse(policyEnv('auto').OPENCODE_CONFIG_CONTENT)
 check('auto’s grant wins over a config that would prompt',
       opened.permission.bash === 'allow' && opened.permission.webfetch === 'allow')
 delete process.env.OPENCODE_CONFIG_CONTENT
+
+/* ----------------------------------------------------------------- windows */
+
+/* PATHEXT is what "executable" means on Windows — `opencode` installed through
+   npm is really `opencode.cmd`, and a doctor that only looked for the bare
+   name reported a working install as missing. */
+same('a bare name on Windows tries each PATHEXT suffix',
+     commandCandidates('opencode', true, ['.COM', '.EXE', '.CMD']),
+     ['opencode.COM', 'opencode.EXE', 'opencode.CMD'])
+same('a name already wearing a suffix is only itself',
+     commandCandidates('opencode.exe', true, ['.COM', '.EXE']), ['opencode.exe'])
+same('a dot in a directory is not a suffix',
+     commandCandidates('tools.d\\opencode', true, ['.EXE']), ['tools.d\\opencode.EXE'])
+same('unix names are only ever themselves',
+     commandCandidates('opencode', false, ['.EXE']), ['opencode'])
+
+/* The cmd.exe escaping, pinned. A `.cmd` shim is run through cmd.exe, and the
+   vault path rides `--dir` down that line — a space or a quote mishandled is
+   a turn run against the wrong directory. The rules are msvcrt's quote dance
+   plus cmd's caret pass, doubled for arguments because the shim re-expands
+   its `%*` through cmd a second time. */
+check('a flag survives the caret passes',
+      escapeForCmd('--model', true) === '^^^"--model^^^"')
+check('a path with spaces stays one argument',
+      escapeForCmd('C:\\My Vault', true) === '^^^"C:\\My^^^ Vault^^^"')
+check('a quote inside an argument is escaped for msvcrt',
+      escapeForCmd('say "hi"', true) === '^^^"say^^^ \\^^^"hi\\^^^"^^^"')
+check('the command itself gets one caret pass and no quotes',
+      escapeForCmd('C:\\Program Files\\opencode.cmd', false) ===
+        'C:\\Program^ Files\\opencode.cmd')
+
+/* Away from Windows the invocation is exactly what was asked for — the PATH
+   walk and the shell are that platform's problem alone. */
+const plain = invocation('opencode', ['run', '--format', 'json'])
+check('unix spawns the name as given',
+      plain.file === 'opencode' && plain.args.length === 3 &&
+      Object.keys(plain.options).length === 0)
+
+/* ------------------------------------------------- a copilot per chat */
+
+/* One session per conversation is what lets two notes be worked on at once.
+   The turn itself cannot be tested here — it spawns a CLI — but the bookkeeping
+   under it can, and getting it wrong is what a single global `session` did for
+   years: starting one copilot silently ended the other. `start` spawns nothing
+   (a process is per turn), so this is safe to run anywhere. */
+ai.setVault('/tmp/tulip-test-vault')
+ai.attach(() => {})
+const startedA = ai.start({ key: 'chat-a', provider: 'opencode', model: 'm', mode: 'auto', turnId: 't-a' })
+const startedB = ai.start({ key: 'chat-b', provider: 'opencode', model: 'm', mode: 'read', turnId: 't-b' })
+check('each conversation starts its own copilot', startedA.ok && startedB.ok)
+check('starting one does not end the other', ai.canWrite('chat-a') === true)
+check('the permission mode is that session\'s own', ai.canWrite('chat-b') === false)
+check('an unknown conversation has no copilot', ai.canWrite('chat-c') === false)
+check('a message needs the session it names',
+      ai.send('chat-c', 'hello', null, 't-c').ok === false)
+check('stopping one conversation leaves the other running',
+      ai.stop('chat-b').ok === true && ai.canWrite('chat-a') === true)
+check('stopping the same one twice is not an error, only a no-op',
+      ai.stop('chat-b').ok === false)
+ai.stopAll()
+check('stopAll takes every copilot', ai.canWrite('chat-a') === false)
 
 /* ----------------------------------------------------------------- report */
 

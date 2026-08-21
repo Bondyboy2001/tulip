@@ -115,6 +115,18 @@ check('the drawing and document engines stay behind their own doors', () => {
     'a lazily-loaded engine is on the startup path: ' + found.slice(0, 5).join(', '))
 })
 
+check('document-specific viewers stay off the ordinary note launch', () => {
+  const found = has(/(^|\/)src\/(pdf|pdf-find|language-table|keyboard|speech|csv|notebook)\.js$/)
+  assert.deepEqual(found, [],
+    'a document-specific viewer is on the startup path: ' + found.join(', '))
+})
+
+check('language alphabet data stays behind the language-table route', () => {
+  const found = has(/(^|\/)electron\/alphabets\.json$/)
+  assert.deepEqual(found, [],
+    'the language alphabet catalogue is on the startup path: ' + found.join(', '))
+})
+
 check('the eager graph has not grown past what it was measured at', () => {
   /* A ceiling, not a target: 522KB when this was written, against ~1,233KB
      before the editing stack moved off. It is here to make an accidental

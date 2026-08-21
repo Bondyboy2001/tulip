@@ -73,7 +73,7 @@ function queryTerms (query) {
       /* Words need three letters to be worth searching; a number is worth
          searching from two, because "page 42" is a real question and its
          answer lives on a page full of other numbers. */
-      (/[\p{L}]/.test(term) ? term.length >= 3 : term.length >= 2)))]
+      (/[\p{L}]/u.test(term) ? term.length >= 3 : term.length >= 2)))]
 }
 
 /* Stops at `cap`, because the caller only ever asks whether a term appears up
@@ -110,12 +110,6 @@ function excerpt (page, terms, limit) {
   return `${start ? '…\n' : ''}${body}${start + limit < source.length ? '\n…' : ''}`
 }
 
-/**
- * @param {string} query
- * @param {{path:string,textPath:string,openPage?:number,pages:object[]}[]} documents
- *   `pages` comes from `parsePages`. The caller holds them across turns rather
- *   than splitting the same book up again for every question.
- */
 /* How much ranked context a question earns. A follow-up that names no topic
    ("thanks", "continue", "yes") must not pay for six pages of a book the
    conversation already holds — and a question that names one thing does not
@@ -132,6 +126,12 @@ function contextBudget (terms) {
   return { maxPages: 1, maxChars: 3000 }
 }
 
+/**
+ * @param {string} query
+ * @param {{path:string,textPath:string,openPage?:number,pages:{page:number,pages:number,text:string,folded:string}[]}[]} documents
+ *   `pages` comes from `parsePages`. The caller holds them across turns rather
+ *   than splitting the same book up again for every question.
+ */
 function relevantPdfContext (query, documents, { maxPages = 6, maxChars = 14000 } = {}) {
   const terms = queryTerms(query)
   const phrase = folded(query).trim()

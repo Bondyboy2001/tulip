@@ -183,11 +183,22 @@ export function pictureBlocks (matches, makeWidget, opts) {
     const widgets = []
     eachFence(state, ({ node, lang, code }) => {
       if (!matches(lang) || !code.trim()) return
+      /* The closing fence line is marked as having a picture joined beneath it,
+         so the stylesheet can drop its bottom border by matching a class on the
+         line itself. It used to ask `:has(+ .cm-widgetBuffer + …)` instead —
+         and `:has()` with a sibling combinator makes the engine re-check every
+         line in the viewport whenever CodeMirror touches the sibling list,
+         which it does on every keystroke. The decoration is free here: this
+         field already knows the answer, which is why it is drawing a widget. */
       widgets.push(
+        Decoration.line({ class: 'tk-code-joined' }).range(state.doc.lineAt(node.to).from),
         Decoration.widget({ widget: makeWidget(code), block: true, side: 1 }).range(node.to)
       )
     })
-    return Decoration.set(widgets)
+    /* Sorted, not appended in place: a line decoration starts at the head of
+       the closing line and the widget sits at its end, so the two go in out of
+       order and `Decoration.set` is entitled to refuse an unsorted list. */
+    return Decoration.set(widgets, true)
   }
   return fenceField(build, opts)
 }

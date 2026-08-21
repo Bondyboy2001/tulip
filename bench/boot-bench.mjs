@@ -52,6 +52,7 @@ const flag = (name, fallback) => {
 
 const RUNS = Number(flag('runs', 6))
 const LABEL = flag('label', process.env.TULIP_NO_APP_SCHEME ? 'file-url' : 'app-scheme')
+const CHECK = args.includes('--check')
 const ROOT = path.join(import.meta.dirname, '..')
 
 /* High enough to stay clear of anything a developer is likely to be running,
@@ -180,6 +181,7 @@ async function runOnce (userData) {
 
 const userData = await mkdtemp(path.join(tmpdir(), 'tulip-boot-data-'))
 const vault = await mkdtemp(path.join(tmpdir(), 'tulip-boot-vault-'))
+let exitCode = 0
 
 try {
   await scratchVault(vault)
@@ -203,7 +205,7 @@ try {
      median: including it would average the cost of building the cache into the
      figure that exists to show what the cache saves. */
   const warm = runs.slice(1)
-  console.log(JSON.stringify({
+  const report = {
     label: LABEL,
     appScheme: !process.env.TULIP_NO_APP_SCHEME,
     runs: RUNS,
@@ -216,12 +218,27 @@ try {
       load: round(median(warm.map((r) => r.load)))
     },
     warmRunsMs: warm.map((r) => round(r.domContentLoaded))
-  }, null, 2))
+  }
+  console.log(JSON.stringify(report, null, 2))
+  if (CHECK) {
+    const failures = []
+    if (report.firstRunMs.domContentLoaded > 1800) failures.push('first launch over 1800ms')
+    if (report.warmMedianMs.domContentLoaded > 900) failures.push('warm median over 900ms')
+    if (failures.length) {
+      console.error(`boot performance gate failed: ${failures.join(', ')}`)
+      exitCode = 1
+    } else {
+      console.error('boot performance gate passed')
+    }
+  }
+} catch (error) {
+  console.error(error)
+  exitCode = 1
 } finally {
   await rm(userData, { recursive: true, force: true }).catch(() => {})
   await rm(vault, { recursive: true, force: true }).catch(() => {})
   /* The debugger sockets keep node's event loop alive long after the last
      answer, so a script that merely runs out of work here sits for minutes
      printing nothing. */
-  process.exit(0)
+  process.exit(exitCode)
 }

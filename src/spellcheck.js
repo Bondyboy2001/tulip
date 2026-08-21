@@ -40,39 +40,73 @@ export function variantForLocale (locale) {
 }
 
 /**
- * A checker over one dictionary, plus whatever words the app has been taught.
+ * A checker over one or several dictionaries, plus whatever words the app has
+ * been taught.
  *
- * Building it parses half a megabyte of word list, which takes a moment and is
- * why nothing here happens until the first word is actually checked.
+ * Building it parses half a megabyte of word list per language, which takes a
+ * moment and is why nothing here happens until the first word is actually
+ * checked.
+ *
+ * English is always the first dictionary; the rest come from `languages`, an
+ * array of ids from src/spell-languages.js, each loaded through the caller's
+ * `loadDictionary` — this module cannot know where the shipped `.aff`/`.dic`
+ * pairs live (that is dist layout, the main process's business). A language
+ * whose pair cannot be loaded is skipped rather than fatal: the checker that
+ * knows fewer languages underlines more, never less, and the note is still
+ * being checked.
+ *
+ * A word is correct if ANY dictionary knows it — the only reading of "this
+ * vault is written in English and German" under which prose in either
+ * language comes out clean.
+ *
+ * @param {string} [variant]
+ * @param {string[]} [extraWords]
+ * @param {{ languages?: string[],
+ *           loadDictionary?: (id: string) => { aff: string|Buffer, dic: string|Buffer } | null }} [options]
  */
-export function createSpeller (variant = 'us', extraWords = []) {
+export function createSpeller (variant = 'us', extraWords = [], { languages = [], loadDictionary } = {}) {
   const load = DICTIONARIES[variant] || DICTIONARIES.us
-  const speller = nspell(load())
-  for (const word of extraWords) if (word) speller.add(String(word))
+  const spellers = [nspell(load())]
+  for (const id of languages || []) {
+    const pair = loadDictionary?.(id)
+    if (pair && pair.aff && pair.dic) spellers.push(nspell(pair))
+  }
+
+  /* The taught words are the app's own list, not any dictionary's, so they
+     are held apart rather than pushed into nspell: one set answers for every
+     language, and matching case-insensitively means a name taught from its
+     capitalised use is not re-flagged where it opens a sentence. */
+  const taught = new Set()
+  const teach = (word) => { if (word) taught.add(String(word).toLowerCase()) }
+  for (const word of extraWords) teach(word)
+
+  const known = (word) => {
+    if (taught.has(word.toLowerCase())) return true
+    const lower = word.toLowerCase()
+    for (const speller of spellers) {
+      if (speller.correct(word)) return true
+      /* Tried as written and again in lower case, so a word that opens a
+         sentence is not reported for its capital letter. The other direction
+         is deliberately not tried: `english` really is a misspelling of
+         `English`, and folding it away would hide a whole class of them. */
+      if (lower !== word && speller.correct(lower)) return true
+    }
+    return false
+  }
 
   return {
     variant,
 
     /** Teach it a word for the rest of this session. */
-    add (word) { if (word) speller.add(String(word)) },
+    add: teach,
 
-    /**
-     * The subset of `words` this dictionary does not know.
-     *
-     * A word is tried as it was written and again in lower case, so a word
-     * that opens a sentence is not reported for its capital letter. The other
-     * direction is deliberately not tried: `english` really is a misspelling
-     * of `English`, and folding it away would hide a whole class of them.
-     */
+    /** The subset of `words` no dictionary here knows. */
     check (words) {
       const bad = []
       for (const raw of words || []) {
         const word = String(raw || '')
         if (!word) continue
-        if (speller.correct(word)) continue
-        const lower = word.toLowerCase()
-        if (lower !== word && speller.correct(lower)) continue
-        bad.push(word)
+        if (!known(word)) bad.push(word)
       }
       return bad
     },
@@ -80,10 +114,26 @@ export function createSpeller (variant = 'us', extraWords = []) {
     /**
      * What it might have been. Bounded, because suggesting is a search over the
      * whole dictionary and a panel showing five alternatives to every word
-     * would spend longer guessing than the note took to write.
+     * would spend longer guessing than the note took to write. Every language
+     * is asked and the answers interleaved — for a word mistyped in German,
+     * the German guesses are the point, and English-first ordering would push
+     * them off the end of the list.
      */
     suggest (word, limit = 4) {
-      return speller.suggest(String(word || '')).slice(0, limit)
+      const asked = String(word || '')
+      const rounds = spellers.map((speller) => speller.suggest(asked))
+      const out = []
+      for (let i = 0; out.length < limit; i++) {
+        let offered = false
+        for (const round of rounds) {
+          if (i >= round.length) continue
+          offered = true
+          if (!out.includes(round[i])) out.push(round[i])
+          if (out.length >= limit) break
+        }
+        if (!offered) break
+      }
+      return out
     }
   }
 }

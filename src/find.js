@@ -211,7 +211,7 @@ class FindPanel {
     const q = this.query()
     if (q.eq(getSearchQuery(this.view.state))) return
 
-    const spec = { effects: [setSearchQuery.of(q)] }
+    const spec = { effects: /** @type {import('@codemirror/state').StateEffect<unknown>[]} */ ([setSearchQuery.of(q)]) }
 
     if (jump && q.valid) {
       // From where the search started, then from the top: a query that has no

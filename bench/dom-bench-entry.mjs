@@ -2,6 +2,12 @@ import electron from 'electron'
 
 const { app, BrowserWindow } = electron
 globalThis.document = {
+  /* src/math.js resolves the lazy KaTeX stylesheet from the document rather
+     than from whichever shared chunk esbuild put the module in. Match the real
+     page here so the DOM benchmark exercises maths instead of failing while
+     constructing its URL. */
+  baseURI: 'file:///tulip-dom-benchmark/',
+  compatMode: 'CSS1Compat',
   createElement: () => ({
     classList: { add () {} }, dataset: {}, style: {}, append () {},
     addEventListener (event, callback) { if (event === 'load') queueMicrotask(callback) }
@@ -37,7 +43,7 @@ Paragraph ${index} with **bold text**, $x_${index % 10}^2$, and [[Note ${index}]
   }
 
   const win = new BrowserWindow({ show: false, webPreferences: { offscreen: true } })
-  await win.loadURL('about:blank')
+  await win.loadURL('data:text/html,%3C!doctype%20html%3E%3Cmeta%20charset%3Dutf-8%3E')
   const result = await win.webContents.executeJavaScript(`
     (() => {
       const html = ${JSON.stringify(html)}

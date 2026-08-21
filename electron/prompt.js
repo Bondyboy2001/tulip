@@ -247,21 +247,37 @@ function quoted (context, sent) {
   if (sent.body === block) {
     return `The copy of ${context.note} quoted earlier in this conversation is still current.`
   }
-  if (sent.body && block.length > REQUOTE_LIMIT) {
+  if (context.sourceContext && sent.body) {
+    return `${context.note} has changed or the source window moved since the earlier excerpt. ` +
+      'Read the file selectively for the current code.'
+  }
+  /* Changed since it was quoted. The change itself goes wherever it is small
+     enough to state — at any size of note, not only the long ones: the reader
+     editing the note they are asking about is the ordinary case, and requoting
+     thirty thousand characters for one retyped line was most of what a
+     conversation about a living note spent, times over on every turn, into a
+     thread that re-sends all of it. Only a rewrite still pays for a full
+     quote, and only a different document under the same thread starts over —
+     which is what `bodyOf` guards: a diff of one note against another is not
+     a change, it is nonsense wearing one's name. */
+  if (sent.body && sent.bodyOf === context.note) {
     const run = changedRun(sent.body, block)
-    if (!run) {
+    if (run) {
+      /* The memory moves to the new text even though the whole of it was not
+         sent: the agent has been given everything it needs to hold the current
+         version, so the next turn's comparison is against what it actually has. */
+      sent.body = block
+      return `${context.note} has changed since the copy quoted earlier. Everything else in it is ` +
+        `unchanged; this is the part that is different now (${run.removed.toLocaleString('en-US')} ` +
+        `characters replaced by ${run.added.toLocaleString('en-US')}):\n${run.text}`
+    }
+    if (block.length > REQUOTE_LIMIT) {
       return `${context.note} has changed since the copy quoted earlier and is too long to quote again — ` +
         'read the file for its current text.'
     }
-    /* The memory moves to the new text even though the whole of it was not
-       sent: the agent has been given everything it needs to hold the current
-       version, so the next turn's comparison is against what it actually has. */
-    sent.body = block
-    return `${context.note} has changed since the copy quoted earlier. Everything else in it is ` +
-      `unchanged; this is the part that is different now (${run.removed.toLocaleString('en-US')} ` +
-      `characters replaced by ${run.added.toLocaleString('en-US')}):\n${run.text}`
   }
   sent.body = block
+  sent.bodyOf = context.note
   return block
 }
 
@@ -269,7 +285,62 @@ function quoted (context, sent) {
  * What a session has already put in front of the model, so it is not put there
  * twice. One of these per session — see `send` in ai.js.
  */
-const nothingSent = () => ({ opened: '', body: '', pdfs: '', pages: '', rules: false, turns: 0 })
+const nothingSent = () => ({
+  opened: '', body: '', bodyOf: '', pdfs: '', pageKeys: null, rules: false, turns: 0
+})
+
+/* The fixed lines `relevantPdfContext` (electron/pdf-context.js) builds its
+   block out of, matched here to take the block apart again. The page texts in
+   between may hold any prose at all — blank lines included — so the seams are
+   the marker lines and the closing instruction's own words, never a split on
+   whitespace. */
+const PAGE_MARK = /^--- (.+) page (\d+) of \d+ ---$/gm
+const PAGES_CODA = 'Use these pages first.'
+
+/**
+ * The ranked pages, minus every page this thread has already been given.
+ *
+ * The ranking runs against each question, so the block differs every turn and
+ * a memo that compares whole blocks never matched — six pages, fourteen
+ * thousand characters, quoted again per follow-up into a thread that re-sends
+ * everything it holds. Deduped by page instead: a page already in the thread
+ * is named, not sent, and an agent that wants it sharper has the text file
+ * listed above. A different slice of the same page counts as sent — what the
+ * memo tracks is the page's presence in the thread, not the excerpt's edges.
+ */
+function freshPages (block, sent) {
+  if (!block || !sent) return block
+  if (!(sent.pageKeys instanceof Set)) sent.pageKeys = new Set()
+  const marks = [...block.matchAll(PAGE_MARK)]
+  if (!marks.length) return block
+
+  const codaAt = block.lastIndexOf(`\n\n${PAGES_CODA}`)
+  const end = codaAt > marks[marks.length - 1].index ? codaAt : block.length
+  const lead = block.slice(0, marks[0].index).trim()
+  const coda = codaAt > marks[marks.length - 1].index ? block.slice(codaAt).trim() : ''
+
+  const kept = []
+  const skipped = []
+  marks.forEach((mark, at) => {
+    const to = at + 1 < marks.length ? marks[at + 1].index : end
+    const key = `${mark[1]}\u0000${mark[2]}`
+    if (sent.pageKeys.has(key)) {
+      skipped.push(`${mark[1]} page ${mark[2]}`)
+      return
+    }
+    sent.pageKeys.add(key)
+    kept.push(block.slice(mark.index, to).trim())
+  })
+
+  if (!kept.length) {
+    return `The pages ranked for this question — ${skipped.join(', ')} — were all quoted earlier ` +
+      'in this conversation and are still in front of you; the text files above have the rest.'
+  }
+  const already = skipped.length
+    ? `Already quoted earlier in this conversation, and still in front of you: ${skipped.join(', ')}.`
+    : ''
+  return [lead, ...kept, already, coda].filter(Boolean).join('\n\n')
+}
 
 /**
  * How many turns the rules are trusted to hold before they are said again.
@@ -352,11 +423,10 @@ function promptFor (text, context, sent = null) {
 
   const open = once('opened', context?.note ? opened(context) : '',
     `The open document is still ${context?.note}, at the same place in it.`)
-  const body = quoted(context, sent)
+  const body = context?.skipExcerpt ? '' : quoted(context, sent)
   const ready = once('pdfs', pdfs,
     'The same PDF text files as before are ready; read single pages from them as described earlier.')
-  const pages = once('pages', context?.pdfContext || '',
-    'The pages worth reading are the ones already quoted in this conversation.')
+  const pages = freshPages(context?.pdfContext || '', sent)
 
   /* The rules are a standing instruction, and a thread that has them keeps
      them. Repeating them every turn bought nothing and was charged for each

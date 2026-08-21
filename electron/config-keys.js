@@ -35,6 +35,10 @@ const booleanList = (v) => Array.isArray(v) && v.every(boolean)
 /* A plain object of JSON scalars — the model catalogue and the saved searches.
    Deliberately shallow: nothing that reads these walks a nested structure. */
 const record = (v) => !!v && typeof v === 'object' && !Array.isArray(v)
+/* A record whose values are all strings — the custom hotkeys, command id to
+   accelerator. The strings are validated again where they are spent (see
+   `usableAccelerator` in main.js); this only pins the shape. */
+const recordOfStrings = (v) => record(v) && Object.values(v).every(string)
 /* `undefined` clears a key. The renderer sends it for "forget the last note". */
 const orCleared = (check) => (v) => v === undefined || check(v)
 
@@ -58,6 +62,11 @@ const CONFIG_KEYS = {
   paneBelow: orCleared(string),
   paneBelowHeight: number,
   sideDoc: orCleared(string),
+  /* The size the run output popup was left at, in pixels — see `legalRunSize`
+     in src/runcode.js, which clamps both to the stage on the way in, so a
+     number out of range here can only ever open as a panel that fits. */
+  runWidth: number,
+  runHeight: number,
   railWidth: number,
   sideWidth: number,
   chatWidth: number,
@@ -80,6 +89,9 @@ const CONFIG_KEYS = {
      same reason: it has to survive a relaunch. */
   lockedFiles: stringList,
 
+  /* Custom hotkeys: menu command id -> accelerator ('' = no key). */
+  hotkeys: orCleared(recordOfStrings),
+
   /* Appearance. */
   theme: string,
   /* A lattice around every cell of a `.csv` grid, rather than rules between
@@ -90,10 +102,17 @@ const CONFIG_KEYS = {
   centerHeadings: boolean,
   codeNumbers: boolean,
   codeWrap: boolean,
+  /* Line numbers down the side of a source file — `.py`, `.cpp`, `.tex`. Not
+     notes: see `setLineNumbers` in editor.js for why prose is never numbered. */
+  sourceNumbers: boolean,
   measure: orCleared(number),
   outline: boolean,
   readableWidth: boolean,
   spellcheck: boolean,
+  /* Languages checked beside English, as ids from src/spell-languages.js. An
+     id with no shipped dictionary is skipped at load, so the list is only
+     length-checked here. */
+  spellLanguages: stringList,
   autosave: orCleared(boolean),
 
   /* The copilot. */

@@ -30,6 +30,14 @@ const FLASH_MS = 1500
    wash rather than inheriting the first one's remaining time. */
 const flashing = new WeakMap()
 
+/* Programmatic smooth scrolling is not reachable from the stylesheet — the
+   app's reduced-motion block can only shorten animations and transitions, and
+   a `behavior: 'smooth'` asked for in JavaScript sails straight through it.
+   Asked per jump rather than read once, because the setting can change while
+   the app is open. */
+export const scrollBehavior = () =>
+  window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth'
+
 /**
  * Say where a jump landed.
  *
@@ -83,6 +91,7 @@ export function revealAnchorTarget (event) {
   let id
   try { id = decodeURIComponent(href.slice(1)) } catch { id = href.slice(1) }
   const selector = `[id="${CSS.escape(id)}"]`
+  /** @type {Element | null} */
   let target = null
   for (let scope = anchor.parentElement; scope && !target; scope = scope.parentElement) {
     target = scope.querySelector(selector)
@@ -92,7 +101,7 @@ export function revealAnchorTarget (event) {
   event.preventDefault()
   // Centred, not scrolled-to-the-top: a reference is read against what is
   // around it, and the browser's own jump hides the lines above the target.
-  target.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  target.scrollIntoView({ block: 'center', behavior: scrollBehavior() })
   flashTarget(target)
   return true
 }

@@ -48,14 +48,23 @@ const escaped = (text, i) => text[i - 1] === '\\' || text[i - 1] === '$'
 
 /** Every price in `text`, skipping any that falls inside a maths span. */
 export function findMoney (text, maths = findMath(text)) {
-  const inMath = (from, to) => maths.some((m) => from < m.to && to > m.from)
-
   const out = []
+
+  /* `findMath` yields its spans in document order and never overlapping, and a
+     regex walk yields its hits the same way, so the two lists are walked once
+     side by side. Asking `maths.some(...)` per price instead made the scan
+     O(prices x spans) — and a note dense in maths is exactly a note dense in
+     the `$` this pattern keeps catching. */
+  let next = 0
   MONEY.lastIndex = 0
   for (const m of text.matchAll(MONEY)) {
     const from = m.index
     const to = from + m[0].length
-    if (escaped(text, from) || inMath(from, to)) continue
+    // Spans that end at or before this price cannot hold it, nor any price
+    // after it: both cursors only ever move forward.
+    while (next < maths.length && maths[next].to <= from) next++
+    if (escaped(text, from)) continue
+    if (next < maths.length && to > maths[next].from) continue
     out.push({ from, to, amount: m[1] })
   }
   return out
@@ -65,7 +74,8 @@ export function findMoney (text, maths = findMath(text)) {
 
 /* The inline run, scanned once per run rather than once per `$`: the rule is
    called at every dollar sign in a paragraph, and they all share `src`. */
-let inlineMaths = { src: null, spans: null }
+/** @type {{ src: string | null, spans: ReturnType<typeof findMath> }} */
+let inlineMaths = { src: null, spans: [] }
 function mathsIn (src) {
   if (inlineMaths.src !== src) inlineMaths = { src, spans: findMath(src) }
   return inlineMaths.spans

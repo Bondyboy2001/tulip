@@ -197,7 +197,7 @@ const TAG = /<!--[\s\S]*?(?:-->|$)|<[!?][^>]*>|<\/\s*([a-zA-Z][a-zA-Z0-9:-]*)\s*
 
 /**
  * @param {string} html   what the note wrote
- * @param {(src: string) => string|null} resolve  vault asset -> URL
+ * @param {(src: string) => string|null} [resolve]  vault asset -> URL
  *
  * Exported for the notebook viewer, which faces the same problem from the
  * other side: a `text/html` output was written by whatever code the notebook
@@ -227,13 +227,14 @@ function withLine (html, line) {
 }
 
 /**
- * @param {object} md
+ * @param {import('markdown-it').MarkdownIt} md
  * @param {{resolve?: (src: string) => string|null}} options
  */
 export function rawHtmlPlugin (md, { resolve } = {}) {
   md.renderer.rules.html_block = (tokens, i) => {
     const html = sanitizeHtml(tokens[i].content, resolve)
-    return tokens[i].map ? withLine(html, tokens[i].map[0]) : html
+    const map = tokens[i].map
+    return map ? withLine(html, map[0]) : html
   }
   md.renderer.rules.html_inline = (tokens, i) => sanitizeHtml(tokens[i].content, resolve)
 }

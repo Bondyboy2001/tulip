@@ -1,0 +1,17 @@
+[
+  { "id": "cs", "label": "Czech" },
+  { "id": "da", "label": "Danish" },
+  { "id": "nl", "label": "Dutch" },
+  { "id": "fr", "label": "French" },
+  { "id": "de", "label": "German" },
+  { "id": "el", "label": "Greek" },
+  { "id": "it", "label": "Italian" },
+  { "id": "nb", "label": "Norwegian" },
+  { "id": "pl", "label": "Polish" },
+  { "id": "pt", "label": "Portuguese" },
+  { "id": "ro", "label": "Romanian" },
+  { "id": "ru", "label": "Russian" },
+  { "id": "es", "label": "Spanish" },
+  { "id": "sv", "label": "Swedish" },
+  { "id": "uk", "label": "Ukrainian" }
+]

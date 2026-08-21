@@ -11,11 +11,9 @@ const os = require('node:os')
 const crypto = require('node:crypto')
 const { spawn } = require('node:child_process')
 const { pathToFileURL } = require('node:url')
-const ai = require('./ai')
 const { TurnLedger, turnId } = require('./ai-turns')
 const { mergeChatHistory } = require('./chat-history')
 const { restoreConflicts } = require('./copilot-restore')
-const { createTexCompiler } = require('./tex-compile')
 const { TrustStore } = require('./trust-store')
 const { makeStore: makeReviewStore } = require('./review-store')
 const { makeIndexCache } = require('./index-cache')
@@ -42,7 +40,6 @@ const { makePathStore, relocateAll, forgetAll, resetAll } = require('./path-stor
 const { safeFileName } = require('./safe-name')
 const { parseFrontmatter, propsOf, propValues } = require('./frontmatter.cjs')
 const { emptyWhiteboard, whiteboardText } = require('./whiteboard-data')
-const { KernelHost } = require('./kernel')
 const { killTree } = require('./kill-tree')
 const PDF_TEXT_FORMAT = require('./pdf-text-format.json').version
 const VAULT_CONTRACT = require('./vault-contract.json')
@@ -190,6 +187,12 @@ const isCode = (p) => CODE_EXT.has(path.extname(String(p || '')).toLowerCase())
 const DATA_EXT = new Set(Object.keys(VAULT_CONTRACT.dataExtensions))
 const isData = (p) => DATA_EXT.has(path.extname(String(p || '')).toLowerCase())
 
+/* The two together, for the watcher's classifier: a `.py` or a `.csv` changing
+   on disk means the same to the caches as a `.tex` does, and the classifier
+   has to be able to say so rather than falling through to its unknown-name
+   fallback. */
+const TEXT_DOCUMENT_EXT = new Set([...CODE_EXT, ...DATA_EXT])
+
 /* Every other text document the Copilot can edit, for the turn review. The
    review card is built by diffing before/after snapshots, and a snapshot that
    read only notes and TeX made an agent's write to a notebook, a table or a
@@ -246,16 +249,18 @@ const showAs = (name) => {
 const isSnapshotFile = (p) => {
   const extension = path.extname(String(p || '')).toLowerCase()
   return MD_EXT.has(extension) || ASSET_EXT.has(extension) ||
-    isTex(p) || isPdf(p) || isWhiteboard(p)
+    isTex(p) || isPdf(p) || isReviewedDocument(p)
 }
 
-/* Source and data files are deliberately absent from that list. They reach the
-   tree — and through it the quick switcher, which is built from the tree and
-   not from here — so they are findable by name. What they are not is *indexed*:
-   every bucket the snapshot sorts this list into is Markdown-shaped, built
-   from headings, wikilinks, tags and frontmatter, and a Python file has none
-   of those. Retaining them here would be paying for a walk to filter them out
-   again at the end of it.
+/* Source and data files are here for one bucket only: `documents`, the list the
+   turn review's before/after snapshot is read from. They are still not
+   *indexed* — every other bucket the snapshot sorts this list into is
+   Markdown-shaped, built from headings, wikilinks, tags and frontmatter, and a
+   Python file has none of those, so none of them can hold one. Dropping them
+   from the walk entirely, which is what this used to do, is what made
+   `documents` permanently empty: an agent could rewrite a `.cpp`, a `.csv` or a
+   notebook and the turn ended with no review card and nothing to reject,
+   however carefully `isReviewedDocument` said otherwise.
 
    Searching inside them is a real thing to want and a different feature: it
    needs an index that is about lines rather than about notes. */
@@ -402,6 +407,8 @@ function sendTo (win, channel, payload) {
 }
 
 let vaultPath = null
+let kernels = null
+let aiInstance = null
 
 const cleanFileTags = (values) => {
   const tags = [...new Set((Array.isArray(values) ? values : [])
@@ -433,6 +440,11 @@ const MAX_STORED_COLUMN = 4000
    split somebody's data. */
 const STORED_DELIMITERS = new Set([',', ';', '\t', '|'])
 
+/* Which way a column was pointed by hand. Three answers and no others; a
+   fourth is not an alignment and is dropped, leaving that column to read the
+   way its content implies. */
+const STORED_ALIGNMENTS = new Set(['left', 'center', 'right'])
+
 const tableWidths = makePathStore({
   name: 'table-widths',
   vault: () => vaultPath,
@@ -449,7 +461,18 @@ const tableWidths = makePathStore({
     const usable = widths.every((width) =>
       Number.isFinite(width) && width >= MIN_STORED_COLUMN && width <= MAX_STORED_COLUMN)
     if (!usable) return null
-    return STORED_DELIMITERS.has(delimiter) ? { widths, delimiter } : { widths }
+    /* One entry per column or nothing: a list of another length describes a
+       different table, and pinning it on would point the wrong columns. Nulls
+       are the columns nobody has said anything about, and a list that is all
+       nulls is not worth keeping. */
+    const asked = Array.isArray(value) ? null : value?.aligns
+    const aligns = Array.isArray(asked) && asked.length === widths.length
+      ? asked.map((how) => (STORED_ALIGNMENTS.has(how) ? how : null))
+      : null
+    const kept = { widths }
+    if (aligns && aligns.some(Boolean)) kept.aligns = aligns
+    if (STORED_DELIMITERS.has(delimiter)) kept.delimiter = delimiter
+    return kept
   }
 })
 let watcher = null
@@ -1053,6 +1076,10 @@ let vaultSnapshottingFor = -1
 const invalidateVaultSnapshot = () => {
   vaultSnapshotCache = null
   vaultSnapshotGeneration++
+  /* Which PDFs there are has changed, so what the search pass believes about
+     them is worth nothing. Everything that creates, renames, deletes or
+     restores says so here, which makes this the one place that has to. */
+  forgetPdfSearchFacts()
   /* Every create, rename, delete and restore in the app already says so here,
      which makes this the one place a held document snapshot has to be told
      about all of them. */
@@ -1697,6 +1724,7 @@ function watchVault () {
         siteExtension: SITE_EXT,
         whiteboardExtension: WHITEBOARD_EXT,
         notebookExtension: NOTEBOOK_EXT,
+        documentExtensions: TEXT_DOCUMENT_EXT,
         assetExtensions: ASSET_EXT
       })
       if (change.ignore) return
@@ -1874,8 +1902,10 @@ async function openVault (dir) {
   vaultPath = dir
   /* The kernels belonged to the vault that is closing, and their namespaces
      describe notebooks nothing is showing any more. */
-  kernels.dispose().catch(() => {})
-  kernels.setRoot(dir)
+  if (kernels) {
+    kernels.dispose().catch(() => {})
+    kernels.setRoot(dir)
+  }
   // The next read of each is of the new vault's own file.
   resetAll()
   rememberVault(dir)
@@ -1938,6 +1968,11 @@ ipcMain.handle('app:version', () => app.getVersion())
    The answer names the newest tag and where to get it. Downloading, replacing
    and relaunching stay the reader's, which is also what makes this safe to
    have: there is no code path here that can install anything. */
+
+/* The project itself, for the Help menu — the API endpoint below is the same
+   repository seen through GitHub's API, and they are written apart so that
+   neither has to be derived from the other. */
+const REPO_URL = 'https://github.com/Bondyboy2001/tulip'
 
 const RELEASES = 'https://api.github.com/repos/Bondyboy2001/tulip/releases/latest'
 
@@ -2090,6 +2125,8 @@ ipcMain.handle('app:diagnostics', async () => {
    `revealMainWindow` here showed whichever window was built last — so opening
    a second one left the first hidden until its 4-second backstop fired. */
 const reveals = new Map()
+// The first paint warms the run cache once, not once per window.
+let runCachePruned = false
 ipcMain.on('app:painted', (event) => {
   reveals.get(event.sender.id)?.()
   /* The first paint is also the moment to warm the search index. Left alone,
@@ -2103,6 +2140,19 @@ ipcMain.on('app:painted', (event) => {
      resolved promise and nothing more. */
   if (vaultPath) {
     setTimeout(() => { ensureIndex().catch((error) => logCrash('warmIndex', error)) }, 50)
+  }
+
+  /* And the two other pieces of warming that used to run before there was a
+     window at all. The login shell is a whole profile evaluation — nvm, pyenv,
+     a prompt framework — and the run cache is a walk of a temp directory;
+     neither is wanted before the first Run, and both were competing with the
+     first paint for the same process. Warmed here so clicking Run still does
+     not wait on a login shell, and idempotent, so a second window's paint
+     costs nothing. */
+  ensureLoginPath()
+  if (!runCachePruned) {
+    runCachePruned = true
+    pruneRunCache().catch(() => {})
   }
 })
 
@@ -2403,7 +2453,7 @@ function createWindow ({ open = null } = {}) {
     stopKernelsOwnedBy(win)
     if (primary) {
       primaryWindow = null
-      try { ai.stop('SIGKILL') } catch { /* nothing running */ }
+      try { aiInstance?.stopAll('SIGKILL') } catch { /* nothing running */ }
     }
   })
 
@@ -2660,6 +2710,61 @@ function nudgeZoom (direction) {
   applyZoom(ZOOM_STEPS[next])
 }
 
+/* ------------------------------------------------------ custom hotkeys */
+
+/**
+ * Which menu commands can be rebound, and to what — see the Hotkeys section
+ * of the Settings pane. The menu template is the registry: every item that
+ * sends a command over the `menu` channel carries `command:` beside its
+ * click, and this pass collects them (label, menu, default key) and swaps in
+ * whatever the config says instead. An empty override means "no key at all".
+ *
+ * The catalogue is rebuilt with the menu, so `hotkeys:list` always describes
+ * the menu actually installed.
+ */
+let hotkeyCatalogue = []
+
+/* Electron throws out of `buildFromTemplate` on an accelerator it cannot
+   parse, and this one arrives from a config file — a mangled entry must cost
+   that one binding, never the whole menu at boot. */
+const ACCELERATOR_SHAPE = new RegExp(
+  '^(?:(?:Cmd|Ctrl|CmdOrCtrl|Alt|Option|Shift|Super|Meta)\\+)*' +
+  '(?:[A-Za-z0-9]|F(?:[1-9]|1[0-9]|2[0-4])|Plus|Space|Tab|Backspace|Delete|' +
+  "Return|Enter|Esc|Escape|Up|Down|Left|Right|Home|End|PageUp|PageDown|" +
+  "[\\[\\]\\\\/,.'=;`-])$"
+)
+const usableAccelerator = (value) =>
+  typeof value === 'string' && (value === '' || ACCELERATOR_SHAPE.test(value))
+
+function applyHotkeys (template) {
+  const overrides = readConfig().hotkeys || {}
+  const seen = new Map()
+  const walk = (items, menuLabel) => {
+    for (const item of items || []) {
+      if (Array.isArray(item.submenu)) walk(item.submenu, item.label || menuLabel)
+      if (!item.command) continue
+      if (!seen.has(item.command)) {
+        seen.set(item.command, {
+          command: item.command,
+          label: item.label,
+          section: menuLabel || '',
+          accelerator: item.accelerator || ''
+        })
+      }
+      const wanted = overrides[item.command]
+      if (!usableAccelerator(wanted)) continue
+      /* A hidden twin exists only to carry a second spelling of the default —
+         ⌘\ beside ⌘B — and a rebound command must not keep the stale key
+         alive underneath the new one. */
+      if (item.visible === false) { delete item.accelerator; continue }
+      if (wanted) item.accelerator = wanted
+      else delete item.accelerator
+    }
+  }
+  walk(template, '')
+  hotkeyCatalogue = [...seen.values()]
+}
+
 function buildMenu () {
   const template = [
     {
@@ -2671,9 +2776,16 @@ function buildMenu () {
            in it, so it is asked for here rather than under File — where it sat
            among New Note and Save, and where nobody looking to switch vaults
            thought to look. */
-        { label: 'Open Vault…', accelerator: 'Cmd+Shift+O', click: () => pickVault() },
+        /* Both of these existed only as palette commands. "Check for Updates…"
+           is the single most conventional item in a Mac application menu, and
+           a reader who wants to know whether they are behind looks here before
+           anywhere else; "Open Recent" is where every editor puts the list. */
+        { label: 'Check for Updates…', command: 'check-for-updates', click: () => toFocused('menu', 'check-for-updates') },
         { type: 'separator' },
-        { label: 'Settings…', accelerator: 'Cmd+,', click: () => toFocused('menu', 'settings') },
+        { label: 'Open Vault…', accelerator: 'Cmd+Shift+O', click: () => pickVault() },
+        { label: 'Open Recent Vault…', command: 'open-recent-vault', click: () => toFocused('menu', 'open-recent-vault') },
+        { type: 'separator' },
+        { label: 'Settings…', accelerator: 'Cmd+,', command: 'settings', click: () => toFocused('menu', 'settings') },
         { type: 'separator' },
         { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' },
         { type: 'separator' },
@@ -2683,28 +2795,33 @@ function buildMenu () {
     {
       label: 'File',
       submenu: [
-        { label: 'New Note', accelerator: 'Cmd+N', click: () => toFocused('menu', 'new-note') },
-        { label: 'New Whiteboard', click: () => toFocused('menu', 'new-whiteboard') },
-        { label: 'New Website', click: () => toFocused('menu', 'new-website') },
-        { label: 'New Language', click: () => toFocused('menu', 'new-language') },
-        { label: 'New Folder', accelerator: 'Cmd+Shift+N', click: () => toFocused('menu', 'new-folder') },
+        { label: 'New Note', accelerator: 'Cmd+N', command: 'new-note', click: () => toFocused('menu', 'new-note') },
+        { label: 'New Whiteboard', command: 'new-whiteboard', click: () => toFocused('menu', 'new-whiteboard') },
+        { label: 'New Website', command: 'new-website', click: () => toFocused('menu', 'new-website') },
+        { label: 'New Language', command: 'new-language', click: () => toFocused('menu', 'new-language') },
+        { label: 'New Folder', accelerator: 'Cmd+Shift+N', command: 'new-folder', click: () => toFocused('menu', 'new-folder') },
         { type: 'separator' },
-        { label: 'New Tab', accelerator: 'Cmd+T', click: () => toFocused('menu', 'new-tab') },
-        { label: 'Close Tab', accelerator: 'Cmd+W', click: () => toFocused('menu', 'close-tab') },
-        { label: 'Reopen Closed Tab', accelerator: 'Cmd+Shift+T', click: () => toFocused('menu', 'reopen-tab') },
+        { label: 'New Tab', accelerator: 'Cmd+T', command: 'new-tab', click: () => toFocused('menu', 'new-tab') },
+        { label: 'Close Tab', accelerator: 'Cmd+W', command: 'close-tab', click: () => toFocused('menu', 'close-tab') },
+        { label: 'Reopen Closed Tab', accelerator: 'Cmd+Shift+T', command: 'reopen-tab', click: () => toFocused('menu', 'reopen-tab') },
         { type: 'separator' },
-        { label: 'Reveal in Finder', click: () => toFocused('menu', 'reveal') },
+        { label: 'Reveal in Finder', command: 'reveal', click: () => toFocused('menu', 'reveal') },
         { type: 'separator' },
-        { label: 'Save', accelerator: 'Cmd+S', click: () => toFocused('menu', 'save') },
+        { label: 'Save', accelerator: 'Cmd+S', command: 'save', click: () => toFocused('menu', 'save') },
+        /* The toolbar's own Run for the source file on screen, reachable from
+           the keyboard. ⌘R is free here — this menu has never carried the
+           browser's reload. The renderer guards it: with anything but a
+           runnable source file open, the command says so and does nothing. */
+        { label: 'Run File', accelerator: 'Cmd+R', command: 'run-file', click: () => toFocused('menu', 'run-file') },
         /* Not Cmd+P, which has always been the command palette here. */
-        { label: 'Print…', accelerator: 'Cmd+Alt+P', click: () => toFocused('menu', 'print-note') },
-        { label: 'Export as PDF…', click: () => toFocused('menu', 'export-pdf') },
-        { label: 'Export as HTML…', click: () => toFocused('menu', 'export-html') },
-        { label: 'Export as Markdown…', click: () => toFocused('menu', 'export-markdown') },
-        { label: 'Export Whiteboard as PNG…', click: () => toFocused('menu', 'export-whiteboard-png') },
-        { label: 'Export Whiteboard as SVG…', click: () => toFocused('menu', 'export-whiteboard-svg') },
-        { label: 'Export Notebook as Script…', click: () => toFocused('menu', 'export-notebook-script') },
-        { label: 'Export Notebook as HTML…', click: () => toFocused('menu', 'export-notebook-html') }
+        { label: 'Print…', accelerator: 'Cmd+Alt+P', command: 'print-note', click: () => toFocused('menu', 'print-note') },
+        { label: 'Export as PDF…', command: 'export-pdf', click: () => toFocused('menu', 'export-pdf') },
+        { label: 'Export as HTML…', command: 'export-html', click: () => toFocused('menu', 'export-html') },
+        { label: 'Export as Markdown…', command: 'export-markdown', click: () => toFocused('menu', 'export-markdown') },
+        { label: 'Export Whiteboard as PNG…', command: 'export-whiteboard-png', click: () => toFocused('menu', 'export-whiteboard-png') },
+        { label: 'Export Whiteboard as SVG…', command: 'export-whiteboard-svg', click: () => toFocused('menu', 'export-whiteboard-svg') },
+        { label: 'Export Notebook as Script…', command: 'export-notebook-script', click: () => toFocused('menu', 'export-notebook-script') },
+        { label: 'Export Notebook as HTML…', command: 'export-notebook-html', click: () => toFocused('menu', 'export-notebook-html') }
       ]
     },
     {
@@ -2721,14 +2838,14 @@ function buildMenu () {
            where the difference between them lives — a menu accelerator would
            swallow the key app-wide and hand all three to this one command,
            which is only the first of the three. */
-        { label: 'Run Cell', click: () => toFocused('menu', 'nb-run-cell') },
-        { label: 'Run All', click: () => toFocused('menu', 'nb-run-all') },
-        { label: 'Run All Above', click: () => toFocused('menu', 'nb-run-above') },
-        { label: 'Run All Below', click: () => toFocused('menu', 'nb-run-below') },
+        { label: 'Run Cell', command: 'nb-run-cell', click: () => toFocused('menu', 'nb-run-cell') },
+        { label: 'Run All', command: 'nb-run-all', click: () => toFocused('menu', 'nb-run-all') },
+        { label: 'Run All Above', command: 'nb-run-above', click: () => toFocused('menu', 'nb-run-above') },
+        { label: 'Run All Below', command: 'nb-run-below', click: () => toFocused('menu', 'nb-run-below') },
         { type: 'separator' },
-        { label: 'Interrupt', accelerator: 'Cmd+.', click: () => toFocused('menu', 'nb-interrupt') },
-        { label: 'Restart Kernel…', click: () => toFocused('menu', 'nb-restart') },
-        { label: 'Restart and Run All…', click: () => toFocused('menu', 'nb-restart-all') }
+        { label: 'Interrupt', accelerator: 'Cmd+.', command: 'nb-interrupt', click: () => toFocused('menu', 'nb-interrupt') },
+        { label: 'Restart Kernel…', command: 'nb-restart', click: () => toFocused('menu', 'nb-restart') },
+        { label: 'Restart and Run All…', command: 'nb-restart-all', click: () => toFocused('menu', 'nb-restart-all') }
       ]
     },
     {
@@ -2738,42 +2855,42 @@ function buildMenu () {
            means depends on what is on screen: a note undoes an edit, a PDF
            undoes a highlight, and a plain text field wants the browser's own
            history — which the renderer asks for back through `edit:undo`. */
-        { label: 'Undo', accelerator: 'Cmd+Z', click: () => toFocused('menu', 'undo') },
-        { label: 'Redo', accelerator: 'Shift+Cmd+Z', click: () => toFocused('menu', 'redo') },
+        { label: 'Undo', accelerator: 'Cmd+Z', command: 'undo', click: () => toFocused('menu', 'undo') },
+        { label: 'Redo', accelerator: 'Shift+Cmd+Z', command: 'redo', click: () => toFocused('menu', 'redo') },
         { type: 'separator' },
         { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' },
         { type: 'separator' },
-        { label: 'Find in Note', accelerator: 'Cmd+F', click: () => toFocused('menu', 'find') },
-        { label: 'Search Vault', accelerator: 'Cmd+Shift+F', click: () => toFocused('menu', 'search') }
+        { label: 'Find in Note', accelerator: 'Cmd+F', command: 'find', click: () => toFocused('menu', 'find') },
+        { label: 'Search Vault', accelerator: 'Cmd+Shift+F', command: 'search', click: () => toFocused('menu', 'search') }
       ]
     },
     {
       label: 'View',
       submenu: [
-        { label: 'Back', accelerator: 'Cmd+[', click: () => toFocused('menu', 'back') },
-        { label: 'Forward', accelerator: 'Cmd+]', click: () => toFocused('menu', 'forward') },
+        { label: 'Back', accelerator: 'Cmd+[', command: 'back', click: () => toFocused('menu', 'back') },
+        { label: 'Forward', accelerator: 'Cmd+]', command: 'forward', click: () => toFocused('menu', 'forward') },
         { type: 'separator' },
-        { label: 'Previous Tab', accelerator: 'Alt+Cmd+Left', click: () => toFocused('menu', 'prev-tab') },
-        { label: 'Next Tab', accelerator: 'Alt+Cmd+Right', click: () => toFocused('menu', 'next-tab') },
+        { label: 'Previous Tab', accelerator: 'Alt+Cmd+Left', command: 'prev-tab', click: () => toFocused('menu', 'prev-tab') },
+        { label: 'Next Tab', accelerator: 'Alt+Cmd+Right', command: 'next-tab', click: () => toFocused('menu', 'next-tab') },
         { type: 'separator' },
-        { label: 'Quick Switcher', accelerator: 'Cmd+O', click: () => toFocused('menu', 'switcher') },
-        { label: 'Jump to Heading', click: () => toFocused('menu', 'headings') },
-        { label: 'Command Palette', accelerator: 'Cmd+P', click: () => toFocused('menu', 'commands') },
+        { label: 'Quick Switcher', accelerator: 'Cmd+O', command: 'switcher', click: () => toFocused('menu', 'switcher') },
+        { label: 'Jump to Heading', command: 'headings', click: () => toFocused('menu', 'headings') },
+        { label: 'Command Palette', accelerator: 'Cmd+P', command: 'commands', click: () => toFocused('menu', 'commands') },
         { type: 'separator' },
-        { label: 'Toggle Sidebar', accelerator: 'Cmd+B', click: () => toFocused('menu', 'sidebar') },
+        { label: 'Toggle Sidebar', accelerator: 'Cmd+B', command: 'sidebar', click: () => toFocused('menu', 'sidebar') },
         // The old key still works. A menu item carries one accelerator, so the
         // second one needs a twin of its own, kept out of the menu.
-        { label: 'Toggle Sidebar', accelerator: 'Cmd+\\', visible: false, click: () => toFocused('menu', 'sidebar') },
-        { label: 'Toggle Outline', accelerator: 'Cmd+Shift+E', click: () => toFocused('menu', 'outline') },
-        { label: 'Toggle Backlinks', accelerator: 'Cmd+Shift+K', click: () => toFocused('menu', 'links') },
-        { label: 'Toggle Info', accelerator: 'Cmd+Shift+I', click: () => toFocused('menu', 'info') },
-        { label: 'Toggle Copilot', accelerator: 'Cmd+Shift+A', click: () => toFocused('menu', 'copilot') },
-        { label: 'Reading View', accelerator: 'Cmd+1', click: () => toFocused('menu', 'view-read') },
-        { label: 'Editing View', accelerator: 'Cmd+2', click: () => toFocused('menu', 'view-edit') },
-        { label: 'Raw View', accelerator: 'Cmd+3', click: () => toFocused('menu', 'view-raw') },
-        { label: 'Toggle Reading View', accelerator: 'Cmd+E', click: () => toFocused('menu', 'reading') },
-        { label: 'Toggle Theme', accelerator: 'Cmd+Shift+L', click: () => toFocused('menu', 'theme') },
-        { label: 'Change Theme…', click: () => toFocused('menu', 'themes') },
+        { label: 'Toggle Sidebar', accelerator: 'Cmd+\\', visible: false, command: 'sidebar', click: () => toFocused('menu', 'sidebar') },
+        { label: 'Toggle Outline', accelerator: 'Cmd+Shift+E', command: 'outline', click: () => toFocused('menu', 'outline') },
+        { label: 'Toggle Backlinks', accelerator: 'Cmd+Shift+K', command: 'links', click: () => toFocused('menu', 'links') },
+        { label: 'Toggle Info', accelerator: 'Cmd+Shift+I', command: 'info', click: () => toFocused('menu', 'info') },
+        { label: 'Toggle Copilot', accelerator: 'Cmd+Shift+A', command: 'copilot', click: () => toFocused('menu', 'copilot') },
+        { label: 'Reading View', accelerator: 'Cmd+1', command: 'view-read', click: () => toFocused('menu', 'view-read') },
+        { label: 'Editing View', accelerator: 'Cmd+2', command: 'view-edit', click: () => toFocused('menu', 'view-edit') },
+        { label: 'Raw View', accelerator: 'Cmd+3', command: 'view-raw', click: () => toFocused('menu', 'view-raw') },
+        { label: 'Toggle Reading View', accelerator: 'Cmd+E', command: 'reading', click: () => toFocused('menu', 'reading') },
+        { label: 'Toggle Theme', accelerator: 'Cmd+Shift+L', command: 'theme', click: () => toFocused('menu', 'theme') },
+        { label: 'Change Theme…', command: 'themes', click: () => toFocused('menu', 'themes') },
         { type: 'separator' },
         { label: 'Default Size', accelerator: 'CmdOrCtrl+0', click: () => zoomCommand(0) },
         { label: 'Zoom In', accelerator: 'CmdOrCtrl+Plus', click: () => zoomCommand(1) },
@@ -2802,8 +2919,28 @@ function buildMenu () {
         { type: 'separator' },
         { role: 'front' }
       ]
+    },
+    {
+      /* There was no Help menu at all. Everything under it existed already —
+         in the command palette — which is only findable by someone who knows
+         ⌘P, and the two diagnostics items are exactly what a reader reaches
+         for at the moment something has gone wrong and nothing is working the
+         way they expect. The keyboard sheet is the one thing here that is not
+         in the palette: an app whose whole interface is chords should be able
+         to list them. */
+      role: 'help',
+      submenu: [
+        { label: 'Keyboard Shortcuts', accelerator: 'Cmd+/', command: 'shortcuts', click: () => toFocused('menu', 'shortcuts') },
+        { type: 'separator' },
+        { label: 'Tulip on GitHub', click: () => shell.openExternal(REPO_URL) },
+        { label: 'Report an Issue…', click: () => shell.openExternal(`${REPO_URL}/issues/new`) },
+        { type: 'separator' },
+        { label: 'Reveal Crash Log', command: 'reveal-crash-log', click: () => toFocused('menu', 'reveal-crash-log') },
+        { label: 'Copy Diagnostics', command: 'copy-diagnostics', click: () => toFocused('menu', 'copy-diagnostics') }
+      ]
     }
   ]
+  applyHotkeys(template)
   Menu.setApplicationMenu(Menu.buildFromTemplate(template))
 }
 
@@ -3113,7 +3250,18 @@ ipcMain.handle('file:write', async (_e, p, content, metadata = null) => {
      the same text the write is about to replace, and reading after would hand
      the history store the text being written. Read even when the file is new,
      so the note's first save is recorded as the thing it replaced — nothing. */
-  const before = versioned ? await fs.readFile(abs, 'utf8').catch(() => null) : null
+  /* Except when the index is already holding that same text. Its entry carries
+     the mtime and size it was read at, and those matching the file this write
+     is about to replace is the same freshness test the index sync itself
+     trusts — so the read is of a note that is already in memory, on the path
+     that runs every few seconds for as long as anyone is typing. */
+  const held = versioned && isMarkdown ? index.get(rel(abs)) : null
+  const before = !versioned
+    ? null
+    : (held && oldStat && held.mtime === oldStat.mtimeMs && held.size === oldStat.size &&
+        typeof held.text === 'string' && held.size <= MAX_INDEX_BYTES)
+        ? held.text
+        : await fs.readFile(abs, 'utf8').catch(() => null)
   /* Capture the old inode's birthtime before the atomic rename replaces it.
      Info can then keep saying when the note was created rather than when its
      newest crash-safe save landed. */
@@ -3557,6 +3705,7 @@ ipcMain.handle('tex:compile', async (_e, p) => {
   if (!texCompiler || texCompilerVault !== vaultPath) {
     texCompiler?.stop()
     texCompilerVault = vaultPath
+    const { createTexCompiler } = require('./tex-compile')
     texCompiler = createTexCompiler({
       vault: vaultPath,
       cacheRoot: TEX_PREVIEW_DIR(),
@@ -3615,6 +3764,7 @@ function teachWord (word) {
   const w = String(word ?? '').trim()
   if (!w) return false
   speller?.add(w)
+  forgetSpellVerdicts()
   const done = session.defaultSession.addWordToSpellCheckerDictionary(w)
   // The renderer is holding a pass that is now out of date by one word.
   broadcast('dictionary:changed')
@@ -3628,6 +3778,7 @@ ipcMain.handle('dictionary:remove', (_e, word) => {
   // nspell has no way to take a word back out, so the checker is thrown away
   // and rebuilt without it on the next question.
   speller = null
+  forgetSpellVerdicts()
   const done = session.defaultSession.removeWordFromSpellCheckerDictionary(w)
   broadcast('dictionary:changed')
   return done
@@ -3646,6 +3797,25 @@ ipcMain.handle('dictionary:remove', (_e, word) => {
 let speller = null
 let spellerLoading = null
 
+/* One extra language's Hunspell pair, from the gzipped files the build put in
+   dist/dict (see build.mjs). The id has been through the config's validator
+   and appAsset refuses to leave dist, but the shape check keeps a stray value
+   to a missing-file miss rather than a path error. A pair that is not there —
+   an id from a newer config under an older build — returns null, and the
+   checker simply goes without that language. */
+function loadSpellDictionary (id) {
+  if (!/^[a-z]{2,3}(-[a-z0-9]{2,8})?$/.test(String(id || ''))) return null
+  try {
+    const { gunzipSync } = require('node:zlib')
+    return {
+      aff: gunzipSync(fsSync.readFileSync(appAsset(`dict/${id}.aff.gz`))),
+      dic: gunzipSync(fsSync.readFileSync(appAsset(`dict/${id}.dic.gz`)))
+    }
+  } catch {
+    return null
+  }
+}
+
 function spellerNow () {
   if (speller) return Promise.resolve(speller)
   if (spellerLoading) return spellerLoading
@@ -3655,7 +3825,11 @@ function spellerNow () {
        not a mistake", and the panel has to honour it the same way the
        underlines do. */
     const taught = await session.defaultSession.listWordsInSpellCheckerDictionary().catch(() => [])
-    speller = createSpeller(variantForLocale(app.getLocale()), taught)
+    const languages = readConfig().spellLanguages
+    speller = createSpeller(variantForLocale(app.getLocale()), taught, {
+      languages: Array.isArray(languages) ? languages : [],
+      loadDictionary: loadSpellDictionary
+    })
     return speller
   })()
   spellerLoading.finally(() => { spellerLoading = null })
@@ -3667,10 +3841,80 @@ function spellerNow () {
    is not prose, and neither is worth blocking this process over. */
 const MAX_SPELL_WORDS = 8000
 
+/* One verdict per word, kept between passes.
+   The panel asks again on every pause in typing, and it asks about the whole
+   note each time — so a three-thousand-word note was three thousand Hunspell
+   lookups every half second, on the event loop that also serves file reads and
+   the app's own assets. A word's spelling does not change; only the dictionary
+   can change the answer, and both the ways it can do that clear this map (they
+   are the two places `dictionary:changed` is announced).
+
+   Bounded, and cleared whole rather than evicted one at a time: this only ever
+   saves repeated work, so the rare session that overflows it pays for one cold
+   pass rather than growing without end. */
+const spellVerdicts = new Map()
+const MAX_SPELL_MEMO = 40000
+/* Moved by a dictionary change and by nothing else — not by the memo simply
+   filling up, which is this process tidying after itself rather than the
+   answers changing. A pass in flight compares it against what it captured to
+   find out whether the checker it is holding has been superseded. */
+let spellGeneration = 0
+function forgetSpellVerdicts () { spellVerdicts.clear(); spellGeneration++ }
+
+/* How many unknown words are looked up before yielding. The very first pass
+   over a long note has nothing memoised and is the one that can block; broken
+   up, an IPC call that arrives in the middle of it waits for a chunk instead of
+   the note. */
+const SPELL_CHUNK = 500
+
+/* One walk of the unknown words, into a map of this pass's own.
+ *
+ * Kept out of the memo until the walk is over because of what the yields
+ * between chunks let in: a word removed from the dictionary mid-pass sets
+ * `speller` aside and clears the memo, and the loop — holding the checker it
+ * captured before its first await — used to resume and write that discarded
+ * checker's verdicts into the freshly cleared map. The removed word was
+ * recorded as correctly spelt and stayed that way until the next dictionary
+ * change. `stable` is how the caller learns its answers are of the dictionary
+ * that is still in force.
+ */
+async function spellPass (fresh) {
+  const mine = spellGeneration
+  const checker = await spellerNow()
+  const out = new Map()
+  for (let i = 0; i < fresh.length; i += SPELL_CHUNK) {
+    const chunk = fresh.slice(i, i + SPELL_CHUNK)
+    const bad = new Set(checker.check(chunk))
+    for (const word of chunk) out.set(word, bad.has(word))
+    if (i + SPELL_CHUNK < fresh.length) await new Promise((done) => setImmediate(done))
+  }
+  return { out, stable: spellGeneration === mine }
+}
+
 ipcMain.handle('spell:check', async (_e, words) => {
   if (!Array.isArray(words) || !words.length) return []
-  const checker = await spellerNow()
-  return checker.check(words.slice(0, MAX_SPELL_WORDS))
+  const asked = words.slice(0, MAX_SPELL_WORDS).map((word) => String(word || '')).filter(Boolean)
+
+  const fresh = [...new Set(asked.filter((word) => !spellVerdicts.has(word)))]
+  if (!fresh.length) return asked.filter((word) => spellVerdicts.get(word))
+
+  /* A dictionary change during the walk means the answers are of a dictionary
+     nobody is using any more, so it is walked again against the new one. Twice
+     over is a bound rather than a belief: the pane re-asks on
+     `dictionary:changed` anyway, so a reader holding down Remove costs one
+     stale-looking pass and not an unbounded run of retries. */
+  let answer = await spellPass(fresh)
+  for (let tries = 0; !answer.stable && tries < 2; tries++) answer = await spellPass(fresh)
+
+  if (answer.stable) {
+    // The memo's own cap, which is not a change of answer — hence the plain
+    // clear rather than `forgetSpellVerdicts`.
+    if (spellVerdicts.size + fresh.length > MAX_SPELL_MEMO) spellVerdicts.clear()
+    for (const [word, bad] of answer.out) spellVerdicts.set(word, bad)
+  }
+
+  // This pass's own answers first: a clear may have emptied the memo under it.
+  return asked.filter((word) => answer.out.get(word) ?? spellVerdicts.get(word))
 })
 
 ipcMain.handle('spell:suggest', async (_e, word) => {
@@ -3889,23 +4133,81 @@ function passesFilters (key, entry, filters) {
   return true
 }
 
+/* What the search pass already knows about a PDF: whether its extracted text
+   is current, and the highlights it carries.
+
+   Both are answered from the sidecars, and both were asked afresh for every PDF
+   in the vault on every keystroke — two realpaths, two stats and a header read
+   for the first, a whole read and a `JSON.parse` for the second, times the
+   library. Held for a moment rather than for a generation because the sidecars
+   are written under `.annotations/`, which the vault watcher deliberately
+   ignores: a short life is the honest way to hold something nothing will tell
+   us about. It is far shorter than a reader can retype a query, which is where
+   the whole cost was.
+
+   Cleared outright whenever this process is the one changing a sidecar — a
+   highlight saved, an extraction finished, a PDF deleted — so the reader's own
+   action is never the thing this is stale about. */
+const pdfSearchFacts = new Map()
+const PDF_FACTS_MS = 2000
+
+const forgetPdfSearchFacts = (relPath) => {
+  if (relPath) pdfSearchFacts.delete(String(relPath))
+  else pdfSearchFacts.clear()
+  /* What a PDF answers has changed, and the *narrowing* believes something
+     about that too: a typed-into query only re-asks the PDFs that matched the
+     query before it. A highlight saved on a document that matched nothing, or
+     text extracted for one that had none, would be invisible to every longer
+     query until the reader cleared the box — their own highlight, unfindable.
+     `documentsGeneration` is what that held list is checked against, so moving
+     it here is how the narrowing hears about it. */
+  documentsChanged()
+}
+
+function pdfFacts (pdfPath) {
+  const held = pdfSearchFacts.get(pdfPath)
+  if (held && Date.now() - held.at < PDF_FACTS_MS) return held
+  const fresh = { at: Date.now() }
+  pdfSearchFacts.set(pdfPath, fresh)
+  return fresh
+}
+
+async function pdfTextIsCurrentCached (pdfPath) {
+  const facts = pdfFacts(pdfPath)
+  if (facts.current === undefined) facts.current = await pdfTextIsCurrent(pdfPath)
+  return facts.current
+}
+
 async function pdfMarksForSearch (pdfPath) {
+  const facts = pdfFacts(pdfPath)
+  if (facts.marks) return facts.marks
   try {
     const file = annotationFile(pdfPath)
     await assertReal(file)
     const parsed = JSON.parse(await fs.readFile(file, 'utf8'))
-    return Array.isArray(parsed?.highlights) ? parsed.highlights : []
-  } catch { return [] }
+    facts.marks = Array.isArray(parsed?.highlights) ? parsed.highlights : []
+  } catch { facts.marks = [] }
+  return facts.marks
 }
 
 /** Search the local page-text and highlight sidecars that the PDF reader and
  * Copilot already share. Missing sidecars are reported, never generated in the
  * keystroke path; the background PDF sweep is responsible for preparation. */
-async function searchPdfDocuments (q) {
-  const { pdfs } = await getVaultSnapshot()
+async function searchPdfDocuments (q, only = null) {
+  const { pdfs: all } = await getVaultSnapshot()
+  /* The PDFs the last answer left in the running, when this query is a
+     narrowing of it — the same reasoning the note loop rests on, and for the
+     same reason: a document that does not hold `phys` cannot hold `physi`, so
+     the ones that answered nothing then have nothing to answer now. Left out of
+     the narrowing until now, so a search library of four hundred books paid for
+     all of them on every keystroke while the notes paid for a handful. */
+  const pdfs = only ? all.filter((pdfPath) => only.has(pdfPath)) : all
   const assignedTags = await fileTags.all()
   const results = []
   const unsearchedPaths = []
+  // What this pass leaves for the next one to narrow from: everything that
+  // answered, and everything that could not be read to answer with.
+  const keys = new Set()
 
   /* Bounded, like every other walk of the vault here. Each PDF costs a couple
      of stats, an eighty-byte header read and — when the sidecar is current and
@@ -3924,11 +4226,12 @@ async function searchPdfDocuments (q) {
 
     if (wantsPdf && pathPasses('pdf')) {
       if (!q.terms.length) {
+        keys.add(pdfPath)
         results.push({
           path: pdfPath, name, kind: 'pdf',
           hits: [{ page: 1, text: 'PDF document', source: 'pdf' }], total: 0, score: 0
         })
-      } else if (await pdfTextIsCurrent(pdfPath)) {
+      } else if (await pdfTextIsCurrentCached(pdfPath)) {
         try {
           const entry = await pdfPagesOf(pdfTextFile(pdfPath))
           const hits = []
@@ -3943,11 +4246,22 @@ async function searchPdfDocuments (q) {
             }
           }
           if (hits.length) {
+            keys.add(pdfPath)
             const named = q.terms.filter((term) => term.has.test(name)).length
             results.push({ path: pdfPath, name, kind: 'pdf', hits, total, score: total + named * 8 })
           }
-        } catch { unsearchedPaths.push(pdfPath) }
-      } else unsearchedPaths.push(pdfPath)
+        } catch {
+          keys.add(pdfPath)
+          unsearchedPaths.push(pdfPath)
+        }
+      } else {
+        /* Nothing extracted yet. Carried forward for the same reason an
+           over-large note is: the narrower query still has to be able to say
+           this document went unread rather than quietly dropping the caveat —
+           and the sweep may well have prepared it by then. */
+        keys.add(pdfPath)
+        unsearchedPaths.push(pdfPath)
+      }
     }
 
     if (wantsHighlights && pathPasses('highlight')) {
@@ -3967,14 +4281,17 @@ async function searchPdfDocuments (q) {
         hits.push({ page: mark.rects?.[0]?.page || 1, text: text.trim().slice(0, 220), source: 'highlight', mark: mark.id })
         if (hits.length >= 6) break
       }
-      if (hits.length) results.push({
-        path: pdfPath, name, kind: 'highlight', hits, total,
-        score: total + 6
-      })
+      if (hits.length) {
+        keys.add(pdfPath)
+        results.push({
+          path: pdfPath, name, kind: 'highlight', hits, total,
+          score: total + 6
+        })
+      }
     }
   })
 
-  return { results, unsearchedPaths: [...new Set(unsearchedPaths)] }
+  return { results, unsearchedPaths: [...new Set(unsearchedPaths)], keys }
 }
 
 /* Past this many matches of one term in one note, the exact number stops being
@@ -4201,7 +4518,16 @@ async function searchVault (raw, opts = {}) {
     })
   }
 
-  const pdfAnswer = await searchPdfDocuments(q)
+  /* PDFs are narrowed on one more condition than notes are. `narrowsFrom` asks
+     about `indexGeneration`, which a PDF appearing or being re-extracted does
+     not move — it is not in the Markdown index — so `documentsGeneration`, which
+     every watched change and every write does move, is what says the held list
+     of PDFs still describes the vault. */
+  const pdfOnly = narrowed && lastSearch.pdfKeys && lastSearch.pdfAt === documentsGeneration
+    ? lastSearch.pdfKeys
+    : null
+  const pdfsAt = documentsGeneration
+  const pdfAnswer = await searchPdfDocuments(q, pdfOnly)
   results.push(...pdfAnswer.results)
   for (const pdfPath of pdfAnswer.unsearchedPaths) {
     unsearched++
@@ -4239,7 +4565,12 @@ async function searchVault (raw, opts = {}) {
     filters: q.filters,
     opts: { regex: !!opts.regex, word: !!opts.word, caseSensitive: !!opts.caseSensitive },
     keys,
-    whiteboardKeys
+    whiteboardKeys,
+    pdfKeys: pdfAnswer.keys,
+    /* The state of the vault the PDF pass was run against, not the state it
+       finished in: a PDF that changed while it ran is one this list may already
+       be wrong about, and the next query must go back to the whole set. */
+    pdfAt: pdfsAt
   }
 
   /* Sorted before the cap, not after. Ranking the first 200 notes the index
@@ -4265,14 +4596,21 @@ ipcMain.handle('search:vault', (_e, raw, opts = {}) => searchVault(raw, opts))
  * note rather than per occurrence: a note that says `#book` five times is one
  * book-note, not five.
  *
- * Not cached. A full scan costs what one search keystroke costs — the texts
- * are already in memory — and the callers debounce; a cache would only be a
- * third place the truth could go stale.
+ * Held against `indexGeneration`, exactly as `aliasTable` is: the scan is the
+ * HASHTAG expression over the full text of every note in the vault, and the
+ * completion asks for it on a keystroke. It cannot go stale, because the
+ * generation moves whenever anything the count is made of does — including the
+ * assigned file tags, whose store bumps it on save.
  */
+let tagCountsCache = null
+let tagCountsAt = -1
+
 ipcMain.handle('tags:vault', async () => {
   if (!vaultPath) return []
   await ensureIndex()
+  if (tagCountsCache && tagCountsAt === indexGeneration) return tagCountsCache
 
+  const taken = indexGeneration
   const counts = new Map()
   const assigned = await fileTags.all()
   for (const tags of Object.values(assigned)) {
@@ -4290,9 +4628,17 @@ ipcMain.handle('tags:vault', async () => {
     }
   }
 
-  return [...counts]
+  const table = [...counts]
     .map(([tag, notes]) => ({ tag, notes }))
     .sort((a, b) => b.notes - a.notes || a.tag.localeCompare(b.tag))
+  /* Only if nothing moved across the await above: a count taken partly before
+     an edit and partly after describes a vault that never existed, and holding
+     it would keep saying so. */
+  if (indexGeneration === taken) {
+    tagCountsCache = table
+    tagCountsAt = taken
+  }
+  return table
 })
 
 /* One line of what a replace would do, for the preview: the first line the two
@@ -4887,6 +5233,9 @@ ipcMain.handle('pdf:marks:save', async (_e, p, highlights) => {
   await fs.mkdir(path.dirname(abs), { recursive: true })
   const body = JSON.stringify({ version: 1, pdf: p, highlights: highlights || [] }, null, 2)
   await writeAtomic(abs, body)
+  // `.annotations/` is outside what the watcher reports, so the search pass is
+  // told here or not at all.
+  forgetPdfSearchFacts(p)
   return true
 })
 
@@ -5282,7 +5631,13 @@ async function pdfTextIsCurrent (relPath) {
  * replaces the entry without anyone having to remember to clear it.
  */
 const pdfPagesCache = new Map()
-const PDF_PAGES_CACHED = 8
+/* Enough for a library, not just for what is open. This was eight, chosen for
+   the copilot's turn — one document, maybe its neighbours. Vault search reaches
+   every PDF there is on every keystroke, so on any shelf bigger than eight the
+   cache evicted the whole set between one letter and the next and re-split
+   every book each time. The entries hold extracted text, which is small beside
+   the PDFs it came from. */
+const PDF_PAGES_CACHED = 64
 
 async function pdfPagesOf (sidecar) {
   const stamp = await fs.stat(sidecar)
@@ -5387,6 +5742,8 @@ function ensurePdfText (relPath, { onWork } = {}) {
       if (vaultPath !== vault) return { ok: false, error: 'The vault changed while the PDF was being prepared.' }
       await fs.mkdir(path.dirname(sidecar), { recursive: true })
       await writeAtomic(sidecar, extracted.text)
+      // There is text to search now where the last pass found none.
+      forgetPdfSearchFacts(relPath)
       return {
         ok: true,
         textPath: rel(sidecar),
@@ -5743,6 +6100,10 @@ function compiledRunner (id, { file, prefix, seed, warmCode, compile }) {
 
   runner(id, {
     file,
+    /* Compiled languages are where the heavy numeric blocks live — a ray
+       tracer in a note is C++, not zsh — so they share go and julia's longer
+       clock rather than the shell one-liners' ten seconds. */
+    timeout: 60_000,
     compiled,
     cached: (code) => fsSync.existsSync(binaryFor(code)),
     steps: (source, _dir, code) => {
@@ -5765,21 +6126,24 @@ function compiledRunner (id, { file, prefix, seed, warmCode, compile }) {
 compiledRunner('rust', {
   file: 'main.rs',
   prefix: 'rs',
-  seed: '2021',
+  seed: '2021 -O',
   warmCode: 'fn main() {}\n',
   compile: (source, output) => [
-    'rustc', ['--edition', '2021', '-A', 'dead_code', '-o', output, source]
+    'rustc', ['-O', '--edition', '2021', '-A', 'dead_code', '-o', output, source]
   ]
 })
 
 /* `c++` follows the platform compiler; pin the standard so its default age
-   does not decide whether a note's structured bindings or lambdas compile. */
+   does not decide whether a note's structured bindings or lambdas compile.
+   `-O2` because a numeric block runs 3-4× faster and the compile is on the
+   build clock, not the program's — measured on a ray-tracer note: 6.4s a
+   frame unoptimised, 1.7s with -O2, for a compile 0.2s slower. */
 compiledRunner('cpp', {
   file: 'main.cpp',
   prefix: 'cpp',
-  seed: 'c++20',
+  seed: 'c++20 -O2',
   warmCode: 'int main() { return 0; }\n',
-  compile: (source, output) => ['c++', ['-std=c++20', '-o', output, source]]
+  compile: (source, output) => ['c++', ['-O2', '-std=c++20', '-o', output, source]]
 })
 
 /* CUDA is C++ that nvcc splits into host code and device code, so a ```cu
@@ -5798,9 +6162,9 @@ compiledRunner('cpp', {
 compiledRunner('cuda', {
   file: 'main.cu',
   prefix: 'cu',
-  seed: 'nvcc c++17',
+  seed: 'nvcc c++17 -O2',
   warmCode: 'int main() { return 0; }\n',
-  compile: (source, output) => ['nvcc', ['-std=c++17', '-o', output, source]]
+  compile: (source, output) => ['nvcc', ['-O2', '-std=c++17', '-o', output, source]]
 })
 
 /**
@@ -5869,7 +6233,19 @@ const WINDOWS_ROOTS = () => {
   return expanded
 }
 
-const FALLBACK_PATHS = process.platform === 'win32' ? WINDOWS_ROOTS() : [
+/* Worked out on the first Run, not at `require` time. On Windows the list is
+   `WINDOWS_ROOTS()`, which is several `readdirSync`s of Program Files — a
+   handful of blocking directory reads that used to happen while this module was
+   still being evaluated, ahead of anything at all being on screen, for a value
+   nothing needs until someone runs a code block. */
+let fallbackPathsCache = null
+
+function fallbackPaths () {
+  if (!fallbackPathsCache) fallbackPathsCache = process.platform === 'win32' ? WINDOWS_ROOTS() : POSIX_FALLBACK_PATHS
+  return fallbackPathsCache
+}
+
+const POSIX_FALLBACK_PATHS = [
   '/opt/homebrew/bin', '/opt/homebrew/sbin',   // Homebrew, Apple silicon
   '/usr/local/bin', '/usr/local/sbin',         // Homebrew, Intel — and much else
   '/opt/local/bin',                            // MacPorts
@@ -5885,10 +6261,32 @@ const FALLBACK_PATHS = process.platform === 'win32' ? WINDOWS_ROOTS() : [
   '/usr/local/cuda/bin'
 ]
 
-let loginPath = null        // resolved once, at startup
+let loginPath = null        // resolved once, on the first paint
+let loginPathReady = null
+
+/**
+ * The login shell's PATH, asked for once.
+ *
+ * `$SHELL -lic` evaluates somebody's whole profile — nvm, pyenv, a prompt
+ * framework — which is tens to hundreds of milliseconds of a subprocess and its
+ * I/O. It used to be spawned at `whenReady`, ahead of the window being built,
+ * competing with the first paint for a value nothing wants until the first Run,
+ * TeX or kernel. It is kicked off at the first paint instead, and everything
+ * that spawns a tool awaits this rather than reading a `loginPath` that has not
+ * arrived — which would silently run against a PATH short of what the reader's
+ * profile puts there, and report the tool missing.
+ */
+function ensureLoginPath () {
+  if (!loginPathReady) {
+    loginPathReady = readLoginPath()
+      .then((value) => { loginPath = value })
+      .catch(() => {})
+  }
+  return loginPathReady
+}
 
 function readLoginPath () {
-  /* See FALLBACK_PATHS: there is no login shell to ask on Windows, and asking
+  /* See `fallbackPaths`: there is no login shell to ask on Windows, and asking
      means spawning `/bin/zsh` to watch it fail on every launch. */
   if (process.platform === 'win32') return Promise.resolve(null)
   return new Promise((resolve) => {
@@ -5938,7 +6336,7 @@ function readLoginPath () {
 /** Longest-first, de-duplicated, in preference order. */
 function runnerPath () {
   const seen = new Set()
-  return [loginPath, process.env.PATH, ...FALLBACK_PATHS]
+  return [loginPath, process.env.PATH, ...fallbackPaths()]
     .filter(Boolean)
     .flatMap((part) => part.split(path.delimiter))
     .filter((dir) => dir && !seen.has(dir) && seen.add(dir))
@@ -5946,8 +6344,15 @@ function runnerPath () {
 }
 
 /* Enough output to be worth reading, capped so a runaway `yes` cannot grow the
-   main process without bound. Each stream gets its own budget. */
-const MAX_RUN_BYTES = 256 * 1024
+   main process without bound. Each stream gets its own budget. PPM images are
+   the exception — `P3\n800 600\n` is already 7 bytes but the pixels that follow
+   are the picture, so a blackhole render would be cut after ~85k pixels (a
+   band across the top) at 256KB. */
+const MAX_RUN_BYTES = 1024 * 1024
+/* Sized for animation, not a still: a 480×360 P3 frame is ~1.9 MB of ASCII,
+   so ten megabytes cut an 8-frame render mid-frame. 32 MB holds ~16 such
+   frames — or a 1600×1200 still — before the truncation warning is earned. */
+const MAX_PPM_BYTES = 32 * 1024 * 1024
 const DEFAULT_TIMEOUT_MS = 10_000
 
 const runs = new Map()   // id -> { child, timer, dir, done }
@@ -6017,11 +6422,20 @@ function startRun (id, cmd, args, { cwd, timeoutMs, env: extraEnv, quiet = false
   const sizes = { stdout: 0, stderr: 0 }
   let truncated = false
 
+  // PPM header is visible in the first bytes of stdout. If it is there,
+  // the pixels are the image, not a transcript — keep up to MAX_PPM_BYTES
+  // so a multi-frame render survives intact.
+  let isPPMStream = false
   const pipe = (stream, name) => {
     stream.setEncoding('utf8')
     stream.on('data', (text) => {
-      if (sizes[name] >= MAX_RUN_BYTES) return
-      const room = MAX_RUN_BYTES - sizes[name]
+      if (!isPPMStream && name === 'stdout' && sizes[name] === 0) {
+        const head = String(text).trimStart()
+        if (head.startsWith('P3\n') || head.startsWith('P3\r') || head.startsWith('P3 ')) isPPMStream = true
+      }
+      const limit = isPPMStream && name === 'stdout' ? MAX_PPM_BYTES : MAX_RUN_BYTES
+      if (sizes[name] >= limit) return
+      const room = limit - sizes[name]
       const chunk = text.length > room ? text.slice(0, room) : text
       sizes[name] += chunk.length
       if (chunk.length < text.length) truncated = true
@@ -6080,6 +6494,8 @@ function runTimeoutMs (key, fallback) {
  * would quietly get twice the budget of one that does not.
  */
 async function runSequence (id, steps, { cwd, timeoutMs, cleanup, quiet = false }) {
+  // The PATH these steps run under, before the first of them is spawned.
+  await ensureLoginPath()
   let left = timeoutMs        // the program's remaining budget
   let ms = 0                  // wall clock across every step, build included
   let buildMs = 0
@@ -6241,13 +6657,19 @@ ipcMain.handle('run:kill', (_e, id) => stopRun(Number(id)))
    A notebook's cells run in a kernel rather than as programs, because they are
    meant to share one namespace — see electron/kernel.js for why that is
    borrowed from Jupyter rather than built here. */
-const kernels = new KernelHost({
-  pathFor: runnerPath,
-  onEvent: (event) => {
-    const win = kernelOwners.get(event.path)
-    if (win) sendTo(win, 'kernel:event', event)
-  }
-})
+function kernelHost () {
+  if (kernels) return kernels
+  const { KernelHost } = require('./kernel')
+  kernels = new KernelHost({
+    pathFor: runnerPath,
+    onEvent: (event) => {
+      const win = kernelOwners.get(event.path)
+      if (win) sendTo(win, 'kernel:event', event)
+    }
+  })
+  if (vaultPath) kernels.setRoot(vaultPath)
+  return kernels
+}
 
 /* Which window is showing each notebook, so a kernel's output goes to the pane
    that asked for it. Keyed by notebook path because that is what a kernel
@@ -6268,19 +6690,21 @@ function stopKernelsOwnedBy (win) {
   for (const [notebookPath, owner] of [...kernelOwners]) {
     if (owner !== win) continue
     kernelOwners.delete(notebookPath)
-    kernels.shutdown(notebookPath).catch(() => {})
+    kernels?.shutdown(notebookPath).catch(() => {})
   }
 }
 
 ipcMain.handle('kernel:start', async (event, notebookPath, wanted) => {
   if (typeof notebookPath !== 'string' || !notebookPath) throw new Error('No notebook.')
   ownKernel(notebookPath, event)
-  const kernel = await kernels.kernelFor(notebookPath, wanted)
+  // The Jupyter server is spawned with `pathFor`, which is `runnerPath`.
+  await ensureLoginPath()
+  const kernel = await kernelHost().kernelFor(notebookPath, wanted)
   return { kernel: kernel.displayName, name: kernel.name, state: kernel.state }
 })
 
 ipcMain.handle('kernel:execute', async (event, notebookPath, code) => {
-  const kernel = kernels.get(notebookPath)
+  const kernel = kernels?.get(notebookPath)
   if (!kernel) throw new Error('This notebook has no kernel running.')
   const win = ownKernel(notebookPath, event)
 
@@ -6301,7 +6725,7 @@ ipcMain.handle('kernel:execute', async (event, notebookPath, code) => {
 })
 
 ipcMain.handle('kernel:interrupt', async (_e, notebookPath) => {
-  const kernel = kernels.get(notebookPath)
+  const kernel = kernels?.get(notebookPath)
   return kernel ? kernel.interrupt() : false
 })
 
@@ -6309,7 +6733,7 @@ ipcMain.handle('kernel:interrupt', async (_e, notebookPath) => {
    whether there was a question to answer: what the kernel does with it comes
    back as ordinary output, the way it does when you type into a terminal. */
 ipcMain.handle('kernel:input', async (_e, notebookPath, value) => {
-  const kernel = kernels.get(notebookPath)
+  const kernel = kernels?.get(notebookPath)
   return kernel ? kernel.respondInput(value) : false
 })
 
@@ -6317,28 +6741,31 @@ ipcMain.handle('kernel:input', async (_e, notebookPath, value) => {
    a cell, nothing is drawn until the whole reply is in hand. A kernel that is
    not running is not an error worth raising here — the caller is a Tab key. */
 ipcMain.handle('kernel:complete', async (_e, notebookPath, code, cursorPos) => {
-  const kernel = kernels.get(notebookPath)
+  const kernel = kernels?.get(notebookPath)
   if (!kernel) return null
   return kernel.complete(code, cursorPos).catch(() => null)
 })
 
 ipcMain.handle('kernel:inspect', async (_e, notebookPath, code, cursorPos) => {
-  const kernel = kernels.get(notebookPath)
+  const kernel = kernels?.get(notebookPath)
   if (!kernel) return null
   return kernel.inspect(code, cursorPos).catch(() => null)
 })
 
 ipcMain.handle('kernel:restart', async (_e, notebookPath) => {
-  const kernel = kernels.get(notebookPath)
+  const kernel = kernels?.get(notebookPath)
   return kernel ? kernel.restart() : false
 })
 
 ipcMain.handle('kernel:shutdown', async (_e, notebookPath) => {
   kernelOwners.delete(notebookPath)
-  return kernels.shutdown(notebookPath)
+  return kernels ? kernels.shutdown(notebookPath) : false
 })
 
-ipcMain.handle('kernel:specs', () => kernels.kernelSpecs())
+ipcMain.handle('kernel:specs', async () => {
+  await ensureLoginPath()
+  return kernelHost().kernelSpecs()
+})
 
 /* For quitting, where there is no later: the SIGKILL escalation timer in
    `stopRun` would never fire, so the groups go outright. */
@@ -6454,6 +6881,9 @@ async function newestVideo (dir) {
 async function manimCommand () {
   const configured = readConfig().manimCommand
   if (configured) return String(configured).split(/\s+/)
+  // The probe is the first thing a render does, so it is also where the login
+  // shell's PATH has to have arrived.
+  await ensureLoginPath()
   return new Promise((resolve) => {
     // The same PATH a run gets, so the probe and the render cannot disagree
     // about which manim is installed.
@@ -6670,6 +7100,7 @@ ipcMain.handle('tikz:render', async (event, noteName, code) => {
   queueMicrotask(() => toRun('run:out', { id, stream: 'stdout', text: 'Drawing…\n' }))
 
   const finish = async () => {
+    await ensureLoginPath()
     await fs.writeFile(path.join(dir, 'figure.tex'), tikzDocument(code), 'utf8')
     const { latex, dvisvgm } = tikzCommands()
 
@@ -6725,15 +7156,55 @@ ipcMain.handle('tikz:render', async (event, noteName, code) => {
 /* Prose arrives a token at a time. One IPC message per token is far more
    traffic than a window repainting sixty times a second can use, so runs of
    deltas are joined and sent on a short timer. Anything that is not prose
-   flushes what is held first, so nothing is ever reordered around it. */
-let aiText = ''
-let aiTextTurn = ''
+   flushes what is held first, so nothing is ever reordered around it.
+
+   Held per turn rather than in one string: two conversations can be answered at
+   once now, and a single buffer would have interleaved their prose into
+   whichever turn happened to flush it. */
+const aiText = new Map()   // turn id -> the prose held for it
 let aiTimer = null
+
+/* What each turn was seen to touch, and which turns ran alongside another.
+
+   A turn's review card is built by diffing the vault against the copy taken
+   before it started, which says exactly what changed and nothing about who
+   changed it. With one copilot that was the same question. With one per
+   conversation it is not: a turn about `Notes.md` finishing while another is
+   still editing `main.cpp` would list — and offer to Reject — the other's work.
+
+   So a turn that shared the app with another is narrowed to the files its own
+   tool calls named. That is a smaller claim than the diff: a file rewritten by
+   a shell command the agent ran is not among them, and goes unreviewed rather
+   than being attributed to whichever turn happened to end first. A turn that
+   ran alone keeps the whole diff, which is every turn in ordinary use. */
+const aiTouched = new Map()   // turn id -> Set of vault paths its tools named
+const aiOverlapped = new Set()   // turns that were not the only one running
+
+function aiTurnTouched (event) {
+  const id = turnId(event?.turnId)
+  if (!id) return
+  for (const value of [event?.path, event?.from]) {
+    const seen = String(value || '')
+    if (!seen) continue
+    if (!aiTouched.has(id)) aiTouched.set(id, new Set())
+    aiTouched.get(id).add(seen)
+  }
+}
+
+function forgetAiTurn (id) {
+  aiTouched.delete(id)
+  aiOverlapped.delete(id)
+}
 
 const aiTurns = new TurnLedger({
   snapshot: snapshotNotes,
-  complete: (before, after) => {
-    const changes = changedNotes(before, after)
+  complete: (before, after, id) => {
+    const all = changedNotes(before, after)
+    const mine = aiTouched.get(id)
+    const changes = aiOverlapped.has(id)
+      ? all.filter((change) => mine?.has(change.path))
+      : all
+    forgetAiTurn(id)
     return trust?.record({ source: 'copilot', changes }) || null
   }
 })
@@ -6855,16 +7326,24 @@ async function finishAiHistory (id) {
 function flushAiText () {
   clearTimeout(aiTimer)
   aiTimer = null
-  if (!aiText) return
-  const text = aiText
-  const id = aiTextTurn
-  aiText = ''
-  aiTextTurn = ''
-  toCopilot('ai:event', { k: 'text', text, turnId: id })
+  if (!aiText.size) return
+  /* All of them, on any flush. Each turn's prose is in the order it arrived and
+     goes out as one message; what must never happen is a turn's own text
+     crossing its own tool call, and every non-prose event flushes everything
+     before it goes. */
+  const held = [...aiText]
+  aiText.clear()
+  for (const [id, text] of held) {
+    if (text) toCopilot('ai:event', { k: 'text', text, turnId: id })
+  }
 }
 
-ai.attach(
-  (event) => {
+function aiService () {
+  if (aiInstance) return aiInstance
+  const service = require('./ai')
+  aiInstance = service
+  service.attach(
+    (event) => {
     /* The hidden request is an implementation detail, not a note the reader
        edited. Suppress its tool/draft rows; once its Write succeeds, replace
        them with the real Tulip rename operation. */
@@ -6889,13 +7368,13 @@ ai.attach(
       return
     }
     if (event?.k === 'text') {
-      if (aiText && aiTextTurn !== event.turnId) flushAiText()
-      aiTextTurn = turnId(event.turnId)
-      aiText += event.text || ''
+      const id = turnId(event.turnId)
+      aiText.set(id, (aiText.get(id) || '') + (event.text || ''))
       if (!aiTimer) aiTimer = setTimeout(flushAiText, 32)
       return
     }
     flushAiText()
+    aiTurnTouched(event)
     if (event?.k === 'turn-end' || event?.k === 'error') {
       const id = turnId(event.turnId)
       /* The turn is over, so its search answers are litter: swept on the same
@@ -6915,28 +7394,50 @@ ai.attach(
           toCopilot('ai:event', event)
         })
         .catch(() => toCopilot('ai:event', event))
+        /* Whatever the turn touched is only of interest while there is a review
+           to build out of it. A read-only turn never reaches `complete`, where
+           this is otherwise dropped, and a vault read all afternoon would keep
+           every path it ever looked at. */
+        .finally(() => forgetAiTurn(id))
       return
     }
     toCopilot('ai:event', event)
-  },
-  () => runnerPath(),
-  /* Beside the app's other state rather than in the vault: what models a CLI
-     offers is an account property, not something about these notes. */
-  path.join(app.getPath('userData'), 'ai-catalogue.json')
-)
+    },
+    () => runnerPath(),
+    /* Beside the app's other state rather than in the vault: what models a CLI
+       offers is an account property, not something about these notes. */
+    path.join(app.getPath('userData'), 'ai-catalogue.json')
+  )
+  return service
+}
 
-ipcMain.handle('ai:start', (event, opts) => {
+ipcMain.handle('ai:start', async (event, opts) => {
   assertCopilotWindow(event)
+  const ai = aiService()
   ai.setVault(vaultPath)
   const id = turnId(opts?.turnId)
   if (!id) return { ok: false, error: 'The Copilot turn could not be identified.' }
-  return ai.start({ ...(opts || {}), turnId: id })
+  /* Which conversation's copilot this is. Sessions are per chat, so the key is
+     part of every call that names one — see electron/ai.js. */
+  // The CLI is spawned with `runnerPath()`, so the login shell has to be back
+  // before it is: a Copilot started against a PATH short of the profile's is a
+  // "command not found" for a tool that is installed.
+  await ensureLoginPath()
+  return ai.start({ ...(opts || {}), key: String(opts?.key || ''), turnId: id })
 })
-ipcMain.handle('ai:models', (_e, opts) => ai.models({ fresh: !!opts?.fresh }))
-ipcMain.handle('ai:doctor', () => ai.doctor())
-ipcMain.handle('ai:send', async (event, text, context, requestedTurnId) => {
+ipcMain.handle('ai:models', async (_e, opts) => {
+  await ensureLoginPath()
+  return aiService().models({ fresh: !!opts?.fresh })
+})
+ipcMain.handle('ai:doctor', async () => {
+  await ensureLoginPath()
+  return aiService().doctor()
+})
+ipcMain.handle('ai:send', async (event, key, text, context, requestedTurnId) => {
   assertCopilotWindow(event)
+  const ai = aiService()
   ai.setVault(vaultPath)
+  const chat = String(key || '')
   const id = turnId(requestedTurnId)
   if (!id) return { ok: false, error: 'The Copilot turn could not be identified.' }
   const words = String(text || '')
@@ -6950,8 +7451,17 @@ ipcMain.handle('ai:send', async (event, text, context, requestedTurnId) => {
      review is built from — two walks of the vault, and the whole of the delay
      between pressing send and the first token — could only ever produce an
      empty diff. */
-  if (ai.canWrite()) await aiTurns.begin(id)
-  const result = await ai.send(words, prepared.context, id)
+  if (ai.canWrite(chat)) {
+    /* Everything already running, and this turn with it: from here none of
+       them can claim the whole vault diff as its own. */
+    const others = aiTurns.live
+    if (others.length) {
+      aiOverlapped.add(id)
+      for (const other of others) aiOverlapped.add(other)
+    }
+    await aiTurns.begin(id)
+  }
+  const result = await ai.send(chat, words, prepared.context, id)
   if (!result?.ok) {
     const operation = await finishAiHistory(id).catch(() => null)
     sendAiReview(id, operation)
@@ -6967,6 +7477,12 @@ ipcMain.handle('ai:send', async (event, text, context, requestedTurnId) => {
  * long the turn ran, and only main can say whether the window has come back to
  * the front in the moment since the event was sent.
  */
+/* The before-copy the renderer's live diff is built against — served from the
+   turn's own baseline so the editor's review and the turn-end card cannot
+   disagree about what "before" was. See rememberAgentBefore in renderer.js. */
+ipcMain.handle('ai:baseline', (_e, turn, relPath) =>
+  aiTurns.baseline(turn, String(relPath || '')))
+
 ipcMain.handle('ai:announce', (_e, info) => {
   const win = copilotWindow()
   if (!win || win.isFocused()) return { ok: false }
@@ -6989,10 +7505,12 @@ ipcMain.handle('ai:announce', (_e, info) => {
   return { ok: true }
 })
 
-ipcMain.handle('ai:stop', async (event, requestedTurnId) => {
+ipcMain.handle('ai:stop', async (event, key, requestedTurnId) => {
   assertCopilotWindow(event)
   const id = turnId(requestedTurnId)
-  const stopped = ai.stop()
+  /* One conversation's copilot, not every one of them: the other notes' turns
+     are somebody else's work and go on running. */
+  const stopped = aiInstance?.stop(String(key || '')).ok || false
   const operation = await finishAiHistory(id).catch(() => null)
   sendAiReview(id, operation)
   return stopped
@@ -7068,6 +7586,35 @@ ipcMain.handle('trust:restore', async (_e, id, onlyPath = null) => {
 const CHAT_DIR = () => path.join(app.getPath('userData'), 'chats')
 const chatFile = () => path.join(CHAT_DIR(), `${sha1(vaultPath || '')}.json`)
 
+/* What the file holds, read once per vault and kept — the same arrangement
+   electron/path-store.js uses for its sidecars, and sound for the same reason:
+   this process is the only writer, and the one window allowed to hold the panel
+   is the only asker.
+
+   Read once matters here. The panel flushes on an 800ms debounce for the length
+   of a turn, and the save below re-read and re-parsed the whole file — sixty
+   transcripts — synchronously each time, on the event loop that is at that
+   moment relaying the turn's own output. Keyed by the file, so switching vaults
+   reads the new one rather than merging into the old one's transcripts. */
+let chatCache = null
+let chatCacheFile = ''
+
+function chatHistoryNow () {
+  const file = chatFile()
+  if (chatCache && chatCacheFile === file) return chatCache
+  let parsed = {}
+  try {
+    parsed = JSON.parse(fsSync.readFileSync(file, 'utf8')) || {}
+  } catch {
+    /* No history for this vault yet — the ordinary first-run case — or a file
+       `ai:history:load` has already moved aside. */
+    parsed = {}
+  }
+  chatCache = parsed && typeof parsed === 'object' ? parsed : {}
+  chatCacheFile = file
+  return chatCache
+}
+
 ipcMain.handle('ai:history:load', (event) => {
   /* The same fence as `ai:start` and the save half below: transcripts belong
      to the one window allowed to hold the panel, and a window that cannot
@@ -7080,10 +7627,15 @@ ipcMain.handle('ai:history:load', (event) => {
     raw = fsSync.readFileSync(file, 'utf8')
   } catch {
     // No history for this vault yet, which is the ordinary first-run case.
+    chatCache = {}
+    chatCacheFile = file
     return {}
   }
   try {
-    return JSON.parse(raw)
+    const parsed = JSON.parse(raw) || {}
+    chatCache = typeof parsed === 'object' ? parsed : {}
+    chatCacheFile = file
+    return parsed
   } catch (err) {
     /* The file exists and will not parse — truncated by a power cut, or half
        written by a kill. Returning `{}` here used to be the whole story, and
@@ -7095,6 +7647,8 @@ ipcMain.handle('ai:history:load', (event) => {
     try {
       fsSync.renameSync(file, `${file}.corrupt`)
     } catch { /* if it cannot be moved, it will simply be overwritten */ }
+    chatCache = {}
+    chatCacheFile = file
     return {}
   }
 })
@@ -7104,18 +7658,21 @@ ipcMain.handle('ai:history:save', async (event, history) => {
   if (!vaultPath) return { ok: false }
   try {
     await fs.mkdir(CHAT_DIR(), { recursive: true })
-    let existing = {}
-    try {
-      existing = JSON.parse(fsSync.readFileSync(chatFile(), 'utf8')) || {}
-    } catch { /* nothing kept yet, or a file `ai:history:load` has moved aside */ }
-    history = mergeChatHistory(existing, history)
+    const file = chatFile()
+    history = mergeChatHistory(chatHistoryNow(), history)
     /* Not fsync'd. The last write of a transcript is the one the window makes
        on its way out, and waiting on the disk there is both the slowest place
        to do it and the likeliest to be cut short — which is what left hundreds
        of half-renamed temp files beside the history. The rename still keeps the
        file whole; only the guarantee about a power cut is given up, over a
        chat log that is already on screen. */
-    await writeAtomic(chatFile(), JSON.stringify(history), { durable: false })
+    await writeAtomic(file, JSON.stringify(history), { durable: false })
+    /* Held only once it is down. A write that failed leaves the cache
+       describing the file that is actually there, so the retry the renderer
+       makes merges against the truth rather than against what this attempt
+       hoped to write. */
+    chatCache = history
+    chatCacheFile = file
     return { ok: true }
   } catch (err) {
     console.error('chat history write failed', err)
@@ -7345,6 +7902,8 @@ ipcMain.handle('edit:undo', (e) => e.sender.undo())
 ipcMain.handle('edit:redo', (e) => e.sender.redo())
 
 ipcMain.handle('config:get', () => readConfig())
+ipcMain.handle('hotkeys:list', () => hotkeyCatalogue)
+
 ipcMain.handle('config:set', (_e, patch) => {
   /* Not every config key is a preference — see electron/config-keys.js. The
      renderer writes the settable ones; main keeps `vaultPath` and the command
@@ -7358,6 +7917,17 @@ ipcMain.handle('config:set', (_e, patch) => {
      Setting them lands nowhere unless the thing that reads them is told. */
   if (Object.prototype.hasOwnProperty.call(accepted, 'historyInVault') && vaultPath) {
     trust?.setVault(vaultPath, next.historyInVault === true)
+  }
+  // The menu is the thing a hotkey lives in, so a change means a rebuild —
+  // cheap, and the only way an accelerator ever moves.
+  if (Object.prototype.hasOwnProperty.call(accepted, 'hotkeys')) buildMenu()
+  /* A language turned on or off is a different dictionary, which is the same
+     event as a word taught or removed: the checker is rebuilt on the next
+     question and every held verdict is stale. */
+  if (Object.prototype.hasOwnProperty.call(accepted, 'spellLanguages')) {
+    speller = null
+    forgetSpellVerdicts()
+    broadcast('dictionary:changed')
   }
   return next
 })
@@ -7819,11 +8389,6 @@ app.whenReady().then(async () => {
     }
   })
 
-  // Warmed now rather than on the first Run, so clicking Run does not wait on
-  // a login shell. A failure here is not fatal — the fallbacks still apply.
-  readLoginPath().then((value) => { loginPath = value }).catch(() => {})
-  pruneRunCache().catch(() => {})
-
   const cfg = readConfig()
   /* One vault, under one key: the folder last connected is the folder Tulip
      opens. `defaultVaultPath` was a second name for it while the settings pane
@@ -7845,7 +8410,7 @@ app.whenReady().then(async () => {
        so `read_csv("data.csv")` beside a notebook read someone else's root
        until the reader switched vaults, which on the ordinary launch is never.
        See electron/kernel.js. */
-    kernels.setRoot(vaultPath)
+    kernels?.setRoot(vaultPath)
     // Present in the list from the first launch, not only once it is left.
     rememberVault(vaultPath)
     /* And the index this vault was left holding. The launch that most needs it
@@ -7859,8 +8424,14 @@ app.whenReady().then(async () => {
     watchVault()
   }
 
-  buildMenu()
   const first = createWindow()
+  /* After the window is asked for, not before. Building the menu is a
+     two-hundred-line template and an accelerator table, and none of it is on
+     screen until the reader reaches for it — while `createWindow` is what
+     starts the renderer loading, which is the only thing anybody is waiting
+     for. Still on this tick, so the menu is in place long before the window
+     it belongs to has painted. */
+  buildMenu()
   guardGuests()
   if (vaultPath) first.setTitle(path.basename(vaultPath))
 
@@ -7877,8 +8448,8 @@ app.on('before-quit', () => {
   quitting = true
   if (watcher) watcher.close()
   killAllRuns()
-  kernels.disposeSync()
-  ai.stop('SIGKILL')
+  kernels?.disposeSync()
+  aiInstance?.stopAll('SIGKILL')
   trust?.flushSync()
   flushDurabilitySync()
   flushConfig()

@@ -161,7 +161,9 @@ const descriptions = new Map()
    Both settle on the same class. Fetching it twice would be worse than a
    wasted request: two `LanguageDescription`s are two different types, and the
    matcher would stop recognising its own descriptions. */
+/** @type {typeof import('@codemirror/language').LanguageDescription | null} */
 let LanguageDescription = null
+/** @type {Promise<typeof import('@codemirror/language').LanguageDescription> | null} */
 let arriving = null
 
 /** Called by editor.js at load, with the class it already has to hand. */
@@ -200,14 +202,16 @@ export function languageFor (token) {
      it is plain came out coloured as maths. */
   if (canon === 'text') return null
   if (!descriptions.has(name)) {
-    descriptions.set(name, LanguageDescription.of({
+    const cls = LanguageDescription
+    if (!cls) throw new Error('languageFor called before its class arrived')
+    descriptions.set(name, cls.of({
       name,
       alias: [name],
       async load () {
         const { languages } = await import('@codemirror/language-data')
-        const real = LanguageDescription.matchLanguageName(languages, name, true) ||
+        const real = cls.matchLanguageName(languages, name, true) ||
           (canon && canon !== name &&
-            LanguageDescription.matchLanguageName(languages, canon, true)) || null
+            cls.matchLanguageName(languages, canon, true)) || null
         if (!real) throw new Error(`Unknown code language: ${name}`)
         return support(real)
       }

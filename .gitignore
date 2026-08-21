@@ -15,3 +15,5 @@ build/
 # Scratch written by agent tooling run inside the repo.
 .pi-subagents/
 .commandcode/
+.claude/
+.devin/

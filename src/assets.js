@@ -943,6 +943,12 @@ export function renderEmbed (spec, onReady = () => {}) {
     img.alt = spec.alt || ''
     if (spec.path) img.dataset.vaultImage = spec.path
     img.loading = 'lazy'
+    /* Off the thread the note is being rendered on. Lazy already keeps the
+       pictures below the fold from being decoded at all; this keeps the ones
+       above it from being decoded synchronously, which on a note full of
+       photographs is the difference between the text appearing and the whole
+       page waiting for the images. */
+    img.decoding = 'async'
     if (spec.width) img.width = spec.width
     if (spec.height) img.height = spec.height
     img.addEventListener('load', onReady, { once: true })

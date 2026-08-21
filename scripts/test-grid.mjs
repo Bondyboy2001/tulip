@@ -522,4 +522,39 @@ ok('the find box hides what it does not match, but only when asked', () => {
   assert.deepEqual(r.afterOnlyMatchesOff, ['Ada', 'Grace', 'Alan', 'Bob'])
 })
 
+/* ------------------------------------------------------------ alignment */
+
+ok('a column reads the way its content implies until somebody says otherwise', () => {
+  assert.ok(!r.alignByContent.text.cell.includes('csv-num'), r.alignByContent.text.cell)
+  assert.ok(r.alignByContent.numbers.cell.includes('csv-num'), r.alignByContent.numbers.cell)
+})
+
+ok('the heading menu points a column left, centre or right', () => {
+  assert.ok(r.alignedRight.cell.includes('csv-right'), r.alignedRight.cell)
+  assert.ok(r.alignedRight.head.includes('csv-right'), r.alignedRight.head)
+})
+
+ok('and points every selected column at once', () => {
+  assert.equal(r.alignManyLabel, 'Align centre (2 columns)')
+  for (const shape of r.alignedMany) {
+    assert.ok(shape.cell.includes('csv-center'), shape.cell)
+    assert.ok(shape.head.includes('csv-center'), shape.head)
+  }
+  // Reopened over those columns, the menu ticks the alignment they are in.
+  assert.equal(r.alignTicked, '✓ Align centre (2 columns)')
+})
+
+ok('“automatically” hands the columns back to their content', () => {
+  for (const shape of r.alignedAuto) {
+    assert.ok(!shape.cell.includes('csv-center'), shape.cell)
+    assert.ok(!shape.cell.includes('csv-right'), shape.cell)
+  }
+})
+
+ok('and none of it is an edit to the file', () => {
+  assert.equal(r.writesFromAligning, 0, 'aligning a column wrote the file')
+  assert.equal(r.fileAfterAligning,
+    'name,score,when\nAda,10,2026-01-02\nGrace,2,2025-12-31\nAlan,,2026-03-04\nBob,9,2026-02-01\n')
+})
+
 console.log(`\n${passed} checks passed`)

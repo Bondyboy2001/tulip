@@ -123,4 +123,14 @@ ok('the keys main reads for itself are all settable or deliberately absent', () 
   }
 })
 
+ok('hotkeys accept only a flat record of strings', () => {
+  assert.deepEqual(
+    sanitizeConfigPatch({ hotkeys: { 'run-file': 'Cmd+R', sidebar: '' } }).accepted,
+    { hotkeys: { 'run-file': 'Cmd+R', sidebar: '' } })
+  assert.deepEqual(sanitizeConfigPatch({ hotkeys: { save: 3 } }).accepted, {})
+  assert.deepEqual(sanitizeConfigPatch({ hotkeys: ['Cmd+R'] }).accepted, {})
+  assert.deepEqual(sanitizeConfigPatch({ hotkeys: undefined }).accepted, { hotkeys: undefined })
+})
+
 console.log(`\nconfig keys: ${passed}/${passed}`)
+

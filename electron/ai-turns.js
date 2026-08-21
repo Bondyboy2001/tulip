@@ -35,6 +35,28 @@ class TurnLedger {
     return !!key && (this.baselines.has(key) || this.finishing.has(key))
   }
 
+  /** Which turns have a baseline and have not been finished — the turns whose
+   *  edits are still to be accounted for. Two of them at once is two copilots
+   *  working side by side, which is when a turn's diff has to be narrowed to
+   *  the files it was itself seen to touch. */
+  get live () {
+    return [...this.baselines.keys()]
+  }
+
+  /**
+   * The turn's before-copy of one file, out of the baseline `begin` took.
+   *
+   * `known: false` says this turn has no baseline to consult — read-only turns
+   * never take one — and the caller falls back to whatever it can reach. With
+   * a baseline, an absent key is an answer in itself: the file did not exist
+   * when the turn began, so its "before" is nothing at all.
+   */
+  baseline (id, key) {
+    const map = this.baselines.get(turnId(id))
+    if (!map) return { known: false, text: null }
+    return { known: true, text: map.has(key) ? map.get(key) : null }
+  }
+
   finish (id) {
     const key = turnId(id)
     if (!key) return Promise.resolve(null)
@@ -45,7 +67,7 @@ class TurnLedger {
     const before = this.baselines.get(key)
     this.baselines.delete(key)
     const finishing = Promise.resolve(this.snapshot())
-      .then((after) => this.complete(before, after))
+      .then((after) => this.complete(before, after, key))
       .finally(() => this.finishing.delete(key))
     this.finishing.set(key, finishing)
     return finishing

@@ -287,6 +287,19 @@ async function checks () {
     assert.deepEqual(await call('table-widths:get', 'Table.csv'), { widths: [90, 300] })
   })
 
+  await check('and which way a column was pointed is kept with the widths', async () => {
+    const pointed = { widths: [120, 260], aligns: [null, 'center'], delimiter: ';' }
+    assert.deepEqual(await call('table-widths:set', 'Table.csv', pointed), pointed)
+    assert.deepEqual(await call('table-widths:get', 'Table.csv'), pointed)
+    /* An alignment nobody offers, and a list that describes some other table,
+       are both dropped — the widths beside them are not. */
+    assert.deepEqual(await call('table-widths:set', 'Table.csv',
+      { widths: [120, 260], aligns: ['sideways', 'left'] }),
+    { widths: [120, 260], aligns: [null, 'left'] })
+    assert.deepEqual(await call('table-widths:set', 'Table.csv',
+      { widths: [120, 260], aligns: ['left'] }), { widths: [120, 260] })
+  })
+
   await check('a layout that is not one is not stored', async () => {
     assert.equal(await call('table-widths:set', 'Table.csv', 'wide'), null)
     assert.equal(await call('table-widths:set', 'Table.csv', [0, -4]), null)
@@ -429,5 +442,111 @@ async function checks () {
       from(A, 'tab:drag-start', bad)
       assert.equal(await from(B, 'tab:dragging'), null, `it accepted ${JSON.stringify(bad)}`)
     }
+  })
+
+  /* ---------------- the exports, which write outside the vault ----------------
+
+     Every other write in this file is checked for staying inside the vault.
+     These are the handlers where leaving it is the whole point — an export is
+     how a note gets somewhere the app does not own — so what has to be tested
+     is the opposite: that they write what they promised, where they were told,
+     and that the one path in them which is *not* the user's choice (an
+     attachment's name inside the export folder) still cannot climb out.
+
+     Each is given an explicit `to`. That argument exists so the destination can
+     come from somewhere other than the native dialog, and a suite that let the
+     dialog open would hang on a modal nobody is there to answer. */
+
+  const exportWindow = BrowserWindow.getAllWindows()[0]
+  /* From a real window, because these handlers begin by asking which one is
+     speaking and refuse when the answer is nothing. */
+  const exporting = (channel, ...args) => {
+    const fn = handlers.get(channel)
+    if (!fn) throw new Error('no handler for ' + channel)
+    return fn({ sender: exportWindow.webContents }, ...args)
+  }
+  const OUT = path.join(OUTSIDE, 'exports')
+  fs.mkdirSync(OUT, { recursive: true })
+
+  await check('a note exports as one self-contained HTML file', async () => {
+    const to = path.join(OUT, 'note.html')
+    const done = await exporting('note:export-html', 'Seed', '<article class="reading"><h1>Hello</h1></article>', to)
+    assert.equal(done.ok, true, done.error || 'it reported failure')
+    assert.equal(done.path, to, 'it wrote where it was told')
+    const page = fs.readFileSync(to, 'utf8')
+    assert.ok(page.startsWith('<!doctype html>'), 'it is a whole document')
+    assert.ok(page.includes('<h1>Hello</h1>'), 'the body it was handed is in it')
+    /* The point of the export: no <link> to a stylesheet the file cannot reach
+       from wherever it is opened. */
+    assert.ok(/<style>[\s\S]*}/.test(page), 'the stylesheet came with it')
+    assert.equal(done.bytes, Buffer.byteLength(page), 'and it counted what it wrote')
+  })
+
+  await check('a name that would be markup does not become markup', async () => {
+    const to = path.join(OUT, 'sharp.html')
+    await exporting('note:export-html', 'Tom & <script>', '<p>x</p>', to)
+    const page = fs.readFileSync(to, 'utf8')
+    assert.ok(page.includes('<title>Tom &amp; '), 'the ampersand is escaped')
+    assert.ok(!page.includes('<title>Tom &amp; <script>'), 'and the tag is not opened in the title')
+  })
+
+  await check('a note exports as Markdown with its attachments beside it', async () => {
+    fs.writeFileSync(path.join(VAULT, 'picture.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]))
+    const to = path.join(OUT, 'portable.md')
+    const done = await exporting('note:export-markdown', 'Seed', '# Portable\n\n![](picture.png)\n',
+      [{ rel: 'picture.png', as: 'picture.png' }], to)
+    assert.equal(done.ok, true, done.error || 'it reported failure')
+    assert.equal(done.copied, 1, 'the attachment was copied')
+    assert.equal(fs.readFileSync(to, 'utf8'), '# Portable\n\n![](picture.png)\n')
+    assert.ok(fs.existsSync(path.join(OUT, 'picture.png')), 'and it landed beside the note')
+  })
+
+  await check('an attachment cannot be written outside the export folder', async () => {
+    const to = path.join(OUT, 'nested', 'escape.md')
+    fs.mkdirSync(path.dirname(to), { recursive: true })
+    const done = await exporting('note:export-markdown', 'Seed', 'text',
+      [{ rel: 'picture.png', as: '../climbed.png' },
+        { rel: 'picture.png', as: '/tmp/absolute.png' }], to)
+    assert.equal(done.ok, true, 'the note itself still exports')
+    assert.equal(done.copied, 0, 'neither attachment was copied')
+    assert.equal(fs.existsSync(path.join(OUT, 'climbed.png')), false, 'nothing climbed out')
+  })
+
+  await check('a missing attachment does not fail the export', async () => {
+    const to = path.join(OUT, 'broken.md')
+    const done = await exporting('note:export-markdown', 'Seed', 'text',
+      [{ rel: 'not-here.png', as: 'not-here.png' }], to)
+    assert.equal(done.ok, true, 'the note exports with its link left broken')
+    assert.equal(done.copied, 0)
+  })
+
+  await check('a whiteboard exports as the bytes it was handed', async () => {
+    const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>')
+    const to = path.join(OUT, 'board.svg')
+    const done = await exporting('whiteboard:export', 'Board', 'svg', svg, to)
+    assert.equal(done.ok, true, done.error || 'it reported failure')
+    assert.equal(fs.readFileSync(to, 'utf8'), svg.toString(), 'byte for byte')
+
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+    const alsoTo = path.join(OUT, 'board.png')
+    const also = await exporting('whiteboard:export', 'Board', 'png', png, alsoTo)
+    assert.equal(also.ok, true, also.error || 'it reported failure')
+    assert.deepEqual([...fs.readFileSync(alsoTo)], [...png])
+  })
+
+  await check('an export says so rather than throwing when the path is unwritable', async () => {
+    const done = await exporting('note:export-html', 'Seed', '<p>x</p>',
+      path.join(OUT, 'no-such-folder', 'deep', 'note.html'))
+    assert.equal(done.ok, false, 'it did not claim to have written')
+    assert.ok(done.error, 'and it says why, for the toast')
+  })
+
+  await check('the window is printed to a real PDF', async () => {
+    const to = path.join(OUT, 'printed.pdf')
+    const done = await exporting('pdf:export', 'Seed', to)
+    assert.equal(done.ok, true, done.error || 'it reported failure')
+    const head = fs.readFileSync(to).subarray(0, 5).toString('latin1')
+    assert.equal(head, '%PDF-', 'what landed is a PDF')
+    assert.ok(done.bytes > 0, 'and it counted the bytes')
   })
 }

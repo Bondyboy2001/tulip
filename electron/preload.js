@@ -8,6 +8,12 @@ const { contextBridge, ipcRenderer, webUtils } = require('electron')
  * stays the only thing that can touch the filesystem.
  */
 contextBridge.exposeInMainWorld('tulip', {
+  /* Which desktop this is. The page has no `process` of its own and had no way
+     to ask, so every shortcut it printed was a ⌘ chord and every "reveal"
+     button said Finder — on Windows, instructions to press keys that are not
+     there. A string rather than an `isMac` flag: the page should be able to
+     tell the third platform apart from the two it knows. */
+  platform: process.platform,
   vault: {
     pick: () => ipcRenderer.invoke('vault:pick'),
     current: () => ipcRenderer.invoke('vault:current'),
@@ -188,14 +194,18 @@ contextBridge.exposeInMainWorld('tulip', {
    * which note is open. Everything it says comes back on `ai:event`.
    */
   ai: {
+    /* `opts.key` names the conversation the copilot belongs to. One process per
+       chat, so a turn about one note and a turn about another run side by
+       side rather than one waiting on the other. */
     start: (opts) => ipcRenderer.invoke('ai:start', opts),
     /* `{ fresh: true }` asks the CLIs again rather than taking the answer main
        is holding — what the Refresh button in Settings is for, after installing
        a model or signing into a provider mid-session. */
     models: (opts) => ipcRenderer.invoke('ai:models', opts),
     doctor: () => ipcRenderer.invoke('ai:doctor'),
-    send: (text, context, turnId) => ipcRenderer.invoke('ai:send', text, context, turnId),
-    stop: (turnId) => ipcRenderer.invoke('ai:stop', turnId),
+    send: (key, text, context, turnId) =>
+      ipcRenderer.invoke('ai:send', key, text, context, turnId),
+    stop: (key, turnId) => ipcRenderer.invoke('ai:stop', key, turnId),
     /* A picture pasted into the message box, filed in the vault so the agent —
        which reads files and takes no images over its message stream — can be
        pointed at it. `bytes` is a Uint8Array; the answer is a vault path. */
@@ -210,6 +220,11 @@ contextBridge.exposeInMainWorld('tulip', {
        really is unfocused, and bouncing the dock — are the main process's to
        do. */
     announce: (info) => ipcRenderer.invoke('ai:announce', info),
+    /* The turn's own before-copy of one file — what the review card is diffed
+       against. Asked for instead of reading the disk, because a provider can
+       announce a Write after the file has already changed; by then the disk is
+       the copilot's version and the baseline is the only "before" left. */
+    baseline: (turnId, path) => ipcRenderer.invoke('ai:baseline', turnId, path),
     // Transcripts, per note, kept with the app's state rather than the vault.
     history: {
       load: () => ipcRenderer.invoke('ai:history:load'),
@@ -263,6 +278,12 @@ contextBridge.exposeInMainWorld('tulip', {
   config: {
     get: () => ipcRenderer.invoke('config:get'),
     set: (patch) => ipcRenderer.invoke('config:set', patch)
+  },
+  /* The rebindable menu commands — id, label, menu, default key — for the
+     Hotkeys section of Settings. Read-only; the bindings themselves travel
+     back as the `hotkeys` config record. */
+  hotkeys: {
+    list: () => ipcRenderer.invoke('hotkeys:list')
   },
   /* The spellchecker's custom dictionary. Adding mostly happens from the
      native context menu over a misspelling, which main owns outright; these

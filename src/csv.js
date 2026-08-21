@@ -47,6 +47,7 @@
    ================================================================== */
 
 import { dataDelimiter } from './vault-paths.js'
+import { isMac, keyLabel } from './platform.js'
 import { dropdown } from './dropdown.js'
 
 /* Fixed, and in one place, because the virtual window's arithmetic depends on
@@ -63,6 +64,11 @@ const OVERSCAN = 8
    either side already covers more ground than eight rows do, and every one of
    them is paid for on every row in the band. */
 const OVERSCAN_COLS = 2
+
+/* The alignments a column can be pointed at by hand. Anything else in a saved
+   sidecar — an older Tulip's spelling, a hand-edited file — reads as "nobody
+   asked", which is the same as never having been set. */
+const ALIGNMENTS = ['left', 'center', 'right']
 
 const MIN_COL = 72
 /* How wide a column is allowed to get on its own, when the table is first
@@ -83,6 +89,20 @@ const WIDTH_SAMPLE = 250
    more of the file than the opening measure does — and stops there rather than
    walking a million rows for a width, saying so when it did. */
 const FIT_SCAN = 20000
+/* How wide a fit may make a column, in characters of the grid's own face.
+
+   It used to be the width of the pane, on the reasoning that a column wider
+   than the window shows no more of itself. That is true of a page and false of
+   this: the grid scrolls sideways, so past the pane's edge the rest of the
+   value is a scroll away — and a fit that stopped at the edge left the cell cut
+   off, which is the one thing it was asked to prevent.
+
+   A ceiling is still needed, because one cell holding a chapter would otherwise
+   make a column nothing else on the row could be reached past. Five hundred
+   characters is far more than any heading, identifier or joined list, and still
+   a column you can scroll to the end of; a value longer than that is read by
+   opening the cell, which wraps. */
+const FIT_CHARS = 500
 /* The fallback advance, used only until the real one has been measured. */
 const CHAR_WIDTH = 7.4
 const CELL_PADDING = 18
@@ -98,12 +118,11 @@ const SNAPSHOT_LIMIT = 30
    block to the selection every time somebody opened a context menu. ⌘ is what
    a Mac presses for that anyway; everywhere else there is no ⌘ to press and
    Ctrl is what every list in the system uses. */
-const MAC = typeof navigator !== 'undefined' &&
-  /Mac|iPhone|iPad/i.test(navigator.platform || navigator.userAgent || '')
-
 /** Does this click mean "add to what is already selected" rather than
- *  "select this instead"? */
-const addsToSelection = (event) => event.metaKey || (event.ctrlKey && !MAC)
+ *  "select this instead"? Delegated to platform.js so the same `process.platform`
+ *  source the menu and the shortcut labels use decides it — rather than a second
+ *  UA sniff saying a different thing in a test. */
+const addsToSelection = (event) => event.metaKey || (event.ctrlKey && !isMac())
 
 /* ------------------------------------------------------------- the format */
 
@@ -513,12 +532,23 @@ export function compareCells (a, b) {
  */
 export function sortedOrder (rows, base, col, dir) {
   const sign = dir === 'desc' ? -1 : 1
+  // Many columns hold the same 10–20 strings repeated 200k times. `cellKey`
+  // runs 6 regexes per distinct value — memoize by exact text so duplicates pay once.
+  const keyCache = new Map()
+  const cachedKey = (text) => {
+    let hit = keyCache.get(text)
+    if (hit === undefined) {
+      hit = cellKey(text)
+      keyCache.set(text, hit)
+    }
+    return hit
+  }
   const keyed = base.map((index, at) => {
     const text = String(rows[index]?.[col] ?? '')
     // A blank is decided before anything else and never compared, so it is not
     // worth classifying one.
     const blank = text.trim() === ''
-    return { index, at, blank, key: blank ? null : cellKey(text) }
+    return { index, at, blank, key: blank ? null : cachedKey(text) }
   })
   keyed.sort((p, q) => {
     if (p.blank || q.blank) return p.blank && q.blank ? p.at - q.at : (p.blank ? 1 : -1)
@@ -765,7 +795,7 @@ export function mountCsv ({
   /* The column filter's way in from the keyboard and from a bar that can be
      read, since the funnel in a heading only shows on hover. It acts on the
      column the cursor is in — see `openFilter`. */
-  const filterBtn = button('Filter…', 'filter', 'Filter this column by its values (⇧⌘F)')
+  const filterBtn = button('Filter…', 'filter', keyLabel('Filter this column by its values (⇧⌘F)'))
   const clearFilters = button('Clear filters', 'clear-filters',
     'Show every row again')
 
@@ -788,18 +818,33 @@ export function mountCsv ({
 
   /* A way of looking rather than an edit, so it sits with the sort chips and
      stays on the bar in Reading view. */
-  const fitAll = button('Fit columns', 'fit', 'Fit every column to its content (⌥⌘F)')
+  const fitAll = button('Fit columns', 'fit', keyLabel('Fit every column to its content (⌥⌘F)'))
 
-  const undoBtn = button('↶', 'undo', 'Undo (⌘Z)')
-  const redoBtn = button('↷', 'redo', 'Redo (⇧⌘Z)')
-  const addRow = button('+ Row', 'add-row', 'Add a row below the cursor (⌘⏎)')
+  /* A horizontal scrollbar is an overlay on macOS and disappears when the
+     pointer is still. When Copilot narrows the table that made the columns to
+     the right look absent rather than merely off-screen. These two compact
+     controls stay on the bar only while there is somewhere to move. */
+  const scrollBack = button('‹', 'scroll-left', 'Show earlier columns')
+  const scrollForward = button('›', 'scroll-right', 'Show later columns')
+  for (const [control, label] of [
+    [scrollBack, 'Scroll to earlier columns'],
+    [scrollForward, 'Scroll to later columns']
+  ]) {
+    control.classList.add('is-column-scroll')
+    control.setAttribute('aria-label', label)
+  }
+
+  const undoBtn = button('↶', 'undo', keyLabel('Undo (⌘Z)'))
+  const redoBtn = button('↷', 'redo', keyLabel('Redo (⇧⌘Z)'))
+  const addRow = button('+ Row', 'add-row', keyLabel('Add a row below the cursor (⌘⏎)'))
   const addCol = button('+ Column', 'add-col', 'Add a column after this one')
 
   const gap = document.createElement('span')
   gap.className = 'csv-bar-gap'
 
   bar.append(search, onlyBtn, found, gap,
-    delimiterPick.root, filterBtn, clearFilters, fitAll, undoBtn, redoBtn, addRow, addCol)
+    delimiterPick.root, filterBtn, clearFilters, fitAll, scrollBack, scrollForward,
+    undoBtn, redoBtn, addRow, addCol)
 
   function button (label, act, title) {
     const element = document.createElement('button')
@@ -880,6 +925,11 @@ export function mountCsv ({
   let header = []
   let widths = []
   let numeric = []            // per column: does it read as numbers?
+  /* Per column: the alignment somebody asked for, or null for the one the
+     content implies. A view of the file rather than a fact in it — a CSV has
+     nowhere to say which way a column reads — so it is kept beside the widths
+     and never written into the data. */
+  let aligns = []
   /* The view. Every display position is an index into this, and every index in
      it is a row of `rows` — which stays in the file's own order throughout. */
   let order = []
@@ -953,7 +1003,7 @@ export function mountCsv ({
    *  explains itself instead of feeling broken. */
   const editable = () => {
     if (!readonly) return true
-    onStatus('Reading view — press ⌘2 to edit this table')
+    onStatus(keyLabel('Reading view — press ⌘2 to edit this table'))
     return false
   }
 
@@ -1053,6 +1103,9 @@ export function mountCsv ({
        read as well as how it is laid out. */
     layout.set(current.path, {
       widths: widths.slice(),
+      /* Null for every column that was never asked about, so what comes back
+         is one entry per column and lines up with the widths beside it. */
+      aligns: aligns.slice(),
       delimiter: current.delimiter
     }).catch(() => {})
   }
@@ -1064,14 +1117,11 @@ export function mountCsv ({
      its neighbour. Measuring afresh is the honest answer to that. */
   const layoutFits = (saved) => Array.isArray(saved) && saved.length === widths.length
 
-  /* How wide a fit is allowed to make a column: as wide as the pane it is in.
-     The opening measure caps at MAX_COL so one long cell cannot hide the rest
-     of the table, but a fit is a request to *see* the column, and answering it
-     with the same cap is answering a different question. The pane is the limit
-     that remains: a column wider than the window shows no more of itself than
-     one exactly as wide as it, and everything past that is scrolling. */
-  const fitCeiling = () =>
-    Math.max(MAX_COL, (scroller.clientWidth || 0) - GUTTER - 8)
+  /* How wide a fit is allowed to make a column. The opening measure caps at
+     MAX_COL so one long cell cannot open the file with the rest of the table
+     off screen; a fit is a request to *see* the column and answers a different
+     question, so it goes by FIT_CHARS instead — see the note there. */
+  const fitCeiling = () => Math.max(MAX_COL, FIT_CHARS * charAdvance() + CELL_PADDING)
 
   /**
    * How many columns the file has: the longest row in it, header included.
@@ -1100,6 +1150,7 @@ export function mountCsv ({
     const count = columnCount()
     widths = new Array(count).fill(MIN_COL)
     numeric = new Array(count).fill(false)
+    aligns = new Array(count).fill(null)
     const seen = new Array(count).fill(0)
     const numbers = new Array(count).fill(0)
     const consider = (row, body) => {
@@ -1123,6 +1174,10 @@ export function mountCsv ({
   /** The width one column wants: its widest cell, and never narrower than the
    *  heading, which carries the sort mark, the funnel and the grip beside its
    *  label. */
+  /* Whether the last fit wanted more room than it was allowed — read by
+     `sayIfClipped` and set by nothing else. */
+  let fitClipped = false
+
   const fittedWidth = (c) => {
     // +34 for the sort mark, the funnel and the grip, which sit beside the
     // heading's text.
@@ -1131,7 +1186,9 @@ export function mountCsv ({
     for (let i = 0; i < limit; i++) {
       wanted = Math.max(wanted, textWidth(String(rows[order[i]]?.[c] ?? '')))
     }
-    return Math.round(Math.min(fitCeiling(), Math.max(MIN_COL, wanted)))
+    const ceiling = fitCeiling()
+    if (wanted > ceiling) fitClipped = true
+    return Math.round(Math.min(ceiling, Math.max(MIN_COL, wanted)))
   }
 
   /* A fit that read part of the file says so. Silence would read as "this is
@@ -1142,13 +1199,24 @@ export function mountCsv ({
     onStatus(`Fitted to the first ${FIT_SCAN.toLocaleString()} rows`)
   }
 
+  /* And a fit that could not finish the job says that instead, along with what
+     to do about it. A column left at the ceiling still ends in a clipped cell,
+     and without a word here that reads as the fit having failed rather than as
+     the value being longer than any column may be. */
+  const sayIfClipped = () => {
+    if (!fitClipped) return false
+    onStatus('Some cells are longer than a column may be — press Enter on one to read it whole')
+    return true
+  }
+
   /** One column, as wide as its content. Double-clicking the divider asks for
    *  this; so does the heading's menu. */
   const fitColumn = (c) => {
+    fitClipped = false
     widths[c] = fittedWidth(c)
     paint()
     rememberWidths()
-    sayIfSampled()
+    if (!sayIfClipped()) sayIfSampled()
   }
 
   /** Every column at once — one pass and one repaint, rather than the column's
@@ -1162,6 +1230,7 @@ export function mountCsv ({
   const fitAllColumns = () => {
     const count = columns()
     if (!count) return false
+    fitClipped = false
     let changed = false
     for (let c = 0; c < count; c++) {
       const wanted = fittedWidth(c)
@@ -1173,7 +1242,7 @@ export function mountCsv ({
     paint()
     revealCursor()
     rememberWidths()
-    sayIfSampled()
+    if (!sayIfClipped()) sayIfSampled()
     /* The columns visibly move, which is the whole of the feedback the button
        and the menu need. What the caller does with the answer is the command
        palette's problem — it ran from a list and has nothing on screen to
@@ -1228,6 +1297,16 @@ export function mountCsv ({
   }
 
   /* ------------------------------------------------------------- painting */
+
+  /* The class that says it on a cell. A number column left alone keeps
+     `csv-num`, which lines the digits up as well as pushing them right; a
+     column pointed right by hand is only pushed right, because "align these
+     names right" is not a claim that they are quantities. */
+  const alignClass = (c) => {
+    const asked = aligns[c]
+    if (!asked) return numeric[c] ? 'csv-num' : ''
+    return `csv-${asked}`
+  }
 
   const cellStyle = (element, c) => {
     element.style.width = `${widths[c]}px`
@@ -1310,13 +1389,14 @@ export function mountCsv ({
     const frag = document.createDocumentFragment()
     const corner = gutterCell('', -2)
     corner.classList.add('csv-corner')
-    corner.title = 'Select the whole table (⌘A)'
+    corner.title = keyLabel('Select the whole table (⌘A)')
     frag.append(corner)
     frag.append(spacer(colLeft[firstCol]))
     for (let c = firstCol; c < lastCol; c++) {
       const cell = document.createElement('div')
       cell.className = 'csv-cell csv-th'
-      if (numeric[c]) cell.classList.add('csv-num')
+      const align = alignClass(c)
+      if (align) cell.classList.add(align)
       cell.dataset.col = String(c)
       cell.dataset.row = '-1'
       cell.id = cellId(-1, c)
@@ -1328,8 +1408,8 @@ export function mountCsv ({
         ? (sort.dir === 'asc' ? 'ascending' : 'descending')
         : 'none')
       cell.title = readonly
-        ? 'Click to sort · ⌘-click to select the column'
-        : 'Click to sort · ⌘-click to select the column · double-click to rename'
+        ? keyLabel('Click to sort · ⌘-click to select the column')
+        : keyLabel('Click to sort · ⌘-click to select the column · double-click to rename')
       const hiding = filters.get(c)?.size ?? 0
       cell.classList.toggle('is-filtered', hiding > 0)
 
@@ -1370,6 +1450,15 @@ export function mountCsv ({
      clipped, which is what makes this scroll rather than stretch. */
   const syncHeadScroll = () => { headRow.scrollLeft = scroller.scrollLeft }
 
+  const paintColumnScroll = () => {
+    const max = Math.max(0, scroller.scrollWidth - scroller.clientWidth)
+    const useful = max > 1
+    scrollBack.hidden = !useful
+    scrollForward.hidden = !useful
+    scrollBack.disabled = !useful || scroller.scrollLeft <= 1
+    scrollForward.disabled = !useful || scroller.scrollLeft >= max - 1
+  }
+
   /** The rows that should exist right now, given where the scroller is. */
   const visibleRange = () => {
     const top = scroller.scrollTop
@@ -1402,7 +1491,8 @@ export function mountCsv ({
     for (let c = firstCol; c < lastCol; c++) {
       const cell = document.createElement('div')
       cell.className = 'csv-cell'
-      if (numeric[c]) cell.classList.add('csv-num')
+      const align = alignClass(c)
+      if (align) cell.classList.add(align)
       cell.dataset.row = String(r)
       cell.dataset.col = String(c)
       cell.id = cellId(r, c)
@@ -1494,7 +1584,7 @@ export function mountCsv ({
   const repaintCell = (r, c) => {
     const selector = `.csv-cell[data-row="${r}"][data-col="${c}"]`
     const cell = r === -1 ? headRow.querySelector(selector) : window_.querySelector(selector)
-    if (!cell || cell.querySelector('input')) return
+    if (!cell || cell.querySelector('.csv-input')) return
     if (r === -1) {
       const label = cell.querySelector('.csv-th-label')
       if (label) label.textContent = header[c] ?? ''
@@ -1554,6 +1644,51 @@ export function mountCsv ({
       for (let r = Math.max(0, box.r0); r <= box.r1; r++) seen.add(r)
     }
     return [...seen].sort((a, b) => a - b)
+  }
+
+  /**
+   * The columns the selection touches, ascending and without repeats.
+   *
+   * What "align these" means when three headings have been ⌘-clicked. A
+   * right-click inside the selection is about the selection; one outside it is
+   * about the column under the pointer, the same way the row menu behaves.
+   */
+  const selectedColumns = () => {
+    const seen = new Set()
+    for (const box of ranges()) {
+      for (let c = Math.max(0, box.c0); c <= box.c1; c++) seen.add(c)
+    }
+    return [...seen].sort((a, b) => a - b)
+  }
+
+  /** The columns an alignment item should act on: the selected ones when the
+   *  clicked column is among them, and otherwise just the one clicked. */
+  const alignTargets = (c) => {
+    const picked = shown ? selectedColumns() : []
+    return picked.includes(c) && picked.length > 1 ? picked : [c]
+  }
+
+  /**
+   * Point some columns left, centre or right — or, with null, back at whatever
+   * their content implies.
+   *
+   * Not an edit: nothing in the file changes and nothing is queued to be
+   * saved, so this is offered in Reading view too and never marks a tab dirty.
+   * It is remembered beside the file the way the widths are, because a column
+   * of codes pointed left is a decision about this file that would otherwise
+   * have to be made again tomorrow.
+   */
+  const alignColumns = (cols, how) => {
+    let changed = false
+    for (const c of cols) {
+      if (c < 0 || c >= columns() || aligns[c] === how) continue
+      aligns[c] = how
+      changed = true
+    }
+    if (!changed) return
+    paint()
+    decorate()
+    rememberWidths()
   }
 
   /** Selection, cursor and search-match classes over whatever is built. Cheap
@@ -1973,6 +2108,7 @@ export function mountCsv ({
     rows: rows.slice(),
     widths: widths.slice(),
     numeric: numeric.slice(),
+    aligns: aligns.slice(),
     sort: sort && { ...sort },
     cursor: { ...cursor },
     anchor: { ...anchor },
@@ -2011,6 +2147,7 @@ export function mountCsv ({
     rows = patch.rows.slice()
     widths = patch.widths.slice()
     numeric = patch.numeric.slice()
+    aligns = (patch.aligns || new Array(patch.widths.length).fill(null)).slice()
     sort = patch.sort && { ...patch.sort }
     cursor = { ...patch.cursor }
     anchor = { ...patch.anchor }
@@ -2037,6 +2174,48 @@ export function mountCsv ({
 
   /* ------------------------------------------------------------- editing */
 
+  /* How far an open cell may grow downwards, in rows. A field the height of the
+     table would hide the thing being edited *for*: the rest of the column. Past
+     this it scrolls, which is what a value of a few thousand characters was
+     always going to do. */
+  const EDIT_LINES = 8
+
+  /**
+   * The open cell, sized to what is in it.
+   *
+   * A cell is as wide as its column, and a value longer than that used to be
+   * edited through a slot: the field kept the column's width and scrolled, so
+   * the text on screen began and ended mid-word and there was no way to see the
+   * whole of what you were changing. Every spreadsheet answers this the same
+   * way — the open cell leaves the column and takes the room it needs — and
+   * that is what this does: out to the right edge of the grid, then down over
+   * the rows below, wrapping.
+   *
+   * The heading strip is the exception. It is 30px of `overflow: hidden` with
+   * the body underneath it, so a heading's field grows sideways and no further;
+   * a heading long enough to need two lines would be drawn under the table.
+   */
+  function fitEditor () {
+    if (!editing) return
+    const { input, cell, r } = editing
+    const strip = r === -1 ? headRow : scroller
+    /* From the cell's own left edge to the grid's, less a hair: the field is
+       allowed to cover its neighbours to the right, not the scrollbar. */
+    const room = strip.getBoundingClientRect().right - cell.getBoundingClientRect().left - 6
+    const wanted = textWidth(input.value) + CELL_PADDING
+    input.style.width = `${Math.round(Math.max(cell.offsetWidth, Math.min(wanted, room)))}px`
+    if (r === -1) return
+    /* Measured, not computed: how many lines the value wraps onto is the
+       browser's business once the width is settled. `auto` first, or a field
+       that has just been emptied keeps the height of what it held. */
+    input.style.height = 'auto'
+    /* `scrollHeight` is the content and its padding; the border is not in it,
+       and this box is sized border to border — without the difference the field
+       is two pixels short of what it holds and scrolls by that much. */
+    const edges = input.offsetHeight - input.clientHeight
+    input.style.height = `${Math.min(input.scrollHeight + edges, ROW_HEIGHT * EDIT_LINES)}px`
+  }
+
   function beginEdit (seed = null) {
     if (!editable()) return
     if (editing) commitEdit()
@@ -2046,11 +2225,20 @@ export function mountCsv ({
     const selector = `.csv-cell[data-row="${cursor.r}"][data-col="${cursor.c}"]`
     const cell = cursor.r === -1 ? headRow.querySelector(selector) : window_.querySelector(selector)
     if (!cell) return
-    const input = document.createElement('input')
+    /* A textarea rather than an input, and for one reason: it can wrap. Nothing
+       else about it is used — Enter, Tab and Escape are the grid's, taken
+       before the field ever sees them, so a value still cannot be given a
+       newline by typing one. */
+    const input = document.createElement('textarea')
     input.className = 'csv-input'
+    input.rows = 1
+    input.spellcheck = false
     input.value = seed === null ? valueAt(cursor.r, cursor.c) : seed
+    cell.classList.add('is-editing')
     cell.replaceChildren(input)
-    editing = { r: cursor.r, c: cursor.c, input }
+    editing = { r: cursor.r, c: cursor.c, input, cell }
+    fitEditor()
+    input.addEventListener('input', fitEditor)
     input.focus()
     if (seed === null) input.select()
     else input.setSelectionRange(input.value.length, input.value.length)
@@ -2060,7 +2248,9 @@ export function mountCsv ({
    *  time — closing, scrolling and moving all do. */
   function commitEdit ({ cancel = false } = {}) {
     if (!editing) return
-    const { r, c, input } = editing
+    const { r, c, input, cell } = editing
+    // The cell goes back to being a cell: clipped, and in its own column.
+    cell.classList.remove('is-editing')
     const value = input.value
     const src = sourceOf(r)
     editing = null
@@ -2220,6 +2410,7 @@ export function mountCsv ({
     })
     widths.splice(where, 0, MIN_COL)
     numeric.splice(where, 0, false)
+    aligns.splice(where, 0, null)
     /* A filter is keyed by column index, and a column inserted to the left of
        a filtered one moves it. Without this, filtering "type" and then adding
        a column before it leaves the grid hiding rows by the wrong column. */
@@ -2250,6 +2441,7 @@ export function mountCsv ({
     })
     widths.splice(at, 1)
     numeric.splice(at, 1)
+    aligns.splice(at, 1)
     // The deleted column's filter goes with it; the ones after it move up.
     filters.delete(at)
     shiftFilters(at, -1)
@@ -2644,7 +2836,11 @@ export function mountCsv ({
 
     if (needCols > columns()) {
       while (header.length < needCols) header.push('')
-      while (widths.length < needCols) { widths.push(MIN_COL); numeric.push(false) }
+      while (widths.length < needCols) {
+        widths.push(MIN_COL)
+        numeric.push(false)
+        aligns.push(null)
+      }
     }
     if (needRows > viewRows()) {
       const extra = needRows - viewRows()
@@ -2758,6 +2954,35 @@ export function mountCsv ({
     menu.style.top = `${Math.min(y - box.top, box.height - height - 8)}px`
   }
 
+  /**
+   * The alignment items, worded and ordered the same in every menu that shows
+   * them.
+   *
+   * A tick against the one in force rather than three items that look alike:
+   * the question "which way is this column pointed" is one the menu can answer
+   * just by being open, and over several columns at once it answers honestly —
+   * no tick when they disagree.
+   */
+  const alignItems = (c) => {
+    const cols = alignTargets(c)
+    const many = cols.length > 1
+    const suffix = many ? ` (${cols.length} columns)` : ''
+    const agreed = cols.every((col) => aligns[col] === aligns[cols[0]]) ? aligns[cols[0]] : undefined
+    const item = (how, label) => ({
+      label: `${agreed === how ? '✓ ' : ''}${label}${suffix}`,
+      run: () => alignColumns(cols, how)
+    })
+    return [
+      item('left', 'Align left'),
+      item('center', 'Align centre'),
+      item('right', 'Align right'),
+      {
+        label: `${agreed === null ? '✓ ' : ''}Align automatically${suffix}`,
+        run: () => alignColumns(cols, null)
+      }
+    ]
+  }
+
   const cellMenu = (event, r, c) => {
     /* Worked out once, here, rather than inside each item: the list is what the
        labels count and what the items act on, so a menu that says "Delete 3
@@ -2774,7 +2999,9 @@ export function mountCsv ({
         { label: 'Copy', run: () => copySelection() },
         '-',
         { label: 'Select column', run: () => selectColumn(c) },
-        { label: 'Select row', disabled: r < 0, run: () => selectRow(r) }
+        { label: 'Select row', disabled: r < 0, run: () => selectRow(r) },
+        '-',
+        ...alignItems(c)
       ])
       return
     }
@@ -2803,7 +3030,9 @@ export function mountCsv ({
       '-',
       { label: 'Select column', run: () => selectColumn(c) },
       { label: 'Select row', disabled: r < 0, run: () => selectRow(r) },
-      { label: 'Fill down', disabled: !many, run: () => fillDown() }
+      { label: 'Fill down', disabled: !many, run: () => fillDown() },
+      '-',
+      ...alignItems(c)
     ])
   }
 
@@ -2829,7 +3058,9 @@ export function mountCsv ({
         '-',
         { label: 'Fit column width', run: () => fitColumn(c) },
         { label: 'Fit all columns', run: () => fitAllColumns() },
-        { label: 'Select column', run: () => selectColumn(c) }
+        { label: 'Select column', run: () => selectColumn(c) },
+        '-',
+        ...alignItems(c)
       ])
       return
     }
@@ -2845,6 +3076,8 @@ export function mountCsv ({
       { label: 'Fit column width', run: () => fitColumn(c) },
       { label: 'Fit all columns', run: () => fitAllColumns() },
       { label: 'Select column', run: () => selectColumn(c) },
+      '-',
+      ...alignItems(c),
       '-',
       { label: 'Insert column left', run: () => insertColumn(c) },
       { label: 'Insert column right', run: () => insertColumn(c + 1) },
@@ -2896,6 +3129,7 @@ export function mountCsv ({
   scroller.addEventListener('scroll', () => {
     syncHeadScroll()
     paintRows()
+    paintColumnScroll()
   }, { passive: true })
 
   bar.addEventListener('click', (event) => {
@@ -2906,6 +3140,12 @@ export function mountCsv ({
       case 'add-row': insertRows(Math.max(0, cursor.r) + 1); break
       case 'add-col': insertColumn(cursor.c + 1); break
       case 'fit': fitAllColumns(); break
+      case 'scroll-left':
+        scroller.scrollBy({ left: -Math.max(180, scroller.clientWidth * 0.75), behavior: 'smooth' })
+        return
+      case 'scroll-right':
+        scroller.scrollBy({ left: Math.max(180, scroller.clientWidth * 0.75), behavior: 'smooth' })
+        return
       // A toggle keeps the focus it was given: the next thing the reader does
       // is likely to be turning it back off, or typing more into the box.
       case 'only-matches': setOnlyMatches(!onlyMatches); return
@@ -3355,6 +3595,12 @@ export function mountCsv ({
       const savedWidths = Array.isArray(saved) ? saved : saved?.widths
       // The file may have been swapped under us while the reads resolved.
       if (current?.path === path && layoutFits(savedWidths)) widths = savedWidths.slice()
+      /* Checked against the column count on its own: an older sidecar has
+         widths and no alignments, and a file whose shape has changed since is
+         one whose remembered alignments describe other columns. */
+      if (current?.path === path && layoutFits(saved?.aligns)) {
+        aligns = saved.aligns.map((a) => (ALIGNMENTS.includes(a) ? a : null))
+      }
       rebuildOrder()
       paint()
       scroller.scrollTop = Number(place?.top) || 0
@@ -3362,6 +3608,7 @@ export function mountCsv ({
       syncHeadScroll()
       paintRows({ force: true })
       decorate()
+      requestAnimationFrame(paintColumnScroll)
     },
 
     save: saveFile,
@@ -3491,7 +3738,10 @@ export function mountCsv ({
 
     /** The grid is laid out in pixels against the scroller's width; a pane
      *  opening beside it changes that without a window resize. */
-    resize () { paintRows({ force: true }) }
+    resize () {
+      paintRows({ force: true })
+      paintColumnScroll()
+    }
   }
 
   return grid

@@ -49,5 +49,5 @@
     "types": [],
     "lib": ["ES2022", "DOM", "DOM.Iterable"]
   },
-  "include": ["src/**/*.js", "electron/**/*.js"]
+  "include": ["src/**/*.js", "electron/**/*.js", "types/**/*.d.ts"]
 }

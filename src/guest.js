@@ -108,15 +108,15 @@ function buildGuest (page, viewClass) {
 const waiting = new Map()
 
 const watcher = typeof IntersectionObserver === 'function'
-  ? new IntersectionObserver((entries) => {
+  ? new IntersectionObserver((entries, observer) => {
     for (const [node] of waiting) {
-      if (!node.isConnected) { waiting.delete(node); watcher.unobserve(node) }
+      if (!node.isConnected) { waiting.delete(node); observer.unobserve(node) }
     }
     for (const entry of entries) {
       if (!entry.isIntersecting) continue
       const mount = waiting.get(entry.target)
       waiting.delete(entry.target)
-      watcher.unobserve(entry.target)
+      observer.unobserve(entry.target)
       mount?.()
     }
   }, { rootMargin: '200px' })

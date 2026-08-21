@@ -45,17 +45,21 @@ const stores = []
  * @param onSave  told after a write, for the caches that a change invalidates
  */
 function makePathStore ({ name, vault, clean = (v) => v, onSave = () => {} }) {
+  /** @type {Record<string, unknown> | null} */
   let cache = null
 
   const file = () => path.join(vault(), '.tulip', `${name}.json`)
 
   async function load () {
     if (cache) return cache
+    /** @type {Record<string, unknown>} */
+    let loaded
     try {
       const parsed = JSON.parse(await fs.readFile(file(), 'utf8'))
-      cache = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
-    } catch { cache = {} }
-    return cache
+      loaded = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+    } catch { loaded = {} }
+    cache = loaded
+    return loaded
   }
 
   async function save () {

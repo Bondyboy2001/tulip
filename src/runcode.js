@@ -10,8 +10,8 @@
    printed the last time you ran it.
    ================================================================== */
 
-import { renderedBlock } from './blocks.js'
-import { el, svgIcon } from './dom.js'
+import { copyButton, renderedBlock } from './blocks.js'
+import { el, reason, svgIcon } from './dom.js'
 import { runners as RUNNERS } from '../electron/runnable-languages.json'
 
 const api = window.tulip
@@ -323,15 +323,6 @@ function stateFor (lang, code) {
   return state
 }
 
-/* An invoke that throws arrives wrapped in Electron's own framing —
-   "Error invoking remote method 'run:start': Error: …" — and only the sentence
-   the handler wrote is worth showing. */
-function reason (err) {
-  const text = String(err?.message || err)
-  const at = text.lastIndexOf('Error: ')
-  return at === -1 ? text : text.slice(at + 'Error: '.length)
-}
-
 /**
  * Starts a piece of work and hands its state the run it produced.
  *
@@ -360,7 +351,7 @@ async function launch (state, start) {
     }
     return result
   } catch (err) {
-    Object.assign(state, { status: 'done', error: reason(err), ms: 0, stopRequested: false })
+    Object.assign(state, { status: 'done', error: reason(err, 'That could not be run.'), ms: 0, stopRequested: false })
     state.render()
     settleRun(state)
     return null
@@ -1121,4 +1112,427 @@ export function attachRunControl (wrap, head, lang, code) {
   // in its own box instead of widening the code above it.
   wrap.after(runPanelUI(lang, code))
   head.append(runButtonUI(lang, code))
+}
+
+/* ------------------------------------------------------------ whole files
+   A source file on the stage — `solve.py`, `main.cpp` — is a program the same
+   way a fenced block is, so running one goes through exactly the machinery
+   above: the same `run:start`, the same session store keyed by language and
+   text, the same painters. What differs is only where the two ends live: the
+   button is the toolbar's, handed in from index.html rather than minted per
+   block, and the output goes to a dock under the editor rather than under a
+   fence. The text is read when Run is pressed, not when the file opens, so the
+   run is always of what is on screen. */
+
+/* A PPM (P3) is an image, not a transcript. A C++ file that prints
+   `P3\n800 600\n255\n…` is the blackhole renderer in the bug report — dumping
+   480k lines of `255 255 255` as text is the bug, not the feature. Detect the
+   header and show the picture. */
+function isPPM (text) {
+  const t = String(text || '').trimStart()
+  return t.startsWith('P3\n') || t.startsWith('P3\r') || t.startsWith('P3 ')
+}
+
+function ppmToCanvas (text) {
+  const raw = String(text || '').trim()
+  if (!raw.startsWith('P3')) return null
+  // Split header + pixels. P3 is ASCII; ignore comments (#…) for now — Tulip's
+  // own PPM never emits them, and a generic PPM with comments still splits fine
+  // if we strip them first.
+  const cleaned = raw.replace(/^P3\s+((#.*\n)\s*)*/m, 'P3\n').replace(/#.*$/gm, '')
+  const tokens = cleaned.split(/\s+/)
+  if (tokens[0] !== 'P3' || tokens.length < 4) return null
+  const w = Number(tokens[1]); const h = Number(tokens[2]); const max = Number(tokens[3])
+  if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0 || w > 4000 || h > 4000) return null
+  if (max !== 255) return null
+  const need = w * h * 3
+  // Do not allocate for absurd images in the renderer process.
+  if (need > 8_000_000) return null
+  const have = tokens.length - 4
+  const pixels = Math.min(w * h, Math.floor(have / 3))
+  if (pixels <= 0) return null
+  const canvas = document.createElement('canvas')
+  canvas.width = w; canvas.height = h
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return null
+  const img = ctx.createImageData(w, h)
+  // Fill with black where truncated.
+  let p = 4
+  for (let i = 0; i < pixels; i++) {
+    const r = Number(tokens[p++]); const g = Number(tokens[p++]); const b = Number(tokens[p++])
+    const o = i * 4
+    img.data[o] = r; img.data[o + 1] = g; img.data[o + 2] = b; img.data[o + 3] = 255
+  }
+  for (let i = pixels; i < w * h; i++) {
+    const o = i * 4
+    img.data[o] = 0; img.data[o + 1] = 0; img.data[o + 2] = 0; img.data[o + 3] = 255
+  }
+  ctx.putImageData(img, 0, 0)
+  // A truncated stream ends on a frame missing its tail; the animation player
+  // wants to drop that frame rather than flash its black fill every loop.
+  canvas._partial = pixels < w * h
+  return canvas
+}
+
+/* Split on each P3 header, keeping the header with its body. One frame — the
+   common case — is not an animation, and says so by returning null. */
+function framesFromPPM (text) {
+  const parts = String(text || '').trim().split(/(?=^P3\s)/m).map(s => s.trim()).filter(Boolean)
+  if (parts.length < 2) return null
+  // Cap frames to avoid a 100-frame spam blocking the UI.
+  return parts.slice(0, 48)
+}
+
+function ppmToAnimated (text) {
+  const frames = framesFromPPM(text)
+  if (!frames || frames.length < 2) return null
+  const canvases = []
+  for (const part of frames) {
+    const c = ppmToCanvas(part)
+    if (c) canvases.push(c)
+  }
+  // Only the last frame can be cut off; a loop that includes it flashes black.
+  if (canvases.length > 1 && canvases[canvases.length - 1]._partial) canvases.pop()
+  if (canvases.length < 2) return null
+  // Reuse first canvas size for the player.
+  const w = canvases[0].width, h = canvases[0].height
+  const player = document.createElement('div')
+  player.className = 'ppm-anim'
+  const view = canvases[0]
+  player.append(view)
+  const ctx = view.getContext('2d')
+  const datas = canvases.map(c => c.getContext('2d').getImageData(0,0,w,h))
+  let idx = 0, raf = null, playing = true
+  const tick = () => {
+    if (!playing || !view.isConnected) return
+    idx = (idx + 1) % datas.length
+    ctx.putImageData(datas[idx], 0, 0)
+    raf = setTimeout(tick, 42) // ~24fps
+  }
+  // Start when visible.
+  const start = () => { if (view.isConnected && playing) tick() }
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(start)
+  else setTimeout(start, 0)
+  // Expose a retire hook so mountFileRun can stop it.
+  player._stop = () => { playing = false; clearTimeout(raf) }
+  // For drawRunImage's caption: the size and how many frames came back.
+  player.width = w; player.height = h; player._frames = datas.length
+  return player
+}
+
+/**
+ * A run whose output is a picture, drawn into the dock's panel.
+ *
+ * Set as a bare figure — the picture in a frame, nothing written around it.
+ * Framed rather than bled to the dock's edges: an image that runs edge to edge
+ * reads as the app's own chrome. The run's shape (size, frames) rides on the
+ * picture's tooltip; the one caption that survives is the truncation warning,
+ * because a silently cut animation looks like a finished one.
+ */
+function drawRunImage (panel, state, image) {
+  const frames = image._frames || 1
+  const shape = `${image.width}×${image.height}` + (frames > 1 ? `, ${frames} frames` : '')
+  image.title = shape
+  const well = el('div', 'run-image-well')
+  well.append(image)
+  const figure = el('figure', 'run-image')
+  if (state.truncated) {
+    const meta = el('figcaption', 'run-image-meta')
+    meta.append(el('span', 'run-image-warn', 'truncated'))
+    figure.append(meta)
+  }
+  figure.append(well)
+  panel.replaceChildren(figure)
+  panel.hidden = false
+  panel.classList.remove('is-bad')
+}
+
+/* ----------------------------------------------------------- the popup
+   The output panel is a window over the corner of the stage, and its size is
+   the setting that matters: the common output here is a picture, and how big
+   a picture should be is a question only the person looking at it can answer.
+
+   Dragged from the panel's top-left corner rather than stepped through
+   fractions — the grip moves the way the panel grows, which is the one
+   direction that needs no explaining, and the panel is anchored at the bottom
+   right so the two corners it does not move stay put.
+
+   Written down, so the next run opens at the size the last one was left at.
+   Kept out of Settings all the same: it is a property of the output in front
+   of you, not of the app. */
+const RUN_MIN_W = 260
+const RUN_MIN_H = 150
+const DEFAULT_RUN_SIZE = { w: 720, h: 480 }
+
+/** A stored size, made usable: a config from another version or a hand-edited
+ *  one still opens as a panel that fits on the stage and can be grabbed.
+ *
+ *  The stage is the ceiling when there is one to measure. There is not always:
+ *  restoring runs before the first paint on a window opening minimised, and a
+ *  box of zero would otherwise pin every popup to its minimum for the session.
+ *  No box means no ceiling — the next drag measures a real one. */
+const runRoom = (span, min) => (span > min + 24 ? span - 24 : Infinity)
+
+function legalRunSize (w, h, box) {
+  const maxW = runRoom(box?.width || 0, RUN_MIN_W)
+  const maxH = runRoom(box?.height || 0, RUN_MIN_H)
+  const want = (value, min, max, fallback) => {
+    const n = Number(value)
+    return Math.min(max, Math.max(min, Number.isFinite(n) && n > 0 ? n : fallback))
+  }
+  return {
+    w: want(w, RUN_MIN_W, maxW, DEFAULT_RUN_SIZE.w),
+    h: want(h, RUN_MIN_H, maxH, DEFAULT_RUN_SIZE.h)
+  }
+}
+
+/**
+ * The toolbar Run for the file on screen.
+ *
+ * @param {HTMLButtonElement} button   the strip's own control
+ * @param {HTMLElement} host           the popup the output panel goes in
+ * @param {() => {lang: string, code: string}} source  the file as it is now
+ */
+export function mountFileRun ({ button, host, source }) {
+  let state = null
+
+  /* The size lives here, not on the panel: the popup element is one for the
+     life of the window and the size outlives any particular run. */
+  let size = { ...DEFAULT_RUN_SIZE }
+  /* And while a picture is up, the popup is the picture's shape. A render has
+     an aspect the program chose; a panel of some other shape can only answer
+     that with bars down two of its sides or a crop, and neither is a thing
+     anyone wanted to look at. So the width is the reader's — the grip sets it,
+     it is what gets written down — and the height follows from the render.
+     Null while the output is a transcript, which has no shape of its own and
+     takes both dimensions from the drag. */
+  let aspect = null
+  /* The stage is measured here, at every paint, rather than once when the size
+     is restored. Restoring happens during boot, before the panes have their
+     final widths, so a size clamped then would be clamped to a half-built
+     stage — and written back a little smaller on every launch. What is stored
+     is what the reader dragged; what is drawn is as much of it as fits now. */
+  const paintSize = () => {
+    const box = host.parentElement?.getBoundingClientRect()
+    const wide = runRoom(box?.width || 0, RUN_MIN_W)
+    const tall = runRoom(box?.height || 0, RUN_MIN_H)
+    let w = Math.min(size.w, wide)
+    let h = Math.min(size.h, tall)
+    if (aspect) {
+      h = w / aspect
+      // A wide render in a short stage: give the height back and take the
+      // width the aspect asks for at that height, rather than letterboxing.
+      if (h > tall) { h = tall; w = h * aspect }
+    }
+    host.style.width = `${Math.round(w)}px`
+    host.style.height = `${Math.round(h)}px`
+  }
+  /* Repainted on the change and not otherwise: `paint` runs on every chunk a
+     program prints, and the shape only moves when the kind of output does. */
+  const setAspect = (next) => {
+    if (next === aspect) return
+    aspect = next
+    paintSize()
+  }
+  paintSize()
+
+  /* Closing is closing, not clearing: the run and everything it printed stay
+     in the session store, so the panel comes back with the output still in it
+     the next time the file is run — or the next time the same unchanged run is
+     joined.
+
+     And closing has to outlast the run. Output arrives in chunks and every
+     chunk repaints, so without a flag the panel a reader has just dismissed
+     comes straight back with the next line the program prints. Pressing Run is
+     what takes the dismissal off — it is the one gesture that means "show me
+     this". */
+  let dismissed = false
+  const show = (on) => { host.hidden = !on || dismissed }
+  const dismiss = () => { dismissed = true; show(false) }
+
+  /* The panel's corner handle. It is at the top left because the panel is
+     pinned to the bottom right, so dragging up and to the left is dragging the
+     one corner that moves, and the panel grows the way the pointer went.
+
+     Pointer capture rather than window listeners: the pointer leaves the
+     handle on the first pixel of any real drag, and capture is what keeps the
+     drag with the element it started on — the same thing the TeX divider and
+     the panel grips do. */
+  const grip = el('div', 'file-run-grip')
+  grip.setAttribute('role', 'separator')
+  grip.setAttribute('aria-label', 'Resize output')
+  grip.title = 'Drag to resize · double-click to reset'
+  grip.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0) return
+    event.preventDefault()
+    grip.setPointerCapture(event.pointerId)
+    const from = { x: event.clientX, y: event.clientY, ...size }
+    const move = (move_) => {
+      const dx = from.x - move_.clientX
+      const dy = from.y - move_.clientY
+      /* With a picture up the height is the render's business, so a drag that
+         is mostly vertical would otherwise do nothing. Both directions are
+         read as the same request — make it bigger — and the one that asks for
+         more wins. */
+      const w = aspect ? Math.max(from.w + dx, (from.h + dy) * aspect) : from.w + dx
+      size = legalRunSize(w, from.h + dy, host.parentElement?.getBoundingClientRect())
+      paintSize()
+    }
+    const done = () => {
+      grip.removeEventListener('pointermove', move)
+      grip.removeEventListener('pointerup', done)
+      grip.removeEventListener('pointercancel', done)
+      api.config.set({ runWidth: size.w, runHeight: size.h })
+    }
+    grip.addEventListener('pointermove', move)
+    grip.addEventListener('pointerup', done)
+    grip.addEventListener('pointercancel', done)
+  })
+  grip.addEventListener('dblclick', () => {
+    size = { ...DEFAULT_RUN_SIZE }
+    paintSize()
+    api.config.set({ runWidth: size.w, runHeight: size.h })
+  })
+
+  const close = el('button', 'run-btn is-icon tk-close')
+  close.type = 'button'
+  close.title = 'Close output'
+  close.setAttribute('aria-label', 'Close output')
+  close.append(svgIcon('<path d="M4.6 4.6l6.8 6.8M11.4 4.6l-6.8 6.8"/>',
+    { className: 'run-icon', stroke: 1.5 }))
+  close.addEventListener('click', dismiss)
+  /* Escape closes it, the way it closes every other panel laid over the
+     document. Only when it is up, so the key is free for the editor's own
+     uses the rest of the time. */
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape' || host.hidden) return
+    event.preventDefault()
+    dismiss()
+  })
+
+  const face = () => {
+    const running = state?.status === 'running'
+    drawRunFace(button, running, running ? 'Stop this file' : 'Run this file')
+  }
+
+  /* Watch one run: the button wears its status, the dock streams its output.
+     The previous run's painters are retired first — the state they are bound
+     to may well outlive this view in the session store. */
+  const watch = (next, lang, code) => {
+    retirePainters(host)
+    button.tkRetire?.()
+    state = next
+    painter(state, button, face)
+    const panel = makePanel('file-run')
+    /* A sibling of the panel, laid over the popup's corner, rather than a
+       child of the head: the head is inside the scroller and rebuilt with
+       every status change, and the one control worth keeping still is the one
+       that takes the transcript away with you. Read at the click — the output
+       is still arriving when the button first appears. */
+    // The stage has a settled width by now, whatever it had at restore.
+    paintSize()
+    const copy = copyButton(() => state.stdout + state.stderr, 'Copy output')
+    const draw = incrementalOutput(panel, state, lang, code)
+    let ppmCanvas = null
+    let lastPPMText = null
+    const paint = () => {
+      /* Long output is read through a window (see the panel's max-height), and
+         a window on a program that is still printing has to follow the last
+         line — otherwise a run scrolls past behind a box showing its first
+         thirty lines. After the microtask so the line being appended is in the
+         box before it is scrolled to. */
+      if (state.status === 'running') {
+        queueMicrotask(() => { panel.scrollTop = panel.scrollHeight })
+      }
+      if (state.status === 'done' && state.code === 0 && isPPM(state.stdout) && !state.stderr) {
+        if (lastPPMText !== state.stdout) {
+          ppmCanvas?._stop?.()
+          ppmCanvas = ppmToAnimated(state.stdout) || ppmToCanvas(state.stdout)
+          lastPPMText = state.stdout
+        }
+        if (ppmCanvas) {
+          drawRunImage(panel, state, ppmCanvas)
+          /* The popup takes the render's shape — see `aspect`. Set before it is
+             shown, so the picture is never drawn once at the wrong shape and
+             then again at the right one. */
+          setAspect(ppmCanvas.height ? ppmCanvas.width / ppmCanvas.height : null)
+          show(!panel.hidden)
+          // PPM fills the popup — no copy control, no verdict, image only.
+          copy.hidden = true
+          return
+        }
+      } else if (state.status === 'running' && isPPM(state.stdout)) {
+        // While streaming, keep the transcript hidden — 480k lines of numbers
+        // is not a thing to incrementally append.
+        panel.replaceChildren()
+        panel.hidden = false
+        const bar = el('div', 'run-out-head')
+        bar.append(el('span', 'run-out-verdict is-running', 'Rendering…'))
+        panel.append(bar)
+        show(true)
+        copy.hidden = true
+        return
+      }
+      // Not a PPM, or PPM failed to parse — fall back to the transcript.
+      if (ppmCanvas?._stop) ppmCanvas._stop()
+      ppmCanvas = null
+      lastPPMText = null
+      // Text has no shape of its own: the popup goes back to the dragged one.
+      setAspect(null)
+      draw()
+      // The popup follows its panel: nothing to say, nothing on screen.
+      show(!panel.hidden)
+      // And the copy control follows the transcript: no output, nothing to take.
+      copy.hidden = !state.stdout && !state.stderr
+    }
+    painter(state, panel, paint)
+    /* The grip and the close are the popup's own furniture and outlive any one
+       run; they are put back with each because the panel inside is new. */
+    host.replaceChildren(panel, copy, close, grip)
+    state.render()
+  }
+
+  button.addEventListener('click', () => {
+    if (state?.status === 'running') { requestStop(state); return }
+    const { lang, code } = source()
+    if (!isRunnable(lang)) return
+    const next = stateFor(lang, code)
+    watch(next, lang, code)
+    /* Pressing Run means asking to see the run: a panel closed after the last
+       one comes back for this one, wherever in the file you are standing. */
+    dismissed = false
+    show(true)
+    /* Unchanged text that is already running — a run left going when the file
+       was switched away from — is joined rather than restarted, exactly as a
+       block's own button would. */
+    if (next.status !== 'running') launch(next, () => api.run.start(lang, code))
+  })
+
+  face()
+
+  return {
+    /** The size the last session left the popup at — see `legalRunSize`. The
+     *  stage is not measured here on purpose; `paintSize` does that. */
+    restoreRunSize (cfg = {}) {
+      size = legalRunSize(cfg.runWidth, cfg.runHeight)
+      paintSize()
+    },
+    /** A compiled language's file is open: page the compiler in now. */
+    warm (lang) { if (isRunnable(lang)) warmRunner(lang) },
+    /** A different document took the stage: the popup and the button let go.
+     *  The run itself is not stopped — it lives in the session store, and
+     *  pressing Run on the unchanged file joins it again. */
+    reset () {
+      retirePainters(host)
+      button.tkRetire?.()
+      state = null
+      /* Back to the dragged shape here too, and not at the next run: the panel
+         reopens at whatever the style still says, so leaving a picture's shape
+         on it would flash a transcript into a frame cut for a render. */
+      setAspect(null)
+      host.replaceChildren()
+      show(false)
+      face()
+    }
+  }
 }

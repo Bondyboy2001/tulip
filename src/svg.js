@@ -187,8 +187,8 @@ function readSvg (code) {
   /* A drawing that gives a size but no viewBox cannot be scaled to the column,
      and one that gives neither has no size at all — both are worth fixing here
      rather than leaving to look broken. */
-  const width = parseFloat(root.getAttribute('width'))
-  const height = parseFloat(root.getAttribute('height'))
+  const width = parseFloat(root.getAttribute('width') || '')
+  const height = parseFloat(root.getAttribute('height') || '')
   if (!root.getAttribute('viewBox') && width > 0 && height > 0) {
     root.setAttribute('viewBox', `0 0 ${width} ${height}`)
   }

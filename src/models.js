@@ -143,7 +143,8 @@ function placeholderFor (key) {
  * One slot, because the callers ask in bursts about a single selection rather
  * than alternating between several. The enabled list is compared by its
  * contents, since Settings hands over a new array for the same ticks. */
-let offered = null   // { catalogue, enabled, selected, list }
+/** @type {{catalogue: object, enabled: string[]|undefined, selected: string|undefined, list: object[]}|null} */
+let offered = null
 
 const sameKeys = (a, b) => {
   if (a === b) return true
@@ -193,6 +194,43 @@ const longLabel = (model) =>
 export const asOptions = (models) =>
   models.map((model) => ({ value: model.key, label: longLabel(model) }))
 
+/**
+ * The whole catalogue, searched — what `/model` offers as it is typed.
+ *
+ * Everything the CLIs will admit to, not the shortlist ticked in Settings: the
+ * ticks exist to keep a four-hundred-entry dropdown down to a menu, and a
+ * search *is* the way of cutting four hundred down. So the ticks shape the
+ * list you scroll and this shapes the list you type at.
+ *
+ * Ranked in three bands rather than sorted by score, because the bands are what
+ * a person is doing: the name they are typing, then the shelf it sits on, then
+ * anything that merely contains the words. Every word must land somewhere, so
+ * `claude opus` finds Claude Opus 5 and `opus sonnet` finds nothing.
+ */
+export function searchModels (catalogue, query, limit = 12) {
+  const all = allModels(catalogue)
+  const words = String(query || '').toLowerCase().split(/\s+/).filter(Boolean)
+  if (!words.length) return all.slice(0, limit)
+
+  const name = []
+  const shelf = []
+  const rest = []
+  for (const model of all) {
+    if (!words.every((word) => model.search.includes(word))) continue
+    const label = model.label.toLowerCase()
+    if (words.every((word) => label.includes(word))) name.push(model)
+    else if (words.every((word) => `${model.group} ${model.label}`.toLowerCase().includes(word))) shelf.push(model)
+    else rest.push(model)
+    // Three full bands' worth is more than the menu can show, whatever the mix.
+    if (name.length >= limit) break
+  }
+  return [...name, ...shelf, ...rest].slice(0, limit)
+}
+
+/** One model out of the catalogue, by the key a menu row carries. */
+export const modelByKey = (catalogue, key) =>
+  allModels(catalogue).find((model) => model.key === key) || null
+
 /** The provider a key names, as a person would say it. */
 export const providerLabel = (provider) => PROVIDER[provider]?.label || provider
 
@@ -223,6 +261,17 @@ export const COPILOT_MODES = Object.freeze({
   READ: 'read',
   ASK: 'ask',
   AUTO: 'auto'
+})
+
+/* What a question is, as against what the copilot is allowed to do about it.
+   A code task is a self-contained request — the fix for one block, carrying
+   everything it needs in its own words — and it is treated differently on both
+   ends of the wire: it gets a chat of its own rather than the conversation's
+   history, and the open document is not quoted at it. Named here because that
+   agreement spans the renderer, the panel and the prompt, and a mode spelled
+   out at each of them is a typo away from silently costing a whole excerpt. */
+export const CONTEXT_MODES = Object.freeze({
+  CODE_TASK: 'code-task'
 })
 
 export const COPILOT_MODE_ORDER = [

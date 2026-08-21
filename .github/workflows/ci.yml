@@ -86,6 +86,16 @@ jobs:
       - name: Staged-swap failure is safe
         run: npm run test:build-staging
 
+      # After the build, because the boot bench launches the built app. A slow
+      # launch is the regression this project keeps having — `npm run verify`
+      # has gated on these numbers all along, and CI not running them meant the
+      # one check nobody remembers to run locally was also the one check CI
+      # skipped. The thresholds have headroom over a developer machine; if a
+      # hosted runner turns out not to fit under them, the answer is to raise
+      # the number in the bench with a note saying why, not to drop the step.
+      - name: Performance gates
+        run: npm run test:performance
+
       # Advisories are a build failure, not a notice someone scrolls past. The
       # overrides in package.json exist to keep this green; when it goes red,
       # the fix is a new override or an upstream bump, not a lowered threshold.

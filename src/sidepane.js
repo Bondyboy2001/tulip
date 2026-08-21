@@ -66,6 +66,11 @@ export function openToSide (path, { persist = true, keepScroll = false } = {}) {
     deps.el.body.append(renderTransclusion({ path, anchor: null }, restore, []))
   }
 
+  /* Only when the column is actually about to move. Showing a second document
+     in a pane that is already open changes nothing about the shell, and pinning
+     the stage for a slide that is not happening holds the editor at a stale
+     width for the length of one. */
+  if (deps.el.app.dataset.side !== 'open') deps.willSlide?.(true)
   deps.el.app.dataset.side = 'open'
   if (persist) deps.remember(path)
 }
@@ -74,6 +79,7 @@ export function closeSidePane ({ persist = true } = {}) {
   if (!deps) return
   showing = null
   clearBody()
+  if (deps.el.app.dataset.side === 'open') deps.willSlide?.(false)
   deps.el.app.dataset.side = 'closed'
   if (persist) deps.remember(null)
 }

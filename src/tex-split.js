@@ -17,8 +17,8 @@ const legalRatio = (value) => Math.max(MIN_RATIO, Math.min(MAX_RATIO, value))
  * @param {HTMLElement} deps.stage
  * @param {HTMLElement} deps.divider
  * @param {HTMLElement} deps.app
- * @param {object} deps.api
- * @returns {{restoreTexSplit: (cfg: object) => void}}
+ * @param {{ config: { set: (patch: object) => Promise<void> } }} deps.api
+ * @returns {{restoreTexSplit: (cfg?: { texSourceRatio?: number }) => void}}
  */
 export function mountTexSplit ({ stage, divider, app, api }) {
   let ratio = DEFAULT_RATIO
@@ -47,6 +47,7 @@ export function mountTexSplit ({ stage, divider, app, api }) {
     divider.classList.add('is-live')
     app.dataset.resizing = 'tex'
 
+    /** @type {number | null} */
     let nextX = event.clientX
     let frame = 0
     let finished = false

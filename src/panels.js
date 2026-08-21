@@ -195,8 +195,15 @@ export function mountPanels ({
 
   /* Opening/closing a pane animates the grid edge. Follow the actual host box
      through those frames instead of guessing where the CSS transition is. */
-  const gripObserver = new ResizeObserver(() => {
-    for (const p of PANELS) placeGrip(p)
+  const gripObserver = new ResizeObserver((entries) => {
+    /* Only the hosts that actually moved. Placing all three on any one host's
+       frame meant a rect read and a style write per panel per frame for the
+       whole of the grid transition, two thirds of it about edges that had not
+       gone anywhere. */
+    for (const entry of entries) {
+      const p = PANELS.find((panel) => panel.host === entry.target)
+      if (p) placeGrip(p)
+    }
   })
   for (const p of PANELS) gripObserver.observe(p.host)
 

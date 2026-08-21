@@ -80,6 +80,8 @@ export const isPdfPath = (path) => PDF_EXT.test(path || '')
 export const isSitePath = (path) => SITE_EXT.test(path || '')
 export const isWhiteboardPath = (path) => WHITEBOARD_EXT.test(path || '')
 export const isNotebookPath = (path) => NOTEBOOK_EXT.test(path || '')
+export const isLanguageTablePath = (path) =>
+  String(path || '').toLowerCase().endsWith(VAULT_CONTRACT.languageTableSuffix)
 
 /** Whether the last segment carries an extension at all. A wikilink names a
  *  note without one — `[[Reading list]]` — and that is the difference between
@@ -100,7 +102,7 @@ const HAS_EXT = /\.[^./]+$/
  * than pretended at.
  */
 export const isViewedFilePath = (path) => {
-  const name = String(path || '').split('/').pop()
+  const name = String(path || '').split('/').pop() || ''
   if (!HAS_EXT.test(name)) return false
   return !NOTE_EXT.test(name) && !isTexPath(name) && !isPdfPath(name) &&
     !isSitePath(name) && !isWhiteboardPath(name) && !isDataPath(name) &&
@@ -119,4 +121,4 @@ export const isChatAttachment = (path) =>
 
 /** A path's last segment with the extension taken off — the name to show. */
 export const noteName = (path) =>
-  String(path || '').split('/').pop().replace(NOTE_EXT, '')
+  (String(path || '').split('/').pop() || '').replace(NOTE_EXT, '')

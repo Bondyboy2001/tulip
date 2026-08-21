@@ -10,6 +10,8 @@
    ================================================================== */
 
 import { el as node } from './dom.js'
+import { isMac } from './platform.js'
+import { SPELL_LANGUAGES } from './spell-languages.js'
 import { NO_MATCH, dropdown, matcher } from './dropdown.js'
 import { THEMES } from './themes.js'
 
@@ -34,15 +36,35 @@ const SECTIONS = [
      tab of their own now. */
   {
     id: 'appearance',
+    group: 'Options',
     label: 'Appearance',
     rows: [
-      { key: 'theme', type: 'themes', name: 'Theme' },
+      {
+        key: 'theme',
+        type: 'themes',
+        name: 'Theme',
+        hint: 'The palette the whole window wears.'
+      },
       {
         key: 'zoom',
         type: 'zoom',
+        name: 'Default zoom',
         // "Default", because this is the size Tulip opens at: ⌘+ and ⌘− move
         // the window you are in, and this is where they come back to.
-        name: 'Default zoom'
+        hint: 'The size Tulip opens at — ⌘+ and ⌘− move the window you are in.'
+      }
+    ]
+  },
+  {
+    id: 'hotkeys',
+    group: 'Options',
+    label: 'Hotkeys',
+    rows: [
+      {
+        key: 'hotkeys',
+        type: 'hotkeys',
+        name: 'Keyboard shortcuts',
+        hint: 'Click a key, press the new one. Backspace clears it, Esc cancels.'
       }
     ]
   },
@@ -53,18 +75,21 @@ const SECTIONS = [
      along with everything else that is true of a note and of nothing else. */
   {
     id: 'markdown',
+    group: 'Documents',
     label: 'Markdown',
     rows: [
       {
         key: 'readableWidth',
         type: 'toggle',
         name: 'Readable line length',
+        hint: 'Hold note text to a comfortable measure instead of the window’s full width.',
         fallback: true
       },
       {
         key: 'measure',
         type: 'segment',
         name: 'Line width',
+        hint: 'How wide a line may run while the readable length is on.',
         options: [
           { value: 'narrow', label: 'Narrow' },
           { value: 'normal', label: 'Normal' },
@@ -76,12 +101,14 @@ const SECTIONS = [
         key: 'centerHeadings',
         type: 'toggle',
         name: 'Center headings',
+        hint: 'Set headings on the centre line of the page.',
         fallback: false
       },
       {
         key: 'spellcheck',
         type: 'toggle',
         name: 'Check spelling',
+        hint: 'Underline words the dictionary does not know.',
         fallback: true
       },
       /* The checker's exceptions, not a setting of the app's own — the list
@@ -90,30 +117,45 @@ const SECTIONS = [
       {
         key: '',
         type: 'dictionary',
-        name: 'Dictionary'
+        name: 'Dictionary',
+        hint: 'The words spellcheck has been taught to accept.'
+      },
+      /* English is not on the grid because it is not optional — the app's
+         locale picks its spelling. These are the languages a note might be in
+         on top of that, and a word right in any chosen one is not underlined. */
+      {
+        key: 'spellLanguages',
+        type: 'languages',
+        name: 'Spelling languages',
+        hint: 'Languages checked besides English.',
+        fallback: []
       },
       {
         key: 'outline',
         type: 'toggle',
         name: 'Show the outline',
+        hint: 'Keep the outline pane open beside notes.',
         fallback: false
       },
       {
         key: 'codeNumbers',
         type: 'toggle',
         name: 'Number code lines',
+        hint: 'Line numbers down the side of fenced code blocks.',
         fallback: true
       },
       {
         key: 'codeWrap',
         type: 'toggle',
         name: 'Wrap long code lines',
+        hint: 'Wrap instead of scrolling sideways.',
         fallback: false
       },
       {
         key: 'manimQuality',
         type: 'select',
         name: 'Manim quality',
+        hint: 'How sharply a ```manim scene renders — higher is slower.',
         options: [
           { value: 'l', label: 'Low — 480p15' },
           { value: 'm', label: 'Medium — 720p30' },
@@ -125,41 +167,68 @@ const SECTIONS = [
       }
     ]
   },
+  /* A source file — `.py`, `.cpp`, `.tex` — shown as itself. It is the one kind
+     of document with no reading view to have opinions about, so what is asked
+     here is only about the text: how it is addressed, not how it is set. */
+  {
+    id: 'source',
+    group: 'Documents',
+    label: 'Source',
+    rows: [
+      {
+        key: 'sourceNumbers',
+        type: 'toggle',
+        /* Off by default. Numbers down the side are what a source file is read
+           with in every other editor, but they are also a column of chrome
+           beside a page that has none, and which of those it reads as is a
+           matter of taste rather than of correctness. */
+        name: 'Show line numbers',
+        hint: 'A numbered margin beside source files.',
+        fallback: false
+      }
+    ]
+  },
   /* The `.csv` grid. One question so far, and it is a real one: rules between
      the columns are enough to read a table by, and a full lattice is what you
      want when you are aiming at cells rather than reading rows. */
   {
     id: 'csv',
+    group: 'Documents',
     label: 'CSV',
     rows: [
       {
         key: 'csvBorders',
         type: 'toggle',
         name: 'Border every cell',
+        hint: 'A full lattice for aiming at cells, not only rules between columns.',
         fallback: false
       }
     ]
   },
   {
     id: 'pdf',
+    group: 'Documents',
     label: 'PDF',
     rows: [
       {
         key: 'pdfText',
         type: 'toggle',
         name: 'Read PDFs out for the copilot',
+        hint: 'Extract each PDF as page-marked text the copilot can read a page at a time.',
         fallback: true
       }
     ]
   },
   {
     id: 'tex',
+    group: 'Documents',
     label: 'TeX',
     rows: [
       {
         key: 'texEngine',
         type: 'select',
         name: 'Compile with',
+        hint: 'The engine a TeX document is built with.',
         options: [
           { value: 'pdflatex', label: 'pdfLaTeX' },
           { value: 'xelatex', label: 'XeLaTeX' },
@@ -177,12 +246,14 @@ const SECTIONS = [
      not get a control. */
   {
     id: 'study',
+    group: 'Features',
     label: 'Study',
     rows: [
       {
         key: 'studyNewPerDay',
         type: 'number',
         name: 'New words a day',
+        hint: 'How much unseen material a day’s study may introduce.',
         placeholder: '8',
         min: 1,
         max: 200
@@ -191,6 +262,7 @@ const SECTIONS = [
         key: 'studyRetention',
         type: 'select',
         name: 'Aim to remember',
+        hint: 'The recall the scheduler aims for — fewer reviews against more forgetting.',
         options: [
           { value: 0.85, label: '85% — fewer reviews' },
           { value: 0.9, label: '90% — the usual balance' },
@@ -203,23 +275,27 @@ const SECTIONS = [
         key: 'studySpeaking',
         type: 'toggle',
         name: 'Speak the words',
+        hint: 'Say each word aloud as it is studied.',
         fallback: true
       }
     ]
   },
   {
     id: 'copilot',
+    group: 'Features',
     label: 'Copilot',
     rows: [
       {
         key: 'aiModel',
         type: 'models',
-        name: 'Default model'
+        name: 'Default model',
+        hint: 'Who answers when the copilot is asked — any model the CLI offers.'
       },
       {
         key: 'aiModels',
         type: 'catalogue',
         name: 'Models offered',
+        hint: 'The shortlist the panel offers — /model still reaches the whole catalogue.',
         /* Beside the name rather than in the list: it undoes the whole list, and a
            control that clears three hundred ticks does not belong among them. */
         action: { id: 'clear-models', label: 'Reset', title: 'Tick nothing — offer no models of your own' }
@@ -227,16 +303,18 @@ const SECTIONS = [
       {
         key: '',
         type: 'doctor',
-        name: 'Copilot Doctor'
+        name: 'Copilot Doctor',
+        hint: 'A local readiness check: installed, signed in, ready to answer.'
       },
-      /* Permission mode and effort live on the composer instead — both are
-         per-turn decisions, and the popover beside the message box is where you
-         are when you make them. The settings themselves (`aiEffort`, `aiMode`)
-         are still persisted; this is only about where the control
-         for them sits. Effort had the additional problem of being a property of
-         the model rather than of the app — the stops are whatever the chosen
-         model publishes — so a copy of it here could offer a level the model in
-         the panel does not take. */
+      /* Permission mode and effort belong to the conversation, not to the app:
+         both are per-turn decisions, and you make them while looking at the
+         panel. Mode is a control on the composer; effort is ⌃T, with the
+         composer's readout naming the level in force. The settings themselves
+         (`aiEffort`, `aiMode`) are still persisted; this is only about where
+         they are changed from. Effort had the additional problem of being a
+         property of the model rather than of the app — the levels are whatever
+         the chosen model publishes — so a copy of it here could offer one the
+         model in the panel does not take. */
     ]
   }
   /* There is no Vault section, and no "default vault" setting behind it. The
@@ -245,6 +323,55 @@ const SECTIONS = [
      of changing it. A pane offering a second, separately-configured folder
      only ever raised the question of which of the two you were looking at. */
 ]
+
+/* A keydown, as the accelerator string Electron's menu takes. Letters and
+   digits come from `code` so a layout's shifted characters do not leak into
+   the name; the punctuation Electron accepts is mapped the same way. A chord
+   with no modifier would fire in the middle of typing, so only the F-keys may
+   go bare. */
+const NAMED_KEYS = {
+  ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right',
+  ' ': 'Space', Enter: 'Return', Tab: 'Tab', Home: 'Home', End: 'End',
+  PageUp: 'PageUp', PageDown: 'PageDown', '+': 'Plus'
+}
+const PUNCT_CODES = {
+  Minus: '-', Equal: '=', BracketLeft: '[', BracketRight: ']',
+  Backslash: '\\', Semicolon: ';', Quote: "'", Comma: ',', Period: '.',
+  Slash: '/', Backquote: '`'
+}
+
+function chordOf (event) {
+  if (['Shift', 'Control', 'Alt', 'Meta'].includes(event.key)) return null
+  const parts = []
+  if (event.metaKey) parts.push('Cmd')
+  if (event.ctrlKey) parts.push('Ctrl')
+  if (event.altKey) parts.push('Alt')
+  if (event.shiftKey) parts.push('Shift')
+  const code = event.code || ''
+  let key = ''
+  if (/^Key[A-Z]$/.test(code)) key = code.slice(3)
+  else if (/^Digit\d$/.test(code)) key = code.slice(5)
+  else if (/^F(?:[1-9]|1\d|2[0-4])$/.test(event.key)) key = event.key
+  else if (PUNCT_CODES[code]) key = PUNCT_CODES[code]
+  else key = NAMED_KEYS[event.key] || ''
+  if (!key) return null
+  if (!parts.length && !/^F\d/.test(key)) return null
+  return [...parts, key].join('+')
+}
+
+/* An accelerator, spelt the way this desktop spells keys — glyphs run
+   together on a Mac, words joined by + everywhere else. */
+const MAC_GLYPHS = {
+  Cmd: '⌘', CmdOrCtrl: '⌘', Ctrl: '⌃', Alt: '⌥', Option: '⌥', Shift: '⇧',
+  Return: '⏎', Enter: '⏎', Backspace: '⌫', Delete: '⌦', Escape: '⎋', Esc: '⎋',
+  Space: '␣', Tab: '⇥', Up: '↑', Down: '↓', Left: '←', Right: '→', Plus: '+'
+}
+
+function chordLabel (accel) {
+  const parts = String(accel || '').split('+')
+  if (isMac()) return parts.map((p) => MAC_GLYPHS[p] || p).join('')
+  return parts.map((p) => (p === 'CmdOrCtrl' || p === 'Cmd' ? 'Ctrl' : p)).join('+')
+}
 
 /**
  * @param el        the shell from index.html
@@ -255,6 +382,8 @@ const SECTIONS = [
 export function mountSettings ({ el, api, values, onChange }) {
   let active = SECTIONS[0].id
   let modelCatalogue = DEFAULT_CATALOGUE
+  /* The rebindable commands, from the menu itself — see hotkeys:list. */
+  let hotkeyCatalogue = []
   let doctorState = null
 
   /* ------------------------------------------------------------ controls */
@@ -411,6 +540,157 @@ export function mountSettings ({ el, api, values, onChange }) {
       button.title = 'Add and remove words the spellchecker skips'
       button.addEventListener('click', openDictionary)
       return button
+    },
+
+    /**
+     * The spellchecker's extra languages, on the same checkbox grid the model
+     * list uses. Each click writes the whole list: the config holds ids, the
+     * grid holds labels, and `change` redraws the pane so the row never shows
+     * a state the checker is not in.
+     */
+    languages (row) {
+      const grid = node('div', 'model-shelf-grid')
+      const chosen = new Set(Array.isArray(valueOf(row)) ? valueOf(row) : [])
+      for (const { id, label } of SPELL_LANGUAGES) {
+        const option = node('button', 'model-option')
+        option.type = 'button'
+        option.setAttribute('role', 'checkbox')
+        option.setAttribute('aria-checked', String(chosen.has(id)))
+        option.classList.toggle('is-on', chosen.has(id))
+        option.append(node('span', 'model-tick'), node('span', 'model-name', label))
+        option.addEventListener('click', () => {
+          const next = new Set(chosen)
+          if (next.has(id)) next.delete(id)
+          else next.add(id)
+          change(row, [...next].sort())
+        })
+        grid.append(option)
+      }
+      return grid
+    },
+
+    /**
+     * Every rebindable command, with its key — the menu is the registry (see
+     * `applyHotkeys` in electron/main.js), read over IPC when the pane opens.
+     *
+     * Obsidian's arrangement: click the key, press the new one. A binding
+     * that matches the default is stored as nothing at all, so the config
+     * carries only what the user actually moved; Backspace clears a key
+     * outright, and two commands on one chord are both flagged rather than
+     * silently letting the first of them win.
+     */
+    hotkeys () {
+      const wrap = node('div', 'hotkey-list')
+
+      const effective = (overrides) => {
+        const map = new Map()
+        for (const entry of hotkeyCatalogue) {
+          const held = overrides[entry.command]
+          map.set(entry.command, typeof held === 'string' ? held : entry.accelerator)
+        }
+        return map
+      }
+
+      const saveHotkey = (command, accel) => {
+        const next = { ...(values().hotkeys || {}) }
+        const fallback = hotkeyCatalogue.find((e) => e.command === command)?.accelerator || ''
+        if (accel === fallback) delete next[command]
+        else next[command] = accel
+        onChange('hotkeys', next)
+        paint()
+      }
+
+      /* One recording at a time, on the window and in capture, so the chord
+         being pressed reaches nothing else — not the editor, and not the
+         pane's own Escape-to-close. */
+      let recording = null
+      const stopRecording = () => {
+        if (!recording) return
+        window.removeEventListener('keydown', onRecordKey, true)
+        recording.chip.classList.remove('is-recording')
+        recording = null
+        paint()
+      }
+      const onRecordKey = (event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        if (event.key === 'Escape') { stopRecording(); return }
+        if (event.key === 'Backspace' || event.key === 'Delete') {
+          const { command } = recording
+          stopRecording()
+          saveHotkey(command, '')
+          return
+        }
+        const chord = chordOf(event)
+        if (!chord) return
+        const { command } = recording
+        stopRecording()
+        saveHotkey(command, chord)
+      }
+
+      function paint () {
+        wrap.replaceChildren()
+        if (!hotkeyCatalogue.length) {
+          wrap.append(node('span', 'settings-hint', 'The command list is still loading — reopen this section in a moment.'))
+          return
+        }
+        const overrides = values().hotkeys || {}
+        const bound = effective(overrides)
+        /* Who else answers to each chord, for the conflict flag. */
+        const claims = new Map()
+        for (const [command, accel] of bound) {
+          if (accel) claims.set(accel, (claims.get(accel) || []).concat(command))
+        }
+        for (const entry of hotkeyCatalogue) {
+          const line = node('div', 'hotkey-row')
+          const name = node('span', 'hotkey-name', entry.label)
+          if (entry.section) name.append(node('span', 'hotkey-menu', entry.section))
+          line.append(name)
+
+          const custom = typeof overrides[entry.command] === 'string'
+          const current = bound.get(entry.command)
+
+          const rivals = current ? claims.get(current).filter((c) => c !== entry.command) : []
+          if (rivals.length) {
+            const flag = node('span', 'hotkey-conflict', 'both bound')
+            flag.title = 'This key is also bound to: ' +
+              rivals.map((c) => hotkeyCatalogue.find((e) => e.command === c)?.label || c).join(', ')
+            line.append(flag)
+          }
+
+          if (custom) {
+            const reset = node('button', 'hotkey-reset', '↺')
+            reset.type = 'button'
+            reset.title = `Back to the default${entry.accelerator ? ` (${chordLabel(entry.accelerator)})` : ''}`
+            reset.setAttribute('aria-label', 'Restore the default shortcut')
+            reset.addEventListener('click', () => {
+              const next = { ...(values().hotkeys || {}) }
+              delete next[entry.command]
+              onChange('hotkeys', next)
+              paint()
+            })
+            line.append(reset)
+          }
+
+          const chip = node('button', `hotkey-chord${custom ? ' is-custom' : ''}${current ? '' : ' is-blank'}`)
+          chip.type = 'button'
+          chip.textContent = current ? chordLabel(current) : 'Not set'
+          chip.title = 'Click, then press the new shortcut'
+          chip.addEventListener('click', () => {
+            stopRecording()
+            recording = { command: entry.command, chip }
+            chip.classList.add('is-recording')
+            chip.textContent = 'Press keys…'
+            window.addEventListener('keydown', onRecordKey, true)
+          })
+          chip.addEventListener('blur', stopRecording)
+          line.append(chip)
+          wrap.append(line)
+        }
+      }
+
+      paint()
+      return wrap
     },
 
     toggle (row) {
@@ -847,7 +1127,15 @@ export function mountSettings ({ el, api, values, onChange }) {
 
   function renderRail () {
     el.rail.replaceChildren()
+    /* Obsidian's arrangement: the sections run under small group headings —
+       Options, then the document kinds, then the features — so the rail reads
+       as three short lists rather than one long one. */
+    let group = null
     for (const section of SECTIONS) {
+      if (section.group && section.group !== group) {
+        group = section.group
+        el.rail.append(node('div', 'settings-rail-head', group))
+      }
       const button = node('button', 'settings-tab', section.label)
       button.type = 'button'
       button.setAttribute('aria-current', String(section.id === active))
@@ -873,6 +1161,7 @@ export function mountSettings ({ el, api, values, onChange }) {
         name.append(act)
       }
       label.append(name)
+      if (row.hint) label.append(node('div', 'settings-hint', row.hint))
       line.append(label)
 
       const control = CONTROLS[row.type]?.(row)
@@ -884,7 +1173,8 @@ export function mountSettings ({ el, api, values, onChange }) {
 
       // A full-width control reads better under its label than squeezed
       // beside it — the theme grid and the model list are both of those.
-      if (row.type === 'themes' || row.type === 'catalogue' || row.type === 'doctor') line.classList.add('is-stacked')
+      if (row.type === 'themes' || row.type === 'catalogue' || row.type === 'doctor' ||
+          row.type === 'hotkeys' || row.type === 'languages') line.classList.add('is-stacked')
       el.body.append(line)
     }
   }
@@ -1017,8 +1307,15 @@ export function mountSettings ({ el, api, values, onChange }) {
     renderRail()
     renderBody()
     loadModels().catch(() => {})
+    Promise.resolve(api.hotkeys?.list()).then((list) => {
+      hotkeyCatalogue = Array.isArray(list) ? list : []
+      if (!el.root.hidden) renderBody()
+    }).catch(() => {})
     openedFrom = document.activeElement
     el.root.hidden = false
+    // Dragged on an earlier open: keep that spot, pulled back into a window
+    // that may have shrunk since.
+    if (placed) place(placed.x, placed.y)
     /* The section rail, not the close button. Opening a pane already focused
        on the way out of it means the first thing Tab offers is leaving, and a
        reader arriving by keyboard has to walk past the exit to reach the
@@ -1036,11 +1333,59 @@ export function mountSettings ({ el, api, values, onChange }) {
   }
 
   el.close.addEventListener('click', close)
-  el.root.addEventListener('mousedown', (event) => {
-    if (event.target === el.root) close()
+
+  /* ------------------------------------------------------- the popup */
+
+  /* The pane is a popup, not a modal: the app behind stays usable, clicking
+     into it does not close anything, and the box can be dragged aside by its
+     header to uncover whatever it is sitting on. The position is inline style
+     on the box, so it survives close and reopen for the life of the window —
+     re-clamped on open in case the window shrank in the meantime. */
+  const box = el.root.querySelector('.settings-box')
+  const head = el.root.querySelector('.settings-head')
+  let placed = null
+
+  function place (x, y) {
+    const pad = 8
+    const width = box.offsetWidth
+    x = Math.max(pad, Math.min(x, window.innerWidth - width - pad))
+    y = Math.max(pad, Math.min(y, window.innerHeight - 64))
+    placed = { x, y }
+    box.style.position = 'fixed'
+    box.style.left = `${x}px`
+    box.style.top = `${y}px`
+  }
+
+  head?.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0) return
+    // The close button and the search field live here too, and a drag must
+    // not begin on either of them.
+    if (event.target.closest('button, input, select, textarea')) return
+    const rect = box.getBoundingClientRect()
+    const grabX = event.clientX - rect.left
+    const grabY = event.clientY - rect.top
+    const move = (ev) => place(ev.clientX - grabX, ev.clientY - grabY)
+    const drop = () => {
+      head.removeEventListener('pointermove', move)
+      head.removeEventListener('pointerup', drop)
+      head.removeEventListener('pointercancel', drop)
+    }
+    head.setPointerCapture(event.pointerId)
+    head.addEventListener('pointermove', move)
+    head.addEventListener('pointerup', drop)
+    head.addEventListener('pointercancel', drop)
   })
+
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape' || el.root.hidden) return
+    /* A popup, not a modal — but Escape still means "put Settings away" from
+       anywhere that is not itself spending the key. Inside the pane it always
+       closes; so does pressing it with nothing in particular focused, which is
+       where a click on the pane's own background leaves the keyboard. Only a
+       focused editor or field outside the pane keeps its own Escape. */
+    const inPane = el.root.contains(event.target)
+    const idle = event.target === document.body || event.target === document.documentElement
+    if (!inPane && !idle) return
     event.stopPropagation()
     // Nearest thing first: the dictionary dialog, then a search in progress,
     // and only with both out of the way the pane itself.

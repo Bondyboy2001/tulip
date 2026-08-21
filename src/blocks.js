@@ -30,8 +30,10 @@ import { el, svgIcon } from './dom.js'
  *
  * The text is captured, not looked up: both callers rebuild this button
  * whenever the block's code changes, so what it holds is what is on screen.
+ * A caller whose text is still arriving — a run's output panel — passes a
+ * function instead, and the clipboard gets whatever it answers at the click.
  */
-export function copyButton (text) {
+export function copyButton (text, label = 'Copy code') {
   const face = () => svgIcon(
     '<rect x="5.5" y="5.5" width="7" height="7" rx="1.6"/>' +
     '<path d="M10.5 3.5h-5A1.5 1.5 0 0 0 4 5v5.5"/>',
@@ -46,14 +48,14 @@ export function copyButton (text) {
     button.title = title
     button.setAttribute('aria-label', title)
   }
-  say('Copy code')
+  say(label)
   button.append(face())
 
   let undo = 0
   button.addEventListener('click', () => {
     // Electron's clipboard, via the bridge: the page's own
     // navigator.clipboard needs a permission the sandbox does not grant.
-    window.tulip.copy(text)
+    window.tulip.copy(typeof text === 'function' ? text() : text)
     button.classList.add('is-copied')
     button.replaceChildren(tick())
     say('Copied')
@@ -61,7 +63,7 @@ export function copyButton (text) {
     undo = setTimeout(() => {
       button.classList.remove('is-copied')
       button.replaceChildren(face())
-      say('Copy code')
+      say(label)
     }, 1300)
   })
   return button

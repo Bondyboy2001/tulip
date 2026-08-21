@@ -53,6 +53,10 @@ const iconTemplates = new Map()
  * viewBox, the aria-hidden and — for the outlined ones — the same five stroke
  * attributes. `stroke` asks for the outlined preset at a given width; `fill`
  * for the solid one.
+ *
+ * @param {string} markup
+ * @param {{ viewBox?: string, className?: string, size?: number | null,
+ *           stroke?: number | null, fill?: string | null }} [options]
  */
 export function svgIcon (markup, {
   viewBox = '0 0 16 16',
@@ -98,6 +102,74 @@ export function escapeHtml (s) {
   return String(s).replace(/[&<>"']/g, (c) => ESCAPES[c])
 }
 
+/* ------------------------------------------------------------- failures
+
+   An `invoke` that throws reaches the renderer wrapped in Electron's own
+   framing — "Error invoking remote method 'file:write': Error: …" — and if the
+   handler threw a system error the sentence inside that framing is an errno
+   line naming a path the reader never chose: "EACCES: permission denied, open
+   '/Users/…/vault/.tulip-tmp-x9'". Neither half is a thing to put in front of
+   somebody whose note would not save.
+
+   So a message survives only if a handler in this app wrote it deliberately.
+   Machine text is traded for the sentence the call site already had ready,
+   which is the one that knows what was being attempted.
+   ================================================================== */
+
+/* What the common errnos mean to someone who was trying to save a file. The
+   path is deliberately dropped: it is nearly always a temp file the writer
+   made, so naming it explains nothing and reads as a leak. */
+const ERRNO = {
+  EACCES: 'Permission was refused.',
+  EPERM: 'Permission was refused.',
+  EROFS: 'That location is read-only.',
+  ENOSPC: 'The disk is full.',
+  EDQUOT: 'The disk quota is full.',
+  ENOENT: 'That file is no longer there.',
+  EEXIST: 'Something is already there by that name.',
+  ENOTEMPTY: 'That folder is not empty.',
+  EBUSY: 'That file is in use by another program.',
+  EISDIR: 'That is a folder, not a file.',
+  ENOTDIR: 'Part of that path is not a folder.',
+  ENAMETOOLONG: 'That name is too long.',
+  EMFILE: 'Too many files are open at once.',
+  ENFILE: 'Too many files are open at once.',
+  EXDEV: 'That move crosses disks and has to be a copy.',
+  ETIMEDOUT: 'That took too long and was given up on.',
+  ECONNREFUSED: 'The connection was refused.'
+}
+
+/**
+ * The sentence to show for a failure, given what the call site would say.
+ *
+ * @param {unknown} err        whatever was thrown or rejected with
+ * @param {string} [fallback]  the caller's own account of what failed
+ * @returns {string}
+ */
+export function reason (err, fallback = 'Something went wrong.') {
+  const said = typeof err === 'object' && err !== null && 'message' in err
+    ? err.message
+    : undefined
+  const raw = String(said ?? err ?? '').trim()
+  /* Electron nests its framing before the handler's own text, so the LAST
+     "Error: " is where what the handler actually said begins. */
+  const at = raw.lastIndexOf('Error: ')
+  const text = (at === -1 ? raw : raw.slice(at + 'Error: '.length)).trim()
+  if (!text) return fallback
+  /* An errno line — `EACCES: permission denied, open '/…'` — is machine text
+     with a path in it, so what shows is the caller's sentence and, when the
+     code is one this knows, a plain account of it. Errno-shaped only: any
+     capitalised word will do as the start of a deliberate message ("PDF: this
+     document is encrypted."), and throwing those away left the reader with the
+     bare fallback and none of the explanation the handler wrote. */
+  const errno = /^(E[A-Z]{2,}):/.exec(text)
+  if (errno) return ERRNO[errno[1]] ? `${fallback} ${ERRNO[errno[1]]}` : fallback
+  /* A bare error class with nothing said in it — "TypeError", "[object
+     Object]" — is framing too, just less obviously. */
+  if (/^[A-Za-z]*Error$/.test(text) || text === '[object Object]') return fallback
+  return text
+}
+
 /* ------------------------------------------------------------ focus trap
 
    Five panels in this app say `aria-modal="true"` — the quick switcher, the
@@ -136,12 +208,63 @@ function focusableWithin (root) {
  * from another dialog holds the focus rather than the one underneath it.
  */
 function topModal () {
-  const open = [...document.querySelectorAll('[aria-modal="true"]')]
+  const open = /** @type {HTMLElement[]} */ ([...document.querySelectorAll('[aria-modal="true"]')])
     /* A fixed handful of dialogs exist and at most a couple are ever mounted at
        once: a constant, not a collection. */
     // eslint-disable-next-line tulip/no-layout-thrash
     .filter((node) => node.offsetParent !== null)
   return open[open.length - 1] || null
+}
+
+/**
+ * Hide the page behind an open modal from assistive technology.
+ *
+ * The Tab trap above stops the keyboard leaving the dialog, which is only half
+ * of what `aria-modal` promises. A screen reader's own cursor does not move by
+ * Tab: it walks the accessibility tree, and the note, the sidebar and the tab
+ * strip were all still in it — so the reader could read straight through a
+ * dialog asking them a question, with no sign it was there.
+ *
+ * `inert` rather than `aria-hidden` alone: it takes the background out of the
+ * tree AND makes it unclickable, which is what a modal already means.
+ *
+ * @param {Element} background  everything that is not the dialogs — the app
+ *                              shell. The modals must not live inside it.
+ */
+export function guardModalBackground (background) {
+  if (!background) return
+  const modals = [...document.querySelectorAll('[aria-modal="true"]')]
+  if (!modals.length) return
+
+  const sync = () => {
+    /* `hidden` rather than a layout read: these dialogs are shown and hidden by
+       that attribute, and asking for geometry here would run on every open and
+       close of every one of them.
+
+       On an ancestor, though, not on the dialog itself — every one of them is
+       wrapped in a backdrop element, and it is the backdrop that carries the
+       attribute. Testing the dialog alone found them all permanently open. */
+    /* A dialog that has put its own `aria-modal` down is not asking for any of
+       this: the theme picker sits in the corner over a page it is previewing,
+       and the page has to stay live under it — readable, clickable, scrollable.
+       Read at sync time rather than filtered once at registration, because it
+       is the same panel that is modal as the quick switcher and not modal as
+       the theme picker. */
+    const anyOpen = modals.some((node) =>
+      node.getAttribute('aria-modal') === 'true' && !node.closest('[hidden]'))
+    background.toggleAttribute('inert', anyOpen)
+    background.setAttribute('aria-hidden', String(anyOpen))
+  }
+
+  const observer = new MutationObserver(sync)
+  /* The dialog and everything it hangs from, since any of them could be the one
+     that is toggled. A handful of nodes each, watched for one attribute. */
+  for (const modal of modals) {
+    for (let node = /** @type {Element | null} */ (modal); node && node !== document.body; node = node.parentElement) {
+      observer.observe(node, { attributes: true, attributeFilter: ['hidden', 'aria-modal'] })
+    }
+  }
+  sync()
 }
 
 /**

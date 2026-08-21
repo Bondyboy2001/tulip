@@ -28,7 +28,7 @@ export const COUNTRIES = CODES
   .map((code) => ({
     code,
     flag: countryFlag(code),
-    name: code === 'XK' ? 'Kosovo' : names.of(code)
+    name: code === 'XK' ? 'Kosovo' : names.of(code) || ''
   }))
   .filter((country) => country.name && country.name !== country.code)
   .sort((a, b) => a.name.localeCompare(b.name))
@@ -36,7 +36,7 @@ export const COUNTRIES = CODES
 /** The country back out of its flag — countryFlag's inverse. */
 export function countryCode (flag) {
   const letters = [...String(flag || '')]
-    .map((char) => char.codePointAt(0) - 0x1F1E6)
+    .map((char) => (char.codePointAt(0) ?? 0) - 0x1F1E6)
     .filter((at) => at >= 0 && at < 26)
     .map((at) => String.fromCharCode(65 + at))
   return letters.length === 2 ? letters.join('') : ''

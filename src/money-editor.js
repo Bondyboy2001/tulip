@@ -10,7 +10,7 @@
 import { Decoration, ViewPlugin } from '@codemirror/view'
 import { syntaxTree } from '@codemirror/language'
 import { findMoney } from './money.js'
-import { mathSpans, docText } from './math.js'
+import { mathSpans, docText, slidThrough } from './math.js'
 import { inCode } from './blocks.js'
 
 /**
@@ -21,13 +21,28 @@ import { inCode } from './blocks.js'
  * recomputed here, which is what stops one keystroke from scanning the note
  * three times over.
  */
+/** @type {{doc: import('@codemirror/state').Text|null, spans: ReturnType<typeof findMoney>|null}} */
 let cache = { doc: null, spans: null }
 
 function moneySpans (doc) {
-  if (cache.doc !== doc) {
-    cache = { doc, spans: findMoney(docText(doc), mathSpans(doc)) }
+  if (cache.doc === doc && cache.spans) return cache.spans
+
+  /* A price begins with a `$`, and the maths layer only slides its cache
+     through a change on a line that holds no `$` at all — so under the very
+     same conditions no price can have been written, unwritten or reworded
+     either, and this cache slides with it rather than scanning again. */
+  const slid = /** @type {{from: import('@codemirror/state').Text|null, changes: import('@codemirror/state').ChangeSet|null}|null} */ (slidThrough(doc))
+  if (slid && slid.changes && cache.spans && cache.doc === slid.from) {
+    const { changes } = slid
+    const map = (pos) => changes.mapPos(pos)
+    const spans = cache.spans.map((s) => ({ ...s, from: map(s.from), to: map(s.to) }))
+    cache = { doc, spans }
+    return spans
   }
-  return cache.spans
+
+  const spans = findMoney(docText(doc), mathSpans(doc) ?? undefined)
+  cache = { doc, spans }
+  return spans
 }
 
 /* -------------------------------------------------------- live preview */

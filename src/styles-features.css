@@ -78,26 +78,6 @@
 .ai-doctor-version { overflow: hidden; color: var(--faint); text-overflow: ellipsis; white-space: nowrap; }
 .ai-doctor-status { color: var(--muted); }
 
-/* The Copilot settings belong to the compact model readout that opens them.
-   On a wide panel the old full-width card became a mostly empty slab; cap it
-   to the size its two controls actually need and anchor it to that readout. */
-.ai-compose .ai-pop {
-  left: auto;
-  right: 0;
-  width: min(320px, calc(100% - 10px));
-  padding: 10px 11px 11px;
-  gap: 6px 11px;
-  border-radius: 10px;
-  box-shadow: 0 12px 30px rgb(0 0 0 / 18%), 0 2px 7px rgb(0 0 0 / 10%);
-}
-.ai-compose .ai-model-control .dd-button {
-  border: 1px solid var(--line-soft);
-  background: color-mix(in srgb, var(--sunk) 72%, var(--surface));
-}
-.ai-compose .ai-model-control .dd-button:hover {
-  border-color: var(--line);
-  background: var(--hover);
-}
 
 /* ========================================================== review statistics
    The panel built in src/review-panel.js. Its own block rather than rules

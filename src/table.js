@@ -141,10 +141,18 @@ function alignments (delimiterRow) {
   })
 }
 
-/** Every table in the document, as line ranges plus their parsed contents. */
-function findTables (state) {
+/**
+ * Every table between line `first` and line `last`, as line ranges plus their
+ * parsed contents — and whether the scan ended inside a code fence.
+ *
+ * `last` bounds the header candidates exclusively and the rows inclusively,
+ * because a header on the final line has no line left to hold its delimiter.
+ * The fence is reported so a caller scanning part of a document can tell that
+ * what follows the part is code.
+ */
+function scanTables (state, first, last) {
   const tables = []
-  const total = state.doc.lines
+  const total = last
 
   /* Which fence the scan is inside, if any. Without this a table written
      *inside* a code block became a live editable grid in the editing view
@@ -155,7 +163,7 @@ function findTables (state) {
      own character, so ``` does not end a ~~~ block. */
   let fence = null
 
-  for (let n = 1; n < total; n++) {
+  for (let n = first; n < total; n++) {
     const head = state.doc.line(n)
 
     const marker = /^\s{0,3}(`{3,}|~{3,})/.exec(head.text)
@@ -214,8 +222,11 @@ function findTables (state) {
     n = last
   }
 
-  return tables
+  return { tables, fence }
 }
+
+/** Every table in the document, as line ranges plus their parsed contents. */
+const findTables = (state) => scanTables(state, 1, state.doc.lines).tables
 
 /**
  * The same answer for one document version, computed once.
@@ -960,6 +971,8 @@ function pullEdge (band, axis, at) {
 function wireCellSelection (wrap, view) {
   let drag = null
   let frame = 0
+  let moveFrame = 0
+  let pendingMove = null
   watchForPressesAway()
 
   /* Grow the rectangle to whatever the pointer stands over now. Kept apart
@@ -1013,7 +1026,10 @@ function wireCellSelection (wrap, view) {
   const endDrag = () => {
     document.removeEventListener('mousemove', onMove)
     if (frame) cancelAnimationFrame(frame)
+    if (moveFrame) cancelAnimationFrame(moveFrame)
     frame = 0
+    moveFrame = 0
+    pendingMove = null
     const finished = drag
     drag = null
     wrap.classList.remove('is-selecting-cells')
@@ -1023,17 +1039,19 @@ function wireCellSelection (wrap, view) {
   /* On the document, not the wrap: past the last row the pointer is over the
      note, the pane, or nothing at all, and a listener on the grid stops
      hearing about a drag exactly when it leaves the grid. */
-  const onMove = (event) => {
-    if (!drag || !(event.buttons & 1)) return
-    drag.at = { x: event.clientX, y: event.clientY }
+  const applyMove = () => {
+    moveFrame = 0
+    const at = pendingMove
+    pendingMove = null
+    if (!drag || !at) return
+    drag.at = at
 
     if (!drag.selectingCells) {
-      const point = cellPointNear(wrap, event.clientX, event.clientY)
+      const point = cellPointNear(wrap, at.x, at.y)
       if (point && point.r === drag.anchor.r && point.c === drag.anchor.c) {
         const anchor = caretInCellAt(drag.cell, drag.down.x, drag.down.y)
-        const head = caretInCellAt(drag.cell, event.clientX, event.clientY)
+        const head = caretInCellAt(drag.cell, at.x, at.y)
         if (!anchor || !head) return
-        event.preventDefault()
         /* A contenteditable cell is nested through CodeMirror's non-editable
            block widget. Chromium focuses and edits that cell correctly, but it
            does not begin a native drag range through the widget boundary. Make
@@ -1046,8 +1064,18 @@ function wireCellSelection (wrap, view) {
       }
     }
 
+    extendTo(at.x, at.y)
+  }
+
+  const onMove = (event) => {
+    if (!drag || !(event.buttons & 1)) return
     event.preventDefault()
-    extendTo(event.clientX, event.clientY)
+    pendingMove = { x: event.clientX, y: event.clientY }
+    /* Pointer devices routinely send several moves between two paints. Each
+       hit-test after the previous move's class changes forces Chromium to lay
+       the grid out again, although only the last coordinate can be seen. Keep
+       one update for the frame and flush it on release below. */
+    if (!moveFrame) moveFrame = requestAnimationFrame(applyMove)
   }
 
   wrap.addEventListener('mousedown', (event) => {
@@ -1112,6 +1140,12 @@ function wireCellSelection (wrap, view) {
     if (!frame) frame = requestAnimationFrame(autoScroll)
 
     document.addEventListener('mouseup', () => {
+      /* The release may arrive before the scheduled frame. Apply its last
+         coordinate now so the rectangle never finishes one event behind. */
+      if (pendingMove) {
+        if (moveFrame) cancelAnimationFrame(moveFrame)
+        applyMove()
+      }
       const finished = endDrag()
       if (!finished) return
       if (finished.selectingCells) {
@@ -2756,6 +2790,83 @@ function shiftTables (tables, changes) {
   }))
 }
 
+/* One table slid down the page by an edit above it, which — unlike
+   `shiftTables` — may have made or unmade lines, so the line numbers move too. */
+function slideTable (t, changes, lines) {
+  const map = (pos) => changes.mapPos(pos)
+  return {
+    ...t,
+    from: map(t.from),
+    to: map(t.to),
+    deco: map(t.deco),
+    widthsLine: t.widthsLine === null ? null : t.widthsLine + lines,
+    lastLine: t.lastLine + lines,
+    rows: t.rows.map((row) => ({
+      line: row.line + lines,
+      cells: row.cells.map((c) => ({ ...c, from: map(c.from), to: map(c.to) }))
+    }))
+  }
+}
+
+/**
+ * The document's tables when every change landed inside one of them — which is
+ * every keystroke typed in a cell, and so the case that matters most.
+ *
+ * `shiftOnly` above covers prose typed far from any pipe; this covers the other
+ * half, where the walk over every line of the note was being paid to rebuild
+ * one grid. Only the edited table's own line range is scanned again; the tables
+ * before it are untouched by an edit that begins after them, and the ones after
+ * it are slid.
+ *
+ * Returns null — meaning take the full walk — whenever anything about the edit
+ * could reach outside that range:
+ *
+ * - a change outside the table, or spread across two of them;
+ * - a pipe on the line above, which a rescan could turn into a header and so
+ *   start a table one line higher than this is allowed to look;
+ * - a line below the table that could read as a delimiter row, which would let
+ *   a table start on the region's last line and run out the far side;
+ * - a fence opened inside the region and not closed there, which puts every
+ *   line under it in code and invalidates the tables being slid.
+ */
+function rebuiltTable (tr, tables) {
+  const before = tr.startState.doc
+  const doc = tr.state.doc
+
+  let table = null
+  let ok = true
+  tr.changes.iterChanges((fromA, toA) => {
+    if (!ok) return
+    const found = tables.find((t) => fromA >= t.from && toA <= t.to)
+    if (!found || (table && found !== table)) { ok = false; return }
+    table = found
+  })
+  if (!ok || !table) return null
+
+  const first = before.lineAt(table.from).number
+  if (first > 1 && doc.line(first - 1).text.includes('|')) return null
+
+  // Association forward, so text typed at the very end of the last row is
+  // inside the region rather than after it.
+  const last = doc.lineAt(tr.changes.mapPos(table.to, 1)).number
+  if (last <= first) return null
+  if (last < doc.lines) {
+    const next = doc.line(last + 1).text
+    if (DELIMITER.test(next) && next.includes('-')) return null
+  }
+
+  const region = scanTables(tr.state, first, last)
+  if (region.fence) return null
+
+  const at = tables.indexOf(table)
+  const lines = doc.lines - before.lines
+  return [
+    ...tables.slice(0, at),
+    ...region.tables,
+    ...tables.slice(at + 1).map((t) => slideTable(t, tr.changes, lines))
+  ]
+}
+
 export const tablePreview = StateField.define({
   create: (state) => buildTables(state),
   update (value, tr) {
@@ -2765,9 +2876,16 @@ export const tablePreview = StateField.define({
        once for this field and again for the version cache behind locate().
        Both are slid instead; the cache is refilled here so the next locate()
        finds the new doc already answered. */
-    if (cache.doc === tr.startState.doc && shiftOnly(tr)) {
-      cache = { doc: tr.state.doc, tables: shiftTables(cache.tables, tr.changes) }
-      return value.map(tr.changes)
+    if (cache.doc === tr.startState.doc) {
+      if (shiftOnly(tr)) {
+        cache = { doc: tr.state.doc, tables: shiftTables(cache.tables, tr.changes) }
+        return value.map(tr.changes)
+      }
+      /* Typing in a cell is the other whole-note walk, and the one the widget
+         below is rebuilt from anyway. Refilled here so `buildTables` and the
+         next `locate()` both find the new doc already answered. */
+      const rebuilt = rebuiltTable(tr, cache.tables)
+      if (rebuilt) cache = { doc: tr.state.doc, tables: rebuilt }
     }
     return buildTables(tr.state)
   },

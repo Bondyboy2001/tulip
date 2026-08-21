@@ -21,7 +21,7 @@ import { embedSpec, renderEmbed } from './assets.js'
 import { artefactRun, attachArtefactBlock } from './runcode.js'
 import { DRAWN } from './languages.js'
 
-const api = window.tulip
+const api = globalThis.tulip
 
 export function isTikz (lang) {
   return String(lang || '').trim().toLowerCase() === DRAWN.tikz
@@ -41,7 +41,8 @@ const runs = new Map()
    every other embed. */
 /* Exported for the editing half next door, not for general use. */
 export function pictureFor (path, onLoad) {
-  const picture = renderEmbed(embedSpec(path, { resolve: () => path }))
+  const asItself = { dir: '', resolve: () => path }
+  const picture = renderEmbed(embedSpec(path, asItself))
   if (onLoad) picture.querySelector?.('img')?.addEventListener('load', onLoad, { once: true })
   return picture
 }
@@ -135,7 +136,7 @@ const READS_FILES = /\\(?:openin|openout|read|write|input|include|InputIfFileExi
  */
 export function attachTikz (wrap, head, code, { noteName }) {
   const asks = READS_FILES.test(code)
-  attachArtefactBlock(wrap, head, {
+  const spec = {
     ...tikzSpec(code, noteName),
     kind: 'tikz',
     make: (path) => pictureFor(path),
@@ -147,5 +148,6 @@ export function attachTikz (wrap, head, code, { noteName }) {
         ? 'This picture reads files, so it is not drawn until you ask'
         : 'Draw this picture with TeX'
     }
-  })
+  }
+  attachArtefactBlock(wrap, head, spec)
 }

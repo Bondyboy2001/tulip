@@ -127,6 +127,11 @@ export default [
     ignores: [
       'node_modules/**',
       'dist/**',
+      /* A build that dies partway leaves its staging directory behind — .gitignore
+         already knows about them, and without this a crashed build turns the next
+         lint run into two thousand findings against bundled third-party code. */
+      '.dist-stage-*/**',
+      '.dist-previous-*/**',
       'build/**',
       'output/**',
       'bench/**'

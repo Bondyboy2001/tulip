@@ -11,7 +11,9 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
 import path from 'node:path'
 
-const note = process.argv[2]
+const args = process.argv.slice(2)
+const note = args.find((arg) => !arg.startsWith('--'))
+const check = args.includes('--check')
 
 const generated = () => {
   const out = ['# Big Note\n']
@@ -73,5 +75,21 @@ const result = spawnSync('node_modules/.bin/electron', [path.join(dir, 'host.mjs
   stdio: ['inherit', 'pipe', 'pipe'], encoding: 'utf8'
 })
 process.stdout.write((result.stdout || '').split('\n').filter((l) => !/^\s*$/.test(l)).join('\n') + '\n')
-if (result.status !== 0) process.stderr.write(result.stderr || '')
-process.exit(result.status ?? 1)
+if (result.status !== 0) {
+  process.stderr.write(result.stderr || '')
+  process.exit(result.status ?? 1)
+}
+if (check) {
+  try {
+    const report = JSON.parse(result.stdout)
+    const open = report.stages?.find((stage) => stage.label === 'WHOLE OPEN')
+    if (!open || open.ms > 1000) {
+      console.error(`reading performance gate failed: whole open ${open?.ms ?? 'missing'}ms`)
+      process.exit(1)
+    }
+    console.error(`reading performance gate passed: whole open ${open.ms}ms`)
+  } catch (error) {
+    console.error(`reading performance gate failed: ${error.message}`)
+    process.exit(1)
+  }
+}

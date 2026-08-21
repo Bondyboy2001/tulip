@@ -31,7 +31,7 @@ import path from 'node:path'
    to prove a failed build leaves the last one intact — which is a thing to do
    to a dist, not a test to run beside 32 others that are reading one.
    `npm run verify` runs it on its own, after the build. */
-const NOT_A_TEST = new Set(['test:build-staging'])
+const NOT_A_TEST = new Set(['test:build-staging', 'test:performance'])
 
 /* One at a time. Each of these drives a window that is deliberately shown —
    see the note above. test:reading-list drives an offscreen one and is not

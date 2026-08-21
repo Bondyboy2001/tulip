@@ -86,10 +86,19 @@ app.whenReady().then(async () => {
 })
 `)
 
-const run = spawnSync(path.join(root, 'node_modules/.bin/electron'), [main], {
+const runElectron = () => spawnSync(path.join(root, 'node_modules/.bin/electron'), [main], {
   encoding: 'utf8',
+  timeout: 150_000,
+  maxBuffer: 64 * 1024 * 1024,
   env: { ...process.env, ELECTRON_DISABLE_SECURITY_WARNINGS: '1' }
 })
+
+/* A macOS app activation can occasionally lose the first launch to another
+   Electron window. One retry turns that incidental empty run into either a
+   real measurement or a loud, reproducible failure; it never combines values
+   from two processes. */
+let run = runElectron()
+if (!(run.stdout || '').includes('__RESULTS__')) run = runElectron()
 
 const line = (run.stdout || '').split('\n').find((text) => text.startsWith('__RESULTS__'))
 if (!line) {
@@ -161,4 +170,20 @@ console.log('')
 if (process.argv.includes('--save')) {
   await writeFile(baselineFile, JSON.stringify(results, null, 2))
   console.log(`baseline saved to ${path.relative(root, baselineFile)}\n`)
+}
+
+if (process.argv.includes('--check')) {
+  /* Deliberately broad ceilings. This is a regression alarm, not a promise
+     that a shared CI machine behaves like an idle laptop. Each is comfortably
+     above the measured baseline but below the multi-frame pauses that brought
+     this benchmark into existence. */
+  const ceilings = { build: 220, keystroke: 45, elsewhere: 20, select: 80 }
+  const failed = Object.entries(ceilings)
+    .filter(([key, limit]) => typeof results[key] !== 'number' || results[key] > limit)
+  if (failed.length) {
+    console.error('table performance gate failed: ' + failed
+      .map(([key, limit]) => `${key} ${results[key] ?? 'missing'}ms > ${limit}ms`).join(', '))
+    process.exit(1)
+  }
+  console.log('table performance gate passed\n')
 }

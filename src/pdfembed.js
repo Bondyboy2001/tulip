@@ -13,8 +13,6 @@
  * page, because a forgotten document is a worker that never exits.
  */
 
-import { loadPdfjs, PDF_DATA, renderPageToCanvas } from './pdf.js'
-
 /* How tall the box is unless the note says otherwise — enough for most of an
    A4 page at column width, small enough that the note stays a note — lives in
    the stylesheet, as the fallback of `--embed-pdf-h`. Keeping it there is what
@@ -162,13 +160,15 @@ export function renderPdfEmbed (spec, onReady = () => {}, fileChip) {
   }
 
   async function open () {
-    const [source, pdfjs] = await Promise.all([
+    const [source, runtime] = await Promise.all([
       window.tulip.pdf.source(spec.path),
-      loadPdfjs()
+      import('./pdf.js')
     ])
+    const pdfjs = await runtime.loadPdfjs()
     if (state.dead) return
 
-    const loading = pdfjs.getDocument({ url: source, ...PDF_DATA })
+    state.runtime = runtime
+    const loading = pdfjs.getDocument({ url: source, ...runtime.PDF_DATA })
     const doc = await loading.promise
     if (state.dead) { loading.destroy().catch(() => {}); return }
     state.doc = doc
@@ -254,7 +254,7 @@ export function renderPdfEmbed (spec, onReady = () => {}, fileChip) {
 
     // The viewer's own render, so the resolution and the canvas ceiling are one
     // rule rather than two — the copy this had made did not carry the ceiling.
-    const { canvas } = await renderPageToCanvas(page, scale)
+    const { canvas } = await state.runtime.renderPageToCanvas(page, scale)
     if (state.dead || !state.visible.has(wrap)) {
       releaseCanvas(canvas)
       return

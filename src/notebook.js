@@ -405,6 +405,21 @@ function attachmentUrl (name, attachments) {
 }
 
 /**
+ * Keep an output image off the main thread.
+ *
+ * The pictures a notebook carries are recorded output, not the page: a file
+ * with fifty plots in it holds fifty base64 bitmaps, and a data URI is decoded
+ * synchronously by default — so opening such a notebook decoded every one of
+ * them before the first cell could be scrolled. Neither hint changes what is
+ * drawn; both change when.
+ */
+function outOfLine (img) {
+  img.loading = 'lazy'
+  img.decoding = 'async'
+  return img
+}
+
+/**
  * Markdown source with its `attachment:` references turned into data URIs.
  *
  * For the export, which has no app around it to resolve anything — the viewer
@@ -1592,6 +1607,7 @@ export function mountNotebook ({
       img.src = url
       img.alt = stub.dataset?.alt || stub.getAttribute('alt') || ''
       img.className = 'nb-md-image'
+      outOfLine(img)
       stub.replaceWith(img)
     }
   }
@@ -1632,7 +1648,7 @@ export function mountNotebook ({
       const img = document.createElement('img')
       img.src = `data:${part.mime};base64,${part.data}`
       img.alt = 'Cell output'
-      figure.append(img)
+      figure.append(outOfLine(img))
       return figure
     }
     if (part.kind === 'svg') {
@@ -1644,7 +1660,7 @@ export function mountNotebook ({
       const img = document.createElement('img')
       img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(part.markup)}`
       img.alt = 'Cell output'
-      figure.append(img)
+      figure.append(outOfLine(img))
       return figure
     }
     if (part.kind === 'html') {
@@ -2188,7 +2204,16 @@ export function mountNotebook ({
 
   async function interruptKernel () {
     stopQueue()
-    if (kernelInfo) await kernel.interrupt(current.path).catch(() => {})
+    if (kernelInfo) {
+      try {
+        await kernel.interrupt(current.path)
+      } catch (err) {
+        /* A cell that is still running after this is the honest picture, and
+           the reader has to be told the stop did not land — silence here reads
+           as "interrupted, and the cell is just slow to notice". */
+        notify(`${kernelNamed() || 'The kernel'} could not be interrupted: ${err?.message || 'it did not answer'}.`)
+      }
+    }
     paintBar()
   }
 
@@ -2210,13 +2235,24 @@ export function mountNotebook ({
         title: `Restart ${kernelNamed() || 'the kernel'}?`,
         detail: 'Every variable, import and open file in this session is thrown ' +
           'away. The outputs already in the notebook stay where they are.',
-        go: 'Restart'
+        go: 'Restart',
+        danger: true
       })
       if (!yes) return false
     }
     stopQueue()
     if (!kernelInfo) return false
-    await kernel.restart(current.path).catch(() => {})
+    try {
+      await kernel.restart(current.path)
+    } catch (err) {
+      /* The session is still there. Clearing the counts and abandoning the runs
+         below would draw a notebook that had been restarted when nothing was —
+         so none of it happens, and the reader is told why rather than being
+         left to discover it from the next cell that still has state. */
+      notify(`${kernelNamed() || 'The kernel'} could not be restarted: ${err?.message || 'it did not answer'}.`)
+      paintBar()
+      return false
+    }
     /* Every number in the file describes a session that no longer exists. The
        outputs stay — they are what those runs printed, and deleting them is a
        separate thing the reader can ask for. */
@@ -2246,7 +2282,8 @@ export function mountNotebook ({
           title: 'Restart and run every cell?',
           detail: 'The session is emptied first, so the notebook runs from the top ' +
             'against nothing — which is what it will do for whoever opens it next.',
-          go: 'Restart and run'
+          go: 'Restart and run',
+          danger: true
         })
         if (!yes) return
       }

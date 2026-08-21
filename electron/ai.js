@@ -157,7 +157,42 @@ function detailOf (value) {
 
 let emit = () => {}
 let vault = null
-let session = null   // { provider, model, effort, mode, write, proc, busy, thread, used, turnId }
+
+/**
+ * One copilot per conversation, kept by the key the panel files it under.
+ *
+ * There used to be a single `session`, and with it a single copilot: a turn
+ * running about one note was the whole app's turn, and a question asked about
+ * another had to wait for it. A conversation is the unit the panel already
+ * thinks in — its own transcript, its own thread to resume — so it is the unit
+ * a process belongs to as well, and two notes can now be worked on at once.
+ *
+ * Everything below that used to read this global takes its session as an
+ * argument instead. That is not ceremony: a process outlives its own session by
+ * a few lines of stdout, and `mine()` — still the whole answer to "whose turn is
+ * this?" — can only ask the question against the session the handler was built
+ * for.
+ */
+const sessions = new Map()   // key -> { key, provider, model, effort, mode, write, proc, busy, thread, used, turnId }
+
+/* A vault worked in all day opens more conversations than it closes, and each
+   one that ever sent a message would otherwise keep a session object for the
+   life of the app. Idle ones are dropped oldest-first; a busy one is never
+   taken, because something is still streaming into it. */
+const MAX_SESSIONS = 12
+
+/** The key a call names, as a small printable string. `''` is a real key — the
+ *  one an older renderer, which knew only one copilot, sends. */
+const sessionKey = (value) => {
+  const key = String(value ?? '').trim()
+  return key.length <= 120 ? key : key.slice(0, 120)
+}
+
+const sessionFor = (key) => sessions.get(sessionKey(key)) || null
+
+/** Every copilot there is, for the two callers that mean "all of them": a vault
+ *  change and the app quitting. */
+const allSessions = () => [...sessions.values()]
 
 /**
  * What each thread has already been told, kept by thread rather than by session.
@@ -199,9 +234,10 @@ function memoFor (thread) {
 
 /** The thread has a name now. File this session's memory under it, so the next
  *  session resuming that thread picks up what has already been said. */
-function rememberThread (thread) {
-  if (!thread || !session || MEMOS.get(thread) === session.sent) return
-  MEMOS.set(thread, session.sent)
+function rememberThread (self) {
+  const thread = self?.thread
+  if (!thread || MEMOS.get(thread) === self.sent) return
+  MEMOS.set(thread, self.sent)
   if (MEMOS.size > MAX_MEMOS) MEMOS.delete(MEMOS.keys().next().value)
 }
 
@@ -209,12 +245,12 @@ function rememberThread (thread) {
  *  before/after snapshots a review is built from: a read-only turn cannot have
  *  written anything, so the pair is two walks of the vault for a guaranteed
  *  empty diff. */
-const canWrite = () => !!session?.write
+const canWrite = (key) => !!sessionFor(key)?.write
 
 /** Every event carries the turn that caused it. Main may hold a terminal event
  * while it snapshots the vault, and without this identity an older completion
  * can arrive after a queued turn has begun and settle the newer one. */
-function publish (event, owner = session) {
+function publish (event, owner) {
   emit({ ...event, turnId: event?.turnId || owner?.turnId || null })
 }
 
@@ -231,8 +267,8 @@ function publish (event, owner = session) {
  * The reading is rough, and rough is the point: it is a number to watch climb,
  * not a bill. See `tokensIn` for what "rough" is worth here.
  */
-function account (text) {
-  if (session && text) session.tokens += tokensIn(text)
+function account (self, text) {
+  if (self && text) self.tokens += tokensIn(text)
 }
 
 /**
@@ -245,8 +281,8 @@ function account (text) {
  * to throw it away is the copy `detailOf` already avoids.
  */
 
-function accountOutput (value) {
-  if (session) session.tokens += tokensOf(value)
+function accountOutput (self, value) {
+  if (self) self.tokens += tokensOf(value)
 }
 
 /**
@@ -289,6 +325,36 @@ function tokensOf (value) {
   return tokensIn(String(value?.text ?? value?.output ?? ''))
 }
 
+/* A count, or nothing. Every figure a CLI reports about its own usage arrives
+   as "a number if it bothered to send one", and the three ways that can fail —
+   absent, unparseable, negative — all mean the same thing here: it did not say.
+   Shared by both halves of `usageOf` so the total and its components are read
+   to the same standard. */
+const positive = (value) => {
+  const result = Number(value)
+  return Number.isFinite(result) && result > 0 ? result : 0
+}
+
+/** The usage shape emitted by OpenCode's `step-finish` event. */
+function usageOf (tokens) {
+  if (!tokens || typeof tokens !== 'object') return null
+
+  /* A total, where one is published, is the CLI's own arithmetic and beats
+     ours. Only when it is missing are the parts added up — and they are added
+     up rather than picked from, because a component left out is a conversation
+     reported as emptier than it is, which is the direction that surprises. */
+  const direct = positive(tokens.total ?? tokens.totalTokens)
+  if (direct) return { used: Math.round(direct) }
+
+  const cache = tokens.cache || {}
+  const used = positive(tokens.input ?? tokens.inputTokens) +
+    positive(cache.read ?? tokens.cachedReadTokens) +
+    positive(cache.write ?? tokens.cachedWriteTokens) +
+    positive(tokens.output ?? tokens.outputTokens) +
+    positive(tokens.reasoning ?? tokens.thoughtTokens)
+  return used > 0 ? { used: Math.round(used) } : null
+}
+
 /* Already in tokens: the weighting is applied as each piece of text arrives,
    which is the only point at which what kind of text it was is still known. */
 const estimated = (owner) => Math.round(owner?.tokens || 0)
@@ -297,6 +363,96 @@ const estimated = (owner) => Math.round(owner?.tokens || 0)
    installs somewhere only a profile knows about. Main lends us the one it
    already resolves for running fenced code. */
 let resolvePath = () => process.env.PATH
+
+/* ----------------------------------------------------- running on Windows */
+
+const WINDOWS = process.platform === 'win32'
+
+/* Windows has no execute bit — a command is a file wearing one of the PATHEXT
+   suffixes, and `opencode` installed through npm is really `opencode.cmd`,
+   which neither spawn nor access will find under its bare name. */
+const executableSuffixes = () =>
+  (process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean)
+
+/** The files the OS would consider for this name. A name already wearing a
+ *  suffix is only itself, and so is every name away from Windows. The two
+ *  trailing parameters exist for the tests, which run on neither platform in
+ *  particular. */
+function commandCandidates (file, windows = WINDOWS, suffixes = executableSuffixes()) {
+  if (!windows || /\.[^\\/.]+$/.test(file)) return [file]
+  return suffixes.map((ext) => file + ext)
+}
+
+/** The first candidate that exists and can be run, or nothing. On Windows the
+ *  X_OK bit does not exist and access() answers for existence, which together
+ *  with the suffix is the whole of what "executable" means there. */
+function runnableAt (file) {
+  for (const candidate of commandCandidates(file)) {
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK)
+      return candidate
+    } catch { /* keep looking */ }
+  }
+  return ''
+}
+
+/** Where the command actually lives, walked over the same PATH the spawn
+ *  uses. Empty when it is nowhere — which the caller treats as "spawn the
+ *  name as given and let ENOENT tell the story". */
+function resolveCommand (command) {
+  if (command.includes(path.sep) || (WINDOWS && command.includes('/'))) {
+    return runnableAt(command)
+  }
+  for (const dir of String(resolvePath() || '').split(path.delimiter)) {
+    if (!dir) continue
+    const found = runnableAt(path.join(dir, command))
+    if (found) return found
+  }
+  return ''
+}
+
+/**
+ * The command and arguments, as this platform can actually run them.
+ *
+ * Unix spawns the name as given. Windows is why this exists: a CLI installed
+ * through npm is a `.cmd` shim, which CreateProcess will not run and Node
+ * refuses outright without a shell — so the call is rewritten through
+ * cmd.exe, every argument escaped the way cmd unescapes it. A command that
+ * resolves to a real executable runs directly, shell-free, which is both
+ * faster and immune to all of that quoting.
+ */
+function invocation (command, args) {
+  if (!WINDOWS) return { file: command, args, options: {} }
+  const found = resolveCommand(command)
+  if (!found || !/\.(cmd|bat)$/i.test(found)) {
+    return { file: found || command, args, options: {} }
+  }
+  const line = [escapeForCmd(found, false), ...args.map((arg) => escapeForCmd(arg, true))].join(' ')
+  return {
+    file: process.env.comspec || 'cmd.exe',
+    args: ['/d', '/s', '/c', `"${line}"`],
+    options: { windowsVerbatimArguments: true }
+  }
+}
+
+/**
+ * One argument, as cmd.exe will read it back out.
+ *
+ * The backslash-and-quote dance is msvcrt's parsing rule and the caret pass
+ * is cmd's own — applied twice for arguments, because a `.cmd` shim expands
+ * its `%*` through cmd a second time. The command itself gets the caret pass
+ * alone: quoting the program name would hide it from cmd's own lookup.
+ */
+function escapeForCmd (text, argument) {
+  let out = String(text)
+  if (argument) {
+    out = out.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\*)$/, '$1$1')
+    out = `"${out}"`
+  }
+  out = out.replace(/([()%!^"<>&|;, *?])/g, '^$1')
+  if (argument) out = out.replace(/([()%!^"<>&|;, *?])/g, '^$1')
+  return out
+}
 
 /* Where the last catalogue this CLI gave is kept between launches — main names
    it, because only main knows where the app's state lives. See `models`. */
@@ -307,7 +463,11 @@ let catalogueFile = ''
 function relative (abs) {
   if (!abs || !vault) return abs || ''
   const rel = path.relative(vault, abs)
-  return rel.startsWith('..') ? abs : rel
+  if (rel.startsWith('..')) return abs
+  // The renderer's vault paths are '/'-separated on every platform — the same
+  // spelling main.js hands the tree — so a Windows tool report has to arrive
+  // in it too, or no step row would ever match the note it touched.
+  return rel.split(path.sep).join('/')
 }
 
 /* ---------------------------------------------------------------- running */
@@ -320,12 +480,12 @@ function relative (abs) {
  * tool subprocesses with it — so all of that is here and the `start…` function
  * below is left holding only its own arguments.
  *
- * The session is captured rather than read back off the module: `stop` nulls it
- * and `start` immediately builds another, so a SIGTERMed process can outlive
- * its own session by a few lines of stdout. Every event, every mutation and
- * every end-of-turn below is gated on this process still being the session's,
- * which is the whole of the answer to "whose turn is this?" — the handlers
- * underneath never have to ask.
+ * The session is handed in rather than read back off the map: `stop` deletes it
+ * and `start` immediately files another under the same key, so a SIGTERMed
+ * process can outlive its own session by a few lines of stdout. Every event,
+ * every mutation and every end-of-turn below is gated on this process still
+ * being the session's, which is the whole of the answer to "whose turn is
+ * this?" — the handlers underneath never have to ask.
  */
 /* How long a turn may say nothing at all — no stream event, not even a line of
    logging — before it is taken as wedged. Generous, because the quietest
@@ -351,21 +511,25 @@ function reap (proc, signal = 'SIGTERM') {
   }
 }
 
-function launch (provider, args, onMessage, { prompt = null, isRetry = false } = {}) {
-  const self = session
-  const proc = spawn(PROVIDERS[provider].command, args, {
+function launch (provider, args, onMessage, { self, prompt = null, isRetry = false }) {
+  const run = invocation(PROVIDERS[provider].command, args)
+  const proc = spawn(run.file, run.args, {
     cwd: vault,
     stdio: ['pipe', 'pipe', 'pipe'],
-    // Its own process group, so `stop` can take the CLI's tool subprocesses
-    // with it rather than leaving them orphaned.
-    detached: true,
+    /* Its own process group, so `stop` can take the CLI's tool subprocesses
+       with it rather than leaving them orphaned. Unix only: Windows has no
+       groups — kill-tree walks the tree with taskkill instead — and a
+       detached child there gets a console window of its own. */
+    detached: !WINDOWS,
+    windowsHide: true,
     // The tool fence rides the environment — see `policyEnv`. Taken from the
     // session rather than from an argument, so every turn a session spawns is
     // fenced the same way the mode it was started in says it should be.
-    env: { ...process.env, PATH: resolvePath(), ...policyEnv(self?.mode) }
+    env: { ...process.env, PATH: resolvePath(), ...policyEnv(self?.mode) },
+    ...run.options
   })
 
-  const mine = () => session === self && self.proc === proc
+  const mine = () => sessions.get(self.key) === self && self.proc === proc
 
   /* A process that dies mid-turn has to close the turn out, or `busy` stays set
      and every later message is refused with "still working" — the reply it is
@@ -386,7 +550,7 @@ function launch (provider, args, onMessage, { prompt = null, isRetry = false } =
 
   // A line of JSON at a time.
   let spoke = false
-  readLines(proc.stdout, (msg) => { spoke = true; if (mine()) onMessage(msg) })
+  readLines(proc.stdout, (msg) => { spoke = true; if (mine()) onMessage(msg, self) })
 
   /* Writing to a CLI that has already died is an EPIPE on stdin, and an
      unhandled stream error takes the whole main process down. Treated as the
@@ -408,7 +572,7 @@ function launch (provider, args, onMessage, { prompt = null, isRetry = false } =
         ? `The \`${PROVIDERS[provider].command}\` command is not on your PATH. Install it and sign in with your subscription.`
         : err.message
     }, self)
-    stop()
+    stop(self.key)
   })
 
   // Only the tail is kept, because a turn against a long document can put a
@@ -436,7 +600,7 @@ function launch (provider, args, onMessage, { prompt = null, isRetry = false } =
       k: 'error',
       message: `The copilot went quiet for ${Math.round(TURN_WATCHDOG_MS / 60000)} minutes and was stopped.`
     }, self)
-    stop()
+    stop(self.key)
   }, 30000)
   starved.unref?.()
   proc.stdout.on('data', alive)
@@ -451,7 +615,7 @@ function launch (provider, args, onMessage, { prompt = null, isRetry = false } =
        died gets no retry, because whatever it did may already have happened.
        Once, because a second identical death is an answer, not bad luck. */
     if (!proc.ending && code && !spoke && !isRetry && mine() && self.busy) {
-      self.proc = launch(provider, args, onMessage, { prompt, isRetry: true })
+      self.proc = launch(provider, args, onMessage, { self, prompt, isRetry: true })
       return
     }
     endTurn()
@@ -479,47 +643,47 @@ function launch (provider, args, onMessage, { prompt = null, isRetry = false } =
  * agent is read-only, which is how "don't touch my notes" is made a fact about
  * the process rather than a request the model could talk itself out of.
  */
-function startOpencodeTurn (text) {
+function startOpencodeTurn (text, self) {
   const args = ['run', '--format', 'json', '--dir', vault,
-                '--model', session.model]
+                '--model', self.model]
   /* `--thinking` only *shows* the reasoning stream — the spend is `--variant`'s
      to decide. Without it the reasoning arrives as nothing at all, and a model
      that thinks for a minute looks hung; at `none` there is no reasoning to
      show and the flag is noise on the command line. */
-  if (session.effort !== 'none') args.push('--thinking')
-  if (!session.write) args.push('--agent', 'plan')
+  if (self.effort !== 'none') args.push('--thinking')
+  if (!self.write) args.push('--agent', 'plan')
   // Spelled as a model variant here. The level came from this model's own
   // `variants`, so it is a name opencode gave us rather than one we invented.
-  if (session.effort) args.push('--variant', session.effort)
-  if (session.thread) args.push('--session', session.thread)
+  if (self.effort) args.push('--variant', self.effort)
+  if (self.thread) args.push('--session', self.thread)
 
   // The prompt goes over stdin. As a positional argument it would ride the
   // command line, which a long question and a quoted selection can overrun.
   // opencode announces no end of turn either; the process ending is the end of
   // turn, which is what `launch` does with an exit anyway.
-  return launch('opencode', args, onOpencodeMessage, { prompt: text })
+  return launch('opencode', args, onOpencodeMessage, { self, prompt: text })
 }
 
-function onOpencodeMessage (msg) {
+function onOpencodeMessage (msg, self) {
   // Every event carries the thread it belongs to, so the id is picked up from
   // whichever arrives first rather than from an event of its own.
-  if (msg.sessionID && msg.sessionID !== session.thread) {
-    session.thread = msg.sessionID
-    rememberThread(session.thread)
-    publish({ k: 'thread', thread: session.thread })
+  if (msg.sessionID && msg.sessionID !== self.thread) {
+    self.thread = msg.sessionID
+    rememberThread(self)
+    publish({ k: 'thread', thread: self.thread }, self)
   }
 
   const part = msg.part || {}
   switch (msg.type) {
     case 'reasoning':
-      account(part.text)
-      publish({ k: 'thinking', text: part.text || '', tokens: 0 })
+      account(self, part.text)
+      publish({ k: 'thinking', text: part.text || '', tokens: 0 }, self)
       break
 
     case 'text':
       // Delivered whole rather than in deltas.
-      account(part.text)
-      publish({ k: 'text', text: part.text || '' })
+      account(self, part.text)
+      publish({ k: 'text', text: part.text || '' }, self)
       break
 
     case 'tool_use': {
@@ -529,7 +693,7 @@ function onOpencodeMessage (msg) {
       const where = input.filePath || input.pattern || input.command || input.path || ''
       const needle = input.oldString || input.old_string || ''
       const id = part.callID || part.id
-      publish({ k: 'tool', id, name, path: relative(where), needle })
+      publish({ k: 'tool', id, name, path: relative(where), needle }, self)
       // A tool call is announced already finished in the common case; the
       // guard is for the builds that report it running first.
       if (state.status === 'completed' || state.status === 'error') {
@@ -537,7 +701,7 @@ function onOpencodeMessage (msg) {
         /* Counted whole, before `detailOf` cuts it to what the panel shows: the
            whole of it is what the model's context is carrying. Every shape a
            tool reports in, not only the string one — see `measure`. */
-        accountOutput(state.output)
+        accountOutput(self, state.output)
         publish({
           k: wrote(name) && !failed ? 'edited' : 'tool-done',
           id,
@@ -547,34 +711,32 @@ function onOpencodeMessage (msg) {
           // opencode files the output under `output` on the completed state, and
           // the reason under `error` on the failed one.
           detail: detailOf(failed ? (state.error ?? state.output) : state.output)
-        })
+        }, self)
       }
       break
     }
 
     case 'step_finish': {
-      // No end-of-turn event to carry this, so the running total is kept and
-      // reported when the process exits.
-      const total = part.tokens?.total
-      if (total) session.used = total
+      const usage = usageOf(part.tokens)
+      if (usage) self.used = usage.used
       break
     }
 
     case 'error': {
-      session.busy = false
+      self.busy = false
       publish({
         k: 'turn-end',
-        used: session.used || estimated(session),
-        estimated: !session.used,
+        used: self.used || estimated(self),
+        estimated: !self.used,
         error: msg.error?.data?.message || msg.error?.name || 'The turn failed.'
-      })
+      }, self)
       /* The CLI has said the turn failed; it is not also trusted to exit. Left
          alone, one that lingered kept running behind the next turn's process —
          `stop` only ever reaches the newest — so the failed turn's tree goes
          now. Let go of before the kill: the exit handler must not read this
          process as the session's and report the death a second time. */
-      const proc = session.proc
-      session.proc = null
+      const proc = self.proc
+      self.proc = null
       if (proc) reap(proc)
       break
     }
@@ -582,6 +744,13 @@ function onOpencodeMessage (msg) {
 }
 
 /* ------------------------------------------------------------------ plumbing */
+
+/* A line that never ends would grow the buffer below for the length of a
+   turn, on the main process. Nothing legitimate comes close — the payloads
+   inside a line are bounded by what a model can say — so past this the line
+   is dropped whole: when its newline finally lands, the remainder fails to
+   parse and is ignored, which is the treatment garbage already gets. */
+const LINE_LIMIT = 8 * 1024 * 1024
 
 /**
  * JSON per line, and a line can be split across two reads.
@@ -605,13 +774,14 @@ function readLines (stream, onMessage) {
       try { onMessage(JSON.parse(line)) } catch { /* not ours to read */ }
     }
     if (at) buffer = buffer.slice(at)
+    if (buffer.length > LINE_LIMIT) buffer = ''
   })
 }
 
 /* -------------------------------------------------------------------- API */
 
 function setVault (dir) {
-  if (dir !== vault) stop()
+  if (dir !== vault) stopAll()
   vault = dir
 }
 
@@ -628,8 +798,9 @@ const ASK_TIMEOUT_MS = 15000
  *  in the renderer substitutes the built-in list for a provider that gives
  *  nothing, so a GUI launched before the CLI is installed still shows one. */
 function ask (command, args, parse) {
+  const run = invocation(command, args)
   return new Promise((resolve) => {
-    execFile(command, args, {
+    execFile(run.file, run.args, {
       env: { ...process.env, PATH: resolvePath() },
       maxBuffer: 8 * 1024 * 1024,
       /* A CLI that asks for a login, or one that hangs against a network that
@@ -638,7 +809,9 @@ function ask (command, args, parse) {
          (the built-in list stands in), so a slow catalogue costs a stale list
          rather than a pane that never fills. */
       timeout: ASK_TIMEOUT_MS,
-      killSignal: 'SIGKILL'
+      killSignal: 'SIGKILL',
+      windowsHide: true,
+      ...run.options
     }, (error, stdout) => {
       if (error) { resolve([]); return }
       try { resolve(parse(stdout)) } catch { resolve([]) }
@@ -807,11 +980,14 @@ function models ({ fresh = false } = {}) {
 }
 
 function probe (command, args) {
+  const run = invocation(command, args)
   return new Promise((resolve) => {
-    execFile(command, args, {
+    execFile(run.file, run.args, {
       env: { ...process.env, PATH: resolvePath() },
       timeout: 5000,
-      maxBuffer: 256 * 1024
+      maxBuffer: 256 * 1024,
+      windowsHide: true,
+      ...run.options
     }, (error, stdout, stderr) => resolve({
       ok: !error,
       text: String(stdout || stderr || '').trim()
@@ -829,13 +1005,7 @@ function probe (command, args) {
  * executable, which is the question that was meant.
  */
 function onPath (command) {
-  if (command.includes(path.sep)) return canRun(command)
-  return String(resolvePath() || '').split(path.delimiter)
-    .some((dir) => dir && canRun(path.join(dir, command)))
-}
-
-function canRun (file) {
-  try { fs.accessSync(file, fs.constants.X_OK); return true } catch { return false }
+  return !!resolveCommand(command)
 }
 
 /** A redacted readiness check: only availability, version and whether the
@@ -868,11 +1038,16 @@ function doctor () {
 }
 
 function start ({
-  provider = 'opencode', model, effort = '', mode = null, write = null, resume = null,
-  used = 0, turnId = null
+  key = '', provider = 'opencode', model, effort = '', mode = null, write = null,
+  resume = null, used = 0, turnId = null
 } = {}) {
   if (!vault) return { ok: false, error: 'Open a vault first.' }
-  stop()
+  const id = sessionKey(key)
+  /* Only this conversation's copilot. Starting one used to end whichever was
+     running, which is exactly what made the panel single-file: the second note
+     asked a question and the first note's turn died for it. */
+  stop(id)
+  evictIdleSessions()
   /* Taken at its word. The catalogue is an account property this file cannot
      check a name against, so a model the renderer offers is a model this
      spawns, and a name it does not know is the CLI's to refuse. */
@@ -883,7 +1058,8 @@ function start ({
     ? mode
     : write === true ? 'ask' : 'read'
   const canWrite = selectedMode !== 'read'
-  session = {
+  const session = {
+    key: id,
     provider, model: selectedModel, effort, mode: selectedMode, write: canWrite,
     proc: null, busy: false, thread: resume || null, used: 0,
     /* What the *thread* has already been told, not what this session has — see
@@ -894,14 +1070,28 @@ function start ({
        what it was reading rather than from zero. Already a token count — the
        panel sends back the figure it was last shown. */
     tokens: Math.max(0, Math.round(Number(used) || 0)),
-    turnId: String(turnId || '') || null
+    turnId: String(turnId || '') || null,
+    // Least-recently-used, for the eviction above.
+    at: Date.now()
   }
+  sessions.set(id, session)
 
   // It spawns per turn, so there is nothing to start until there is something
   // to say.
-  publish({ k: 'ready', thread: session.thread })
+  publish({ k: 'ready', thread: session.thread }, session)
   return { ok: true, provider, model: selectedModel, effort,
     mode: selectedMode, turnId: session.turnId }
+}
+
+/** Room for the one about to be made. A session with a process on it is a turn
+ *  in flight and is never taken; the rest are a few fields each, and the oldest
+ *  of them is the conversation least likely to be spoken in next. */
+function evictIdleSessions () {
+  const idle = allSessions().filter((one) => !one.busy && !one.proc)
+  const spare = sessions.size - MAX_SESSIONS + 1
+  if (spare <= 0) return
+  idle.sort((a, b) => a.at - b.at)
+  for (const one of idle.slice(0, spare)) sessions.delete(one.key)
 }
 
 /** Each CLI by the function that starts a turn against it. One, now; the map is
@@ -910,12 +1100,17 @@ const TURN_STARTERS = {
   opencode: startOpencodeTurn
 }
 
-function send (text, context, turnId = null) {
+function send (key, text, context, turnId = null) {
   // Deliberately not started here: only the panel knows which copilot, which
   // effort and which write mode the user picked, so an implicit start would
   // quietly answer as somebody else.
+  const session = sessionFor(key)
   if (!session) return { ok: false, error: 'The copilot is not running.' }
+  /* Per conversation, which is the whole of the rule: two notes may be answered
+     at once, one note may not be asked twice at once — the second question is a
+     follow-up, and the panel queues it. */
   if (session.busy) return { ok: false, error: 'The copilot is still working.' }
+  session.at = Date.now()
 
   /* Start's id names the turn it was called for. The id of every later message
      is installed here, immediately before the provider can emit anything about
@@ -949,7 +1144,7 @@ function send (text, context, turnId = null) {
      restarted. Every other exit from this function puts `busy` back; so does
      this one. */
   try {
-    session.proc = startTurn(opening)
+    session.proc = startTurn(opening, session)
   } catch (err) {
     session.busy = false
     session.proc = null
@@ -959,7 +1154,7 @@ function send (text, context, turnId = null) {
     forgetSent()
     return { ok: false, error: err?.message || `${session.provider} could not be started.` }
   }
-  account(opening)
+  account(session, opening)
   return { ok: true }
 }
 
@@ -968,11 +1163,21 @@ function send (text, context, turnId = null) {
  * spawned — with a SIGKILL escalation for one that will not go. On quit main
  * passes SIGKILL directly, because the escalation timer would never fire.
  */
-function stop (signal = 'SIGTERM') {
-  const proc = session?.proc
-  if (proc) reap(proc, signal)
-  session = null
+function stop (key, signal = 'SIGTERM') {
+  const session = sessionFor(key)
+  if (!session) return { ok: false }
+  if (session.proc) reap(session.proc, signal)
+  sessions.delete(session.key)
   return { ok: true }
+}
+
+/** Every copilot at once — the vault changing under all of them, and the app
+ *  quitting. On quit main passes SIGKILL directly, because the escalation timer
+ *  would never fire. */
+function stopAll (signal = 'SIGTERM') {
+  let stopped = false
+  for (const session of allSessions()) stopped = stop(session.key, signal).ok || stopped
+  return { ok: stopped }
 }
 
 /* What main talks to — and, under a name that says why they are here, the pure
@@ -988,6 +1193,13 @@ module.exports = {
   start,
   send,
   stop,
+  stopAll,
   canWrite,
-  parsers: { detailOf, tokensIn, tokensOf, readLines, parseOpencode, contextSize, policyEnv }
+  /** Whether this conversation's copilot is mid-turn. Main asks so a stop for
+   *  one chat cannot be read as the app having gone quiet. */
+  isBusy: (key) => !!sessionFor(key)?.busy,
+  parsers: {
+    detailOf, tokensIn, tokensOf, usageOf, readLines, parseOpencode, contextSize,
+    policyEnv, commandCandidates, escapeForCmd, invocation
+  }
 }

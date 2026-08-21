@@ -121,6 +121,9 @@ const TAGS = {
 }
 
 export function mountHistory ({ el, api, confirm, beforeRestore, onError }) {
+  /** @type {{ path: string | null,
+   *           operations: { id: string, at: number, source: string,
+   *                         changes: { path: string, added?: number, removed?: number }[] }[] }} */
   const state = { path: null, operations: [] }
 
   async function restore (operation, path) {
@@ -175,6 +178,7 @@ export function mountHistory ({ el, api, confirm, beforeRestore, onError }) {
        first time it is asked for, and kept once it has been. Shutting a row and
        opening it again is a gesture people repeat, and each round trip is the
        whole note twice over the wire and a fresh diff of it. */
+    /** @type {HTMLElement | null} */
     let diff = null
     async function show () {
       if (diff) {

@@ -90,12 +90,13 @@ class EmbedPlaceholderWidget extends WidgetType {
   ignoreEvent () { return true }
 }
 
-/* Every `![[ ]]` in the document, as [from, to] pairs. The guard is the same
-   one `findEmbeds` uses — a line without `![` cannot hold an embed, and almost
-   every line is exactly that. */
-function placeholderRanges (doc) {
+/* Every `![[ ]]` between two positions, as [from, to] pairs, whole lines at a
+   time. The guard is the same one `findEmbeds` uses — a line without `![`
+   cannot hold an embed, and almost every line is exactly that. */
+function placeholderRanges (doc, from = 0, to = doc.length) {
   const out = []
-  for (let n = 1; n <= doc.lines; n++) {
+  const last = doc.lineAt(to).number
+  for (let n = doc.lineAt(from).number; n <= last; n++) {
     const line = doc.line(n)
     if (!line.text.includes('![')) continue
     for (const m of line.text.matchAll(PLACEHOLDER_RE)) {
@@ -105,21 +106,54 @@ function placeholderRanges (doc) {
   return out
 }
 
-const placeholderDeco = (doc) => {
-  const ranges = placeholderRanges(doc)
+const placeholderDeco = (ranges) => {
   if (!ranges.length) return Decoration.none
   return Decoration.set(ranges.map(([from, to]) =>
     Decoration.replace({ widget: new EmbedPlaceholderWidget(from, to) }).range(from, to)), true)
 }
 
+/* The lines a transaction touched, whole, in the document it produced. A
+   placeholder is six characters that cannot hold a newline, so it can only be
+   written or unwritten by an edit on its own line — everything outside this
+   range survives the change and only has to be slid. */
+function touchedLines (changes, doc) {
+  let from = -1
+  let to = -1
+  changes.iterChanges((_fromA, _toA, fromB, toB) => {
+    if (from < 0) from = fromB
+    if (toB > to) to = toB
+  })
+  if (from < 0) return null
+  return { from: doc.lineAt(from).from, to: doc.lineAt(to).to }
+}
+
 /* The chip is a decoration of its own rather than a kind of embed, so the
    live preview does not have to know the placeholder exists: it skips an
-   empty target (one line, in editor.js) and this field draws it. */
+   empty target (one line, in editor.js) and this field draws it.
+
+   The pairs are kept beside the decorations because the widget carries its own
+   [from, to] — it is what the picker writes over when the chip is clicked — so
+   a moved chip has to be rebuilt rather than mapped. Rebuilding the handful
+   that exist is nothing; walking every line of the note to find them, which is
+   what this did on every keystroke, was not. */
 const placeholderField = ViewPlugin.fromClass(
   class {
-    constructor (view) { this.decorations = placeholderDeco(view.state.doc) }
+    constructor (view) {
+      this.ranges = placeholderRanges(view.state.doc)
+      this.decorations = placeholderDeco(this.ranges)
+    }
+
     update (update) {
-      if (update.docChanged) this.decorations = placeholderDeco(update.state.doc)
+      if (!update.docChanged) return
+      const doc = update.state.doc
+      const touched = touchedLines(update.changes, doc)
+      if (!touched) return
+      const kept = this.ranges
+        .map(([from, to]) => [update.changes.mapPos(from), update.changes.mapPos(to)])
+        .filter(([from]) => from < touched.from || from > touched.to)
+      const found = placeholderRanges(doc, touched.from, touched.to)
+      this.ranges = kept.concat(found).sort((a, b) => a[0] - b[0])
+      this.decorations = placeholderDeco(this.ranges)
     }
   },
   {

@@ -1,5 +1,6 @@
 import { EditorView, Decoration, ViewPlugin, WidgetType, keymap, drawSelection,
-         rectangularSelection, dropCursor, highlightActiveLine } from '@codemirror/view'
+         rectangularSelection, dropCursor, highlightActiveLine,
+         lineNumbers } from '@codemirror/view'
 import { EditorState, EditorSelection, Prec, StateEffect, StateField,
          Compartment, Facet, Transaction } from '@codemirror/state'
 import { syntaxTree, HighlightStyle, syntaxHighlighting, indentOnInput,
@@ -25,7 +26,7 @@ primeSyntaxTree(syntaxTree)
 import { defaultKeymap, history, historyKeymap, indentWithTab, undo, redo } from '@codemirror/commands'
 import { search, searchKeymap, openSearchPanel } from '@codemirror/search'
 import { findConfig } from './find.js'
-import { EXTERNAL_SCHEME, flashTarget } from './links.js'
+import { EXTERNAL_SCHEME, flashTarget, scrollBehavior } from './links.js'
 import { autocompletion, closeBrackets, closeBracketsKeymap,
          completionKeymap, startCompletion } from '@codemirror/autocomplete'
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
@@ -62,7 +63,27 @@ import { fileDiff, withinLines } from './linediff.js'
 
 const tulipTheme = EditorView.theme({
   '&': { color: 'var(--ink)', backgroundColor: 'transparent', height: '100%' },
+  /* A note has no gutter at all. A source file has one when the setting asks
+     for it — and it is drawn as part of the page rather than as a rail: no
+     panel behind it, no border down its edge, just faint numbers standing off
+     the text. The heavier version CodeMirror ships is for an IDE, where the
+     gutter is a target for breakpoints and folds; here it is only an address. */
   '.cm-gutters': { display: 'none' },
+  '&.is-source .cm-gutters': {
+    display: 'flex',
+    border: 'none',
+    background: 'transparent',
+    color: 'var(--faint)'
+  },
+  '&.is-source .cm-lineNumbers .cm-gutterElement': {
+    minWidth: '2.5em',
+    padding: '0 10px 0 0',
+    /* The numbers are an aside, so they are set a size down from the code and
+       do not change width with the digit. */
+    fontSize: '0.86em',
+    fontVariantNumeric: 'tabular-nums'
+  },
+  '&.is-source .cm-activeLineGutter': { background: 'transparent', color: 'var(--muted)' },
   /* Padding cancelled by an equal negative margin: the highlight band extends
      past the text on both sides without shifting the text itself.
 
@@ -2051,7 +2072,13 @@ export function createEditor ({
   const sourceTitle = new Compartment()
   const sourceColor = new Compartment()
   const sourceAttributes = new Compartment()
+  /* Line numbers, which only a source file ever gets — see `sourceEffects`. */
+  const sourceNumbers = new Compartment()
+  /* And the file run's output, which only a source file ever has. A prose note
+     runs its code a fence at a time, and those panels are already widgets of
+     their own — see src/runblocks.js. */
   let raw = false
+  let numbered = false
   let sourceMode = 'markdown'
   let agentTypingRun = 0
   let agentTypingTimer = 0
@@ -2141,6 +2168,7 @@ export function createEditor ({
         sourceTitle.of(titleFor(noteTitle, onRename, noteFlag, titleEditable)),
         sourceColor.of(syntaxHighlighting(highlight)),
         sourceAttributes.of(EditorView.editorAttributes.of({ class: '' })),
+        sourceNumbers.of([]),
         /* A language note is a table editor, not a free-form buffer: the only
            way to write to it is through a cell. Typing, pasting or deleting in
            the source lines around the grid is dropped here, which is what a
@@ -2212,7 +2240,7 @@ export function createEditor ({
               const inFragment = el.closest('.transclude')
                 ?.querySelector(`[data-equation="${CSS.escape(equation)}"]`)
               if (inFragment) {
-                inFragment.scrollIntoView({ block: 'center', behavior: 'smooth' })
+                inFragment.scrollIntoView({ block: 'center', behavior: scrollBehavior() })
                 flashTarget(inFragment)
                 return true
               }
@@ -2310,7 +2338,19 @@ export function createEditor ({
      selection inside a code block came out overhanging the block it belongs to
      — the band still as wide as the column had been. Watching the content
      element is watching the thing that actually resizes. */
-  const columnObserver = new ResizeObserver(() => view.requestMeasure())
+  /* Width only. The content box also changes height on every keystroke that
+     wraps or unwraps a line, and CodeMirror has already scheduled a measure for
+     that edit — so answering the height too bought a second measure pass per
+     wrapped line typed, for a geometry change that was never the problem. */
+  let columnWidth = -1
+  const columnObserver = new ResizeObserver((entries) => {
+    const entry = entries[entries.length - 1]
+    const width = entry.contentBoxSize?.[0]?.inlineSize ??
+      entry.target.getBoundingClientRect().width
+    if (width === columnWidth) return
+    columnWidth = width
+    view.requestMeasure()
+  })
   columnObserver.observe(view.contentDOM)
   const destroy = view.destroy.bind(view)
   view.destroy = () => { columnObserver.disconnect(); destroy() }
@@ -2362,7 +2402,13 @@ export function createEditor ({
     sourceAttributes.reconfigure(EditorView.editorAttributes.of({
       class: isProse() ? (raw ? 'is-raw' : '') : `is-source is-raw${sourceMode === 'tex' ? ' is-tex' : ''}`
     })),
-    preview.reconfigure(raw || !isProse() ? [] : RENDERED)
+    preview.reconfigure(raw || !isProse() ? [] : RENDERED),
+    /* Prose is never numbered, whatever the setting says. A note is a
+       document — its lines are where the words happened to wrap, not addresses
+       anyone refers to — while a source file's line numbers are how a compiler,
+       a stack trace and a colleague all name a place in it. So the setting asks
+       about source files, and this is where "source file" is known. */
+    sourceNumbers.reconfigure(numbered && !isProse() ? lineNumbers() : []),
   ]
 
   const markSourceMode = () => {
@@ -2384,6 +2430,19 @@ export function createEditor ({
     // CodeMirror rebuilds its root classes with the state. This one is ours,
     // and the Copilot review marks depend on it surviving the note.
     markSourceMode()
+  }
+
+  /**
+   * Number the lines of source files, or stop.
+   *
+   * A preference rather than a per-file choice: it is a way of reading code,
+   * and someone who wants the numbers wants them in every file they open.
+   */
+  view.setLineNumbers = (on) => {
+    const next = !!on
+    if (numbered === next) return
+    numbered = next
+    view.dispatch({ effects: sourceEffects() })
   }
 
   /** Raw view: the file as it is on disk, monospaced, nothing hidden. */

@@ -80,7 +80,10 @@ export const FONT_ROLES = {
 
 /** The stack an id names, or the role's own starting point if it names none. */
 export function fontStack (id, role) {
-  return (BY_ID.get(id) || BY_ID.get(FONT_ROLES[role].fallback)).stack
+  /* Total: every role's fallback is an id FONTS declares, so the second lookup
+     cannot miss. */
+  const face = /** @type {(typeof FONTS)[number]} */ (BY_ID.get(id) || BY_ID.get(FONT_ROLES[role].fallback))
+  return face.stack
 }
 
 /** What to call the chosen face, for the toast that confirms it. */

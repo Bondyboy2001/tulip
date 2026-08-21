@@ -1,7 +1,6 @@
 import MarkdownIt from 'markdown-it'
 
-import { dropdown } from './dropdown.js'
-import { el as element } from './dom.js'
+import { el as element, reason } from './dom.js'
 import { diffBlock } from './history.js'
 import { when } from './time.js'
 import { mathPlugin } from './math.js'
@@ -11,9 +10,9 @@ import { assetKind, assetUrl } from './assets.js'
 import { isLanguageTablePath } from './language-table.js'
 import {
   DEFAULT_CATALOGUE,
-  asOptions, effortLabel, effortsFor, modelFromConfig, nearestEffort,
-  offeredModels, providerGrant, providerLabel, splitKey,
-  COPILOT_MODES, COPILOT_MODE_ORDER, copilotModeFromConfig, copilotModeLabel
+  effortLabel, effortsFor, modelByKey, modelFromConfig, nearestEffort,
+  offeredModels, providerGrant, providerLabel, searchModels, splitKey,
+  COPILOT_MODES, COPILOT_MODE_ORDER, CONTEXT_MODES, copilotModeFromConfig, copilotModeLabel
 } from './models.js'
 import {
   NOTE_EXT, isChatAttachment, isTexPath, isPdfPath, isSitePath, isWhiteboardPath,
@@ -36,6 +35,14 @@ import { newTurnId, ownsTurn } from './copilot-turns.js'
  * about one note never drags in what you were discussing about another. A note
  * may have many conversations; one of them is open, and `/new` and `/history`
  * in the message box are how you start another or go back to an old one.
+ *
+ * A conversation also has its own copilot. Ask about one file, move to another
+ * and ask there, and both are being answered at once: two CLI processes, two
+ * threads, neither waiting on the other. What is still single is the panel, so
+ * everything it shows — the working strip, the Stop button, the counter — is
+ * about the chat on screen, and the ones running behind it are named in a line
+ * of their own at the foot of the log. See `runOf` for where a turn's state
+ * lives now, and `ensureSession` for the process behind it.
  *
  * The transcript is data, not DOM. Every message is a plain object that knows
  * how to draw itself, which is what lets a conversation be written to disk and
@@ -155,14 +162,14 @@ const MAX_CHATS = 20   // conversations kept per note; the oldest fall off
 
 export function mountCopilot ({
   el, api, context, files = () => [], onEditing, onEdited, onRenamed, onConfig,
-  onCite, onOpen, onRestore, onAccept, onWarn, onPermission
+  onCite, onOpen, onRestore, onAccept, onWarn, onPermission, willSlide
 }) {
   const state = {
     open: false,
     /* The default level of the model's own ladder, not the top of it: high
        reasoning burns thinking tokens on every turn — including turns that
-       only want a summary — and the slider is one click away for the turns
-       that do want it. */
+       only want a summary — and ⌃T is one keystroke away for the turns that
+       do want it. */
     effort: 'medium',
     /* One choice, not two: `provider:id` names the CLI and the model together,
        so the panel has a single control where it used to have a pair. Empty
@@ -173,39 +180,31 @@ export function mountCopilot ({
     // opencode alone answers with hundreds.
     enabled: [],
     mode: COPILOT_MODES.READ,
-    busy: false,
-    started: false,
 
-    /* Set whenever a setting changes or the note does. Nothing restarts on the
-       spot: the process is replaced at the next message, when the wait is
-       expected anyway. Restarting on the change itself made the effort slider
-       kill and respawn a CLI under the user's thumb. */
-    stale: false,
+    /* Bumped whenever a setting every copilot was started with changes — the
+       model, the effort, the permission mode. Nothing restarts on the spot: a
+       conversation whose process was started at an older reading is replaced at
+       its next message, when the wait is expected anyway. Restarting on the
+       change itself made a held-down ⌃T kill and respawn a CLI per keystroke.
+
+       A generation rather than the single `stale` flag this replaces: there is
+       a copilot per conversation now, and one flag could only ever describe
+       one of them. */
+    settings: 0,
 
     notePath: '',
     // note path -> { at, active, convos: [{ id, thread, at, messages }] }
     chats: new Map(),
 
-    stream: null,       // the copilot message currently being written into
-    think: null,        // the thinking message for the turn in progress
+    /* Everything about a turn in flight — the process, the reply being written,
+       the questions waiting behind it — belongs to the conversation it is
+       happening in. See `runOf`. */
 
-    /* Questions asked while a turn was running, in the order they were asked.
-       Each is already in the transcript, greyed, and each carries the
-       conversation it was asked in — a follow-up typed about one note must not
-       be delivered into whichever chat is open when the turn finally ends. */
-    queue: [],
-    // Which conversation the running process was started for, so a message
-    // delivered into a different one knows to replace it first.
-    sessionConvo: null,
-
-    /* The conversation the running turn files into, captured the moment the
-       message is sent. Every event of that turn routes here — never to
-       whichever note happens to be on screen when it arrives — so switching
-       notes mid-reply cannot misfile the answer. */
-    turn: null,         // { id, path, convo }
-    // Stop clears `turn` before awaiting main so startup cannot continue, but
-    // events produced by that stop still belong to the conversation it ended.
-    stopping: null
+    /* The question the Edit button lifted into the composer, so the next send
+       can stand in its place rather than repeat it at the foot. { msg, convo },
+       held only until something is sent. */
+    editing: null,
+    contextMode: null
   }
   const persistConfig = (patch) =>
     onConfig ? onConfig(patch) : api.config.set(patch)
@@ -243,6 +242,15 @@ export function mountCopilot ({
   busyRow.append(busySpinner, busyLabel, busyTime)
   el.log.append(busyRow)
 
+  /* The turns running in other conversations. With one copilot there was
+     nothing to say — the strip above was the only turn there was. With one per
+     note, a reply can be arriving in a chat that is not on screen, and a panel
+     that said nothing about it would look idle while it worked. Each name opens
+     the file it belongs to, which is also how you go and read the answer. */
+  const elsewhereRow = element('div', 'ai-elsewhere')
+  elsewhereRow.hidden = true
+  el.log.append(elsewhereRow)
+
   /* One top-layer viewer for image attachments in both the composer and sent
      messages. It lives outside the panel so a narrow Copilot column cannot
      clip the image the reader asked to inspect. */
@@ -260,14 +268,15 @@ export function mountCopilot ({
   document.body.append(attachmentDialog)
   let attachmentPreviewFocus = null
 
-  let busyAt = 0
+  /* One timer for the panel, not one per turn: it repaints the strip on screen,
+     and there is only ever one of those however many turns are running. */
   let busyTick = 0
-  let busyPhase = 'Working'
 
   function paintBusy () {
-    const rephrased = busyLabel.textContent !== busyPhase
-    busyLabel.textContent = busyPhase
-    const seconds = Math.round((Date.now() - busyAt) / 1000)
+    const run = visibleRun()
+    const rephrased = busyLabel.textContent !== run.phase
+    busyLabel.textContent = run.phase
+    const seconds = Math.round((Date.now() - (run.at || Date.now())) / 1000)
     // Silent for the first couple of seconds: a timer on a reply that arrives
     // straight away is noise, not reassurance.
     const said = seconds >= 2 ? `${seconds}s` : ''
@@ -280,11 +289,53 @@ export function mountCopilot ({
     if (following && grew) el.log.scrollTop = el.log.scrollHeight
   }
 
-  /** Which phase the turn is in. Cheap enough to call on every event. */
-  function phase (what) {
-    if (what === busyPhase || !state.busy) return
-    busyPhase = what
-    paintBusy()
+  /** Which phase a turn is in. Cheap enough to call on every event. */
+  function phase (run, what) {
+    if (!run.busy || what === run.phase) return
+    run.phase = what
+    if (run === visibleRun()) paintBusy()
+  }
+
+  /**
+   * The panel, told what is running: the strip and the Stop button for the
+   * conversation on screen, and a line naming the ones working behind it.
+   *
+   * Called both when a turn starts or ends and when the reader moves to another
+   * note — the same paint answers both, because what it draws is a fact about
+   * the chat in front of them rather than about the turn that changed.
+   */
+  function paintWorking () {
+    const run = visibleRun()
+    // The button is never disabled — while a turn runs it is the stop button,
+    // which is exactly when you are most likely to want it.
+    el.panel.dataset.busy = run.busy ? 'yes' : 'no'
+    el.send.setAttribute('aria-label', run.busy ? 'Stop' : 'Send')
+    busyRow.hidden = !run.busy
+    if (run.busy) paintBusy()
+
+    const others = workingRuns().filter((other) => other !== run)
+    elsewhereRow.hidden = !others.length
+    if (others.length) {
+      elsewhereRow.replaceChildren(...others.map((other) => {
+        const name = other.turn?.path ? displayName(other.turn.path) : 'the vault'
+        const go = element('button', 'ai-elsewhere-note')
+        go.type = 'button'
+        go.textContent = name
+        go.title = `Working on ${name} — open it`
+        go.addEventListener('click', () => {
+          if (other.turn?.path) onOpen?.(other.turn.path)
+        })
+        return go
+      }))
+      elsewhereRow.prepend(element('span', 'ai-elsewhere-label',
+        others.length === 1 ? 'Also working on' : `Also working on ${others.length} files:`))
+    }
+
+    /* The counter ticks for as long as anything is running, because the reader
+       may be watching any one of them. */
+    const anyone = run.busy || others.length
+    if (anyone && !busyTick) busyTick = setInterval(paintBusy, 1000)
+    if (!anyone && busyTick) { clearInterval(busyTick); busyTick = 0 }
   }
 
   /* How long a turn has to have run before its ending is worth saying out loud.
@@ -300,8 +351,8 @@ export function mountCopilot ({
    * being asked from the other application — has it finished — which otherwise
    * costs a trip back to the window to find out that it has not.
    */
-  function announce (to, trouble = '') {
-    if (!state.busy || !busyAt || Date.now() - busyAt < NOTIFY_AFTER) return
+  function announce (run, to, trouble = '') {
+    if (!run.busy || !run.at || Date.now() - run.at < NOTIFY_AFTER) return
     if (document.hasFocus()) return
     // Nothing waits on it, and a banner that could not be raised is not worth
     // an unhandled rejection in a window the reader is not even looking at.
@@ -361,6 +412,82 @@ export function mountCopilot ({
     return entry.convos.find((c) => c.id === entry.active) || entry.convos[0]
   }
 
+  /* ------------------------------------------------------------- the runs */
+
+  /**
+   * What a conversation has in flight: its copilot, the turn it is answering,
+   * the reply being written into it, and the questions waiting behind that.
+   *
+   * All of this used to be one set of fields on `state`, which said what the
+   * panel was doing — and a panel can only do one thing at a time. So a turn
+   * about one note was the whole app's turn: ask about another and the question
+   * was queued behind it, however unrelated the two were.
+   *
+   * Here instead, because a conversation is what a turn actually belongs to.
+   * The CLI is started per conversation as well (see `ensureSession`), so two
+   * notes are two processes and two threads, and neither waits on the other.
+   * What is still one of is the panel: the strip at the foot of the log, the
+   * Stop button and the elapsed counter all describe the conversation on
+   * screen, and the ones running behind it are named in a line of their own.
+   *
+   * Kept on the conversation rather than in a map beside it, so it cannot
+   * outlive what it is about: a chat trimmed out of memory takes its run with
+   * it. Nothing here is written down — `flush` names the fields it saves, and
+   * this is not among them.
+   */
+  function runOf (convo) {
+    if (!convo.run) {
+      convo.run = {
+        convo,
+        busy: false,
+        // Whether main is holding a copilot for this conversation, and the
+        // settings reading it was started with.
+        started: false,
+        settings: -1,
+        /* Set by `/new` emptying a chat in place: the id is the same, so
+           nothing else would notice that the thread it resumes is one this
+           conversation has just thrown away. */
+        stale: false,
+        /* The turn this conversation is answering, captured the moment the
+           message is sent. Every event of that turn routes here — never to
+           whichever note happens to be on screen when it arrives. */
+        turn: null,       // { id, path, convo, run }
+        // Stop lets go of `turn` before it awaits main, but the events that
+        // stop produces still belong to the conversation it ended.
+        stopping: null,
+        stream: null,     // the copilot message currently being written into
+        think: null,      // the thinking message for the turn in progress
+        /* Questions asked while this conversation was busy, in order. Each is
+           already in the transcript, greyed. Per conversation, so a follow-up
+           about one note is never delivered into another. */
+        queue: [],
+        at: 0,            // when the running turn began, for the counter
+        phase: 'Working'
+      }
+    }
+    return convo.run
+  }
+
+  /** The run the panel's controls describe. */
+  const visibleRun = () => runOf(chat())
+
+  /** Every run there is, for the handful of questions that are about all of
+   *  them: what is still working, and what a rename has to follow. */
+  function allRuns () {
+    const out = []
+    for (const entry of state.chats.values()) {
+      for (const convo of entry.convos) if (convo.run) out.push(convo.run)
+    }
+    return out
+  }
+
+  const workingRuns = () => allRuns().filter((run) => run.busy)
+
+  /* Every turn in flight, by the id it was issued. How an event coming back
+     from main finds the conversation it belongs to — with several running at
+     once, "the turn" is no longer a question the panel can answer on its own. */
+  const turns = new Map()
+
   /**
    * The session id to resume with, if this conversation has one worth using.
    *
@@ -388,13 +515,36 @@ export function mountCopilot ({
       (/^Ask about .+? or anything else in the vault\. You will see it edit\. Type @ for a file, \/ for commands\.$/.test(msg.text) ||
        /has your vault open\. Open a note to start a conversation about it\.$/.test(msg.text)))
 
+  /**
+   * Take a message out of a conversation, and out of the window with it.
+   *
+   * Three things have to happen together and used to be remembered separately
+   * at each of the four places that drop a row: the message leaves `messages`,
+   * a step stops being findable in the `steps` index that points at it, and the
+   * node leaves the document — because a row still on screen after the
+   * conversation has let go of it is a transcript that disagrees with itself.
+   * The step line in particular was present at two of those four sites and
+   * absent at the other two, which is the kind of invariant that survives only
+   * as long as whoever adds the fifth site happens to look at the right one.
+   *
+   * `at` is passed when the caller already knows where the message sits, which
+   * is every caller that is walking the array anyway.
+   */
+  function drop (convo, msg, at = convo.messages.indexOf(msg), { keepNode = false } = {}) {
+    if (at !== -1) convo.messages.splice(at, 1)
+    if (msg.t === 'step' && convo.steps?.get(msg.id) === msg) convo.steps.delete(msg.id)
+    /* A caller about to replace the whole log has no use for a node-by-node
+       teardown of it — `repaint` empties the log wholesale — but the reference
+       still has to go, or the row is drawn twice the next time it is filed. */
+    if (!keepNode) msg.node?.remove()
+    msg.node = null
+  }
+
   function dismissStarters (convo) {
     let removed = false
     for (let at = convo.messages.length - 1; at >= 0; at--) {
       if (!isStarter(convo.messages[at])) continue
-      const [starter] = convo.messages.splice(at, 1)
-      starter.node?.remove()
-      starter.node = null
+      drop(convo, convo.messages[at], at)
       removed = true
     }
     return removed
@@ -418,11 +568,10 @@ export function mountCopilot ({
         if (prose(convo.messages[at])) spoken++
         else if (oldest === -1) oldest = at
       }
-      const [gone] = convo.messages.splice(spoken > MAX_PROSE || oldest === -1 ? 0 : oldest, 1)
+      const at = spoken > MAX_PROSE || oldest === -1 ? 0 : oldest
+      const gone = convo.messages[at]
       if (!gone) break
-      if (gone.t === 'step' && convo.steps?.get(gone.id) === gone) convo.steps.delete(gone.id)
-      gone.node?.remove()
-      gone.node = null
+      drop(convo, gone, at)
     }
   }
 
@@ -505,7 +654,7 @@ export function mountCopilot ({
       if (msg.line != null) node.dataset.line = String(msg.line)
       else delete node.dataset.line
     }
-    if (msg === state.stream) return paintStream(node, msg.text || '')
+    if (msg === streamOnScreen()) return paintStream(node, msg.text || '')
     /* A question is built rather than rendered — its attachments are cards, not
        markdown — so redrawing one through `html` alone dropped the files it was
        asked with. Which is what happens the moment a queued question goes out:
@@ -671,9 +820,9 @@ export function mountCopilot ({
 
   /** The reply is no longer being streamed into: give the finished text the
    *  one clean whole render the fast path deferred, seam and split removed. */
-  function settleStream () {
-    const msg = state.stream
-    state.stream = null
+  function settleStream (run) {
+    const msg = run.stream
+    run.stream = null
     if (msg) redraw(msg)
   }
 
@@ -712,6 +861,9 @@ export function mountCopilot ({
   const EDIT_MARK =
     '<svg viewBox="0 0 16 16" aria-hidden="true">' +
     '<path d="M3 11.75V13h1.25l7.7-7.7-1.25-1.25zM9.9 4.85l1.25 1.25"/></svg>'
+  const CANCEL_MARK =
+    '<svg viewBox="0 0 16 16" aria-hidden="true">' +
+    '<path d="m4.6 4.6 6.8 6.8M11.4 4.6l-6.8 6.8"/></svg>'
 
   const actions = (...rows) =>
     `<div class="msg-actions">${rows.filter(Boolean).join('')}</div>`
@@ -740,8 +892,8 @@ export function mountCopilot ({
      screen belongs to another one: an offscreen conversation is only ever
      redrawn once it is opened. */
   const writing = () => {
-    const to = state.turn || state.stopping
-    return !!to && to.convo === chat()
+    const run = visibleRun()
+    return !!(run.turn || run.stopping)
   }
 
   /* The reply's last word, which is where its copy button goes — one button per
@@ -839,7 +991,7 @@ export function mountCopilot ({
         if (msg.line != null) node.dataset.line = String(msg.line)
       }
     }
-    if (msg === state.stream) paintStream(node, msg.text || '')
+    if (msg === streamOnScreen()) paintStream(node, msg.text || '')
     else if (msg.t === 'you') paintUserMessage(node, msg)
     else { node.innerHTML = html(msg); dressCode(node) }
     msg.node = node
@@ -973,7 +1125,15 @@ export function mountCopilot ({
        there is nothing to ask differently, and the composer is where it already
        is. */
     if (!msg.text && !attached.length) return
-    if (msg.queued || msg.dropped) return
+    /* A queued question can still be taken back — the one mercy a message
+       waiting on a long turn has. A dropped one is already history. */
+    if (msg.queued) {
+      const strip = element('div', 'msg-actions')
+      strip.innerHTML = action('unqueue', 'Cancel this queued message', CANCEL_MARK)
+      node.append(strip)
+      return
+    }
+    if (msg.dropped) return
     const strip = element('div', 'msg-actions')
     strip.innerHTML = action('edit', 'Edit this question and ask again', EDIT_MARK) +
       (msg.text ? action('copy', 'Copy this question', COPY_MARK) : '')
@@ -999,11 +1159,25 @@ export function mountCopilot ({
       const diff = element('button', 'ghost is-compact', 'Diff')
       diff.type = 'button'
       diff.addEventListener('click', async () => {
-        const old = row.querySelector('.history-diff')
+        const old = row.querySelector('.history-diff, .ai-review-gone')
         if (old) { old.remove(); return }
-        const detail = await api.trust.operation(operation.id)
+        let detail = null
+        try {
+          detail = await api.trust.operation(operation.id)
+        } catch {
+          // Falls through to the same line as a missing change: from the
+          // reader's side, a history that cannot be read and one that no
+          // longer holds this turn are the same answer.
+        }
         const change = detail?.changes.find((item) => item.path === summary.path)
-        if (!change) return
+        /* A turn old enough to have been evicted from the history — it holds
+           whole before/after texts and is capped — has no diff left to show.
+           Saying so beats a button that answers a click with nothing, which
+           reads as broken rather than as expired. */
+        if (!change) {
+          row.append(element('div', 'ai-review-gone', 'That change is no longer in the history.'))
+          return
+        }
         row.append(diffBlock(change))
       })
       row.append(path, diff)
@@ -1018,7 +1192,7 @@ export function mountCopilot ({
     reject.title = `Reject changes to all ${operation.changes.length} files`
     reject.addEventListener('click', () => {
       Promise.resolve(onRestore?.(operation, null)).catch((err) => {
-        onWarn?.(err?.message || 'Those changes could not be rejected.')
+        onWarn?.(reason(err, 'Those changes could not be rejected.'))
       })
     })
     actions.append(reject)
@@ -1030,8 +1204,20 @@ export function mountCopilot ({
       node.classList.add('is-accepted')
       keep.textContent = 'Accepted'
       keep.disabled = true
-      Promise.resolve(onAccept?.(operation)).catch(() => {})
-      save()
+      Promise.resolve(onAccept?.(operation))
+        .then(save)
+        .catch((err) => {
+          /* Put back. Accepting only clears the diff marks, so nothing is lost
+             when it fails — but a button that says "Accepted" over changes
+             that were not is the transcript telling the reader something
+             untrue, and it is the record they come back to. Reported the same
+             way Reject reports, rather than swallowed. */
+          msg.accepted = false
+          node.classList.remove('is-accepted')
+          keep.textContent = 'Accept changes'
+          keep.disabled = false
+          onWarn?.(reason(err, 'Those changes could not be accepted.'))
+        })
     })
     actions.append(keep)
     /* The decision belongs beside the change count. Keeping it in a separate
@@ -1135,9 +1321,9 @@ export function mountCopilot ({
    * rather than its content: live while it runs, and afterwards a single quiet
    * line saying how long it went on for.
    */
-  function thinking (event, to = null) {
-    if (!state.think) state.think = push({ t: 'think', tokens: 0, text: '', live: true }, to)
-    const think = state.think
+  function thinking (run, event, to = null) {
+    if (!run.think) run.think = push({ t: 'think', tokens: 0, text: '', live: true }, to)
+    const think = run.think
     if (event.tokens) think.tokens = Math.max(think.tokens, event.tokens)
     if (event.text) think.text += event.text
     redraw(think)
@@ -1149,14 +1335,14 @@ export function mountCopilot ({
    * process was stopped, or died, or simply never reported back. Left as it
    * was, it would still read `Editing` in a transcript opened a week later.
    */
-  function settleSteps () {
+  function settleSteps (run) {
     /* `stopping` as well as `turn`: Stop lets go of the turn before it awaits
        main, so by the time this runs the only thing still naming the
        conversation being settled is the one Stop parked there. Falling through
        to `chat()` settled whatever was on screen instead, and left the stopped
        conversation reading `Editing …` for good — which is the exact state this
        function exists to prevent. */
-    const convo = (state.turn || state.stopping)?.convo || chat()
+    const convo = (run.turn || run.stopping)?.convo || run.convo
     for (const msg of convo.messages) {
       if (msg.t === 'step' && msg.done === false) {
         msg.done = true
@@ -1166,47 +1352,49 @@ export function mountCopilot ({
   }
 
   /** The thinking is over — collapse it to its epitaph. */
-  function settleThinking () {
-    if (!state.think) return
-    state.think.live = false
-    redraw(state.think)
-    state.think = null
-    save()
+  function settleThinking (run) {
+    if (!run.think) return
+    run.think.live = false
+    redraw(run.think)
+    run.think = null
+    save(pathOf(run))
   }
 
-  function setBusy (busy) {
-    state.busy = busy
-    // The button is never disabled — while a turn runs it is the stop button,
-    // which is exactly when you are most likely to want it.
-    el.panel.dataset.busy = busy ? 'yes' : 'no'
-    el.send.setAttribute('aria-label', busy ? 'Stop' : 'Send')
+  /** Which note a run's messages are filed under, for the writes that follow
+   *  them. The turn carries it; a stopped one is still the turn being settled. */
+  const pathOf = (run) => (run.turn || run.stopping)?.path ?? state.notePath
 
-    clearInterval(busyTick)
-    busyRow.hidden = !busy
+  /** The reply being streamed into the conversation on screen, if there is one.
+   *  Only that one gets the cheap append-only paint — an offscreen reply has no
+   *  node to append to. */
+  const streamOnScreen = () => visibleRun().stream
+
+  function setBusy (run, busy) {
+    run.busy = busy
     if (busy) {
-      busyAt = Date.now()
-      busyPhase = 'Working'
-      paintBusy()
-      busyTick = setInterval(paintBusy, 1000)
+      run.at = Date.now()
+      run.phase = 'Working'
     } else {
-      busyTick = 0
-      settleThinking()
-      settleStream()
-      settleSteps()
+      settleThinking(run)
+      settleStream(run)
+      settleSteps(run)
       /* The answer is whole now, so the row that ends it gains its copy button.
          `settleStream` only covers a turn that stopped while writing; one that
          ended on a tool call left its last words rendered mid-turn, and mid-turn
          is exactly when that button is withheld. */
-      const ending = state.turn || state.stopping
+      const ending = run.turn || run.stopping
       const ended = [...(ending?.convo?.messages || [])].reverse().find((m) => m.t === 'bot')
       if (ended) redraw(ended)
-      state.turn = null
-      /* Whatever was asked while this turn ran goes out now. On a microtask
-         rather than here: every caller of `setBusy(false)` is in the middle of
-         closing a turn out, and starting the next one from inside that would
-         have the two overlap in `state`. */
-      queueMicrotask(drain)
+      // The id is only of interest while its events can still arrive.
+      if (ending?.id) turns.delete(ending.id)
+      run.turn = null
     }
+    paintWorking()
+    /* Whatever was asked while this turn ran goes out now. On a microtask
+       rather than here: every caller of `setBusy(run, false)` is in the middle
+       of closing a turn out, and starting the next one from inside that would
+       have the two overlap in the same run. */
+    if (!busy) queueMicrotask(() => drain(run))
   }
 
   /**
@@ -1257,10 +1445,11 @@ export function mountCopilot ({
   /**
    * A question put back in the box to be asked differently.
    *
-   * Not an edit of the transcript: what was asked was asked, and the thread on
-   * the other side has it either way. This is the composer being loaded with
-   * the question and its files so the next one can be a word different rather
-   * than typed again from memory.
+   * The composer is loaded with the question and its files, and the message is
+   * remembered: when the reworded version is sent, it takes the original's
+   * place in the transcript rather than repeating it at the foot. The thread on
+   * the other side keeps what was actually said either way — only the
+   * transcript treats the resend as a revision rather than a new question.
    */
   function editMessage (button) {
     const msg = messageAt(button)
@@ -1268,7 +1457,25 @@ export function mountCopilot ({
     if (msg.text) quote(msg.text)
     const attached = Array.isArray(msg.attachments) ? msg.attachments : []
     if (attached.length) addAttachments(attached, true)
+    state.editing = { msg, convo: chat() }
     el.input.focus()
+  }
+
+  /**
+   * A queued question withdrawn before it went out.
+   *
+   * Off the queue and out of the transcript both: a row left grey reads as
+   * still waiting, and one stamped "not sent" reads as a failure. The reader
+   * changed their mind, so the transcript treats it as never asked.
+   */
+  function cancelQueued (button) {
+    const msg = messageAt(button)
+    if (!msg?.queued) return
+    const queue = visibleRun().queue
+    const at = queue.findIndex((item) => item.msg === msg)
+    if (at !== -1) queue.splice(at, 1)
+    drop(chat(), msg)
+    save()
   }
 
   el.log.addEventListener('click', (event) => {
@@ -1280,6 +1487,9 @@ export function mountCopilot ({
 
     const edit = event.target.closest('.ai-edit')
     if (edit) { editMessage(edit); return }
+
+    const unqueue = event.target.closest('.ai-unqueue')
+    if (unqueue) { cancelQueued(unqueue); return }
 
     const edited = event.target.closest('.msg-step.can-open')
     if (edited) {
@@ -1357,7 +1567,7 @@ export function mountCopilot ({
   const dirtyNotes = new Set()
   const removedNotes = new Set()
 
-  function save (path = (state.turn || state.stopping)?.path ?? state.notePath) {
+  function save (path = state.notePath) {
     unsaved = true
     dirtyNotes.add(chatKey(path))
     if (!saveSince) saveSince = Date.now()
@@ -1405,10 +1615,15 @@ export function mountCopilot ({
        on screen and the one a running turn is filing into. Done before the
        question of whether to write at all: browsing notes with the panel shut
        makes entries without changing anything worth saving, and those are
-       exactly the ones this is here to let go of. */
-    for (const [path] of ranked.slice(MAX_NOTES)) {
-      if (path !== chatKey(state.notePath) && path !== chatKey(state.turn?.path) &&
-          path !== chatKey(state.stopping?.path)) state.chats.delete(path)
+       exactly the ones this is here to let go of. The two kinds that cannot go
+       are the note on screen and any conversation still being answered — of
+       which there may now be several at once. */
+    for (const [path, entry] of ranked.slice(MAX_NOTES)) {
+      if (path === chatKey(state.notePath)) continue
+      // A conversation with a turn in flight is being written into; letting it
+      // out of memory would drop the reply as it arrived.
+      if (entry.convos.some((convo) => convo.run?.busy || convo.run?.stopping)) continue
+      state.chats.delete(path)
     }
 
     /* Blur, `beforeunload` and every note switch ask for a write, and most of
@@ -1488,20 +1703,18 @@ export function mountCopilot ({
   /* -------------------------------------------------------------- events */
 
   api.on('ai:event', (event) => {
-    /* The turn that is running owns these events, wherever the reader has
-       wandered since sending it; events arriving outside a turn belong to
-       whatever is on screen. Resolved once and in full, so nothing below has to
-       spell the fallback out again — it used to be spelled four ways, and two
-       of them named the default differently. */
-    const to = state.turn || state.stopping
-    /* Main may hold a terminal event while it snapshots the vault. A queued
-       turn can begin during that wait, so arrival order is not ownership: only
-       the id issued by `deliver` decides which conversation may consume it. */
+    /* Which turn this belongs to, asked of the id rather than of the panel.
+       Several conversations can be being answered at once, so "the running
+       turn" is no longer a thing the panel knows — the id issued by `deliver`
+       is the only thing that decides, and an event whose turn has already been
+       settled has nowhere left to go. */
+    const to = turns.get(String(event?.turnId || ''))
     if (!ownsTurn(to, event)) return
+    const run = to.run
     switch (event.k) {
       case 'ready':
       case 'thread':
-        state.started = true
+        run.started = true
         // Filed against the conversation being discussed, so coming back to it
         // later picks the same session up rather than starting over.
         if (event.thread) {
@@ -1512,37 +1725,40 @@ export function mountCopilot ({
         break
 
       case 'thinking':
-        thinking(event, to)
-        phase('Thinking')
+        thinking(run, event, to)
+        phase(run, 'Thinking')
         break
 
       case 'preparing-pdf':
-        phase('Preparing PDF')
+        phase(run, 'Preparing PDF')
         break
 
       case 'text':
-        settleThinking()
-        if (!state.stream) state.stream = push({ t: 'bot', text: '' }, to)
-        state.stream.text += event.text
-        redraw(state.stream)
-        phase('Writing')
+        settleThinking(run)
+        if (!run.stream) run.stream = push({ t: 'bot', text: '' }, to)
+        run.stream.text += event.text
+        redraw(run.stream)
+        phase(run, 'Writing')
         break
 
       case 'tool':
         // A fresh tool call ends the paragraph before it; the next prose the
         // copilot writes belongs in a message of its own.
-        settleThinking()
-        settleStream()
+        settleThinking(run)
+        settleStream(run)
         // Capture the note before the tool changes it. The renderer keeps this
         // separate from the transcript so it can draw a live, unsaved diff.
+        // The turn id rides along: a provider can announce a Write after the
+        // file has already changed, and the turn's own baseline is then the
+        // only copy of "before" left — see rememberAgentBefore.
         if ((event.name === 'Edit' || event.name === 'Write') && event.path) {
-          onEditing?.(event.path, event.needle || '', event.name)
+          onEditing?.(event.path, event.needle || '', event.name, event.turnId)
         }
         step({ ...event, done: false }, to)
         // A tool running is the quietest part of a turn and the one that most
         // looks like a hang, so the strip says which tool and on what rather
         // than leaving a timer to answer that on its own.
-        phase(phaseOf(event))
+        phase(run, phaseOf(event))
         break
 
       // Nothing was written — a read finishing, or a write that failed.
@@ -1562,11 +1778,11 @@ export function mountCopilot ({
       }
 
       case 'renamed':
-        settleThinking()
-        settleStream()
+        settleThinking(run)
+        settleStream(run)
         step({ ...event, name: 'Rename', done: true }, to)
         Promise.resolve(onRenamed?.(event)).catch((err) => {
-          onWarn?.(err?.message || 'The file was renamed but the window could not follow it.')
+          onWarn?.(reason(err, 'The file was renamed but the window could not follow it.'))
         })
         break
 
@@ -1577,17 +1793,17 @@ export function mountCopilot ({
 
       case 'review':
         push({ t: 'review', operation: event.operation, accepted: false }, to)
-        save()
+        save(to.path)
         break
 
       // The process is gone — it exited, or was never there to begin with.
       // Forgetting it here is what lets the next message start a fresh one
       // instead of talking to a corpse.
       case 'error':
-        state.started = false
+        run.started = false
         failed(event.message || 'Something went wrong.', to)
-        announce(to, event.message || 'Something went wrong.')
-        setBusy(false)
+        announce(run, to, event.message || 'Something went wrong.')
+        setBusy(run, false)
         break
 
       case 'turn-end':
@@ -1604,8 +1820,8 @@ export function mountCopilot ({
         if (event.used || event.cost) paintContext(to)
         if (event.error) failed(event.error, to)
         // Before `setBusy`, which is what lets go of the turn this is about.
-        announce(to, event.error || '')
-        setBusy(false)
+        announce(run, to, event.error || '')
+        setBusy(run, false)
         /* The deltas since the last tool call are only in memory until now.
            Named, because `setBusy` has just let go of the turn: the reader may
            have browsed on, and this write is about the note the reply landed
@@ -1617,9 +1833,12 @@ export function mountCopilot ({
 
   /* -------------------------------------------------------------- session */
 
-  const settings = (convo = chat(), turnId = state.turn?.id) => {
+  const settings = (convo, turnId) => {
     const { provider, id } = splitKey(state.model)
     return {
+      /* Which copilot this is. One per conversation, so the key is the
+         conversation's own id — see electron/ai.js. */
+      key: convo.id,
       provider,
       model: id,
       effort: state.effort,
@@ -1636,28 +1855,29 @@ export function mountCopilot ({
   }
 
   /**
-   * Makes the running process match what is on screen — the chosen copilot,
-   * the chosen effort, and the note being discussed. Called just before a
-   * message goes out, never on the change itself.
+   * Makes this conversation's copilot match the settings — the chosen model,
+   * effort and permission mode. Called just before a message goes out, never on
+   * the change itself.
+   *
+   * A conversation keeps its own process, so this no longer has to ask whether
+   * the one that is running belongs to somebody else: starting one for this
+   * chat replaces this chat's, and leaves every other note's turn alone. What
+   * it does still ask is whether the settings have moved since — the reader
+   * changing model or effort makes every copilot out of date, and each is
+   * replaced at its own next message.
    */
-  async function ensureSession (convo = chat(), turnId = state.turn?.id) {
+  async function ensureSession (run, turnId) {
     /* The panel is not always the way in — a Fix button asks a question with
        the panel still closed — and a turn about to be sent is as good a reason
        to know the real catalogue as a control about to be drawn. */
     readCatalogue()
-    /* A message going into a conversation the running process was not started
-       for has to replace it, or it is answered with another chat's history.
-       Ordinarily the note switch has already said so; a queued follow-up
-       delivered after the reader moved on has not. */
-    if (state.sessionConvo !== convo.id) state.stale = true
-    if (state.started && !state.stale) return true
-    if (state.stale) await api.ai.stop()
-    const result = await api.ai.start(settings(convo, turnId))
-    state.started = !!result?.ok
-    state.stale = false
-    state.sessionConvo = state.started ? convo.id : null
-    if (!result?.ok) failed(result?.error || 'The copilot could not start.')
-    return state.started
+    if (run.started && !run.stale && run.settings === state.settings) return true
+    const result = await api.ai.start(settings(run.convo, turnId))
+    run.started = !!result?.ok
+    run.stale = false
+    run.settings = state.settings
+    if (!result?.ok) failed(result?.error || 'The copilot could not start.', run.turn)
+    return run.started
   }
 
   /* ------------------------------------------------------------ commands */
@@ -1679,11 +1899,11 @@ export function mountCopilot ({
       run: compactChat
     },
     {
-      name: 'search',
-      hint: 'Find a chat about any note — /search followed by words',
-      /* Bare, it primes the box and waits: the rows arrive as the words are
-         typed, so the prompt is the caret sitting after `/search `. */
-      run: () => quote('/search ')
+      name: 'model',
+      hint: 'Choose who answers — /model followed by a name',
+      /* Primed rather than left bare: the catalogue is a list, not a query,
+         so there is something to show before a word is typed. */
+      run: () => { quote('/model '); offerMenu() }
     }
   ]
 
@@ -1764,6 +1984,12 @@ export function mountCopilot ({
    */
   function compactIfFull (path) {
     const convo = chat(path)
+    /* Only for the note on screen. `startChat` works on what is showing — it
+       resets the panel and greets into it — so compacting a queued follow-up's
+       off-screen chat from here would rotate the visible conversation and
+       leave the full one untouched. That chat is compacted instead by its own
+       next on-screen send. */
+    if (path !== state.notePath) return convo
     const room = currentModel()?.context || 0
     if (!room || !convo.used || convo.used / room < ROOMY) return convo
 
@@ -1814,6 +2040,21 @@ export function mountCopilot ({
     if (!asked.length) return ''
     const tail = (last?.text || '').slice(-1200)
 
+    /* How each answer began — which is where a conclusion is usually stated,
+       and the difference between a digest that carries the topics and one
+       that carries what was worked out about them. First line only: the
+       detail is what the context ran out of room for. */
+    const answerTo = (question) => {
+      for (let at = convo.messages.indexOf(question) + 1; at < convo.messages.length; at++) {
+        const msg = convo.messages[at]
+        if (msg.t === 'you') return ''
+        if (msg.t === 'bot' && msg.text) {
+          return msg.text.split('\n', 1)[0].replace(/\s+/g, ' ').slice(0, 200)
+        }
+      }
+      return ''
+    }
+
     /* Read and written are kept apart: one says where the answer came from, the
        other says what the conversation has already changed — and a fresh
        session that mistakes the second for the first will happily make the same
@@ -1837,100 +2078,19 @@ export function mountCopilot ({
       'Some background — this continues an earlier conversation, which has been',
       'cut short because it grew too long. Do not answer any of it again.',
       '',
-      'What was asked, oldest first:',
-      ...asked.map((m) => `- ${m.text.replace(/\s+/g, ' ').slice(0, 300)}`),
+      'What was asked, oldest first — each with how its answer began:',
+      ...asked.map((m) => {
+        const line = `- ${m.text.replace(/\s+/g, ' ').slice(0, 300)}`
+        const began = answerTo(m)
+        return began ? `${line}\n  answered: ${began}` : line
+      }),
       ...listed('Files you already read in that conversation, most recent first', read),
       ...listed('Files you already changed in that conversation — do not redo those edits', written),
       ...(tail ? ['', 'How your last reply ended:', tail] : [])
     ].join('\n')
   }
 
-  /* ------------------------------------------------------- finding a chat */
-
-  /* How many results the menu will show, and how much of each conversation is
-     worth reading to find them. A transcript is capped at `MAX_MESSAGES` and
-     there may be sixty notes' worth, so the scan is bounded on both axes: this
-     runs on every keystroke after `/search `. */
-  const FOUND_ROWS = 8
-  const SEARCHED_CHARS = 4000
-
-  /**
-   * Every conversation in the vault, by what was said in it.
-   *
-   * `/history` answers "what else have I asked about this note", which is the
-   * question you have while looking at the note. This answers the other one —
-   * "where was it I worked that out" — which was unanswerable: a conversation
-   * about a note you cannot name was gone, however well you remembered its
-   * contents.
-   *
-   * Searched over what is in memory, which after `restore` is the whole history
-   * file: everything on disk is read in at launch and only trimmed once the cap
-   * bites. Prose only — the reader is remembering something that was said, not
-   * a path that scrolled past in a tool call.
-   */
-  function findChats (query) {
-    const wanted = query.trim().toLowerCase()
-    if (wanted.length < 2) return []
-    const found = []
-    for (const [path, entry] of state.chats) {
-      for (const convo of entry.convos) {
-        let read = 0
-        let hit = null
-        for (const msg of convo.messages) {
-          if (!prose(msg) || !msg.text) continue
-          const text = msg.text.slice(0, SEARCHED_CHARS - read)
-          read += text.length
-          const at = text.toLowerCase().indexOf(wanted)
-          if (at !== -1) { hit = { msg, at, text }; break }
-          if (read >= SEARCHED_CHARS) break
-        }
-        if (hit) found.push({ path, convo, hit })
-      }
-    }
-    // Most recently spoken in first: the chat you are trying to get back to is
-    // far more often a recent one than an old one.
-    found.sort((a, b) => (b.convo.at || 0) - (a.convo.at || 0))
-    return found.slice(0, FOUND_ROWS)
-  }
-
-  /* The matching words with enough either side to recognise them by. */
-  function excerptAround (text, at, wanted) {
-    const from = Math.max(0, at - 30)
-    const raw = text.slice(from, at + wanted.length + 40).replace(/\s+/g, ' ').trim()
-    return `${from ? '…' : ''}${raw}${at + wanted.length + 40 < text.length ? '…' : ''}`
-  }
-
-  function showSearch (query) {
-    const rows = findChats(query).map(({ path, convo, hit }) => ({
-      label: excerptAround(hit.text, hit.at, query.trim().toLowerCase()),
-      hint: `${path === VAULT_CHAT ? 'vault' : displayName(path)} · ${when(convo.at)}`,
-      run: () => openFound(path, convo.id)
-    }))
-    if (!rows.length) { hideMenu(); return }
-    showMenu(rows)
-  }
-
-  /**
-   * A conversation found somewhere else, opened where it lives.
-   *
-   * The note is opened through the renderer rather than by pointing the panel
-   * at it: a chat is about a document, and arriving at the conversation with
-   * the document still showing something else is half an answer. `setNote` comes
-   * back round from that and repaints, so the active conversation is set first.
-   */
-  function openFound (path, id) {
-    if (busyNow()) return
-    hideMenu()
-    el.input.value = ''
-    sizeInput()
-    const entry = state.chats.get(chatKey(path))
-    if (entry?.convos.some((convo) => convo.id === id)) entry.active = id
-    if (path === chatKey(state.notePath) || path === state.notePath) { reset(); return }
-    if (path === VAULT_CHAT) { note('That chat is not about a note — open it from an empty tab.'); return }
-    Promise.resolve(onOpen?.(path, null, null)).catch(() => {
-      onWarn?.('That note could not be opened.')
-    })
-  }
+  /* ------------------------------------------------------- chat history */
 
   /** Go back to a past conversation about this note. */
   function openChat (id) {
@@ -1963,15 +2123,18 @@ export function mountCopilot ({
   /* Nothing may be swapped out from under a turn that is still running: the
      events still arriving belong to the conversation that asked for them. */
   function busyNow () {
-    if (!state.busy) return false
+    if (!visibleRun().busy) return false
     note('The copilot is still working — stop it first.')
     return true
   }
 
   /** Whatever was on screen is no longer what we are looking at. */
   function reset () {
-    state.stream = null
-    state.think = null
+    const run = visibleRun()
+    run.stream = null
+    run.think = null
+    state.editing = null
+    state.contextMode = null
     /* The process is left alone; the next message replaces it with one resuming
        whichever session this conversation belongs to.
 
@@ -1980,7 +2143,7 @@ export function mountCopilot ({
        empties it, thread and all, so the comparison `ensureSession` makes would
        see the conversation it is already running and carry on answering out of
        the history this just threw away. */
-    state.stale = true
+    run.stale = true
     repaint()
     el.input.focus()
   }
@@ -2010,6 +2173,8 @@ export function mountCopilot ({
     menu = null
     el.menu.hidden = true
     el.menu.replaceChildren()
+    el.input.setAttribute('aria-expanded', 'false')
+    el.input.removeAttribute('aria-activedescendant')
   }
 
   function paintMenu () {
@@ -2017,6 +2182,7 @@ export function mountCopilot ({
       const node = element('button', 'ai-menu-row')
       const on = at === menu.at
       node.type = 'button'
+      node.id = `ai-menu-opt-${at}`
       node.setAttribute('role', 'option')
       node.setAttribute('aria-selected', on ? 'true' : 'false')
       node.classList.toggle('is-on', on)
@@ -2026,13 +2192,25 @@ export function mountCopilot ({
       return node
     }))
     el.menu.hidden = false
+    el.input.setAttribute('aria-expanded', 'true')
+    el.input.setAttribute('aria-activedescendant', `ai-menu-opt-${menu.at}`)
     el.menu.children[menu.at]?.scrollIntoView({ block: 'nearest' })
   }
 
+  /** Move the highlight without rebuilding the rows — this runs per arrow
+   *  key, and nothing about the rows changed, only which of them is lit. */
   function moveMenu (by) {
     const count = menu.rows.length
+    const was = el.menu.children[menu.at]
     menu.at = (menu.at + by + count) % count
-    paintMenu()
+    const on = el.menu.children[menu.at]
+    if (!on) { paintMenu(); return }
+    was?.classList.remove('is-on')
+    was?.setAttribute('aria-selected', 'false')
+    on.classList.add('is-on')
+    on.setAttribute('aria-selected', 'true')
+    el.input.setAttribute('aria-activedescendant', on.id)
+    on.scrollIntoView({ block: 'nearest' })
   }
 
   function pickMenu (at = menu.at) {
@@ -2143,17 +2321,57 @@ export function mountCopilot ({
     box.focus()
   }
 
-  /* `/search` and the words after it. The only command that takes an argument,
-     and it takes it live: the rows are the conversations matching what has been
-     typed so far, which is the whole of the interaction. */
-  const SEARCH = /^\/search\s+(.+)$/i
+  /* `/model`, with or without a name after it. The space is what separates the
+     command being *typed* from the command being *used*: `/mode` is still on
+     its way to being a word and belongs in the command list, while `/model `
+     has been said and its own rows take the menu over. */
+  const MODEL = /^\/model(?:\s+([^\n]*))?$/i
+
+  /* How many models a menu shows. The catalogue runs to several hundred, and a
+     list longer than the panel is scrolling rather than choosing — the answer
+     to not seeing what you want here is another word, not another page. */
+  const MODEL_ROWS = 12
+
+  /** The catalogue, searched as it is typed — see `searchModels`. */
+  function showModels (query) {
+    const rows = searchModels(state.catalogue, query, MODEL_ROWS).map((model) => ({
+      /* The model's own name leads, and the shelf it sits on goes to the aside
+         with the rest. Qualified the other way round — `openrouter ·
+         anthropic/claude-…`, the way the readout spells it — every row began
+         with the same word and was cut off before the one that told them
+         apart. */
+      label: model.label,
+      /* Then the two things worth knowing beyond the name: who is serving it,
+         and how much it holds. Kept to two because the panel is a column — at
+         this width a third fact is paid for out of the name, and the name is
+         what is being searched. */
+      hint: [
+        model.group,
+        model.context ? `${Math.round(model.context / 1000)}k` : ''
+      ].filter(Boolean).join(' · '),
+      run: () => pickModel(model.key)
+    }))
+    if (!rows.length) { hideMenu(); return }
+    showMenu(rows)
+  }
+
+  /** A model chosen from the menu: taken, and the line that chose it cleared. */
+  function pickModel (key) {
+    hideMenu()
+    el.input.value = ''
+    sizeInput()
+    chooseModel(key)
+    el.input.focus()
+  }
 
   /** Which menu, if any, belongs over the box right now. */
   function offerMenu () {
     const box = el.input
     const trimmed = box.value.trim()
-    const searching = SEARCH.exec(trimmed)
-    if (searching) { showSearch(searching[1]); return }
+    /* Before the command list, and only once a space has been typed: until then
+       `/model` is a name being completed like any other. */
+    const naming = MODEL.exec(box.value)
+    if (naming && box.value.length > '/model'.length) { showModels(naming[1] || ''); return }
     if (SLASH.test(trimmed)) { offerCommands(trimmed); return }
 
     const upto = box.value.slice(0, box.selectionStart ?? box.value.length)
@@ -2161,6 +2379,14 @@ export function mountCopilot ({
     if (!at) { hideMenu(); return }
     offerMentions(at[1], upto.length - at[1].length - 1)
   }
+
+  /* The menu is an autocomplete over the composer, said as one: the box names
+     the list it drives and the lit row rides `aria-activedescendant`, so a
+     screen reader announces the selection as the arrows move it without focus
+     ever leaving the box. */
+  el.input.setAttribute('aria-autocomplete', 'list')
+  el.input.setAttribute('aria-controls', 'ai-menu')
+  el.input.setAttribute('aria-expanded', 'false')
 
   // A click lands before the textarea loses focus, so the box keeps the caret.
   el.menu.addEventListener('mousedown', (event) => event.preventDefault())
@@ -2179,11 +2405,14 @@ export function mountCopilot ({
    * of speech: the words were left in the message box, and a reader who kept
    * typing lost the follow-up under whatever they wrote next.
    */
-  function enqueue (text, attachments) {
+  function enqueue (text, attachments, contextMode = null) {
     const path = state.notePath
     const convo = chat(path)
     const msg = push({ t: 'you', text, attachments, queued: true }, { path, convo })
-    state.queue.push({ text, attachments, msg, path, convo })
+    /* On the conversation's own queue. Only a question about *this* chat waits
+       for this chat: one asked about another note is another copilot's, and
+       goes out straight away. */
+    runOf(convo).queue.push({ text, attachments, contextMode, msg, path, convo })
   }
 
   /** Ask once for the write-capable provider mode, before a turn starts. */
@@ -2223,19 +2452,18 @@ export function mountCopilot ({
    * separate rows in the transcript — what was asked is what was asked — and it
    * is only the delivery that is joined.
    *
-   * Only a run of them, and only into one conversation: a question asked about
-   * another note is a different thread, and must wait its own turn.
+   * Everything on one conversation's queue was asked about that conversation,
+   * so the whole of it goes out together.
    */
-  function drain () {
-    if (state.busy || !state.queue.length) return
+  function drain (run) {
+    if (run.busy || !run.queue.length) return
 
     const batch = []
-    while (state.queue.length) {
-      const next = state.queue[0]
+    while (run.queue.length) {
+      const next = run.queue[0]
       // The conversation it was asked in may have been emptied by `/new` since.
-      if (!next.convo.messages.includes(next.msg)) { state.queue.shift(); continue }
-      if (batch.length && next.convo !== batch[0].convo) break
-      batch.push(state.queue.shift())
+      if (!next.convo.messages.includes(next.msg)) { run.queue.shift(); continue }
+      batch.push(run.queue.shift())
     }
     if (!batch.length) return
 
@@ -2253,14 +2481,77 @@ export function mountCopilot ({
         save(item.path)
       }
     }
+    const contextMode = batch.every((item) => item.contextMode === CONTEXT_MODES.CODE_TASK)
+      ? CONTEXT_MODES.CODE_TASK
+      : null
     deliver({
-      ...first,
+      msg: first.msg,
+      path: first.path,
+      convo: convoFor(first.path, contextMode, batch),
       text: batch.map((item) => item.text).filter(Boolean).join('\n\n'),
-      attachments: [...new Set(batch.flatMap((item) => item.attachments || []))]
+      attachments: [...new Set(batch.flatMap((item) => item.attachments || []))],
+      contextMode
     }).catch(() => {})
   }
 
+  /**
+   * Which conversation a turn belongs in.
+   *
+   * One rule, stated once, for the two ways a question reaches `deliver`. A
+   * code task is self-contained — the fix for one block, carrying everything it
+   * needs in its own words — so it gets a chat of its own rather than paying to
+   * re-send a conversation it does not draw on. Everything else goes into the
+   * open chat, compacted first if that chat has grown expensive.
+   *
+   * Said here rather than at each entry point because the two had already
+   * drifted: the queued path kept the history the typed path had learned to
+   * drop, and any rule added later ("code tasks skip the digest", "cap them per
+   * note") would have had to be written twice and kept in step by hand.
+   *
+   * `carrying` is the queued case: rows already filed in the old conversation,
+   * which have to travel to the new one rather than be left behind in a
+   * transcript nobody is looking at any more.
+   */
+  function convoFor (path, contextMode, carrying = null) {
+    if (contextMode !== CONTEXT_MODES.CODE_TASK) return compactIfFull(path)
+    /* Only for a conversation still open on its own note. `startChat` works on
+       what is on screen — it resets the panel and greets into it — so a reader
+       who has browsed away in the meantime would have a chat they are not
+       looking at replaced, and the rows moved out from under the one they are. */
+    const rows = (carrying || []).map((item) => item.msg).filter(Boolean)
+    const from = carrying?.[0]?.convo
+    if (rows.length && (path !== state.notePath || from !== chat(path))) return from
+
+    /* Taken out before `startChat` rather than after, so a chat whose only
+       questions were these is recognised as one nobody has spoken in and
+       reused, instead of being filed away as history for the sake of the rows
+       that are about to leave it. The nodes are kept out of it: `reset` empties
+       the log wholesale a moment later, so removing them one at a time is work
+       the screen never shows. */
+    for (const msg of rows) drop(from, msg, undefined, { keepNode: true })
+    startChat()
+    const convo = chat(path)
+    for (const msg of rows) push(msg, { path, convo })
+    return convo
+  }
+
+  let submitting = false
+
+  /* One at a time. In Ask mode `permissionFor` holds a submit open on a
+     dialog with the composer still full, and a second Enter there would ask —
+     and send — the same question twice. Dropped rather than queued: the
+     second press is the reader leaning on the key, not a new message. */
   async function submit () {
+    if (submitting) return
+    submitting = true
+    try {
+      await submitNow()
+    } finally {
+      submitting = false
+    }
+  }
+
+  async function submitNow () {
     const text = el.input.value.trim()
     const attachments = [...pendingAttachments]
     if (!text && !attachments.length) return
@@ -2269,23 +2560,22 @@ export function mountCopilot ({
     const found = command(text)
     if (found) { el.input.value = ''; sizeInput(); hideMenu(); found.run(); return }
 
-    /* A search with nothing matching it has an empty menu, and Enter on an
-       empty menu would otherwise send `/search whatever` to the copilot as a
-       question. It is an instruction to the panel either way. */
-    if (SEARCH.test(text)) {
-      note('No chat in this vault says that.')
-      el.input.value = ''
-      sizeInput()
-      return
-    }
-
     /* Selected files and pasted pictures are already in the vault. Their paths
        travel beside the reader's words and never have to appear inside them. */
-    if (state.busy) {
+    /* Only this conversation being mid-turn queues anything. A turn running
+       about another note is another copilot, and this question goes out
+       beside it. */
+    if (visibleRun().busy) {
+      /* Mid-turn the transcript is being written into — the stream, the
+         thinking row — and rows behind the running turn cannot be pulled out
+         from under it. A queued edit goes out as an ordinary follow-up. */
+      state.editing = null
+      const contextMode = state.contextMode
+      state.contextMode = null
       el.input.value = ''
       clearAttachments()
       sizeInput()
-      enqueue(text, attachments)
+      enqueue(text, attachments, contextMode)
       return
     }
 
@@ -2297,12 +2587,28 @@ export function mountCopilot ({
        no room left is replaced rather than asked to hold one more turn, and a
        question that was never going out does not get a fresh chat opened for
        it. */
-    const convo = compactIfFull(path)
+    const contextMode = state.contextMode
+    const convo = convoFor(path, contextMode)
+    state.contextMode = null
     el.input.value = ''
     clearAttachments()
     sizeInput()
+    /* A resend of an edited question stands where the original stood: the old
+       row and everything under it — the reply it drew, the steps — leave the
+       transcript before the new version is filed. Guarded on the conversation
+       still holding the message, because `/new`, `/compact` or a trim may have
+       taken it in the meantime, and then there is nothing to stand in for. */
+    const editing = state.editing
+    state.editing = null
+    if (editing?.convo === convo) {
+      const at = convo.messages.indexOf(editing.msg)
+      /* Spliced in one go and then let go of one at a time: `drop` is given the
+         message it has already removed, so it is only the index and the node
+         that are still its business. */
+      if (at !== -1) for (const gone of convo.messages.splice(at)) drop(convo, gone, -1)
+    }
     const msg = push({ t: 'you', text, attachments }, { path, convo })
-    await deliver({ text, attachments, msg, path, convo, approved: true })
+    await deliver({ text, attachments, msg, path, convo, contextMode, approved: true })
   }
 
   /**
@@ -2312,7 +2618,7 @@ export function mountCopilot ({
    * later and possibly with the reader looking at another note — so everything
    * this needs is passed in rather than read off what happens to be on screen.
    */
-  async function deliver ({ text, attachments, path, convo, msg, approved = false }) {
+  async function deliver ({ text, attachments, path, convo, msg, contextMode = null, approved = false }) {
     if (!approved && !await permissionFor(path)) {
       markNotSent(msg, path)
       return
@@ -2323,9 +2629,14 @@ export function mountCopilot ({
     }
     // The turn is anchored to this conversation before anything can answer,
     // so browsing away while it runs cannot redirect what comes back.
-    state.turn = { id: newTurnId(), path, convo }
-    const to = state.turn
-    setBusy(true)
+    const run = runOf(convo)
+    const to = { id: newTurnId(), path, convo, run }
+    run.turn = to
+    /* Registered before anything can be said about it: main answers on one
+       channel for every conversation at once, and this is how each event finds
+       its way back to the one that asked. */
+    turns.set(to.id, to)
+    setBusy(run, true)
 
     /* Every way out of the rest of this either settles the panel or hands it to
        a turn that will. A *throw* did neither: `setBusy(true)` is already spent
@@ -2337,42 +2648,47 @@ export function mountCopilot ({
        a newer turn owns the panel by then, and settling it would put down a
        strip that belongs to something still running. */
     try {
-      await sendTurn(to, { text, attachments, convo })
+      await sendTurn(to, { text, attachments, convo, contextMode })
     } catch (err) {
-      if (state.turn === to) {
-        state.started = false
-        failed(err?.message || 'The copilot could not be reached.', to)
-        setBusy(false)
+      if (run.turn === to) {
+        run.started = false
+        failed(reason(err, 'The copilot could not be reached.'), to)
+        setBusy(run, false)
       }
     }
   }
 
   /** The body of a turn — everything `deliver` guards. */
-  async function sendTurn (to, { text, attachments, convo }) {
+  async function sendTurn (to, { text, attachments, convo, contextMode = null }) {
+    const run = to.run
     /* No model — never chosen, or everything unticked in Settings — is not a
        copilot to start: spawning with an empty provider is a crash in main.
        Said in the transcript rather than swallowed, so it reads as a refusal
        with a reason and a retry instead of a question that vanished. */
     if (!state.model) {
       failed('No model selected — pick one in Settings, or above the message box.', to)
-      setBusy(false)
+      setBusy(run, false)
       return
     }
-    if (!await ensureSession(convo, to.id)) { setBusy(false); return }
+    if (!await ensureSession(run, to.id)) { setBusy(run, false); return }
     /* Stop may have been pressed while the session was starting — `halt` has
        nothing to signal yet at that point, so it settles the panel and returns,
        and without this the turn it thought it had cancelled would carry on
        from here: a reply and a run of file edits with no working strip, no way
-       to stop them, and `state.turn` already let go of, so every event would
-       be filed against whichever note happened to be on screen when it landed.
-       The test is the turn's identity, not a flag: a *new* turn started in the
-       meantime owns the session now, and this one is equally stale. */
-    if (state.turn !== to) return
+       to stop them, and the run already let go of the turn, so every event
+       would be filed against whichever note happened to be on screen when it
+       landed. The test is the turn's identity, not a flag: a *new* turn started
+       in the meantime owns this conversation now, and this one is equally
+       stale. */
+    if (run.turn !== to) return
 
     // Awaited: the renderer flushes the open buffer here, so the agent reads
     // the note as it is on screen rather than as it was at the last autosave.
-    const context_ = await context()
-    if (state.turn !== to) return
+    /* The window rides along so the renderer can size the whole-note quote to
+       the model actually chosen — see noteExcerpt. Zero when the catalogue
+       does not say, which the renderer reads as its old fixed ceiling. */
+    const context_ = await context({ mode: contextMode, window: currentModel()?.context || 0 })
+    if (run.turn !== to) return
 
     /* A chat started by `/compact` carries a digest of the one it replaced, and
        it rides the first message rather than being sent as one of its own: a
@@ -2380,21 +2696,21 @@ export function mountCopilot ({
        round trip to be answered with "thank you". */
     const opening = convo.seed ? `${convo.seed}\n\n${text}` : text
 
-    const result = await api.ai.send(opening, { ...context_, attachments }, to.id)
+    const result = await api.ai.send(convo.id, opening, { ...context_, attachments }, to.id)
     /* Stop can be pressed while main is preparing a PDF or taking the turn's
        safety snapshot. The IPC call still has to return, but its failure then
        belongs to the cancelled turn and must not add a second warning after
        the explicit “Stopped.” row. */
-    if (state.turn !== to) return
+    if (run.turn !== to) return
     // Spent only once it has actually gone out: a send that failed leaves the
     // digest for the message that tries again.
     if (result?.ok) convo.seed = ''
     if (!result?.ok) {
       // Whatever went wrong, the session is no longer one we can trust; the
       // next message starts over rather than failing the same way again.
-      state.started = false
+      run.started = false
       failed(result?.error || 'The copilot could not be reached.', to)
-      setBusy(false)
+      setBusy(run, false)
     }
   }
 
@@ -2454,6 +2770,9 @@ export function mountCopilot ({
   }
 
   el.input.addEventListener('input', () => {
+    // A composer wiped by hand is the edit being walked away from: whatever is
+    // typed next is a new question, not a revision of the lifted one.
+    if (!el.input.value && state.editing) state.editing = null
     sizeInput()
     offerMenu()
   })
@@ -2483,7 +2802,7 @@ export function mountCopilot ({
     try {
       result = await api.ai.attach(ext, new Uint8Array(await file.arrayBuffer()))
     } catch (err) {
-      note(err?.message || 'That image could not be attached.', 'warn')
+      note(reason(err, 'That image could not be attached.'), 'warn')
       return
     }
     if (!result?.path) return
@@ -2532,6 +2851,11 @@ export function mountCopilot ({
   })
 
   el.input.addEventListener('keydown', (e) => {
+    /* An IME still composing owns the keyboard: its Enter confirms the word
+       being typed and its arrows move the candidate list, and neither is meant
+       for the panel. 229 is the keyCode every composition key reports, for the
+       engines that say that instead of `isComposing`. */
+    if (e.isComposing || e.keyCode === 229) return
     // While the menu is up it owns the keys that mean "move" and "choose";
     // everything else still types into the box beneath it.
     if (menu) {
@@ -2546,20 +2870,22 @@ export function mountCopilot ({
   })
 
   el.input.addEventListener('blur', () => hideMenu())
-  el.send.addEventListener('click', () => (state.busy ? halt() : submit()))
+  el.send.addEventListener('click', () => (visibleRun().busy ? halt() : submit()))
 
-  async function halt () {
-    const to = state.turn
+  /** Stop one conversation's copilot — the one on screen, unless another is
+   *  named. The other notes' turns are somebody else's work and go on. */
+  async function halt (run = visibleRun()) {
+    const to = run.turn
     /* Let go of the turn before the await, not after. `deliver` checks its own
        turn against this one at every point it resumes, so clearing it here is
        what makes a Stop pressed during startup actually stop: the send that
        was about to happen sees the turn has moved on and never goes out. */
-    state.turn = null
-    state.stopping = to
+    run.turn = null
+    run.stopping = to
     /* Stop means stop, follow-ups included — sending them anyway is the one
        thing the button cannot be read as meaning. They stay in the transcript,
        still greyed, so what was asked and never sent is at least visible. */
-    const waiting = state.queue.splice(0)
+    const waiting = run.queue.splice(0)
     for (const item of waiting) {
       item.msg.queued = false
       item.msg.dropped = true
@@ -2567,14 +2893,15 @@ export function mountCopilot ({
       // Each was asked in its own conversation, which may not be this one.
       save(item.path)
     }
-    await api.ai.stop(to?.id)
-    state.started = false
-    setBusy(false)   // settles the stream and lets go of the turn
+    await api.ai.stop(run.convo.id, to?.id)
+    run.started = false
+    setBusy(run, false)   // settles the stream and lets go of the turn
     /* Let go of it only once the panel has been settled. `setBusy(false)` is
        what closes the truncated reply, the thinking block and any tool call
        left running, and every one of those has to be filed against the
        conversation that was stopped rather than the one on screen. */
-    state.stopping = null
+    run.stopping = null
+    if (to?.id) turns.delete(to.id)
     // Filed where the truncated reply went, so the transcript says why it ends.
     note(waiting.length
       ? `Stopped. ${waiting.length} queued message${waiting.length === 1 ? '' : 's'} were not sent.`
@@ -2609,12 +2936,12 @@ export function mountCopilot ({
   // Where the ring turns red. A reading, not a trigger: compaction acts at
   // `ROOMY`, well before this, so red is the rare single-turn overshoot.
   const FULL = 0.85
-  /* Where compacting is still cheap. A conversation carried over at seven parts
+  /* Where compacting is still cheap. A conversation carried over at six parts
      in ten costs a summary built from the transcript and nothing else; one
      carried over at the red ring has already paid for every turn it spent
      getting there, twice over — the CLIs resume their threads, so a full
      context is re-sent whole on every turn that follows it. */
-  const ROOMY = 0.7
+  const ROOMY = 0.6
 
   /**
    * The ring, and the two things it is worth saying out loud.
@@ -2690,36 +3017,34 @@ export function mountCopilot ({
     el.configEffort.textContent = hasEffort ? effortLabel(state.effort) : ''
     el.configEffort.hidden = !hasEffort
     el.configSep.hidden = !hasEffort
+    /* The two ways to change what it reads, on the thing that reads it —
+       neither of which is a control, so this text is the only place either one
+       is written down. */
+    el.config.title = hasEffort
+      ? 'Thinking level — ⌃T to step through it · /model to change the model'
+      : '/model to change the model'
     paintContext()
   }
 
-  /* The menu is drawn by the app, not by the system — see dropdown.js. It
-     reports only what the user picks, so painting it from state cannot loop
-     back round as a change. */
-  const modelMenu = dropdown({
-    label: 'Model',
-    className: 'is-wide',
-    value: state.model,
-    placeholder: 'No model selected',
-    onChange: (key) => chooseModel(key)
-  })
-  el.model.append(modelMenu.root)
-
-  function paintModel () {
-    const options = asOptions(currentModels())
-    // `set` settles on the first entry when the stored model is not in the
-    // list — a catalogue can lose an entry between launches, and unticking a
-    // model in Settings takes it out of this one. An empty choice survives
-    // both, and the button keeps its "No model selected" rather than turning
-    // into whichever entry came first.
-    state.model = modelMenu.set(options, state.model) || ''
-  }
-
+  /**
+   * The model, chosen by name at the message box — see the `/model` command.
+   *
+   * There is no picker beside the composer any more. A dropdown has to be a
+   * shortlist to be usable, so the one here could only ever offer what Settings
+   * had ticked, and choosing anything else meant leaving the conversation to go
+   * and tick it. Typing the name reaches the whole catalogue and is quicker
+   * than opening a menu even when the model is in it. What is left in the
+   * corner is the readout: which model is answering, and how hard.
+   *
+   * Any model the CLIs offer may be chosen this way, ticked or not — a choice
+   * made by name is the same evidence of intent that a tick is, and
+   * `offeredModels` keeps whatever is selected in view regardless.
+   */
   function chooseModel (key) {
     if (key === state.model) return
-    if (!currentModels().some((model) => model.key === key)) return
+    if (!modelByKey(state.catalogue, key)) return
     state.model = key
-    state.stale = true
+    state.settings++
     /* The levels are the model's, so the choice moves with it: kept where the
        new model takes it, nudged to the nearest it does otherwise — which
        `repaintControls` settles before it draws. Written down in the same
@@ -2745,73 +3070,23 @@ export function mountCopilot ({
   }
 
 
-  function openPop (open) {
-    el.pop.hidden = !open
-    el.config.setAttribute('aria-expanded', open ? 'true' : 'false')
-  }
-
-  el.config.addEventListener('click', (event) => {
-    event.stopPropagation()
-    openPop(el.pop.hidden)
-  })
-
-  // Anywhere outside dismisses it, the way a menu does. The popover's own
-  // clicks are stopped below so changing a setting does not close it.
-  el.pop.addEventListener('click', (event) => event.stopPropagation())
-  document.addEventListener('click', () => openPop(false))
-  document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape' && !el.pop.hidden) { openPop(false); el.config.focus() }
-  })
-
   /**
    * Effort, as the levels this model actually takes.
    *
    * Not a fixed four: a model offers the variants it was published with, and
-   * most of the catalogue has no such dial at all — in which case the row goes
-   * away rather than offering a control that would be ignored. So the slider's
-   * range and its stops are set here rather than written into index.html.
+   * most of the catalogue has no such dial at all — in which case there is
+   * nothing to step through and ⌃T says so rather than moving something.
+   *
+   * There is no control for it. It was a slider in a popover, which meant a
+   * chord for the people who knew it and three gestures for everyone else,
+   * over a setting with two or three stops; the chord is the whole of it now,
+   * and the composer's readout is where the change shows.
    *
    * Nothing restarts the copilot — the level is a flag on the process,
    * applied when the next message replaces it, which is why picking one is
    * free.
    */
   const levels = () => effortsFor(currentModel())
-
-  function paintEffort () {
-    const offered = levels()
-    // The whole row, label included, so nothing is left labelling an absence.
-    el.effortRow.hidden = !offered.length
-    if (!offered.length) { el.effortStops.replaceChildren(); return }
-
-    const at = Math.max(0, offered.indexOf(state.effort))
-    el.effortRange.max = String(offered.length - 1)
-    el.effortRange.value = String(at)
-    /* The name of the stop, for the screen reader and for the hover — the
-       number the input would otherwise announce means nothing, and the slider
-       deliberately does not print the name on itself: the composer's readout
-       beside the model already carries it. */
-    el.effortRange.setAttribute('aria-valuetext', effortLabel(offered[at]))
-    el.effortRange.title = effortLabel(offered[at])
-
-    /* How far along, for the filled part of the track. A lone stop is drawn
-       empty rather than full: there is nowhere to have come from. */
-    el.effort.style.setProperty(
-      '--at', offered.length > 1 ? String(at / (offered.length - 1)) : '0'
-    )
-
-    /* One dot per stop, so the slider says how many there are — two for a model
-       with two, five for a model with five — rather than pretending to be
-       continuous. */
-    el.effortStops.replaceChildren(...offered.map((level, i) => {
-      /* Stops the fill has reached are marked so the CSS can sink them into
-         it — a dot the height of the track reads as debris once the accent
-         fill has covered its ground. */
-      const lit = i <= at ? ' is-passed' : ''
-      const dot = element('span', `ai-effort-stop${level === 'max' ? ' is-top' : ''}${lit}`)
-      dot.title = effortLabel(level)
-      return dot
-    }))
-  }
 
   function setEffort (at, persist = false) {
     const offered = levels()
@@ -2820,9 +3095,7 @@ export function mountCopilot ({
     if (!next) return
     if (next !== state.effort) {
       state.effort = next
-      state.stale = true
-      // Rebuilding the searchable model dropdown here made dragging lag.
-      paintEffort()
+      state.settings++
       paintConfig()
     }
     if (persist) persistConfig({ aiEffort: state.effort })
@@ -2834,13 +3107,54 @@ export function mountCopilot ({
     if (model) state.effort = nearestEffort(model, state.effort)
   }
 
-  /* Dragging, the arrow keys, Home and End are all the input's own — this is
-     the whole of the wiring, where the segmented control it replaced needed a
-     click handler, a keydown handler and a roving tabindex to be half as
-     capable. `input` rather than `change`, so the track fills under the thumb
-     as it is dragged rather than when it is let go. */
-  el.effortRange.addEventListener('input', () => setEffort(Number(el.effortRange.value)))
-  el.effortRange.addEventListener('change', () => setEffort(Number(el.effortRange.value), true))
+  /**
+   * ⌃T walks the model's ladder, a step at a time, wrapping at the top.
+   *
+   * The level is the setting that changes mid-conversation — a question you
+   * expected to be cheap turns out to be hard, and the answer is one more step
+   * of thinking — so it is a chord and nothing else, rather than a popover to
+   * open and a slider to find in it. ⇧ steps back down for the reverse.
+   *
+   * Wrapping rather than stopping at the ends: with two or three levels on
+   * most models, a dial you can spin is quicker than one you have to reverse,
+   * and the readout says where you have landed.
+   *
+   * Only while the panel is open, because that is the only time the setting is
+   * on screen: a chord that silently changes an unseen setting is a chord that
+   * gets pressed by accident. The panel's own text fields would otherwise take
+   * ⌃T as transpose-characters, which is what `preventDefault` is for.
+   */
+  function cycleEffort (by = 1) {
+    const offered = levels()
+    if (!offered.length) {
+      onWarn?.(`${currentModel()?.label || 'This model'} has no thinking levels.`)
+      return
+    }
+    const at = Math.max(0, offered.indexOf(state.effort))
+    setEffort((at + by + offered.length) % offered.length, true)
+    bumpConfig()
+  }
+
+  /* The readout is where the change shows, and it sits in the corner of a panel
+     the reader is not looking at — so it says so itself. The class is taken off
+     when the animation ends, and again before it is put back on, so holding the
+     chord down flashes once per press rather than once. */
+  function bumpConfig () {
+    el.config.classList.remove('is-bumped')
+    // Reading a layout value between the two is what restarts a CSS animation.
+    void el.config.offsetWidth
+    el.config.classList.add('is-bumped')
+  }
+  el.config.addEventListener('animationend', () => el.config.classList.remove('is-bumped'))
+
+  document.addEventListener('keydown', (event) => {
+    if (!event.ctrlKey || event.metaKey || event.altKey) return
+    // `code`, not `key`: ⌃⇧T is `T` on one keyboard layout and `t` on another.
+    if (event.code !== 'KeyT') return
+    if (el.app.dataset.ai !== 'open') return
+    event.preventDefault()
+    cycleEffort(event.shiftKey ? -1 : 1)
+  })
 
 
   let changingMode = false
@@ -2850,7 +3164,7 @@ export function mountCopilot ({
     changingMode = true
     try {
       state.mode = next
-      state.stale = true
+      state.settings++
       paintWrite()
       /* Keep the old boolean conservative for older builds: only Auto carries
          forward as write-enabled, while Ask becomes read-only there. */
@@ -2900,12 +3214,10 @@ export function mountCopilot ({
    * line here rather than a hunt for the sites that list them all.
    */
   function repaintControls () {
-    paintModel()
     /* Before the level is drawn: the choice belongs to the model, and until it
        has been fitted to the model's own levels it may be one the model has
        never offered. */
     settleEffort()
-    paintEffort()
     paintWrite()
     paintConfig()
   }
@@ -2919,7 +3231,7 @@ export function mountCopilot ({
       const paths = await api.ai.pickAttachments()
       if (paths?.length) addAttachments(paths)
     } catch (err) {
-      note(err?.message || 'Those files could not be attached.', 'warn')
+      note(reason(err, 'Those files could not be attached.'), 'warn')
     } finally {
       el.attach.disabled = false
     }
@@ -2945,10 +3257,10 @@ export function mountCopilot ({
     flush()
     hideMenu()
     state.notePath = path || ''
-    /* A running turn keeps its stream and its thinking: they belong to the
-       conversation captured when it started, and the reply goes on landing
-       there while the reader browses. Only an idle panel lets go of them. */
-    if (!state.busy) { state.stream = null; state.think = null }
+    /* Nothing is let go of here. The reply being written and the thinking
+       behind it belong to the conversation that asked, which goes on being
+       answered while the reader reads something else — and is still mid-turn
+       when they come back to it. */
     repaint()
     if (state.open) greet()
   }
@@ -2957,6 +3269,12 @@ export function mountCopilot ({
      the screen can be stripped of them — a rendered subtree per message, kept
      across every note switch, is most of a transcript's weight. */
   let shown = null
+
+  /* How many rows a repaint draws. A chat at the cap is a hundred and fifty
+     messages of markdown, KaTeX and code colouring, and every note switch paid
+     for all of them when what the reader sees is the last screenful. The rest
+     stay data — drawn only when the row standing in for them is asked. */
+  const DRAWN_ROWS = 40
 
   function repaint () {
     dropDirty()
@@ -2967,11 +3285,43 @@ export function mountCopilot ({
     if (convo.messages.some((msg) => msg.t === 'you') && dismissStarters(convo)) save()
     if (shown && shown !== convo) for (const msg of shown.messages) msg.node = null
     shown = convo
-    el.log.replaceChildren(...convo.messages.map(draw), busyRow)
+    const from = Math.max(0, convo.messages.length - DRAWN_ROWS)
+    /* The rows above the fold keep no node: a stale one from an earlier paint
+       of this same conversation would have `redraw` and `drop` writing to
+       elements no longer in the document. */
+    for (let at = 0; at < from; at++) convo.messages[at].node = null
+    el.log.replaceChildren(
+      ...(from ? [earlierRow(convo, from)] : []),
+      ...convo.messages.slice(from).map(draw),
+      busyRow,
+      elsewhereRow
+    )
     following = true
     el.log.scrollTop = el.log.scrollHeight
     // The count belongs to the conversation, so it changes with it.
     paintContext()
+    /* And so does everything about the turn: this conversation may be mid-reply
+       while the one just left was idle, or the other way about. */
+    paintWorking()
+  }
+
+  /** The row standing in for the messages a repaint left undrawn. Clicking it
+   *  draws them all — the reader asked for the history, and a second fold
+   *  inside it would be a page nobody asked to keep turning. */
+  function earlierRow (convo, count) {
+    const row = element('button', 'msg msg-earlier')
+    row.type = 'button'
+    row.textContent = `Show ${count} earlier message${count === 1 ? '' : 's'}`
+    row.addEventListener('click', () => {
+      if (chat() !== convo) { row.remove(); return }
+      /* Trimming may have taken some since; whatever the conversation still
+         holds undrawn is what the fold was hiding. Scroll is kept where it
+         stands, measured from the bottom — the half that does not move. */
+      const keep = el.log.scrollHeight - el.log.scrollTop
+      row.replaceWith(...convo.messages.filter((msg) => !msg.node).map(draw))
+      el.log.scrollTop = el.log.scrollHeight - keep
+    })
+    return row
   }
 
   /** A vault path as the vault names it — the file's own name, without the
@@ -2998,11 +3348,18 @@ export function mountCopilot ({
   function readCatalogue () {
     if (catalogued) return
     catalogued = true
-    loadModels().catch(() => {})
+    // A load that failed — the CLI mid-install, a PATH not there yet — is not
+    // an answer: let the next opening ask again rather than serving the
+    // built-in list for the rest of the window's life.
+    loadModels().catch(() => { catalogued = false })
   }
 
   function open () {
     state.open = true
+    /* Before the attribute, because the width the stage is about to lose has
+       to be measured while the column still has it. See freezePanelSlide in
+       renderer.js for what the pinning is protecting. */
+    if (el.app.dataset.ai !== 'open') willSlide?.(true)
     el.app.dataset.ai = 'open'
     api.config.set({ ai: 'open' })
     readCatalogue()
@@ -3013,6 +3370,7 @@ export function mountCopilot ({
   function close () {
     hideMenu()
     state.open = false
+    if (el.app.dataset.ai === 'open') willSlide?.(false)
     el.app.dataset.ai = 'closed'
     api.config.set({ ai: 'closed' })
   }
@@ -3038,7 +3396,7 @@ export function mountCopilot ({
     if (model === state.model && effort === state.effort && mode === state.mode &&
         enabled.join('\n') === state.enabled.join('\n')) return
 
-     Object.assign(state, { model, enabled, effort, mode, stale: true })
+    Object.assign(state, { model, enabled, effort, mode, settings: state.settings + 1 })
     repaintControls()
   }
 
@@ -3097,9 +3455,13 @@ export function mountCopilot ({
 
       state.notePath = moved(state.notePath)
       // A turn in flight files into a conversation, not a path — but the path
-      // it carries decides which chats survive the next trim.
-      if (state.turn) state.turn.path = moved(state.turn.path)
-      for (const item of state.queue) item.path = moved(item.path)
+      // it carries decides which chats survive the next trim, and names the
+      // file in the "also working on" line.
+      for (const run of allRuns()) {
+        if (run.turn) run.turn.path = moved(run.turn.path)
+        if (run.stopping) run.stopping.path = moved(run.stopping.path)
+        for (const item of run.queue) item.path = moved(item.path)
+      }
       /* And on screen. The renamed note is put on screen before its paths are
          retraced — so by the time this runs the panel has already opened the
          empty chat that belonged to the new name, and the conversation just
@@ -3131,8 +3493,9 @@ export function mountCopilot ({
      * Mid-turn it is left in the box and said out loud: interrupting the reply
      * you are waiting for to ask something else is never what the click meant.
      */
-    ask: (text) => {
+    ask: (text, options = {}) => {
       if (!text) return
+      state.contextMode = options.contextMode || null
       quote(text)
       // Mid-turn it joins the queue like anything else typed while the copilot
       // is working — it used to be left in the box under a promise the panel
@@ -3153,11 +3516,12 @@ export function mountCopilot ({
      * can be written with something waiting for it.
      */
     flush: async () => {
-      /* Closing the window also closes its agent. Stop it while the renderer is
-         still alive so main can finish the turn-scoped safety snapshot and the
-         review can be filed in the right conversation before transcripts are
-         written. Killing it from `BrowserWindow.closed` is too late for both. */
-      if (state.busy) await halt()
+      /* Closing the window also closes its agents — all of them, one per
+         conversation being answered. Stopped while the renderer is still alive
+         so main can finish each turn-scoped safety snapshot and file each
+         review in the right conversation before transcripts are written.
+         Killing them from `BrowserWindow.closed` is too late for both. */
+      await Promise.all(workingRuns().map((run) => halt(run)))
       await flush()
     },
 

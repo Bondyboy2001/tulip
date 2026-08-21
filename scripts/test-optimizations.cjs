@@ -187,11 +187,43 @@ async function rangeStreaming () {
   }
 }
 
+async function lazyFeatureContracts () {
+  const [main, renderer, table, build] = await Promise.all([
+    fs.readFile(path.join(__dirname, '..', 'electron', 'main.js'), 'utf8'),
+    fs.readFile(path.join(__dirname, '..', 'src', 'renderer.js'), 'utf8'),
+    fs.readFile(path.join(__dirname, '..', 'src', 'table.js'), 'utf8'),
+    fs.readFile(path.join(__dirname, '..', 'build.mjs'), 'utf8')
+  ])
+
+  assert.doesNotMatch(main, /^const ai = require\('\.\/ai'\)/m)
+  assert.doesNotMatch(main, /^const \{ KernelHost \} = require\('\.\/kernel'\)/m)
+  assert.doesNotMatch(main, /^const \{ createTexCompiler \} = require\('\.\/tex-compile'\)/m)
+  assert.match(main, /function aiService \(\)[\s\S]{0,180}require\('\.\/ai'\)/)
+  assert.match(main, /function kernelHost \(\)[\s\S]{0,180}require\('\.\/kernel'\)/)
+  assert.match(main, /if \(!texCompiler \|\| texCompilerVault !== vaultPath\)[\s\S]{0,220}require\('\.\/tex-compile'\)/)
+
+  assert.doesNotMatch(renderer, /^import .* from ['"]\.\/pdf\.js['"]/m)
+  assert.doesNotMatch(renderer, /^import .* from ['"]\.\/language-table\.js['"]/m)
+  assert.match(renderer, /import\(['"]\.\/pdf\.js['"]\)/)
+  assert.match(renderer, /import\(['"]\.\/language-table\.js['"]\)/)
+  assert.match(renderer, /loadFeatureStyles\('pdf'\)/)
+  assert.match(renderer, /loadFeatureStyles\('language'\)/)
+  assert.match(renderer, /paintOutlineTab \(\)[\s\S]{0,180}pdf\?\.marks\(\)/)
+  assert.match(renderer, /renderPdfOutline \(\)[\s\S]{0,900}if \(!pdf\)/)
+
+  assert.match(table, /const applyMove = \(\) => \{[\s\S]{0,420}cellPointNear/)
+  assert.match(table, /pendingMove = \{ x: event\.clientX, y: event\.clientY \}/)
+  for (const name of ['language', 'copilot', 'settings', 'pdf', 'notebook', 'csv']) {
+    assert.match(build, new RegExp(`\\n  ${name}: \\[`), `${name} has its own stylesheet bundle`)
+  }
+}
+
 ;(async () => {
   await atomicStores()
   indexedRows()
   vaultEvents()
   await rangeStreaming()
+  await lazyFeatureContracts()
   console.log('optimizations: all checks passed')
 })().catch((err) => {
   console.error(err)

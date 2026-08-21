@@ -1,10 +1,18 @@
 import * as esbuild from 'esbuild'
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { access, cp, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { access, cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
+import { gzipSync } from 'node:zlib'
+
+/* The one list of extra spelling languages, shared with the settings pane and
+   the checker — see electron/spell-languages.json for why it is JSON. */
+const SPELL_LANGUAGE_IDS = JSON.parse(
+  await readFile('electron/spell-languages.json', 'utf8')
+).map((entry) => entry.id)
 
 const run = promisify(execFile)
 
@@ -22,6 +30,83 @@ const output = watch ? 'dist' : `.dist-stage-${process.pid}`
    the other platforms simply go without rather than failing to build. */
 const mac = process.platform === 'darwin'
 const pdfOcrCache = path.join(os.homedir(), 'Library', 'Caches', 'Tulip', 'native')
+
+/* Large surfaces already load their JavaScript only when they are opened, but
+   esbuild normally hoists CSS reached from any renderer import into the one
+   render-blocking renderer.css. Name the source ranges that belong wholly to
+   those surfaces so the core build can omit them and sibling CSS builds can
+   emit them beside the chunks. The runtime awaits each file before mounting
+   its surface; see src/lazy-styles.js. */
+const FEATURE_STYLE_SECTIONS = {
+  language: [
+    ['/* --------------------------------------------------------- study cards */',
+      '/* ------------------------------------------------------------ asking'],
+    ['/* ------------------------------------------------- the language keyboard */',
+      '/* ------------------------------- editing code frame']
+  ],
+  copilot: [[
+    '/* ----------------------------------------------------------- copilot */',
+    '/* ------------------------------------------------------------- outline'
+  ]],
+  settings: [[
+    '/* ----------------------------------------------------------- settings',
+    '/* ================================================================== pdf'
+  ]],
+  pdf: [[
+    '/* ================================================================== pdf',
+    '/* ------------------------------------------------------------- websites'
+  ]],
+  notebook: [[
+    '/* ------------------------------------------------------------- notebook',
+    '.csv-frame {'
+  ]],
+  csv: [
+    ['/* ------------------------------------------------------------ data grid',
+      '/* ------------------------------------------------- the last-resort viewer'],
+    ['.csv-frame {', '.whiteboard-note-dialog {']
+  ]
+}
+
+function styleRanges (source, feature) {
+  return FEATURE_STYLE_SECTIONS[feature].map(([from, to]) => {
+    const start = source.indexOf(from)
+    const end = source.indexOf(to, start + from.length)
+    if (start < 0 || end < 0 || end <= start) {
+      throw new Error(`Could not isolate ${feature} styles between ${from} and ${to}.`)
+    }
+    return { start, end }
+  })
+}
+
+function featureStyleSource (source, feature) {
+  return styleRanges(source, feature).map(({ start, end }) => source.slice(start, end)).join('\n')
+}
+
+function coreStyleSource (source) {
+  const ranges = Object.keys(FEATURE_STYLE_SECTIONS)
+    .flatMap((feature) => styleRanges(source, feature))
+    .sort((a, b) => a.start - b.start)
+  let at = 0
+  let out = ''
+  for (const range of ranges) {
+    if (range.start < at) throw new Error('Feature stylesheet ranges overlap.')
+    out += source.slice(at, range.start)
+    at = range.end
+  }
+  return out + source.slice(at)
+}
+
+const splitFeatureStyles = {
+  name: 'split-feature-styles',
+  setup (build) {
+    build.onLoad({ filter: /[\\/]src[\\/]styles\.css$/ }, async ({ path: file }) => ({
+      contents: coreStyleSource(await readFile(file, 'utf8')),
+      loader: 'css',
+      resolveDir: path.dirname(file),
+      watchFiles: [file]
+    }))
+  }
+}
 
 /* A release build is a version boundary for the local app. Advance only the
    patch component — one thousandth in the project's three-part version — after
@@ -116,11 +201,28 @@ const leanKatex = {
    markdown-it actually wants is read out of markdown-it rather than assumed,
    and checked against what that entry exports, so the release that starts
    wanting an encoder fails this build rather than shipping a reading view that
-   throws "decodeHTML is not a function" on the first `&amp;`. */
-const ENTITIES_DECODE = path.resolve('node_modules/entities/lib/esm/decode.js')
+   throws "decodeHTML is not a function" on the first `&amp;`.
+
+   Both packages have moved their published layout once already — entities 8
+   ships `dist/`, where 6 shipped `lib/esm/`, and markdown-it 15 ships only the
+   bundles under `dist/`, where 14 shipped its sources under `lib/`. Each is
+   looked up rather than hardcoded, so the next move is a build error naming
+   the package, not a scandir ENOENT. */
+const ENTITIES_DECODE = firstExisting([
+  'node_modules/entities/dist/decode.js',
+  'node_modules/entities/lib/esm/decode.js'
+], 'entities no longer publishes a decode-only entry; drop leanEntities.')
+
+function firstExisting (candidates, message) {
+  for (const candidate of candidates) if (existsSync(candidate)) return path.resolve(candidate)
+  throw new Error(message)
+}
 
 async function checkEntitiesDecodeCovers () {
-  const dir = 'node_modules/markdown-it/lib'
+  const dir = firstExisting([
+    'node_modules/markdown-it/lib',
+    'node_modules/markdown-it/dist'
+  ], 'markdown-it ships neither lib/ nor dist/; update leanEntities.')
   const sources = []
   const walk = async (at) => {
     for (const entry of await readdir(at, { withFileTypes: true })) {
@@ -194,6 +296,33 @@ for (const dir of ['standard_fonts', 'cmaps', 'iccs', 'wasm']) {
   await cp(`node_modules/pdfjs-dist/${dir}`, path.join(output, 'pdfjs', dir), { recursive: true })
 }
 
+/* The spellchecker's extra languages, one gzipped Hunspell pair per id from
+   src/spell-languages.js. English travels inside spellcheck.cjs (see that
+   bundle below); these are the optional ones, read and inflated by the main
+   process only for the languages the config turns on — which is why they ship
+   as files rather than being compiled into anything. Gzipped because the raw
+   pairs are 64MB across fifteen languages and compress about five to one, and
+   an app that runs with the network off has to carry all of them to offer any
+   of them.
+
+   Compressed once into a cache keyed on the source's mtime rather than on
+   every build: the packages only change when npm moves them, and a clean
+   build re-gzipping 64MB to produce yesterday's bytes is a minute of nothing. */
+{
+  const dictCache = path.join('node_modules', '.cache', 'tulip-dict')
+  const dictOut = path.join(output, 'dict')
+  await mkdir(dictCache, { recursive: true })
+  await mkdir(dictOut, { recursive: true })
+  await Promise.all(SPELL_LANGUAGE_IDS.flatMap((id) => ['aff', 'dic'].map(async (kind) => {
+    const source = path.join('node_modules', `dictionary-${id}`, `index.${kind}`)
+    const cached = path.join(dictCache, `${id}.${kind}.gz`)
+    const fresh = await Promise.all([stat(source), stat(cached).catch(() => null)])
+      .then(([src, hit]) => hit && hit.mtimeMs > src.mtimeMs)
+    if (!fresh) await writeFile(cached, gzipSync(await readFile(source), { level: 9 }))
+    await cp(cached, path.join(dictOut, `${id}.${kind}.gz`))
+  })))
+}
+
 /** @type {import('esbuild').BuildOptions} */
 const options = {
   /* KaTeX's runtime is already loaded only for a note that contains maths.
@@ -251,8 +380,36 @@ const options = {
      comes up whenever that number moves. Off by default: it is analysis
      output, not part of the app. */
   metafile: process.argv.includes('--metafile'),
-  plugins: [leanExcalidraw, leanKatex, leanEntities]
+  plugins: [splitFeatureStyles, leanExcalidraw, leanKatex, leanEntities]
 }
+
+const featureStyleBundles = Object.keys(FEATURE_STYLE_SECTIONS).map((feature) => ({
+  entryPoints: [`tulip-feature-style:${feature}`],
+  bundle: true,
+  outfile: path.join(output, `${feature}.css`),
+  platform: 'browser',
+  target: ['chrome130'],
+  minify: !watch,
+  logLevel: 'info',
+  plugins: [{
+    name: `feature-style-${feature}`,
+    setup (build) {
+      build.onResolve({ filter: /^tulip-feature-style:/ }, ({ path: spec }) => ({
+        path: spec.slice('tulip-feature-style:'.length),
+        namespace: 'tulip-feature-style'
+      }))
+      build.onLoad({ filter: /.*/, namespace: 'tulip-feature-style' }, async () => {
+        const file = path.resolve('src/styles.css')
+        return {
+          contents: featureStyleSource(await readFile(file, 'utf8'), feature),
+          loader: 'css',
+          resolveDir: path.dirname(file),
+          watchFiles: [file]
+        }
+      })
+    }
+  }]
+}))
 
 /* pdf.js parses documents in a worker, which has to be a file of its own: the
    page hands it a URL, not a function. Built separately, and beside the bundle
@@ -354,7 +511,7 @@ const spellcheck = {
 
 /* Named once: a bundle listed for one of the two branches and forgotten in the
    other is a file that either never rebuilds or never builds. */
-const bundles = [options, worker, pdfText, lint, three, spellcheck]
+const bundles = [options, ...featureStyleBundles, worker, pdfText, lint, three, spellcheck]
 
 /* Scanned pages have no text layer for pdf.js to return. A tiny native helper
    uses the Vision and PDFKit frameworks already present on macOS, compiled for
@@ -431,8 +588,10 @@ if (watch) {
    *  impossible to carry into the packaged app. */
   const required = [
     'index.html', 'renderer.js', 'renderer.css', 'katex.css', 'whiteboard.css',
+    ...Object.keys(FEATURE_STYLE_SECTIONS).map((feature) => `${feature}.css`),
     'pdf.worker.js', 'pdf-text.cjs', ...(mac ? ['pdf-ocr'] : []), 'lint.cjs', 'three.js',
-    'pdfjs/standard_fonts', 'pdfjs/cmaps', 'pdfjs/iccs', 'pdfjs/wasm'
+    'pdfjs/standard_fonts', 'pdfjs/cmaps', 'pdfjs/iccs', 'pdfjs/wasm',
+    ...SPELL_LANGUAGE_IDS.flatMap((id) => [`dict/${id}.aff.gz`, `dict/${id}.dic.gz`])
   ]
   for (const item of required) await access(path.join(output, item))
 

@@ -24,6 +24,7 @@
 import { ZOOM_STEPS, pinchFactor } from './zoom.js'
 import { searchablePage, itemAtOffset, foldCase } from './pdf-search.js'
 import { firstPageEndingAfter } from './pdf-window.js'
+import { MARK_COLORS } from './pdf-colors.js'
 
 /* pdf.js is the largest thing the app can load and most sessions never open a
    document, so it is fetched the first time one is opened rather than sitting
@@ -72,14 +73,6 @@ export const PDF_DATA = {
  *  edit in the stylesheet and a stored highlight keeps meaning what it said.
  *  Exported because the toolbar draws the same palette the popups do, and two
  *  lists of colours would be two lists to keep in step. */
-export const MARK_COLORS = [
-  { id: 'yellow', label: 'Yellow' },
-  { id: 'rose', label: 'Rose' },
-  { id: 'green', label: 'Green' },
-  { id: 'blue', label: 'Blue' },
-  { id: 'violet', label: 'Violet' }
-]
-
 const COLOR_IDS = new Set(MARK_COLORS.map((c) => c.id))
 const DEFAULT_COLOR = 'yellow'
 

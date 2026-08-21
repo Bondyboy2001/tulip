@@ -74,6 +74,8 @@ function splitId (id) {
   }
 }
 
+/** @typedef {{ id?: string, at?: number, grade?: number, due?: number, stability?: number, difficulty?: number, undo?: boolean }} LogRow */
+
 function makeStore ({ vault }) {
   const dir = () => path.join(vault(), STATE_DIR)
   const stateFile = () => path.join(dir(), STATE_FILE)
@@ -83,8 +85,16 @@ function makeStore ({ vault }) {
      built by asking which of several hundred cards are due — so there is
      nothing to gain by going back to disk, and a great deal to lose by having
      two readers disagree about what a card's state is. */
+  /** @type {Record<string, object> | null} */
   let cards = null
+  /** @type {string | null} */
   let loadedFor = null
+  /* The parsed log, held against the file it came from — see `resolvedLog`.
+     Declared here rather than beside it because everything below the `return`
+     is hoisted function declarations, and a `let` down there would never be
+     reached at all. */
+  /** @type {{ file: string, size: number, mtimeMs: number, rows: LogRow[] } | null} */
+  let logCache = null
   const writer = makeCoalescedWriter()
 
   async function load () {
@@ -143,12 +153,12 @@ function makeStore ({ vault }) {
     async record (entries) {
       const list = Array.isArray(entries) ? entries : []
       if (!list.length) return { ok: true, written: 0 }
-      await load()
+      const deck = await load()
 
       const lines = []
       for (const entry of list) {
         if (!entry?.id || !entry.state) continue
-        cards[entry.id] = entry.state
+        deck[entry.id] = entry.state
         lines.push(JSON.stringify({
           id: entry.id,
           at: entry.at || Date.now(),
@@ -186,9 +196,9 @@ function makeStore ({ vault }) {
      */
     async unrecord (entry) {
       if (!entry?.id) return { ok: false }
-      await load()
-      if (entry.state && typeof entry.state === 'object') cards[entry.id] = entry.state
-      else delete cards[entry.id]
+      const deck = await load()
+      if (entry.state && typeof entry.state === 'object') deck[entry.id] = entry.state
+      else delete deck[entry.id]
       await flush()
       try {
         await fs.mkdir(dir(), { recursive: true })
@@ -207,12 +217,12 @@ function makeStore ({ vault }) {
      * not a scan concluding it. Also used when a note is emptied of its table.
      */
     async remove (notePath) {
-      await load()
+      const deck = await load()
       const prefix = `${notePath}|`
       let dropped = 0
-      for (const id of Object.keys(cards)) {
+      for (const id of Object.keys(deck)) {
         if (id.startsWith(prefix) || id.startsWith(`${notePath}/`)) {
-          delete cards[id]
+          delete deck[id]
           dropped++
         }
       }
@@ -228,9 +238,9 @@ function makeStore ({ vault }) {
      * are all still there, and only the schedule has been thrown away.
      */
     async relocate (from, to) {
-      await load()
+      const deck = await load()
       let moved = 0
-      for (const id of Object.keys(cards)) {
+      for (const id of Object.keys(deck)) {
         const parts = splitId(id)
         if (!parts) continue
         const isFile = parts.path === from
@@ -238,8 +248,8 @@ function makeStore ({ vault }) {
         if (!isFile && !isInFolder) continue
         const nextPath = isFile ? to : to + parts.path.slice(from.length)
         const nextId = cardId(nextPath, parts.term, parts.direction)
-        cards[nextId] = cards[id]
-        delete cards[id]
+        deck[nextId] = deck[id]
+        delete deck[id]
         moved++
       }
       if (moved) await flush()
@@ -253,8 +263,8 @@ function makeStore ({ vault }) {
      * @param {string[]} knownIds every card the vault currently contains
      */
     async prune (knownIds) {
-      await load()
-      const ids = Object.keys(cards)
+      const deck = await load()
+      const ids = Object.keys(deck)
       if (!ids.length) return { pruned: 0, refused: false }
 
       const known = new Set(Array.isArray(knownIds) ? knownIds : [])
@@ -276,33 +286,63 @@ function makeStore ({ vault }) {
         }
       }
 
-      for (const id of doomed) delete cards[id]
+      for (const id of doomed) delete deck[id]
       await flush()
       return { pruned: doomed.length, refused: false }
     },
 
     /** Every answer ever given, newest last, for the statistics. */
     async history (limit = 20000) {
-      let raw
-      try { raw = await fs.readFile(logFile(), 'utf8') } catch { return [] }
-      const out = []
-      for (const line of raw.split('\n')) {
-        if (!line.trim()) continue
-        let parsed
-        try { parsed = JSON.parse(line) } catch { continue /* a torn last line */ }
-        /* An undo line strikes out the answer it took back. Resolved here so
-           every consumer of the history sees neither half — the statistics
-           must not count an answer the reviewer explicitly unsaid. */
-        if (parsed?.undo) {
-          for (let i = out.length - 1; i >= 0; i--) {
-            if (out[i].id === parsed.id) { out.splice(i, 1); break }
-          }
-          continue
-        }
-        out.push(parsed)
-      }
-      return out.slice(-limit)
+      return (await resolvedLog()).slice(-limit)
     }
+  }
+
+  /* The log, parsed and with its undos resolved, held against the file it was
+     read from.
+     Every review panel opening re-read and re-parsed up to eight megabytes of
+     JSON lines on the main process. Keyed on the log's own identity — path,
+     size and mtime — so an answer recorded since (which appends, and so
+     changes both) is never served from a stale copy, and so switching vaults
+     cannot serve the wrong vault's history. */
+  async function resolvedLog () {
+    const file = logFile()
+    let stat
+    try { stat = await fs.stat(file) } catch { return [] }
+    if (logCache && logCache.file === file &&
+        logCache.size === stat.size && logCache.mtimeMs === stat.mtimeMs) {
+      return logCache.rows
+    }
+
+    let raw
+    try { raw = await fs.readFile(file, 'utf8') } catch { return [] }
+
+    /* Read backwards, because that is the direction an undo points. An undo
+       line takes back the nearest answer for its card *before* it — and a card
+       is answered over and over, so its id is on many lines and "the answers
+       this undo did not mean" is only decidable by counting from the end.
+       Walking forwards meant re-scanning everything accumulated so far for
+       each undo; walking back, one pending count per card says it in a pass. */
+    const undone = new Map()
+    const rows = []
+    const lines = raw.split('\n')
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i]
+      if (!line.trim()) continue
+      let parsed
+      try { parsed = JSON.parse(line) } catch { continue /* a torn last line */ }
+      const id = parsed?.id
+      if (parsed?.undo) {
+        undone.set(id, (undone.get(id) || 0) + 1)
+        continue
+      }
+      const pending = undone.get(id) || 0
+      if (pending) { undone.set(id, pending - 1); continue }
+      rows.push(parsed)
+    }
+    rows.reverse()
+
+    logCache = { file, size: stat.size, mtimeMs: stat.mtimeMs, rows }
+    return rows
   }
 
   /* Rolled rather than trimmed: the old file keeps its name with `.1` on the

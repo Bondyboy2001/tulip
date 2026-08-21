@@ -22,6 +22,7 @@
    whatever it is called.
    ================================================================== */
 
+import { revealLabel } from './platform.js'
 import { el, svgIcon } from './dom.js'
 import { assetUrl, assetKind } from './assets.js'
 
@@ -90,7 +91,7 @@ export function mountFileView ({ host, file, onStatus = () => {}, onWarn = () =>
       if (!result?.ok) onWarn(result?.error || 'The system could not open that file.')
     })
 
-    const reveal = el('button', 'fileview-btn', 'Reveal in Finder')
+    const reveal = el('button', 'fileview-btn', revealLabel())
     reveal.type = 'button'
     reveal.addEventListener('click', () => { file.reveal(path).catch(() => {}) })
 
