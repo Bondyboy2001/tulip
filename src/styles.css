@@ -9936,6 +9936,126 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
+/* -------------------------------------------------- word documents
+
+   The pane a `.docx` opens into. One column of prose, set the way the reading
+   view sets a note: the document's own fonts, colours and margins are Word's
+   answer to a page of paper, and reproducing them would put a second typeface
+   and a second measure inside an app that has already chosen both. What is
+   kept is what the document *says* — the hierarchy, the emphasis, the lists,
+   the tables and the pictures. See the account at the top of src/docx.js. */
+.docx {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+  padding: 40px 0 0;
+  background: var(--sunk);
+  font-family: var(--font-body);
+  font-size: 17px;
+  line-height: 1.68;
+  color: var(--ink);
+  outline: none;
+}
+.docx[hidden] { display: none; }
+
+.docx-page {
+  max-width: min(var(--measure), 100%);
+  margin-inline: auto;
+  padding: 0 24px 64px;
+}
+
+.docx-p { margin: 0 0 0.9em; overflow-wrap: anywhere; }
+/* Word's own tab stops are a page layout Tulip is not reproducing; what a tab
+   inside a paragraph has to do is keep the space it stands for. */
+.docx-p, .docx-li { white-space: pre-wrap; }
+
+.docx-h {
+  margin: 1.6em 0 0.5em;
+  font-family: var(--font-ui);
+  font-weight: 700;
+  line-height: 1.25;
+}
+.docx-page > .docx-h:first-child { margin-top: 0; }
+h1.docx-h { font-size: 1.7em; }
+h2.docx-h { font-size: 1.4em; }
+h3.docx-h { font-size: 1.2em; }
+h4.docx-h, h5.docx-h, h6.docx-h { font-size: 1.05em; }
+
+.docx-p.is-quote {
+  margin-inline: 0;
+  padding-left: 16px;
+  border-left: 3px solid var(--line);
+  color: var(--ink-soft);
+  font-style: italic;
+}
+.docx-p.is-caption {
+  font-size: 13px;
+  color: var(--ink-soft);
+  text-align: center;
+}
+
+.docx-list { margin: 0 0 0.9em; padding-left: 1.6em; }
+/* A list inside a list is already indented by its parent's padding; the space
+   above it would be a gap in the middle of the run of items. */
+.docx-list .docx-list { margin-bottom: 0; }
+.docx-li { margin: 0.15em 0; }
+
+/* Scoped to the pane: these are the plainest class names in the app, and a
+   `.is-bold` loose in the stylesheet would reach whatever else came to use it. */
+.docx .is-bold { font-weight: 700; }
+.docx .is-italic { font-style: italic; }
+.docx .is-underline { text-decoration: underline; }
+.docx .is-strike { text-decoration: line-through; }
+.docx .is-underline.is-strike { text-decoration: underline line-through; }
+/* Word's highlight is one of sixteen named colours; which one is not worth
+   carrying through three files, and the app already has a mark of its own. */
+.docx .is-marked {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border-radius: 3px;
+}
+
+.docx-link { color: var(--accent); text-decoration: none; }
+.docx-link:hover { text-decoration: underline; }
+
+.docx-img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0.4em 0;
+  border-radius: 6px;
+}
+
+/* A table is as wide as its author made it, so it scrolls inside its own frame
+   rather than pushing the column sideways. */
+.docx-table-frame { margin: 0 0 1.1em; overflow-x: auto; }
+.docx-table {
+  border-collapse: collapse;
+  font-size: 15px;
+  background: var(--paper);
+}
+.docx-table th, .docx-table td {
+  border: 1px solid var(--line);
+  padding: 6px 10px;
+  vertical-align: top;
+  text-align: left;
+}
+.docx-table th { background: var(--surface); font-weight: 600; }
+/* The paragraphs inside a cell are the cell; their document spacing would make
+   every row twice the height it needs. */
+.docx-table .docx-p:last-child, .docx-table .docx-list:last-child { margin-bottom: 0; }
+
+/* The way to the program that owns the format, at the foot of the document
+   rather than over it: Tulip reads a `.docx` and does not write one, so the
+   editing happens in Word. */
+.docx-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 32px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line-soft);
+}
+
 /* ------------------------------------------------------------- notebook
 
    The pane an `.ipynb` opens into: a column of cells, each one a source block
@@ -10736,7 +10856,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 .csv-th {
   position: relative;
   gap: 4px;
-  font-weight: 600;
+  font-weight: 700;
   color: var(--ink-soft);
   border-right-color: var(--line);
   cursor: pointer;

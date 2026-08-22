@@ -50,6 +50,11 @@ export const WHITEBOARD_EXT = new RegExp(`${escapeRe(VAULT_CONTRACT.whiteboardEx
    cells. See src/notebook.js. */
 export const NOTEBOOK_EXT = new RegExp(`${escapeRe(VAULT_CONTRACT.notebookExtension)}$`, 'i')
 
+/* A Word document: drawn, edited and written back — see electron/docx.js. Its
+   own kind rather than one of the files below, because Tulip does have a view
+   of it — which is the whole difference between the two lists. */
+export const DOCX_EXT = new RegExp(`${escapeRe(VAULT_CONTRACT.docxExtension)}$`, 'i')
+
 /* Regional-indicator pairs — the two codepoints a flag emoji is made of, and
    the prefix a language folder carries its country in. A source string in the
    contract because JSON has no regular expressions; `u` is what makes the
@@ -80,6 +85,7 @@ export const isPdfPath = (path) => PDF_EXT.test(path || '')
 export const isSitePath = (path) => SITE_EXT.test(path || '')
 export const isWhiteboardPath = (path) => WHITEBOARD_EXT.test(path || '')
 export const isNotebookPath = (path) => NOTEBOOK_EXT.test(path || '')
+export const isDocxPath = (path) => DOCX_EXT.test(path || '')
 export const isLanguageTablePath = (path) =>
   String(path || '').toLowerCase().endsWith(VAULT_CONTRACT.languageTableSuffix)
 
@@ -91,7 +97,7 @@ const HAS_EXT = /\.[^./]+$/
 
 /**
  * A file the vault holds but has no view of its own for: a photograph, a
- * recording, a `.docx`, an archive.
+ * recording, an archive.
  *
  * The vault is a folder on disk and people put things in folders. Everything
  * above this line is a kind Tulip knows how to *be* — a note, a paper, a board
@@ -106,7 +112,7 @@ export const isViewedFilePath = (path) => {
   if (!HAS_EXT.test(name)) return false
   return !NOTE_EXT.test(name) && !isTexPath(name) && !isPdfPath(name) &&
     !isSitePath(name) && !isWhiteboardPath(name) && !isDataPath(name) &&
-    !isNotebookPath(name) && !isCodePath(name)
+    !isNotebookPath(name) && !isDocxPath(name) && !isCodePath(name)
 }
 
 /* A file attached in the copilot's message box lives under the attachments

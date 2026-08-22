@@ -371,6 +371,28 @@ class KernelHost {
     return this.kernels.get(notebookPath) || null
   }
 
+  /**
+   * The notebook moved. A kernel is filed under the path of the notebook it
+   * belongs to, so a rename left the running process filed under a name that
+   * no longer exists: the next Run started a second kernel, and the first sat
+   * there holding its memory with nothing able to name, interrupt or shut it
+   * down again.
+   *
+   * @returns {boolean} whether anything was actually holding the old name
+   */
+  rename (from, to) {
+    if (!from || !to || from === to) return false
+    let moved = false
+    for (const map of [this.kernels, this.starting]) {
+      const held = map.get(from)
+      if (held === undefined) continue
+      map.delete(from)
+      map.set(to, held)
+      moved = true
+    }
+    return moved
+  }
+
   async shutdown (notebookPath) {
     /* A kernel that is still starting is one this would otherwise walk past,
        leaving the process it is about to become running for a notebook that

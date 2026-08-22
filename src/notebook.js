@@ -1097,6 +1097,7 @@ export function mountNotebook ({
   onSaved = () => {},
   onStatus = () => {}
 }) {
+  /** @type {any} */
   let current = null          // { path }
   let shell = null            // the file, as parsed
   let cells = []              // the working model
@@ -2235,8 +2236,7 @@ export function mountNotebook ({
         title: `Restart ${kernelNamed() || 'the kernel'}?`,
         detail: 'Every variable, import and open file in this session is thrown ' +
           'away. The outputs already in the notebook stay where they are.',
-        go: 'Restart',
-        danger: true
+        go: 'Restart'
       })
       if (!yes) return false
     }
@@ -2282,8 +2282,7 @@ export function mountNotebook ({
           title: 'Restart and run every cell?',
           detail: 'The session is emptied first, so the notebook runs from the top ' +
             'against nothing — which is what it will do for whoever opens it next.',
-          go: 'Restart and run',
-          danger: true
+          go: 'Restart and run'
         })
         if (!yes) return
       }
@@ -3869,6 +3868,23 @@ export function mountNotebook ({
       // there is nothing to type into any more, and the prose is the document.
       if (readonly) editingIndex = -1
       if (current) paint()
+    },
+
+    /**
+     * The notebook moved — it was renamed, or dragged into another folder.
+     *
+     * Two things are filed under the path and neither was told: the file this
+     * writes back to, and the kernel, which main keys by the notebook it
+     * belongs to. Left alone, a rename mid-session meant the next save wrote
+     * to a name that no longer exists, and the next Run started a second
+     * kernel while the first sat there holding its memory under a name nothing
+     * could interrupt or shut down again.
+     */
+    retarget (path) {
+      if (!current || !path || path === current.path) return
+      const from = current.path
+      current.path = path
+      kernel?.rename?.(from, path)?.catch?.(() => {})
     },
 
     focus () {

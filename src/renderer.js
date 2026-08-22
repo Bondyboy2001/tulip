@@ -6,9 +6,10 @@ import { mountTexSplit } from './tex-split.js'
 import { mountAsk } from './ask.js'
 import { languageChip, languageColor, languageLabel, SOURCE_CHOICES } from './languages.js'
 import {
-  NOTE_EXT, TEX_EXT, PDF_EXT, SITE_EXT, WHITEBOARD_EXT, NOTEBOOK_EXT,
+  NOTE_EXT, TEX_EXT, PDF_EXT, SITE_EXT, WHITEBOARD_EXT, NOTEBOOK_EXT, DOCX_EXT,
   isChatAttachment, isTexPath, isPdfPath, isSitePath, isWhiteboardPath,
-  isCodePath, isDataPath, isNotebookPath, isLanguageTablePath, codeToken, isViewedFilePath
+  isCodePath, isDataPath, isNotebookPath, isDocxPath, isLanguageTablePath, codeToken,
+  isViewedFilePath
 } from './vault-paths.js'
 import { CONTEXT_MODES } from './models.js'
 import { DEFAULT_ZOOM } from './zoom.js'
@@ -196,6 +197,7 @@ const el = {
   texPdf: $('tex-pdf'),
   data: $('data'),
   notebook: $('notebook'),
+  docx: $('docx'),
   fileview: $('fileview'),
   empty: $('empty'),
   emptyActions: $('empty-actions'),
@@ -348,7 +350,7 @@ const resolveHere = (src) => state.resolveAsset(src, state.current?.dir || '')
    website is a live guest and has to have a tab and a process of its own. */
 const canShowBeside = (path) =>
   !!path && !isTexPath(path) && !isSitePath(path) && !isWhiteboardPath(path) &&
-  !isDataPath(path) && !isNotebookPath(path)
+  !isDataPath(path) && !isNotebookPath(path) && !isDocxPath(path)
 const viewingPdf = () => state.current?.kind === 'pdf'
 const viewingTex = () => state.current?.kind === 'tex'
 const viewingSite = () => state.current?.kind === 'site'
@@ -367,7 +369,11 @@ const viewingData = () => state.current?.kind === 'data'
    and the document is the cells inside it — so it gets a viewer, like the
    table does, and nothing here reads it as prose or as source. */
 const viewingNotebook = () => state.current?.kind === 'notebook'
-/* A file with no view of its own — a picture, a recording, a `.docx`. Not
+/* A Word document, drawn from the zip of XML it is stored as and written back
+   the same way. A viewed kind like the grid and the notebook: the file is not
+   text, so there is nothing here for the editor to hold — see src/docx.js. */
+const viewingDocx = () => state.current?.kind === 'docx'
+/* A file with no view of its own — a picture, a recording, an archive. Not
    text: anything that reads as text was handed to the editor at the door, so
    whatever is in this pane is something there is nothing to type into. */
 const viewingFile = () => state.current?.kind === 'file'
@@ -378,7 +384,7 @@ const viewingFile = () => state.current?.kind === 'file'
    apply to it, and neither does anything that acts on a column of text. */
 const viewingText = () =>
   !viewingPdf() && !viewingSite() && !viewingWhiteboard() && !viewingData() &&
-  !viewingNotebook() && !viewingFile()
+  !viewingNotebook() && !viewingDocx() && !viewingFile()
 
 /* ------------------------------------------------------------------ locks
 
@@ -397,7 +403,7 @@ const viewingText = () =>
    shown as source and has nowhere else to be held. */
 const canLock = () => Boolean(state.current) &&
   ((viewingText() && !SOURCE_KINDS.has(state.current.kind)) ||
-   viewingData() || viewingNotebook())
+   viewingData() || viewingNotebook() || viewingDocx())
 const lockedHere = () => Boolean(state.current && state.locked.has(state.current.path))
 /* Files of no known kind that turned out to be text when they were opened.
    The probe is a read, so its answer is kept: `noteRef` is asked what kind of
@@ -426,7 +432,9 @@ const docLabel = (path) =>
             ? PDF_EXT
             : isWhiteboardPath(path)
                 ? WHITEBOARD_EXT
-                : isNotebookPath(path) ? NOTEBOOK_EXT : SITE_EXT, '')
+                : isNotebookPath(path)
+                  ? NOTEBOOK_EXT
+                  : isDocxPath(path) ? DOCX_EXT : SITE_EXT, '')
       .replace(NOTE_EXT, '')
 
 /** The name a TAB is shown under: `docLabel`, with the extension taken off the
@@ -484,6 +492,8 @@ function noteRef (path) {
               ? 'whiteboard'
               : isNotebookPath(path)
                   ? 'notebook'
+                  : isDocxPath(path)
+                  ? 'docx'
                   : isDataPath(path)
                   ? 'data'
                   /* A file that read as text is a source file for every
@@ -507,7 +517,7 @@ function noteRef (path) {
    `confirm: ask` at its own mount time therefore captured nothing at all —
    bundling turns these into `var`, so instead of failing loudly every Restore
    button in the app quietly rejected when pressed. */
-const { ask, answer, armed } = mountAsk(el)
+const { ask, answer } = mountAsk(el)
 
 /* -------------------------------------------------------------- markdown */
 
@@ -804,9 +814,17 @@ function watchLanguageHistoryFocus () {
    rather than asked for on each redraw: resolving every bookmark to a page
    number is work the document only has to do once. */
 let pdfContents = []
+/* The viewer, and the two panels that hang off it. Typed rather than left to be
+   inferred from `null`, the way the lazily-mounted viewers below are: a holder
+   whose only type is "null" makes every use of what it holds a finding, and the
+   noise buries the checks worth reading. */
+/** @type {any} */
 let pdf = null
+/** @type {any} */
 let texPdf = null
+/** @type {any} */
 let pdfFind = null
+/** @type {Promise<any> | null} */
 let pdfLoading = null
 
 /* The PDF chrome is in the shell, but its viewer, find bar and stylesheet are
@@ -943,7 +961,9 @@ const site = mountSite({
 /* Loaded only when the first board opens. Excalidraw and React are far larger
    than the document chrome, and a Markdown/PDF session should not parse a
    drawing engine it never uses. */
+/** @type {any} */
 let whiteboardInstance = null
+/** @type {Promise<any> | null} */
 let whiteboardLoading = null
 
 function ensureWhiteboard () {
@@ -997,7 +1017,9 @@ function ensureWhiteboard () {
 
 /* Loaded when the first table opens, on the same reasoning as the whiteboard:
    a session of notes and PDFs should not compile a grid it never shows. */
+/** @type {any} */
 let dataInstance = null
+/** @type {Promise<any> | null} */
 let dataLoading = null
 
 function ensureData () {
@@ -1048,7 +1070,9 @@ function ensureData () {
 /* Loaded when the first notebook opens, on the same terms as the grid. An
    `.ipynb` brings a markdown renderer and a highlighter with it, and a session
    of notes and PDFs should build neither for a file it never opens. */
+/** @type {any} */
 let notebookInstance = null
+/** @type {Promise<any> | null} */
 let notebookLoading = null
 
 function ensureNotebook () {
@@ -1084,6 +1108,8 @@ function ensureNotebook () {
           interrupt: (path) => api.kernel.interrupt(path),
           restart: (path) => api.kernel.restart(path),
           shutdown: (path) => api.kernel.shutdown(path),
+          // A notebook that was renamed takes its running kernel with it.
+          rename: (from, to) => api.kernel.rename(from, to),
           specs: () => api.kernel.specs(),
           /* The answer to an `input()`, and the two questions Tab and ⇧Tab ask
              about the code under the caret. Only the live kernel can answer
@@ -1125,10 +1151,61 @@ function ensureNotebook () {
   return notebookLoading
 }
 
+/* Loaded when the first Word document opens, on the same terms as the grid and
+   the notebook. Nothing here is needed by a vault of notes, and a `.docx` is
+   the least likely of all of them to be in one. */
+/** @type {any} */
+let docxInstance = null
+/** @type {Promise<any> | null} */
+let docxLoading = null
+
+function ensureDocx () {
+  if (docxInstance) return docxInstance
+  if (!docxLoading) {
+    docxLoading = import('./docx.js').then(({ mountDocx }) => {
+      docxInstance = mountDocx({
+        host: el.docx,
+        docx: api.docx,
+        file: api.file,
+        /* A link inside a Word document points out of the vault. It opens the
+           way every other external link in the app does — in the browser,
+           because this pane has no address bar and no way back. */
+        openExternal: (url) => api.openExternal(url),
+        /* The one question editing a Word document has to ask — what a save
+           cannot carry through a paragraph Tulip rewrites — asked in the app's
+           own dialog rather than not at all. */
+        ask,
+        /* The same bargain the grid and the notebook make: the viewer owns the
+           document and reports what it is doing with it, and the tab strip, the
+           save queue and the status line are the renderer's answer to that. */
+        onDirty: (isDirty) => {
+          const changed = state.dirty !== isDirty
+          state.dirty = isDirty
+          if (changed) renderTabs()
+          if (isDirty) queueSave()
+        },
+        /* A write landed. Whether the page is clean afterwards is the viewer's
+           to say — a keystroke during the write leaves it dirty on purpose —
+           and it says so through `onDirty`. */
+        onSaved: () => {
+          renderTabs()
+          setStatusRight('Saved')
+        },
+        onStatus: () => updateStatus(),
+        onWarn: (message) => toast(message)
+      })
+      return docxInstance
+    }).finally(() => { docxLoading = null })
+  }
+  return docxLoading
+}
+
 /* The viewer of last resort — a picture, a recording, or a card describing
    what Tulip cannot show. Loaded on the same terms as the two above: a session
    that opens no such file never builds it. */
+/** @type {any} */
 let fileViewInstance = null
+/** @type {Promise<any> | null} */
 let fileViewLoading = null
 
 function ensureFileView () {
@@ -1449,6 +1526,12 @@ async function saveNow () {
   if (viewingNotebook()) {
     try { await notebookInstance?.save({ flush: true }) } catch (err) {
       toast(reason(err, 'Could not save this notebook.'))
+    }
+    return
+  }
+  if (viewingDocx()) {
+    try { await docxInstance?.save({ flush: true }) } catch (err) {
+      toast(reason(err, 'Could not save this Word document.'))
     }
     return
   }
@@ -2412,6 +2495,10 @@ async function moveInto (destDir, paths = state.dragging || []) {
   // The open note may have been one of them; follow it to its new home.
   const followed = moved.find((m) => m.from === state.current?.path)
   if (followed) {
+    // Same as a rename: a viewer writes back to the path it was given.
+    if (viewingDocx()) docxInstance?.retarget(followed.to)
+    else if (viewingData()) dataInstance?.retarget(followed.to)
+    else if (viewingNotebook()) notebookInstance?.retarget(followed.to)
     state.current = noteRef(followed.to)
     renderTabs()
     sessionOnly({ lastNote: followed.to })
@@ -2545,6 +2632,7 @@ async function openNote (path, opts = {}) {
   if (isWhiteboardPath(path)) return openWhiteboard(path, opts)
   if (isDataPath(path)) return openData(path, opts)
   if (isNotebookPath(path)) return openNotebook(path, opts)
+  if (isDocxPath(path)) return openDocx(path, opts)
   /* A file of no kind Tulip knows. Which door it goes through is decided by
      what is actually in it rather than by what it is called: a `.log`, a
      `.env`, a `.rtf` and a file with no extension at all are text, and text
@@ -2643,6 +2731,7 @@ async function leaveDoc () {
   else if (viewingWhiteboard()) await whiteboardInstance?.close()
   else if (viewingData()) await dataInstance?.close()
   else if (viewingNotebook()) await notebookInstance?.close()
+  else if (viewingDocx()) docxInstance?.close()
   /* Not merely hidden: the pane may be holding a playing video, and a
      recording that goes on playing over the note you switched to is the whole
      reason this viewer is torn down rather than left in place. */
@@ -2891,6 +2980,29 @@ function openNotebook (path, opts = {}) {
 }
 
 /**
+ * A Word document, put on screen as the document it is.
+ *
+ * A viewed kind with nothing behind it: there is no editor to hold it and no
+ * save to make, because Tulip reads `.docx` and does not write it. A file that
+ * will not unzip, or that has no `word/document.xml` in it, throws — and
+ * `openViewed` hands the tab back rather than leaving an empty page claiming to
+ * be a document.
+ */
+function openDocx (path, opts = {}) {
+  return openViewed(path, opts, {
+    show: async (p, place) => {
+      const doc = await ensureDocx()
+      // Told which view it is in before the file lands in it, so a document
+      // opened while the preference says "read" is never briefly editable.
+      doc.setReadonly(state.view === 'read')
+      return doc.open(p, place)
+    },
+    failed: 'That Word document could not be opened.',
+    focus: () => docxInstance?.focus()
+  })
+}
+
+/**
  * A file the vault has no view of its own for, put on screen as what can be
  * shown of it: the picture, the player, or the card that says plainly there is
  * no viewer for this and offers the desktop's.
@@ -3012,6 +3124,7 @@ function applyPanes () {
   const codeOpen = viewingCode()
   const dataOpen = viewingData()
   const notebookOpen = viewingNotebook()
+  const docxOpen = viewingDocx()
   const fileOpen = viewingFile()
   /* The chosen view, minus whatever the document on screen cannot give it. Two
      things take it away: a table has no raw source mode, and a locked file has
@@ -3024,7 +3137,10 @@ function applyPanes () {
      Editing, so a held 'raw' gives way to Editing while one is open, and its
      editable grid is entered rather than the backing pipes briefly shown. */
   const want = heldView ?? state.view
-  const tabular = viewingLanguageTable() || dataOpen || notebookOpen || viewingHtml()
+  /* The kinds with two views of themselves and no third: a table, a notebook
+     and a Word document are read or edited, and neither has a source to show —
+     a `.docx` least of all, being a zip. */
+  const tabular = viewingLanguageTable() || dataOpen || notebookOpen || docxOpen || viewingHtml()
   const show = lockedHere() ? 'read' : (tabular && want === 'raw' ? 'edit' : want)
   heldView = show === want ? null : want
   if (state.view !== show) showView(show)
@@ -3051,6 +3167,7 @@ function applyPanes () {
   el.whiteboard.hidden = !whiteboardOpen
   el.data.hidden = !dataOpen
   el.notebook.hidden = !notebookOpen
+  el.docx.hidden = !docxOpen
   el.fileview.hidden = !fileOpen
   el.reading.hidden = !text || sourceOnly || htmlOpen || state.view !== 'read'
   el.editorHost.hidden = !text || (!sourceOnly && state.view === 'read')
@@ -3059,7 +3176,7 @@ function applyPanes () {
   /* The switch is for the documents with more than one view of themselves: the
      note's three, and the table's two — a `.csv` is read and edited in the same
      grid, and which of the two it is in is this control. */
-  el.viewSwitch.hidden = (!text && !dataOpen && !notebookOpen) || sourceOnly
+  el.viewSwitch.hidden = (!text && !dataOpen && !notebookOpen && !docxOpen) || sourceOnly
   /* The toolbar's Run: only over a source file in a language the run
      machinery accepts — the same test a fenced block's control makes, against
      the extension instead of the fence word. Moving to a different document
@@ -3072,6 +3189,7 @@ function applyPanes () {
   if (runnableFile) fileRun.warm(codeToken(state.current.path))
   if (dataOpen) dataInstance?.setReadonly(state.view === 'read')
   if (notebookOpen) notebookInstance?.setReadonly(state.view === 'read')
+  if (docxOpen) docxInstance?.setReadonly(state.view === 'read' || lockedHere())
   updateViewControl()
   el.studyStart.hidden = !viewingLanguageTable()
   paintKeyboard()
@@ -3087,10 +3205,11 @@ function applyPanes () {
   syncSidebarPaneAvailability()
 }
 
-/** An attachment a note embeds or links to. The vault reads PDFs itself; for
- *  everything else the right answer is the program that owns the format. */
+/** An attachment a note embeds or links to. The vault reads PDFs and Word
+ *  documents itself; for everything else the right answer is the program that
+ *  owns the format. */
 function openAsset (relPath) {
-  if (isPdfPath(relPath)) openNote(relPath)
+  if (isPdfPath(relPath) || isDocxPath(relPath)) openNote(relPath)
   else api.file.reveal(relPath)
 }
 
@@ -3846,6 +3965,12 @@ function markPlace () {
     entry.top = where.top
     return
   }
+  if (viewingDocx()) {
+    const where = docxInstance?.place()
+    if (!where) return
+    entry.top = where.top
+    return
+  }
   /* The line at the top of the page is the place both views understand, and
      the only one the reading view can offer: it has no caret, and the two
      views scroll different documents, so a pixel offset taken in one of them
@@ -3999,6 +4124,17 @@ async function reloadCurrent () {
   if (viewingData()) {
     if (state.dirty) return
     try { await dataInstance?.open(state.current.path, dataInstance.place()) } catch { /* gone */ }
+    updateStatus()
+    return
+  }
+
+  /* A Word document rewritten underneath — saved again from Word, which is the
+     ordinary way to have one — is reread in place, scrolled where it was.
+     Edits of the reader's own stand: theirs is the version on screen, and
+     pulling the disk's over it would lose what they typed. */
+  if (viewingDocx()) {
+    if (state.dirty) return
+    try { await docxInstance?.open(state.current.path, docxInstance.place()) } catch { /* gone */ }
     updateStatus()
     return
   }
@@ -4367,7 +4503,11 @@ const mergePanel = mountMergePanel({
 async function keepBufferOverDisk (path, kind = 'note') {
   const noun = kind === 'whiteboard'
     ? 'This whiteboard'
-    : kind === 'notebook' ? 'This notebook' : kind === 'file' ? 'This file' : 'This note'
+    : kind === 'notebook'
+      ? 'This notebook'
+      : kind === 'Word document'
+        ? 'This Word document'
+        : kind === 'file' ? 'This file' : 'This note'
   let copy = null
   try { copy = await api.file.conflictCopy(path) } catch { copy = null }
   toast(copy
@@ -4818,6 +4958,21 @@ async function copilotContext (options = {}) {
     }
   }
 
+  /* A Word document. The agent cannot read a `.docx` off disk — it is a zip —
+     so what is on screen is sent, the way a selection from a PDF is: the words
+     as they were read, cut at the same limit and said to be cut. */
+  if (viewingDocx()) {
+    const text = docxInstance?.text() || ''
+    return {
+      note: state.current.path,
+      kind: 'docx',
+      title: docxInstance?.title() || '',
+      words: docxInstance?.words() || 0,
+      selection: cut(text),
+      truncated: text.length > SELECTION_LIMIT
+    }
+  }
+
   /* A file with no view of its own: the path is the whole of what can honestly
      be said about it here. There is nothing on screen to quote — a picture, a
      recording, a `.docx` — and the agent has its own tools for a file it can
@@ -5242,6 +5397,10 @@ function updateStatus () {
   // A table is measured in its shape, and so is a notebook.
   if (state.current && viewingData()) text = dataInstance?.summary() || ''
   if (state.current && viewingNotebook()) text = notebookInstance?.summary() || ''
+  /* A Word document is measured in its words, the way a note's Info pane
+     measures a note: it is the one thing about a document you cannot edit that
+     is worth knowing and is not on the screen already. */
+  if (state.current && viewingDocx()) text = docxInstance?.summary() || ''
 
   el.statusLeft.textContent = text
   el.statusLeft.hidden = !text
@@ -7734,7 +7893,8 @@ function updateViewControl () {
   for (const button of el.viewSwitch.querySelectorAll('.view-option')) {
     const view = button.dataset.view
     const unavailable = view === 'raw' &&
-      (viewingLanguageTable() || viewingData() || viewingNotebook() || viewingHtml())
+      (viewingLanguageTable() || viewingData() || viewingNotebook() || viewingDocx() ||
+        viewingHtml())
     const barred = locked && view !== 'read'
     button.hidden = unavailable
     button.disabled = unavailable || barred
@@ -8068,6 +8228,7 @@ const NEW_FILE_COMMANDS = [
   { id: 'new-source', title: 'Source file', kind: 'code' },
   { id: 'new-csv', title: 'CSV table', kind: 'data' },
   { id: 'new-notebook', title: 'Jupyter notebook', kind: 'notebook' },
+  { id: 'new-docx', title: 'Word document', kind: 'docx' },
   { id: 'new-tex', title: 'TeX document', kind: 'tex' },
   { id: 'new-website', title: 'Website', kind: 'site' },
   { id: 'new-whiteboard', title: 'Whiteboard', kind: 'whiteboard' }
@@ -8102,6 +8263,27 @@ function commandList () {
   if (viewingLanguageTable() || viewingData()) {
     commands.push({ id: 'fit-columns', title: 'Auto-resize all columns' })
   }
+  /* What a Word document can be given that it did not already have. Lists and
+     tables are the two structures Word writes that Tulip could not make — the
+     editor could change the words of one and never start one — and neither has
+     a chord or a menu item, which is the test this list is admitted on.
+
+     The rows and columns are only offered where the caret is actually in a
+     table; a palette row that answers "put the caret in a table first" is a row
+     that should not have been there. */
+  if (viewingDocx() && state.view !== 'read' && !lockedHere()) {
+    commands.push({ id: 'docx-bullets', title: 'Make a bulleted list' })
+    commands.push({ id: 'docx-numbers', title: 'Make a numbered list' })
+    commands.push({ id: 'docx-no-list', title: 'Remove list formatting' })
+    commands.push({ id: 'docx-table', title: 'Insert table' })
+    if (docxInstance?.inTable()) {
+      commands.push({ id: 'docx-row', title: 'Add a row below' })
+      commands.push({ id: 'docx-column', title: 'Add a column to the right' })
+      commands.push({ id: 'docx-delete-row', title: 'Delete this row' })
+      commands.push({ id: 'docx-delete-column', title: 'Delete this column' })
+    }
+  }
+
   /* Only the data grid: a language table's columns are the four the format
      defines, and there is nothing in them to pick a category out of. */
   if (viewingData()) {
@@ -8745,8 +8927,7 @@ async function replaceEverywhere () {
       ? `Replace “${query}” with “${into}” in ${plan.notes} ${planPlural}?`
       : `Delete “${query}” from ${plan.notes} ${planPlural}?`,
     detail: replacePreviewText(plan),
-    go: 'Replace all',
-    danger: true
+    go: 'Replace all'
   })
   if (!go) { el.panelInput.focus(); return }
 
@@ -8914,7 +9095,9 @@ function overlayRow ({ item, hits }, i, mode, index) {
                 ? `line ${item.hit.line}`
                 : item.kind === 'whiteboard'
                     ? 'whiteboard'
-                    : `${item.kind === 'highlight' ? 'highlight' : 'PDF'} · p. ${item.hit.page}`)
+                    : item.kind === 'docx'
+                      ? 'Word'
+                      : `${item.kind === 'highlight' ? 'highlight' : 'PDF'} · p. ${item.hit.page}`)
             : ''))
     }
     li.append(right)
@@ -8999,6 +9182,10 @@ async function chooseOverlayItem (i) {
       whiteboardInstance?.find()
       return
     }
+    /* A Word document opens at the top: its hits are lines of the text this app
+       read out of the zip, and a `.docx` has no lines of its own to scroll to —
+       the paragraph they came from is on the page and the reader can see it. */
+    if (item.kind === 'docx') return
     // Through the door both views share: dispatching into the editor alone
     // moved a caret nobody could see while the reading view was up.
     goToLine(Math.min(item.hit.line, editor.state.doc.lines), item.hit.col || 0)
@@ -9218,8 +9405,7 @@ async function removeEmbeddedImage (path) {
   const name = path.split('/').pop() || 'image'
   const yes = await ask({
     title: `Move “${name}” to the Trash and remove it from this note?`,
-    go: 'Move to Trash',
-    danger: true
+    go: 'Move to Trash'
   })
   if (!yes) return
 
@@ -9262,8 +9448,7 @@ async function removeMany (paths) {
     detail: folders
       ? `${folders === 1 ? 'One of them is a folder' : `${folders} of them are folders`}, and everything inside goes too.`
       : '',
-    go: 'Move to Trash',
-    danger: true
+    go: 'Move to Trash'
   })
   if (!yes) return
 
@@ -9481,6 +9666,15 @@ async function renameNote (node, next) {
     const { path, links, rewritten = [] } = await api.file.rename(node.path, name)
     await loadTree()
     if (state.current?.path === node.path) {
+      /* A viewer holds the path it writes back to. The bytes have not changed
+         — a rename is a rename — so it is told the new name rather than
+         reopened, which would throw away an edit not yet saved. Without this
+         the next autosave writes to a file that is no longer there: the grid
+         and the notebook were doing exactly that, and the notebook was also
+         leaving its kernel filed under the old name. */
+      if (viewingDocx()) docxInstance?.retarget(path)
+      else if (viewingData()) dataInstance?.retarget(path)
+      else if (viewingNotebook()) notebookInstance?.retarget(path)
       state.current = noteRef(path)
       // The inline title is the note's name, so a rename has to reach both
       // the editor's widget and the rendered page.
@@ -9579,6 +9773,7 @@ function closeCurrentNote () {
   if (viewingWhiteboard()) whiteboardInstance?.close()
   if (viewingData()) dataInstance?.close()
   if (viewingNotebook()) notebookInstance?.close()
+  if (viewingDocx()) docxInstance?.close()
   pdfContents = []
   state.current = null
   state.dirty = false
@@ -9600,8 +9795,7 @@ async function removeNode (node) {
     title: node.type === 'folder'
       ? `Move “${node.name}” and everything in it to the Trash?`
       : `Move “${node.name}” to the Trash?`,
-    go: 'Move to Trash',
-    danger: true
+    go: 'Move to Trash'
   })
   if (!yes) return
 
@@ -9755,6 +9949,17 @@ function runCommand (id, dir = state.current?.dir || '') {
     case 'new-source': openOverlay('new-source', { dir }); break
     case 'new-csv': createSource(dir, '.csv'); break
     case 'new-notebook': createSource(dir, '.ipynb'); break
+    case 'new-docx': createSource(dir, '.docx'); break
+    /* The structures a Word document can gain. Each is refused politely by the
+       viewer when the caret is nowhere useful — see src/docx.js. */
+    case 'docx-bullets': docxInstance?.setList('bullet'); break
+    case 'docx-numbers': docxInstance?.setList('ordered'); break
+    case 'docx-no-list': docxInstance?.setList(null); break
+    case 'docx-table': docxInstance?.insertTable(3, 3); break
+    case 'docx-row': docxInstance?.editTable('row'); break
+    case 'docx-column': docxInstance?.editTable('column'); break
+    case 'docx-delete-row': docxInstance?.editTable('delete-row'); break
+    case 'docx-delete-column': docxInstance?.editTable('delete-column'); break
     case 'new-tex': createTex(dir); break
     case 'new-whiteboard': createWhiteboard(dir); break
     case 'new-website': createWebsite(dir); break
@@ -10231,6 +10436,17 @@ function stepHistory (redo) {
      decided there, from where the caret is. */
   if (viewingNotebook()) {
     notebookInstance?.history(redo)
+    return
+  }
+
+  /* A Word document keeps snapshots of its page, for the same reason the grid
+     keeps its own history: what is being changed is not a text buffer with an
+     edit log. Without this branch ⌘Z fell through to the editor below, which is
+     holding nothing while a viewed kind is on screen — so a mistyped word could
+     not be taken back at all. */
+  if (viewingDocx()) {
+    const stepped = docxInstance?.history(redo)
+    if (!stepped) setStatusRight(`Nothing to ${redo ? 'redo' : 'undo'}`)
     return
   }
 
@@ -10956,8 +11172,7 @@ el.orphansAll.addEventListener('click', async () => {
       ? 'Move this image to the Trash?'
       : `Move all ${rows.length} images to the Trash?`,
     detail: 'They can be put back from the Trash.',
-    go: 'Move to Trash',
-    danger: true
+    go: 'Move to Trash'
   })
   if (!sure || !orphansOpen) return
   // One at a time rather than all at once: each row reports its own fate, and
@@ -11591,7 +11806,7 @@ api.on('vault:changed', async ({ paths = [] } = {}) => {
      and a notebook is the one most likely to have a second writer, because
      running Jupyter beside Tulip is what the feature is for. */
   const structuredConflict = touched &&
-    (isWhiteboardPath(open) || isDataPath(open) || isNotebookPath(open))
+    (isWhiteboardPath(open) || isDataPath(open) || isNotebookPath(open) || isDocxPath(open))
   const handled = conflict ? await handleDiskConflict(open) : false
   /* A conflict with no common version to merge from falls back to the old
      bargain: the buffer is what was kept. */
@@ -11599,7 +11814,9 @@ api.on('vault:changed', async ({ paths = [] } = {}) => {
   if (structuredConflict) {
     await keepBufferOverDisk(
       open,
-      isWhiteboardPath(open) ? 'whiteboard' : isNotebookPath(open) ? 'notebook' : 'file'
+      isWhiteboardPath(open)
+        ? 'whiteboard'
+        : isNotebookPath(open) ? 'notebook' : isDocxPath(open) ? 'Word document' : 'file'
     )
   }
   await loadTree()
@@ -11675,16 +11892,14 @@ window.addEventListener('keydown', (e) => {
 
      Return takes the filled primary action wherever focus happens to be — the
      colour, not the focus position, is the dialog's statement of what it will
-     do — and that held for every question until one of them destroyed
-     something. A dialog that arrives unbidden mid-keystroke and answers a
-     reflex Return by emptying the Trash is the mistake worth breaking the rule
-     for, so on a destructive question Return presses whichever button is
-     focused, which `ask` has put on Cancel. */
+     do, and that holds for the destructive questions too. Answering "Move to
+     Trash?" with anything but the trash on Return is the more surprising of
+     the two mistakes; esc is right there and unambiguous. */
   if (!el.ask.hidden) {
     if (e.key === 'Escape') { e.preventDefault(); answer(false) }
     if (e.key === 'Enter') {
       e.preventDefault()
-      answer(armed() ? true : document.activeElement === el.askGo)
+      answer(true)
     }
     if (e.key === 'Tab') {
       e.preventDefault()

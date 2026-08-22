@@ -191,6 +191,36 @@ async function checks () {
     assert.ok(JSON.stringify(hits).includes('Seed.md'))
   })
 
+  /* A `.docx` is a zip: nothing in it is text on disk, so a search that only
+     reads files finds nothing in one. This is the whole reason there is a
+     second index for them — a document the vault lists, opens and edits but
+     cannot find reads as "not in the vault" when it means "never looked". */
+  await check('search finds a word inside a Word document', async () => {
+    const { blankDocxBuffer, readDocxBuffer, writeDocxBuffer } = require('../electron/docx')
+    const blank = blankDocxBuffer()
+    const read = readDocxBuffer(blank)
+    fs.writeFileSync(path.join(VAULT, 'Minutes.docx'), writeDocxBuffer(blank, {
+      stamp: read.stamp,
+      body: read.body,
+      after: read.after,
+      items: [{ p: { ppr: '', runs: [{ text: 'The quince harvest was discussed.' }] } }]
+    }))
+    /* The walk indexes what it finds. A file that appeared from outside the app
+       reaches the index when the watcher notices it, so this asks more than
+       once rather than assuming the first query is late enough. */
+    let hits = []
+    for (let tries = 0; tries < 20 && !hits.length; tries++) {
+      await call('vault:snapshot', null)
+      const found = await call('search:vault', 'quince', {})
+      hits = found.results || found
+      if (!hits.length) await new Promise((resolve) => setTimeout(resolve, 250))
+    }
+    assert.ok(JSON.stringify(hits).includes('Minutes.docx'), 'the Word document did not match')
+    const hit = hits.find((r) => r.path === 'Minutes.docx')
+    assert.equal(hit.kind, 'docx', 'it came back as some other kind of result')
+    assert.ok(/quince/.test(JSON.stringify(hit.hits)), 'no line of the document was quoted')
+  })
+
   await check('search finds nothing for a word nothing says', async () => {
     const found = await call('search:vault', 'zzzznotinthisvault', {})
     assert.equal((found.results || found).length, 0)

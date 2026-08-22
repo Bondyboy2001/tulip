@@ -69,6 +69,14 @@ const FILE_ICONS = {
               stroke-width="1.35"/>
              <path d="M6 5.4v2.2M6 11.2v2.2M6 17v2.2" stroke="#E8792B"
               stroke-width="1.5" stroke-linecap="round"/>`,
+  /* A Word document: a page with a W on it, in Word's own blue — the colour a
+     `.docx` is in every file manager the reader has already used, which is the
+     same reasoning the notebook's orange is chosen by. */
+  docx: `<path d="M6.4 2.6h6.6L19 8.6V20a1.6 1.6 0 0 1-1.6 1.6H6.4A1.6 1.6 0 0 1 4.8 20V4.2a1.6 1.6 0 0 1 1.6-1.6z"
+          fill="#2B579A"/>
+         <path d="M13 2.6 19 8.6h-4.4A1.6 1.6 0 0 1 13 7z" fill="#fff" fill-opacity=".38"/>
+         <path d="m7.6 11.6 1.3 5 1.6-3.6 1.6 3.6 1.3-5" fill="none" stroke="#fff"
+          stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round"/>`,
   /* A data file: a table, not a document. Separated from the note mark on
      purpose — a `.csv` opens in a grid and never in the editor. */
   data: `<rect x="3.1" y="4.6" width="17.8" height="14.8" rx="2.2" fill="none"

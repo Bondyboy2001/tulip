@@ -17,6 +17,16 @@
   "whiteboardExtension": ".excalidraw",
   "notebookExtension": ".ipynb",
 
+  "_docx_comment": [
+    "A Word document: read, drawn and written back. Not a format the vault",
+    "invents — a save splices the paragraphs that changed into the file Word",
+    "wrote and leaves the rest of its bytes alone — but a first-class kind all",
+    "the same, because a folder of research holds them and a file that only",
+    "offered `Open with default app` was a file missing from its own vault.",
+    "See electron/docx.js for the read and the write, src/docx.js for the page."
+  ],
+  "docxExtension": ".docx",
+
   "_code_comment": [
     "Source files: text the vault opens and edits, but does not read as prose.",
     "This list only says *that* a file is source. Which language it is written",

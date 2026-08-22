@@ -50,6 +50,16 @@ contextBridge.exposeInMainWorld('tulip', {
     openDefault: (p) => ipcRenderer.invoke('file:open-default', p),
     import: (destDir, sources) => ipcRenderer.invoke('file:import', destDir, sources)
   },
+  /* A Word document, read into blocks. One call: the main process owns the
+     zip, the XML and the pictures inside it, and the renderer is handed a
+     document — see electron/docx.js. */
+  docx: {
+    read: (p) => ipcRenderer.invoke('docx:read', p),
+    /* The paragraphs that changed, and where the rest of the file still is.
+       Answers with the document as it now reads — a save moves every offset in
+       it, so the page is drawn again from what actually landed. */
+    write: (p, edit) => ipcRenderer.invoke('docx:write', p, edit)
+  },
   fileTags: {
     get: (p) => ipcRenderer.invoke('file-tags:get', p),
     set: (p, tags) => ipcRenderer.invoke('file-tags:set', p, tags)
@@ -168,6 +178,9 @@ contextBridge.exposeInMainWorld('tulip', {
     interrupt: (path) => ipcRenderer.invoke('kernel:interrupt', path),
     restart: (path) => ipcRenderer.invoke('kernel:restart', path),
     shutdown: (path) => ipcRenderer.invoke('kernel:shutdown', path),
+    /* The notebook moved. A kernel is filed under its notebook's path, and one
+       left under the old name is a process nothing can name again. */
+    rename: (from, to) => ipcRenderer.invoke('kernel:rename', from, to),
     specs: () => ipcRenderer.invoke('kernel:specs'),
     /* The answer to an `input()`, and the two questions a cell asks about the
        code in it rather than about running it. These three are round trips

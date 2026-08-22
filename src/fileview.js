@@ -14,12 +14,14 @@
    - anything else is described — what it is, how big, when it changed — and
      handed to the desktop, which already has something that can open it.
 
-   What it never does is guess. A `.docx` is not unpacked here and a `.zip` is
-   not listed: a viewer that half-shows a file is worse than one that says
-   plainly it cannot show this one and offers the two buttons that can. Text is
-   not here at all — the renderer probes for that at the door and gives it to
-   the editor, because a file that reads as text is a file worth editing
-   whatever it is called.
+   What it never does is guess. A `.zip` is not listed and a `.key` is not
+   unpacked: a viewer that half-shows a file is worse than one that says
+   plainly it cannot show this one and offers the two buttons that can. A
+   `.docx` is no longer among them — it has a viewer and an editor of its own
+   now, in src/docx.js, which is what having a view of a format rather than a
+   guess at it looks like. Text is not here at all — the renderer probes for that at the
+   door and gives it to the editor, because a file that reads as text is a file
+   worth editing whatever it is called.
    ================================================================== */
 
 import { revealLabel } from './platform.js'

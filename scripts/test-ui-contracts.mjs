@@ -197,14 +197,53 @@ if (source) {
   assert.match(renderer, /case 'new-source': openOverlay\('new-source', \{ dir \}\)/)
   assert.match(renderer, /case 'new-csv': createSource\(dir, '\.csv'\)/)
   assert.match(renderer, /case 'new-notebook': createSource\(dir, '\.ipynb'\)/)
-  /* A table and a notebook are each read and edited in one pane, so the view
-     switch is on the bar while either is open and the viewer is told which of
-     the two it is in. Without the second and third lines the control would
-     move and the document would not. */
+  /* And a Word document, which the vault now writes as well as reads — one
+     blank package, made in main because it is a zip rather than a string. */
+  assert.match(renderer, /case 'new-docx': createSource\(dir, '\.docx'\)/)
+  assert.match(main, /blankDocxBuffer/)
+  /* A table, a notebook and a Word document are each read and edited in one
+     pane, so the view switch is on the bar while any of them is open and the
+     viewer is told which of the two views it is in. Without the lines that
+     follow, the control would move and the document would not. */
   assert.match(renderer,
-    /el\.viewSwitch\.hidden = \(!text && !dataOpen && !notebookOpen\) \|\| sourceOnly/)
+    /el\.viewSwitch\.hidden = \(!text && !dataOpen && !notebookOpen && !docxOpen\) \|\| sourceOnly/)
   assert.match(renderer, /if \(dataOpen\) dataInstance\?\.setReadonly\(state\.view === 'read'\)/)
   assert.match(renderer, /if \(notebookOpen\) notebookInstance\?\.setReadonly\(state\.view === 'read'\)/)
+  assert.match(renderer,
+    /if \(docxOpen\) docxInstance\?\.setReadonly\(state\.view === 'read' \|\| lockedHere\(\)\)/)
+  /* A viewer holds the path it writes back to, and a rename or a move has to
+     reach it. All three are asserted because all three were broken: the next
+     autosave after a rename wrote to a file that no longer existed. The
+     notebook's kernel is filed under the same path and moves with it. */
+  for (const call of [
+    /docxInstance\?\.retarget\(path\)/, /dataInstance\?\.retarget\(path\)/,
+    /notebookInstance\?\.retarget\(path\)/, /docxInstance\?\.retarget\(followed\.to\)/,
+    /dataInstance\?\.retarget\(followed\.to\)/, /notebookInstance\?\.retarget\(followed\.to\)/
+  ]) assert.match(renderer, call)
+  assert.match(main, /ipcMain\.handle\('kernel:rename'/)
+  /* ⌘Z arrives as a menu command, and `stepHistory` hands it to whichever
+     history the reader is looking at. Without this branch it fell through to
+     the editor, which holds nothing while a viewed kind is on screen — so a
+     mistyped word in a Word document could not be taken back at all. */
+  assert.match(renderer, /if \(viewingDocx\(\)\) \{\s*\n\s*const stepped = docxInstance\?\.history\(redo\)/)
+  /* The two structures a Word document can gain, and the four ways a table it
+     has can be changed. All eight are palette rows and nothing else, so a
+     missing case here is a row that silently does nothing. */
+  for (const id of ['docx-bullets', 'docx-numbers', 'docx-no-list', 'docx-table',
+    'docx-row', 'docx-column', 'docx-delete-row', 'docx-delete-column']) {
+    assert.match(renderer, new RegExp(`case '${id}': docxInstance\\?\\.`))
+    assert.match(renderer, new RegExp(`id: '${id}'`))
+  }
+  /* The placeholder the page writes and the save resolves. Written out in both
+     files — there is no import between a renderer module and a main one — so
+     this is the only place the two spellings can be compared. */
+  const docxMain = read('electron', 'docx.js')
+  // Bundled into the renderer when this runs against a built tree.
+  const docxPage = source ? read('src', 'docx.js') : renderer
+  for (const placeholder of ['TULIP_BULLET', 'TULIP_ORDERED']) {
+    assert.ok(docxMain.includes(placeholder) && docxPage.includes(placeholder),
+      `${placeholder} is not spelled the same in both halves of the Word document code`)
+  }
   /* A notebook's run commands are the only things in the app that need a live
      kernel, and they were an API nothing called: `mountNotebook` returned a
      `run` object and no menu, palette or key ever reached it. All three legs
@@ -415,24 +454,13 @@ if (source) {
   assert.match(baseStyles, /pre\.code-text\s*\{[\s\S]{0,100}padding:\s*18px 20px 20px 4px/)
   assert.match(html, /<aside class="sidebar"[^>]*>[\s\S]{0,180}id="app-version"/)
   assert.match(html, /<div class="titlebar"><\/div>/)
-  /* Return takes the filled action wherever focus is — EXCEPT on a question
-     that destroys something, where it presses whatever is focused and `ask`
-     has focused Cancel.
-
-     This reverses what was pinned here before, deliberately. The old contract
-     said Return always answers yes, on the reasoning that the colour and not
-     the focus ring is the dialog's statement of intent. That holds right up
-     until the action is "Move to Trash": these dialogs arrive unbidden and
-     mid-keystroke, a reflex Return is the whole of the mistake, and every
-     platform's destructive alert lands on Cancel for exactly that reason. The
-     filled styling stays on the destructive button either way. */
-  assert.match(ask, /if \(danger\) el\.askCancel\.focus\(\)/)
-  assert.match(ask, /else el\.askGo\.focus\(\)/)
-  assert.match(ask, /const armed = \(\) => !asking\?\.danger/)
-  assert.match(renderer, /answer\(armed\(\) \? true : document\.activeElement === el\.askGo\)/)
-  // And the questions that destroy something say so, or none of the above runs.
-  assert.match(renderer, /go: 'Move to Trash',\s*\n\s*danger: true/)
-  assert.match(renderer, /go: 'Replace all',\s*\n\s*danger: true/)
+  /* Return takes the filled action wherever focus is, destructive or not. The
+     colour and not the focus ring is the dialog's statement of intent, and a
+     "Move to Trash?" that answers Return with "no" surprises more than it
+     saves — esc is the way back, and it is one key away. */
+  assert.match(ask, /el\.askGo\.focus\(\)/)
+  assert.doesNotMatch(ask, /danger/)
+  assert.match(renderer, /if \(e\.key === 'Enter'\) \{\s*\n\s*e\.preventDefault\(\)\s*\n\s*answer\(true\)/)
   /* The dormant horizontal scroll is still reset when wrapping is turned off —
      but only on that transition. Writing `scrollLeft` forces layout on the
      element written to, so doing it for every code block on every applyConfig

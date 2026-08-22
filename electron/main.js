@@ -183,6 +183,14 @@ const isWhiteboard = (p) => path.extname(p).toLowerCase() === WHITEBOARD_EXT
 const NOTEBOOK_EXT = VAULT_CONTRACT.notebookExtension
 const isNotebook = (p) => path.extname(String(p || '')).toLowerCase() === NOTEBOOK_EXT
 
+/* A Word document. Read, shown and written back — but not the way a note is:
+   the vault does not own the format, so a save splices into the file Word
+   wrote rather than serialising this app's model over it. See electron/docx.js.
+   Named here so the tree can give it its own icon and label instead of listing
+   it among the files the vault has no view of. */
+const DOCX_EXT = VAULT_CONTRACT.docxExtension
+const isDocx = (p) => path.extname(String(p || '')).toLowerCase() === DOCX_EXT
+
 /* Source files and data files. Neither is a note — a `.py` is text the vault
    edits but never reads as prose, and a `.csv` is a table rather than a
    document at all — but both are text on disk that the vault owns, so unlike a
@@ -259,7 +267,7 @@ const showAs = (name) => {
 const isSnapshotFile = (p) => {
   const extension = path.extname(String(p || '')).toLowerCase()
   return MD_EXT.has(extension) || ASSET_EXT.has(extension) ||
-    isTex(p) || isPdf(p) || isReviewedDocument(p)
+    isTex(p) || isPdf(p) || isDocx(p) || isReviewedDocument(p)
 }
 
 /* Source and data files are here for one bucket only: `documents`, the list the
@@ -715,6 +723,12 @@ function freeAttachmentName (dir, base, ext) {
  */
 const index = new Map()   // rel path -> { name, text, mtime, size }
 const whiteboardIndex = new Map() // rel path -> extracted text, never image data
+/* Word documents, on the same terms as whiteboards: a zip is not text, so what
+   is held here is what electron/docx.js read out of one. Without it a `.docx`
+   was a file the vault listed, opened and edited but could not find — and a
+   search that silently skips a whole kind of document reads as "not in the
+   vault" when it means "never looked". */
+const docxIndex = new Map()       // rel path -> extracted text, never the zip
 
 /* A note big enough to be a paste of a log file would cost more to hold than
    the search is worth; it is indexed as empty rather than skipped, so it still
@@ -743,6 +757,11 @@ const MAX_VERSIONED_BYTES = 256 * 1024
 
 const MAX_INDEX_BYTES = 4 * 1024 * 1024
 const MAX_WHITEBOARD_INDEX_BYTES = 32 * 1024 * 1024
+/* A Word document has to be unzipped and parsed before there is any text to
+   index, so the cap is lower than a whiteboard's: past this the file is listed,
+   opened and edited as usual, and search reports it as one it could not read
+   rather than spending a second of every vault walk on it. */
+const MAX_DOCX_INDEX_BYTES = 8 * 1024 * 1024
 
 let indexDirty = true
 let syncing = null
@@ -797,7 +816,13 @@ let indexGeneration = 0
  */
 async function syncIndex () {
   indexGeneration++
-  if (!vaultPath) { index.clear(); whiteboardIndex.clear(); forgetLinkTables(); return }
+  if (!vaultPath) {
+    index.clear()
+    whiteboardIndex.clear()
+    docxIndex.clear()
+    forgetLinkTables()
+    return
+  }
   indexDirty = false
 
   /* Before the walk, and only ever on the first sync of a vault: what the last
@@ -806,7 +831,7 @@ async function syncIndex () {
      it claims to be — see the loop. */
   await seedIndexFromCache()
 
-  const { notes, whiteboards = [] } = await getVaultSnapshot()
+  const { notes, whiteboards = [], docx = [] } = await getVaultSnapshot()
 
   const seen = new Set()
   await mapLimit(notes, WALK_LIMIT, async (abs) => {
@@ -857,6 +882,29 @@ async function syncIndex () {
   for (const key of [...whiteboardIndex.keys()]) {
     if (!seenWhiteboards.has(key)) whiteboardIndex.delete(key)
   }
+
+  /* Word documents are unzipped and parsed to be indexed, which is dearer than
+     reading a note — so it happens only when the file's mtime or size has
+     moved, exactly as it does for everything else here. A document too big to
+     be worth parsing on a walk is held with empty text rather than skipped, so
+     that a search can say it went unread instead of quietly leaving it out. */
+  const seenDocx = new Set()
+  await mapLimit(docx, WALK_LIMIT, async (abs) => {
+    const key = rel(abs)
+    seenDocx.add(key)
+    let stat
+    try { stat = await fs.stat(abs) } catch { return }
+    const cached = docxIndex.get(key)
+    if (cached && cached.mtime === stat.mtimeMs && cached.size === stat.size) return
+    docxIndex.set(key, {
+      name: path.basename(abs, path.extname(abs)),
+      text: stat.size <= MAX_DOCX_INDEX_BYTES ? await docxTextOf(abs) : '',
+      mtime: stat.mtimeMs,
+      size: stat.size,
+      kind: 'docx'
+    })
+  })
+  for (const key of [...docxIndex.keys()]) if (!seenDocx.has(key)) docxIndex.delete(key)
 
   // Which notes exist may have changed, and that is the whole of what the link
   // tables are built from.
@@ -1010,6 +1058,38 @@ function touchIndex (absPath, text, stamp) {
   }
 }
 
+/** A Word document's words, or '' where it cannot be read. A file that will
+ *  not parse is not an error here: it is a document search cannot see into,
+ *  and the walk carries on. */
+async function docxTextOf (abs) {
+  try {
+    const { readDocxBuffer, docxText } = require('./docx')
+    return docxText(readDocxBuffer(await fs.readFile(abs)).blocks)
+  } catch {
+    return ''
+  }
+}
+
+/** The same, for a document this app has just written: search should find what
+ *  was typed a moment ago without waiting for the next walk of the vault. */
+function touchDocxIndex (absPath, blocks, stamp) {
+  try {
+    const { docxText } = require('./docx')
+    const stat = stamp || fsSync.statSync(absPath)
+    indexGeneration++
+    documentsChanged()
+    docxIndex.set(rel(absPath), {
+      name: path.basename(absPath, path.extname(absPath)),
+      text: stat.size <= MAX_DOCX_INDEX_BYTES ? docxText(blocks) : '',
+      mtime: stat.mtimeMs,
+      size: stat.size,
+      kind: 'docx'
+    })
+  } catch {
+    indexDirty = true
+  }
+}
+
 function touchWhiteboardIndex (absPath, source, stamp, extractedText = null) {
   try {
     const stat = stamp || fsSync.statSync(absPath)
@@ -1134,6 +1214,11 @@ async function scanVaultDirectory (dir, includeInTree = true) {
     } else if (includeInTree && isNotebook(entry.name)) {
       node = {
         type: 'file', kind: 'notebook',
+        name: path.basename(entry.name, path.extname(entry.name)), path: rel(abs)
+      }
+    } else if (includeInTree && isDocx(entry.name)) {
+      node = {
+        type: 'file', kind: 'docx',
         name: path.basename(entry.name, path.extname(entry.name)), path: rel(abs)
       }
     } else if (includeInTree && (isCode(entry.name) || isData(entry.name))) {
@@ -1266,6 +1351,7 @@ async function getVaultSnapshot ({ fresh = false } = {}) {
       tex: files.filter(isTex),
       pdfs: files.filter(isPdf).map(rel),
       whiteboards: files.filter(isWhiteboard),
+      docx: files.filter(isDocx),
       documents: files.filter(isReviewedDocument)
     }
     snapshot.revision = snapshotRevision(snapshot)
@@ -1922,6 +2008,7 @@ async function openVault (dir) {
   await migrateAttachments(dir).catch(() => {})
   index.clear()
   whiteboardIndex.clear()
+  docxIndex.clear()
   documentSnapshotCache.clear()
   forgetLinkTables()
   /* A different vault means a different cache file, and the index just emptied
@@ -3086,6 +3173,70 @@ ipcMain.handle('file:info', async (_e, p) => {
 const SNIFF_BYTES = 8192
 
 /**
+ * A Word document, read into the blocks the renderer draws.
+ *
+ * The whole file at once rather than page by page: a `.docx` is a zip, and a
+ * zip is read from its end, so there is no cheaper half of one to fetch first.
+ * The parsing is electron/docx.js's — it takes bytes and knows nothing about
+ * Electron, which is what lets scripts/test-docx.cjs read a document without a
+ * window. Held nowhere afterwards: the reply is the document, and a second look
+ * at the same file is a second read, which is what makes a document edited in
+ * Word and looked at again show the edit.
+ */
+ipcMain.handle('docx:read', async (_e, p) => {
+  try {
+    const abs = await realSafePath(p)
+    const stat = await fs.stat(abs)
+    if (!stat.isFile()) return { ok: false, error: 'That is not a file.' }
+    const { readDocxBuffer } = require('./docx')
+    const doc = readDocxBuffer(await fs.readFile(abs))
+    return { ok: true, ...doc, size: stat.size, modified: stat.mtimeMs }
+  } catch (err) {
+    return { ok: false, error: err.message }
+  }
+})
+
+/**
+ * A Word document written back, and read again.
+ *
+ * The edit is a list of items rather than a document — see the account at the
+ * top of electron/docx.js. The file on disk is what it is spliced into, which
+ * is why it is read here and not sent from the renderer: what has to be
+ * preserved is the bytes Word wrote, and a round trip through a window is a
+ * round trip through this app's model of them.
+ *
+ * The reply carries the document as it now stands. The offsets the renderer
+ * holds are offsets into the file that was read, and this write has moved them
+ * all; handing back the new reading is what keeps the next save spliceable.
+ */
+ipcMain.handle('docx:write', async (_e, p, edit) => {
+  try {
+    const abs = await realSafePath(p)
+    const { readDocxBuffer, writeDocxBuffer } = require('./docx')
+    const made = writeDocxBuffer(await fs.readFile(abs), edit)
+    await writeAtomic(abs, made, { durable: readConfig().durability === 'full' })
+    documentsChanged()
+    const stat = await fs.stat(abs).catch(() => null)
+    const document = readDocxBuffer(made)
+    /* Search should find what was typed a moment ago rather than waiting for
+       the next walk of the vault — the same courtesy `touchIndex` does a note
+       on every autosave. */
+    touchDocxIndex(abs, document.blocks, stat)
+    return {
+      ok: true,
+      document: {
+        ok: true,
+        ...document,
+        size: stat?.size ?? made.length,
+        modified: stat?.mtimeMs ?? Date.now()
+      }
+    }
+  } catch (err) {
+    return { ok: false, error: err.message }
+  }
+})
+
+/**
  * Whether a file of no known kind is text, and how big it is.
  *
  * Asked at the door in the renderer, for the files the vault has no view of its
@@ -3131,9 +3282,10 @@ ipcMain.handle('file:probe', async (_e, p) => {
 })
 
 /** A file handed to whatever the desktop opens it with. The one honest answer
- *  for a `.docx`: Tulip cannot show it, and the machine already has something
- *  that can. Returns the reason when the OS refuses, which is what the viewer
- *  puts on screen. */
+ *  for a `.zip` or a `.key`: Tulip cannot show it, and the machine already has
+ *  something that can — and for a `.docx`, which it can show but not edit, it
+ *  is the way to the program that owns the format. Returns the reason when the
+ *  OS refuses, which is what the viewer puts on screen. */
 ipcMain.handle('file:open-default', async (_e, p) => {
   try {
     const problem = await shell.openPath(await realSafePath(p))
@@ -3410,8 +3562,25 @@ ipcMain.handle('table:create', async (_e, dir, name) => {
  * than the feature needs. */
 ipcMain.handle('source:create', async (_e, dir, name, ext) => {
   const wanted = String(ext || '').toLowerCase()
-  if (!CODE_EXT.has(wanted) && !DATA_EXT.has(wanted) && wanted !== NOTEBOOK_EXT) {
+  if (!CODE_EXT.has(wanted) && !DATA_EXT.has(wanted) &&
+    wanted !== NOTEBOOK_EXT && wanted !== DOCX_EXT) {
     throw new Error('That is not a file type Tulip creates.')
+  }
+
+  /* A Word document is the one kind here that is not text at all, so it is
+     written as bytes rather than seeded with a string. What it starts as is the
+     smallest package Word opens without offering to repair it — including a
+     stylesheet, so that a heading applied in Tulip is a heading when the file
+     is opened in Word. See electron/docx.js. */
+  if (wanted === DOCX_EXT) {
+    const { blankDocxBuffer } = require('./docx')
+    const made = freeName(await realSafePath(dir || ''), name || 'Untitled', wanted)
+    await fs.mkdir(path.dirname(made), { recursive: true })
+    noteSelfWrite(made)
+    await fs.writeFile(made, blankDocxBuffer())
+    trust?.creationTime(rel(made), Date.now())
+    invalidateVaultSnapshot()
+    return rel(made)
   }
   const target = freeName(await realSafePath(dir || ''), name || 'Untitled', wanted)
   await fs.mkdir(path.dirname(target), { recursive: true })
@@ -4372,10 +4541,15 @@ async function searchVault (raw, opts = {}) {
     ? (lastSearch.whiteboardKeys || [])
         .map((key) => [key, whiteboardIndex.get(key)]).filter(([, entry]) => entry)
     : whiteboardIndex
+  const docxLooking = narrowed
+    ? (lastSearch.docxKeys || [])
+        .map((key) => [key, docxIndex.get(key)]).filter(([, entry]) => entry)
+    : docxIndex
 
   // What this answer will be narrowed from next, gathered as it is built.
   const keys = []
   const whiteboardKeys = []
+  const docxKeys = []
 
   for (const [key, entry] of looking) {
     const facts = { kind: 'note', fileTags: assignedTags[key] || [] }
@@ -4446,6 +4620,38 @@ async function searchVault (raw, opts = {}) {
     })
   }
 
+  /* Word documents, indexed from the text electron/docx.js reads out of the
+     zip — never the zip itself, which is compressed bytes and a stylesheet.
+     Everything else is a note's rules: the same filters, the same scoring, the
+     same report when one was too large to read. */
+  for (const [key, entry] of docxLooking) {
+    const facts = { kind: entry.kind, fileTags: assignedTags[key] || [] }
+    if (!narrowed && !passesFilters(key, entry, q.filters, facts)) continue
+    if (!q.terms.length) {
+      docxKeys.push(key)
+      results.push({
+        path: key, name: entry.name, kind: 'docx',
+        hits: hitLines(entry.text, [0], 1), total: 0, score: 0
+      })
+      continue
+    }
+    if (entry.size > MAX_DOCX_INDEX_BYTES) {
+      unsearched++
+      if (unsearchedPaths.length < 20) unsearchedPaths.push(key)
+      docxKeys.push(key)
+      continue
+    }
+    const found = findSpots(entry.text, q.terms)
+    if (!found) continue
+    const hits = hitLines(entry.text, found.spots)
+    const named = q.terms.filter((term) => term.has.test(entry.name)).length
+    docxKeys.push(key)
+    results.push({
+      path: key, name: entry.name, kind: 'docx', hits,
+      total: found.total, score: found.total + named * 8
+    })
+  }
+
   /* PDFs are narrowed on one more condition than notes are. `narrowsFrom` asks
      about `indexGeneration`, which a PDF appearing or being re-extracted does
      not move — it is not in the Markdown index — so `documentsGeneration`, which
@@ -4494,6 +4700,7 @@ async function searchVault (raw, opts = {}) {
     opts: { regex: !!opts.regex, word: !!opts.word, caseSensitive: !!opts.caseSensitive },
     keys,
     whiteboardKeys,
+    docxKeys,
     pdfKeys: pdfAnswer.keys,
     /* The state of the vault the PDF pass was run against, not the state it
        finished in: a PDF that changed while it ran is one this list may already
@@ -6926,6 +7133,20 @@ ipcMain.handle('kernel:restart', async (_e, notebookPath) => {
 ipcMain.handle('kernel:shutdown', async (_e, notebookPath) => {
   kernelOwners.delete(notebookPath)
   return kernels ? kernels.shutdown(notebookPath) : false
+})
+
+/* The notebook was renamed or moved. Its kernel is filed under the path it had
+   — as is the window that owns it — so both are re-keyed here rather than left
+   naming a file that is gone. Answered even when nothing was running: the
+   renderer calls this for every rename of an `.ipynb`, and "there was no
+   kernel" is the ordinary case. */
+ipcMain.handle('kernel:rename', async (_e, from, to) => {
+  const owner = kernelOwners.get(from)
+  if (owner) {
+    kernelOwners.delete(from)
+    kernelOwners.set(to, owner)
+  }
+  return kernels ? kernels.rename(from, to) : false
 })
 
 ipcMain.handle('kernel:specs', async () => {

@@ -350,6 +350,14 @@
              exactly as it does for the grid. -->
         <div class="nb" id="notebook" hidden></div>
 
+        <!-- A Word document, shown as the document it is rather than as the
+             zip of XML it is stored as. Read in the main process by
+             electron/docx.js and drawn by src/docx.js, which owns everything
+             inside; Tulip owns the tab, the file and the saving, exactly as it
+             does for the grid. Editable in the Editing view and not in the
+             Reading one. Focusable because it scrolls. -->
+        <div class="docx" id="docx" tabindex="-1" hidden></div>
+
         <!-- Everything else the vault holds: a picture, a recording, a file
              the desktop opens and Tulip does not. Built by src/fileview.js.
              Focusable because a tall picture scrolls. -->

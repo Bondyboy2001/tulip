@@ -48,6 +48,7 @@ const NOT_A_TEST = new Set([
    away, and it runs in the pool with the rest. */
 const WINDOWED = new Set([
   'test:agent-diff',
+  'test:docx-view',
   'test:grid',
   'test:notebook-view',
   'test:table'

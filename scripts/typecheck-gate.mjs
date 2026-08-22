@@ -114,7 +114,7 @@ const CLEAN = [
    lower the ceiling to match in the same commit that earned the drop; the
    gate says so rather than doing it, because a self-lowering ceiling would
    also quietly absorb a fix that later regresses. */
-const CEILING = 2610
+const CEILING = 2445
 
 /** tsc exits nonzero when it has findings, which is the normal case here. */
 function runTsc () {

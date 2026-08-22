@@ -920,6 +920,7 @@ export function mountCsv ({
   frame.append(bar, table, menu, filterPanel)
   host.replaceChildren(frame)
 
+  /** @type {any} */
   let current = null          // { path, delimiter, newline }
   let rows = []               // the body: every row after the header
   let header = []
@@ -3669,6 +3670,23 @@ export function mountCsv ({
     },
 
     focus () { scroller.focus({ preventScroll: true }) },
+
+    /**
+     * The file moved — it was renamed, or dragged into another folder.
+     *
+     * The grid holds the path it writes back to, and nothing else was telling
+     * it: renaming a table mid-edit left the next autosave writing to a name
+     * that no longer exists, which is a failed write and a lost edit. The
+     * column widths are filed against the path too, so they move with it.
+     */
+    retarget (path) {
+      if (!current || !path || path === current.path) return
+      current.path = path
+      // The widths are filed against the path, so they move with it — a table
+      // renamed would otherwise open next time measured from scratch.
+      rememberWidths()
+    },
+
     place: () => ({ top: scroller.scrollTop, left: scroller.scrollLeft }),
     dirty: () => dirty,
 
