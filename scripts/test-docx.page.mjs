@@ -135,10 +135,6 @@ export async function run () {
         : { ok: false, error: 'That Word document could not be read.' }),
       write: async (path, edit) => { writes.push({ path, edit }); return answerWith(edit) }
     },
-    file: {
-      openDefault: async (path) => { opened.push(['default', path]); return { ok: true } },
-      reveal: async (path) => { opened.push(['reveal', path]) }
-    },
     openExternal: (url) => opened.push(['external', url]),
     ask: async (question) => { asked.push(question); return asked.length < 2 },
     onDirty: (isDirty) => { dirty = isDirty },
@@ -327,6 +323,18 @@ export async function run () {
   /* The file was renamed while it was open. The viewer writes back to the path
      it was given, so it has to be told — otherwise the next save goes to a name
      that is no longer there. */
+  window.__stage = 'what the bar shows'
+  const heading = [...host.querySelectorAll('#host .docx-h')].at(-1)
+  caret(heading, 1)
+  result.formatHeading = docx.format()
+  const bolded = host.querySelector('#host .is-bold')
+  caret(bolded, 1)
+  result.formatMarks = docx.format().marks
+  caret(host.querySelector('#host .docx-li'), 1)
+  result.formatList = docx.format().list
+  caret(host.querySelector('#host td .docx-p') || host.querySelector('#host .docx-p'), 0)
+  result.formatTable = docx.format().table
+
   window.__stage = 'a rename'
   docx.retarget('Notes/Field notes renamed.docx')
   caret(host.querySelector('#host .docx-p'), 1)
@@ -334,6 +342,7 @@ export async function run () {
   await settle()
   await docx.save({ flush: true })
   result.wroteTo = writes.at(-1)?.path
+  result.noFooter = !host.querySelector('.docx-actions')
 
   /* --------------------------------------------------- lists and tables */
 
@@ -346,8 +355,10 @@ export async function run () {
   result.listedJoined = madeItem?.parentElement === host.querySelector('#host ul.docx-list')
 
   window.__stage = 'and taking it out again'
+  /* The same button again, not a different one: asking for the list you are
+     already in is asking to leave it, the way it is in Word. */
   caret(madeItem, 2)
-  await docx.setList(null)
+  await docx.setList('bullet')
   const backToPlain = [...host.querySelectorAll('#host .docx-p')].find((p) => p.textContent.startsWith('quo'))
   result.unlisted = Boolean(backToPlain) &&
     !backToPlain.dataset.li && backToPlain.parentElement?.classList.contains('docx-page')
@@ -426,10 +437,6 @@ export async function run () {
   }
   result.refused = refused
   result.stillDrawn = host.querySelectorAll('.docx-h').length
-
-  docx.setReadonly(true)
-  host.querySelector('.docx-actions .is-primary').click()
-  await settle()
 
   docx.close()
   result.closedTo = host.childElementCount

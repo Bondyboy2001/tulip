@@ -9938,17 +9938,20 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 
 /* -------------------------------------------------- word documents
 
-   The pane a `.docx` opens into. One column of prose, set the way the reading
-   view sets a note: the document's own fonts, colours and margins are Word's
-   answer to a page of paper, and reproducing them would put a second typeface
-   and a second measure inside an app that has already chosen both. What is
-   kept is what the document *says* — the hierarchy, the emphasis, the lists,
-   the tables and the pictures. See the account at the top of src/docx.js. */
+   The pane a `.docx` opens into, and the bar it is edited from.
+
+   Drawn as a page: a sheet of paper on a darker ground, with the margins Word
+   itself leaves. That is the one piece of a Word document's own layout worth
+   reproducing — it is what tells a reader at a glance that this is somebody
+   else's document and not a note — and everything else about the way it is set
+   is Tulip's: its type, its measure, its colours. Reproducing the document's
+   own fonts and sizes would make a vault read like a folder of downloads, and
+   would promise a fidelity a save cannot keep. See src/docx.js. */
 .docx {
   position: absolute;
   inset: 0;
   overflow: auto;
-  padding: 40px 0 0;
+  padding: 28px 24px 60px;
   background: var(--sunk);
   font-family: var(--font-body);
   font-size: 17px;
@@ -9958,11 +9961,25 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 }
 .docx[hidden] { display: none; }
 
+/* The sheet. `--measure` is the app's own reading width, and the page is that
+   plus the margins — so a Word document and a note set the same number of
+   words across a line, whatever the window is doing. */
 .docx-page {
-  max-width: min(var(--measure), 100%);
+  max-width: min(calc(var(--measure) + 128px), 100%);
   margin-inline: auto;
-  padding: 0 24px 64px;
+  padding: 64px;
+  border: 1px solid var(--line-soft);
+  border-radius: 3px;
+  background: var(--paper);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.10), 0 8px 24px rgb(0 0 0 / 0.06);
+  /* A document ends where its text ends; a page does not. The minimum is what
+     keeps an empty file looking like a sheet rather than a strip. */
+  min-height: 420px;
 }
+.docx-page:focus-visible { outline: none; }
+/* Something has to say the page takes typing. A caret alone does not, and the
+   app's own accent is what says "this is the live surface" everywhere else. */
+.docx.is-editing .docx-page { border-color: color-mix(in srgb, var(--accent) 26%, var(--line)); }
 
 .docx-p { margin: 0 0 0.9em; overflow-wrap: anywhere; }
 /* Word's own tab stops are a page layout Tulip is not reproducing; what a tab
@@ -10022,39 +10039,97 @@ h4.docx-h, h5.docx-h, h6.docx-h { font-size: 1.05em; }
   max-width: 100%;
   height: auto;
   margin: 0.4em 0;
-  border-radius: 6px;
+  border-radius: 2px;
 }
 
 /* A table is as wide as its author made it, so it scrolls inside its own frame
-   rather than pushing the column sideways. */
+   rather than pushing the page sideways. */
 .docx-table-frame { margin: 0 0 1.1em; overflow-x: auto; }
 .docx-table {
   border-collapse: collapse;
   font-size: 15px;
   background: var(--paper);
+  /* Word's own default: a table spans the text it sits in. A narrower one is
+     still narrower where its author said so — this is a floor, not a width —
+     but a table of empty cells is a grid rather than three thin slots. */
+  min-width: 100%;
 }
 .docx-table th, .docx-table td {
   border: 1px solid var(--line);
   padding: 6px 10px;
   vertical-align: top;
   text-align: left;
+  /* A cell with nothing in it is still a cell you have to be able to click. */
+  min-width: 64px;
 }
 .docx-table th { background: var(--surface); font-weight: 600; }
 /* The paragraphs inside a cell are the cell; their document spacing would make
    every row twice the height it needs. */
 .docx-table .docx-p:last-child, .docx-table .docx-list:last-child { margin-bottom: 0; }
-
-/* The way to the program that owns the format, at the foot of the document
-   rather than over it: Tulip reads a `.docx` and does not write one, so the
-   editing happens in Word. */
-.docx-actions {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin-top: 32px;
-  padding-top: 18px;
-  border-top: 1px solid var(--line-soft);
+/* The cell the caret is in, marked the way a grid marks one — a table with no
+   sense of where you are in it is one you edit by counting. */
+.docx.is-editing .docx-table td:focus-within,
+.docx.is-editing .docx-table th:focus-within {
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent);
 }
+
+/* --------------------------------------------------------- the docx bar
+
+   The same strip the PDF's toolbar and the website's address bar live in, so
+   the three document kinds that carry chrome carry it in one place. */
+.docx-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 38px;
+  flex: none;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--paper);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  color: var(--muted);
+}
+.docx-bar[hidden] { display: none; }
+
+.docx-bar-group { display: flex; align-items: center; gap: 2px; }
+/* Pushed to the far end, away from the controls that change the document. */
+.docx-bar-group.is-end { margin-left: auto; }
+
+.docx-bar-divider {
+  width: 1px;
+  height: 18px;
+  background: var(--line-soft);
+  margin: 0 2px;
+}
+
+.docx-btn {
+  display: grid;
+  place-items: center;
+  min-width: 27px;
+  height: 25px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+  transition: background .12s, color .12s;
+}
+.docx-btn.is-wide { padding: 0 8px; }
+.docx-btn b, .docx-btn i, .docx-btn u, .docx-btn s { font-size: 13px; line-height: 1; }
+.docx-btn:hover { background: var(--hover); color: var(--ink); }
+.docx-btn:active { background: var(--selected); }
+.docx-btn[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+}
+/* A control that cannot do anything where the caret is — the row and column
+   buttons outside a table — is dimmed rather than taken away. */
+.docx-btn:disabled { opacity: .35; cursor: default; }
+.docx-btn:disabled:hover { background: none; color: var(--muted); }
+.docx-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 /* ------------------------------------------------------------- notebook
 

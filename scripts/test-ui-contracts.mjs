@@ -226,6 +226,21 @@ if (source) {
      the editor, which holds nothing while a viewed kind is on screen — so a
      mistyped word in a Word document could not be taken back at all. */
   assert.match(renderer, /if \(viewingDocx\(\)\) \{\s*\n\s*const stepped = docxInstance\?\.history\(redo\)/)
+  /* The bar a Word document is edited from, in the strip the PDF's toolbar and
+     the website's address bar live in. Every button is asserted against a
+     handler, because a control with no listener is a button that does nothing
+     and says nothing about it. */
+  assert.match(html, /<div class="docx-bar" id="docx-tools" hidden>/)
+  for (const id of ['docx-body', 'docx-h1', 'docx-h2', 'docx-h3', 'docx-bold', 'docx-italic',
+    'docx-underline', 'docx-strike', 'docx-bullets', 'docx-numbers', 'docx-table', 'docx-row',
+    'docx-column', 'docx-delete-row', 'docx-delete-column', 'docx-open-word']) {
+    assert.match(html, new RegExp(`id="${id}"`), `${id} is not in the toolbar`)
+  }
+  /* Pressed with `mousedown`, prevented: a click moves the focus off the page
+     and takes the selection these commands act on with it. */
+  assert.match(renderer, /el\[key\]\?\.addEventListener\('mousedown', \(event\) => \{\s*\n\s*event\.preventDefault\(\)/)
+  assert.match(renderer, /el\.docxTools\.hidden = !docxOpen \|\| state\.view === 'read' \|\| lockedHere\(\)/)
+
   /* The two structures a Word document can gain, and the four ways a table it
      has can be changed. All eight are palette rows and nothing else, so a
      missing case here is a row that silently does nothing. */

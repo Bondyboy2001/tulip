@@ -29,7 +29,6 @@
    ================================================================== */
 
 import { el } from './dom.js'
-import { revealLabel } from './platform.js'
 
 /* Word says nine heading levels and HTML has six. Anything deeper is still a
    heading — it is simply drawn at the smallest one. */
@@ -66,7 +65,6 @@ const signature = (runs) => runs.map((run) => (run.raw
  *
  * @param host          the pane this draws into
  * @param docx          `api.docx` — `read` and `write`
- * @param file          the renderer's `api.file`, for the two buttons
  * @param openExternal  a link out of the app, for the document's own links
  * @param ask           the app's own way of asking, for the one question
  *                      editing a Word document has to ask
@@ -76,7 +74,7 @@ const signature = (runs) => runs.map((run) => (run.raw
  * @param onWarn        told when something the reader asked for did not happen
  */
 export function mountDocx ({
-  host, docx, file, openExternal,
+  host, docx, openExternal,
   ask = /** @type {(q: any) => Promise<boolean>} */ (async () => true),
   onDirty = /** @type {(dirty: boolean) => void} */ (() => {}),
   onSaved = /** @type {() => void} */ (() => {}),
@@ -281,28 +279,6 @@ export function mountDocx ({
     }
   }
 
-  /** The two things that can always be done with a file Tulip did not invent. */
-  function actions (path) {
-    const row = el('div', 'docx-actions')
-
-    const open = el('button', 'fileview-btn is-primary', 'Open with default app')
-    open.type = 'button'
-    open.addEventListener('click', async () => {
-      // Word and Tulip must not both hold unsaved versions of one file, so what
-      // is on screen goes to disk before the file is handed over.
-      await saveFile({ flush: true }).catch(() => {})
-      const result = await file.openDefault(path)
-      if (!result?.ok) onWarn(result?.error || 'The system could not open that file.')
-    })
-
-    const reveal = el('button', 'fileview-btn', revealLabel())
-    reveal.type = 'button'
-    reveal.addEventListener('click', () => { file.reveal(path).catch(() => {}) })
-
-    row.append(open, reveal)
-    return row
-  }
-
   /* --------------------------------------------------- reading it back
 
      The other direction: the page as the runs and blocks a save is built from.
@@ -428,7 +404,6 @@ export function mountDocx ({
     }
     for (const kid of node.children) {
       const child = /** @type {any} */ (kid)
-      if (child.classList.contains('docx-actions')) continue
       if (child.classList.contains('docx-table-frame')) { take(tableItem(child), child); continue }
       if (child.tagName === 'UL' || child.tagName === 'OL') {
         for (const item of itemsIn(child, marks)) items.push(item)
@@ -750,6 +725,12 @@ export function mountDocx ({
     const node = hereParagraph()
     if (!node) return
     const inList = Boolean(node.dataset.li)
+    /* Asking for the list it is already in means asking to leave it, which is
+       what the same button does in Word and what the pressed state on the bar
+       has to mean for it to be worth showing. */
+    const already = inList &&
+      (node.parentElement?.tagName === 'OL' ? 'ordered' : 'bullet') === sort
+    if (already) sort = null
     if (!sort && !inList) return
     const where = offsetsIn(node)
 
@@ -921,7 +902,9 @@ export function mountDocx ({
     return {
       type: 'table',
       at: null,
-      props: `<w:tblPr><w:tblW w:w="0" w:type="auto"/><w:tblBorders>${border}</w:tblBorders></w:tblPr>` +
+      /* Across the text, which is what Word's own Insert Table does — a table
+         sized to its contents would open in Word as three thin slots. */
+      props: `<w:tblPr><w:tblW w:w="5000" w:type="pct"/><w:tblBorders>${border}</w:tblBorders></w:tblPr>` +
         `<w:tblGrid>${grid}</w:tblGrid>`,
       rows: Array.from({ length: rows }, (_, r) => ({
         head: r === 0,
@@ -1132,10 +1115,7 @@ export function mountDocx ({
 
     page = el('article', 'docx-page')
     drawBlocks(page, answer.blocks)
-    /* Beside the document rather than inside it: the page's contents are
-       replaced wholesale by an undo, and a button that went with them would
-       come back without its listener. */
-    host.append(page, actions(path))
+    host.append(page)
     /* A pixel offset is the only place a document with no caret and no pages
        has to offer, and it is the right one here: nothing about the page moves
        between two reads of the same file. */
@@ -1314,8 +1294,7 @@ export function mountDocx ({
     const lines = []
     const walk = (node) => {
       for (const child of node.children) {
-        if (child.classList.contains('docx-actions')) continue
-        if (child.tagName === 'TR') {
+          if (child.tagName === 'TR') {
           lines.push([...child.children].map((cell) => cell.textContent?.trim() || '').join('\t'))
           continue
         }
@@ -1356,6 +1335,35 @@ export function mountDocx ({
     if (current) current.path = path
   }
 
+  /**
+   * What the caret is sitting in, for the toolbar to show.
+   *
+   * Read from the page rather than from `document.queryCommandState`, which
+   * answers about the browser's own idea of bold and knows nothing about a run
+   * whose weight came out of a `w:rPr`. Asked on every selection change, so it
+   * walks one paragraph and no further.
+   */
+  function format () {
+    const node = hereParagraph()
+    if (!node) return { level: 0, list: null, table: false, editable: editable() }
+    const marks = new Set()
+    const selection = window.getSelection()
+    const at = selection?.anchorNode
+    let walk = at instanceof HTMLElement ? at : at?.parentElement
+    while (walk && walk !== node) {
+      for (const [key, className] of MARKS) if (walk.classList?.contains(className)) marks.add(key)
+      if (TAG_MARKS[walk.tagName]) marks.add(TAG_MARKS[walk.tagName])
+      walk = walk.parentElement
+    }
+    return {
+      level: node.classList.contains('docx-h') ? Number(node.tagName.slice(1)) || 0 : 0,
+      list: node.dataset.li ? (node.parentElement?.tagName === 'OL' ? 'ordered' : 'bullet') : null,
+      table: Boolean(hereCell()),
+      marks: [...marks],
+      editable: editable()
+    }
+  }
+
   /** Where the reader had got to, for the tab's history and for a reread. */
   const place = () => (current ? { top: host.scrollTop } : null)
 
@@ -1374,6 +1382,9 @@ export function mountDocx ({
     setReadonly,
     history,
     setList,
+    format,
+    mark,
+    setHeading,
     insertTable,
     editTable,
     /** Whether the caret is in a table — the palette asks, so that the rows and

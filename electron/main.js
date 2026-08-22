@@ -1122,6 +1122,7 @@ const BY_NAME = new Intl.Collator(undefined, { numeric: true })
    independently: the sidebar, attachment resolver, note index and PDF sweep.
    Calls in the same startup burst share the in-flight promise; renderer
    refreshes explicitly ask for a fresh generation. */
+/** @type {any} */
 let vaultSnapshotCache = null
 let vaultSnapshotting = null
 /* Which state of the vault a scan belongs to, counted up by every change the
@@ -4501,6 +4502,7 @@ async function searchPdfDocuments (q, only = null) {
    too large to read, not merely the ones shown: the cap is applied to the
    answer, and narrowing from a truncated result would quietly lose the notes
    ranked below it. */
+/** @type {any} */
 let lastSearch = null
 
 /* A named function rather than an inline handler because the search now has

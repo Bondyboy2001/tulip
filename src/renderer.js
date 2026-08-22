@@ -198,6 +198,23 @@ const el = {
   data: $('data'),
   notebook: $('notebook'),
   docx: $('docx'),
+  docxTools: $('docx-tools'),
+  docxBody: $('docx-body'),
+  docxH1: $('docx-h1'),
+  docxH2: $('docx-h2'),
+  docxH3: $('docx-h3'),
+  docxBold: $('docx-bold'),
+  docxItalic: $('docx-italic'),
+  docxUnderline: $('docx-underline'),
+  docxStrike: $('docx-strike'),
+  docxBullets: $('docx-bullets'),
+  docxNumbers: $('docx-numbers'),
+  docxTable: $('docx-table'),
+  docxRow: $('docx-row'),
+  docxColumn: $('docx-column'),
+  docxDeleteRow: $('docx-delete-row'),
+  docxDeleteColumn: $('docx-delete-column'),
+  docxOpenWord: $('docx-open-word'),
   fileview: $('fileview'),
   empty: $('empty'),
   emptyActions: $('empty-actions'),
@@ -1166,7 +1183,6 @@ function ensureDocx () {
       docxInstance = mountDocx({
         host: el.docx,
         docx: api.docx,
-        file: api.file,
         /* A link inside a Word document points out of the vault. It opens the
            way every other external link in the app does — in the browser,
            because this pane has no address bar and no way back. */
@@ -3173,6 +3189,12 @@ function applyPanes () {
   el.editorHost.hidden = !text || (!sourceOnly && state.view === 'read')
   el.pdfTools.hidden = !pdfOpen
   el.siteTools.hidden = !siteOpen
+  /* A Word document's bar is the editing surface's chrome, so it goes with the
+     Reading view rather than sitting there greyed out under one. */
+  if (el.docxTools) {
+    el.docxTools.hidden = !docxOpen || state.view === 'read' || lockedHere()
+    if (!el.docxTools.hidden) paintDocxTools()
+  }
   /* The switch is for the documents with more than one view of themselves: the
      note's three, and the table's two — a `.csv` is read and edited in the same
      grid, and which of the two it is in is this control. */
@@ -3204,6 +3226,86 @@ function applyPanes () {
   el.app.dataset.kind = state.current?.kind || 'note'
   syncSidebarPaneAvailability()
 }
+
+/* ------------------------------------------------- the Word document's bar
+
+   Every button on it is one of the viewer's own commands — see src/docx.js —
+   and every one of them acts on the paragraph the caret is in. The viewer
+   remembers where that was, so a button taking the focus for the length of a
+   click cannot lose it. */
+
+const DOCX_TOOLS = [
+  ['docxBody', () => docxInstance?.setHeading(0)],
+  ['docxH1', () => docxInstance?.setHeading(1)],
+  ['docxH2', () => docxInstance?.setHeading(2)],
+  ['docxH3', () => docxInstance?.setHeading(3)],
+  ['docxBold', () => docxInstance?.mark('bold')],
+  ['docxItalic', () => docxInstance?.mark('italic')],
+  ['docxUnderline', () => docxInstance?.mark('underline')],
+  ['docxStrike', () => docxInstance?.mark('strikeThrough')],
+  ['docxBullets', () => docxInstance?.setList('bullet')],
+  ['docxNumbers', () => docxInstance?.setList('ordered')],
+  ['docxTable', () => docxInstance?.insertTable(3, 3)],
+  ['docxRow', () => docxInstance?.editTable('row')],
+  ['docxColumn', () => docxInstance?.editTable('column')],
+  ['docxDeleteRow', () => docxInstance?.editTable('delete-row')],
+  ['docxDeleteColumn', () => docxInstance?.editTable('delete-column')]
+]
+
+for (const [key, run] of DOCX_TOOLS) {
+  /* `mousedown` rather than `click`, prevented: pressing a button moves the
+     focus off the page, and with it the selection these commands act on. The
+     viewer keeps its own note of where the caret was, but not taking it away
+     in the first place is what keeps the caret where the reader left it. */
+  el[key]?.addEventListener('mousedown', (event) => {
+    event.preventDefault()
+    run()
+    paintDocxTools()
+  })
+}
+
+el.docxOpenWord?.addEventListener('mousedown', async (event) => {
+  event.preventDefault()
+  const path = state.current?.path
+  if (!path) return
+  /* Word and Tulip must not both be holding unsaved versions of one file, so
+     what is on screen goes to disk before the file is handed over. */
+  await saveNow()
+  const answer = await api.file.openDefault(path)
+  if (!answer?.ok) toast(answer?.error || 'The system could not open that file.')
+})
+
+/** What the bar says about where the caret is. */
+function paintDocxTools () {
+  if (!docxInstance || !el.docxTools || el.docxTools.hidden) return
+  const now = docxInstance.format()
+  const marks = new Set(now.marks || [])
+  const pressed = {
+    docxBody: now.level === 0,
+    docxH1: now.level === 1,
+    docxH2: now.level === 2,
+    docxH3: now.level === 3,
+    docxBold: marks.has('bold'),
+    docxItalic: marks.has('italic'),
+    docxUnderline: marks.has('underline'),
+    docxStrike: marks.has('strike'),
+    docxBullets: now.list === 'bullet',
+    docxNumbers: now.list === 'ordered'
+  }
+  for (const [key, is] of Object.entries(pressed)) {
+    el[key]?.setAttribute('aria-pressed', String(is))
+  }
+  // The four that only mean something inside a table.
+  for (const key of ['docxRow', 'docxColumn', 'docxDeleteRow', 'docxDeleteColumn']) {
+    if (el[key]) el[key].disabled = !now.table
+  }
+}
+
+/* The caret moved, so what the bar says about it may have. Cheap: it walks one
+   paragraph, and only while a Word document is the open document. */
+document.addEventListener('selectionchange', () => {
+  if (viewingDocx()) paintDocxTools()
+})
 
 /** An attachment a note embeds or links to. The vault reads PDFs and Word
  *  documents itself; for everything else the right answer is the program that

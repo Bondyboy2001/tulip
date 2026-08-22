@@ -297,7 +297,7 @@ ok('a paragraph becomes a list item', () => {
   assert.equal(r.listedInto, 'UL')
 })
 
-ok('and comes back out of it as a paragraph', () => assert.ok(r.unlisted))
+ok('and the same button again takes it back out', () => assert.ok(r.unlisted))
 
 ok('a table is made with the shape it was asked for', () => {
   assert.deepEqual(r.tableShape, [2, 3])
@@ -340,8 +340,20 @@ ok('a file it cannot read throws, and leaves the open document alone', () => {
   assert.equal(r.stillDrawn, 2, 'the failed open tore down the document on screen')
 })
 
-ok('the foot of the page hands the file to the program that owns it', () => {
-  assert.deepEqual(r.opened.at(-1), ['default', 'Notes/Field notes.docx'])
+/* The two buttons that used to sit under the document are gone: a permanent
+   control at the foot of a page is one you have to scroll to the end of a
+   document to reach. Opening the file in Word is on the toolbar now, which the
+   renderer owns. */
+ok('the page carries no chrome of its own', () => assert.ok(r.noFooter))
+
+/* What the toolbar shows is read off the page rather than from the browser's
+   own idea of bold, which knows nothing about a run whose weight came out of a
+   `w:rPr`. */
+ok('the bar is told what the caret is sitting in', () => {
+  assert.equal(r.formatHeading.level, 3, 'a heading did not report its level')
+  assert.deepEqual(r.formatMarks, ['bold'])
+  assert.equal(r.formatList, 'bullet')
+  assert.equal(r.formatTable, true, 'a cell did not report that it is in a table')
 })
 
 ok('closing empties the pane', () => assert.equal(r.closedTo, 0))

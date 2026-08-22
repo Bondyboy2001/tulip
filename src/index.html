@@ -263,6 +263,75 @@
         </div>
       </div>
 
+      <!-- A Word document's own toolbar, in the strip under the tabs where the
+           PDF's and the website's live. It is what a `.docx` is edited with:
+           the style of the paragraph, the emphasis on the words, the two kinds
+           of list, and tables — the controls Word puts along the top of its own
+           window, minus everything Tulip carries through a save rather than
+           reproduces. Only in the Editing view: there is nothing to press when
+           nothing can be typed. -->
+      <div class="docx-bar" id="docx-tools" hidden>
+        <div class="docx-bar-group" role="group" aria-label="Paragraph style">
+          <button class="docx-btn is-wide" id="docx-body" title="Body text (⌥⌘0)" aria-pressed="false">Body</button>
+          <button class="docx-btn is-wide" id="docx-h1" title="Heading 1 (⌥⌘1)" aria-pressed="false">H1</button>
+          <button class="docx-btn is-wide" id="docx-h2" title="Heading 2 (⌥⌘2)" aria-pressed="false">H2</button>
+          <button class="docx-btn is-wide" id="docx-h3" title="Heading 3 (⌥⌘3)" aria-pressed="false">H3</button>
+        </div>
+
+        <span class="docx-bar-divider" aria-hidden="true"></span>
+
+        <div class="docx-bar-group" role="group" aria-label="Emphasis">
+          <button class="docx-btn" id="docx-bold" title="Bold (⌘B)" aria-label="Bold" aria-pressed="false"><b>B</b></button>
+          <button class="docx-btn" id="docx-italic" title="Italic (⌘I)" aria-label="Italic" aria-pressed="false"><i>I</i></button>
+          <button class="docx-btn" id="docx-underline" title="Underline (⌘U)" aria-label="Underline" aria-pressed="false"><u>U</u></button>
+          <button class="docx-btn" id="docx-strike" title="Strike-through (⇧⌘X)" aria-label="Strike-through" aria-pressed="false"><s>S</s></button>
+        </div>
+
+        <span class="docx-bar-divider" aria-hidden="true"></span>
+
+        <div class="docx-bar-group" role="group" aria-label="Lists">
+          <button class="docx-btn" id="docx-bullets" title="Bulleted list" aria-label="Bulleted list" aria-pressed="false">
+            <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><circle cx="3.2" cy="4.2" r="1.1" fill="currentColor"/><circle cx="3.2" cy="8" r="1.1" fill="currentColor"/><circle cx="3.2" cy="11.8" r="1.1" fill="currentColor"/><path d="M6.4 4.2h7M6.4 8h7M6.4 11.8h7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+          </button>
+          <button class="docx-btn" id="docx-numbers" title="Numbered list" aria-label="Numbered list" aria-pressed="false">
+            <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M6.4 4.2h7M6.4 8h7M6.4 11.8h7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M2.1 2.9h1v2.6M1.7 7.1h1.7L1.7 9.2h1.9M1.8 10.6h1.6l-1 1.2 1 1.2H1.8" fill="none" stroke="currentColor" stroke-width="1.05" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+        </div>
+
+        <span class="docx-bar-divider" aria-hidden="true"></span>
+
+        <!-- A table, and the rows and columns of the one the caret is in. The
+             last four are disabled rather than hidden while the caret is
+             elsewhere: a row of controls that changes shape as the caret moves
+             about the document is a row nobody can aim at. -->
+        <div class="docx-bar-group" role="group" aria-label="Tables">
+          <button class="docx-btn" id="docx-table" title="Insert a table" aria-label="Insert a table">
+            <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><rect x="2.2" y="3.2" width="11.6" height="9.6" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M2.2 6.4h11.6M2.2 9.6h11.6M6.1 3.2v9.6M9.9 3.2v9.6" stroke="currentColor" stroke-width="1.05"/></svg>
+          </button>
+          <button class="docx-btn" id="docx-row" title="Add a row below" aria-label="Add a row below">
+            <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><rect x="2.2" y="2.6" width="11.6" height="5" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M8 9.8v4.2M5.9 11.9h4.2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+          </button>
+          <button class="docx-btn" id="docx-column" title="Add a column to the right" aria-label="Add a column to the right">
+            <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><rect x="2.6" y="2.2" width="5" height="11.6" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M11.9 5.9v4.2M9.8 8h4.2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+          </button>
+          <button class="docx-btn" id="docx-delete-row" title="Delete this row" aria-label="Delete this row">
+            <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><rect x="2.2" y="2.6" width="11.6" height="5" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M5.9 11.9h4.2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+          </button>
+          <button class="docx-btn" id="docx-delete-column" title="Delete this column" aria-label="Delete this column">
+            <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><rect x="2.6" y="2.2" width="5" height="11.6" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M9.8 8h4.2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+          </button>
+        </div>
+
+        <!-- The one thing this app cannot do to a Word document: everything it
+             does not model. It was two buttons at the foot of the page, which
+             is a strange place for a permanent control and a stranger one to
+             have to scroll to the end of a document to find. -->
+        <div class="docx-bar-group is-end">
+          <button class="docx-btn is-wide" id="docx-open-word"
+                  title="Open this file in the app the system opens Word documents with">Open in Word</button>
+        </div>
+      </div>
+
       <!-- A website's bar, in the strip the PDF's toolbar uses, for the same
            reason: it belongs to the document rather than to the app, and it is
            there the whole time one is open. The address is a field and not a
