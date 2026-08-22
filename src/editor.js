@@ -249,6 +249,18 @@ const tulipTheme = EditorView.theme({
     fontFamily: 'var(--font-mono)',
     userSelect: 'none'
   },
+  /* In a source file the whole document is code, so a removed line takes the
+     pane's own face and size — at the prose diff's 17px body type it read as
+     the one thing on screen that had grown. The `−` column matches the width
+     the `+` gutter takes on the added lines. */
+  '&.is-source .cm-agent-deleted': {
+    margin: '1px 0',
+    fontFamily: 'var(--font-mono)',
+    fontSize: '13.5px',
+    lineHeight: '1.62'
+  },
+  '&.is-source .cm-agent-deleted-line': { padding: '0 24px 0 0' },
+  '&.is-source .cm-agent-diff-mark': { paddingLeft: '7px' },
   /* Deleted widgets next to a fenced-code line belong to that fence. Match
      its typography and gutter instead of inheriting the prose diff's larger
      body type. */

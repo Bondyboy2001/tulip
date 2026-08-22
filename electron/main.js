@@ -17,6 +17,13 @@ const { restoreConflicts } = require('./copilot-restore')
 const { TrustStore } = require('./trust-store')
 const { makeStore: makeReviewStore } = require('./review-store')
 const { makeIndexCache } = require('./index-cache')
+const { mapLimit, WALK_LIMIT } = require('./map-limit')
+/* Which files a run wrote, and which it may take back. Lifted out so the
+   deletion guards can be tested directly — see electron/run-pages.js. */
+const { htmlFilesIn, collectRunPages } = require('./run-pages')
+/* The per-note search scan. Lifted out of this file so it can be
+   benchmarked directly — see electron/search-scan.js. */
+const { findSpots, hitLines } = require('./search-scan')
 const {
   REQUEST_PATH: AI_RENAME_REQUEST,
   isRequestPath: isAiRenameRequest,
@@ -37,6 +44,9 @@ const { sanitizeConfigPatch } = require('./config-keys')
 /* Per-path sidecars — tags, table layouts — and the two calls that keep every
    one of them following a rename and forgotten on a delete. */
 const { makePathStore, relocateAll, forgetAll, resetAll } = require('./path-store')
+/* Where a `python` block's interpreter comes from, and what happens when the
+   import it needs is not installed — see electron/python-env.js. */
+const { makePythonEnvs, missingPackage, hasInlineDeps } = require('./python-env')
 const { safeFileName } = require('./safe-name')
 const { parseFrontmatter, propsOf, propValues } = require('./frontmatter.cjs')
 const { emptyWhiteboard, whiteboardText } = require('./whiteboard-data')
@@ -495,6 +505,7 @@ const languageHistory = makeLanguageHistoryStore({ vault: () => vaultPath || '' 
 let config = null
 let configTimer = null
 
+/** @returns {Record<string, any>} */
 function readConfig () {
   if (!config) {
     try {
@@ -692,34 +703,6 @@ function freeAttachmentName (dir, base, ext) {
   let target = path.join(dir, `${clean}-${n}${ext}`)
   while (fsSync.existsSync(target)) target = path.join(dir, `${clean}-${++n}${ext}`)
   return target
-}
-
-/**
- * `fn` over every item, at most `limit` of them in flight, answered in the
- * order the items came in however the work happens to finish.
- *
- * Bounded rather than a bare `Promise.all`: every use of this is a `readdir`,
- * a `stat`, or a `read`, and a large vault asking the OS for one descriptor per
- * note at the same moment is how a walk turns into EMFILE.
- *
- * The order is not a nicety. The vault scan feeds the attachment list, which is
- * turned into a key and compared against the last one to decide whether
- * anything moved — an order that varied run to run would report a change on
- * every tick and undo the very guard it feeds.
- */
-const WALK_LIMIT = 32
-
-async function mapLimit (items, limit, fn) {
-  const out = new Array(items.length)
-  let next = 0
-  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (next < items.length) {
-      const at = next++
-      out[at] = await fn(items[at], at)
-    }
-  })
-  await Promise.all(workers)
-  return out
 }
 
 /* ------------------------------------------------------------ note index */
@@ -1481,6 +1464,13 @@ async function relocate (srcAbs, targetAbs) {
   /* Everything filed against a path rather than inside the file — tags, the
      table's column widths, and whatever is registered next — moves with it. */
   await relocateAll(fromPath, toPath, isDir)
+  /* A python environment cannot be carried to a new path — see `relocate` in
+     electron/python-env.js — so the notes that moved give theirs up and build
+     again on their next run. A folder move is every note under it. */
+  await Promise.all(
+    (isDir ? moves : [{ from: fromPath, to: toPath }])
+      .map(({ from, to }) => pythonEnvs.relocate(from, to))
+  )
   await carryAnnotations(rel(srcAbs), rel(targetAbs))
   /* A card's identity begins with the path of the note it came from, so a
      rename that did not carry the review state would silently reset every word
@@ -1504,9 +1494,19 @@ async function relocate (srcAbs, targetAbs) {
 function notesMovedBy (from, to, isDir) {
   if (!isDir) return MD_EXT.has(path.extname(from).toLowerCase()) ? [{ from, to }] : []
   const prefix = from + '/'
-  return [...index.keys()]
-    .filter((key) => key.startsWith(prefix))
+  return notesUnder(from, true)
     .map((key) => ({ from: key, to: `${to}/${key.slice(prefix.length)}` }))
+}
+
+/**
+ * The `.md` paths a single path stands for: itself, or — for a folder — every
+ * note beneath it. Read from the index, so like `notesMovedBy` it must be
+ * called while those paths still exist.
+ */
+function notesUnder (target, isDir) {
+  if (!isDir) return MD_EXT.has(path.extname(target).toLowerCase()) ? [target] : []
+  const prefix = target + '/'
+  return [...index.keys()].filter((key) => key.startsWith(prefix))
 }
 
 /* Paths the app itself has just written, so the watcher can tell an autosave
@@ -1908,6 +1908,9 @@ async function openVault (dir) {
   }
   // The next read of each is of the new vault's own file.
   resetAll()
+  // Environments are keyed by vault, so none of what is remembered about which
+  // ones exist describes this one.
+  pythonEnvs.reset()
   rememberVault(dir)
   trust?.setVault(dir, readConfig().historyInVault === true)
   /* The vault open is the vault remembered — there is no second, separately
@@ -3539,10 +3542,18 @@ ipcMain.handle('file:move', async (_e, from, destDir) => {
 ipcMain.handle('file:delete', async (_e, p) => {
   const abs = await realSafeTargetPath(p)
   const deletingDirectory = fsSync.statSync(abs).isDirectory()
+  /* Read while the notes are still there to be found: after the trash, the
+     index no longer answers for what was under a deleted folder. */
+  await ensureIndex()
+  const losingEnvs = notesUnder(rel(abs), deletingDirectory)
   // Goes to the system Trash, not an unlink — deletes should be recoverable.
   noteSelfWrite(abs)
   await shell.trashItem(abs)
   await forgetAll(rel(abs), deletingDirectory)
+  /* The note is gone, so the environment its blocks ran in is nobody's. Not
+     recoverable the way the note is — but it holds no work of the reader's,
+     only packages, and a restored note builds a new one on its next run. */
+  await Promise.all(losingEnvs.map((note) => pythonEnvs.forget(note)))
   trust?.forgetCreations(rel(abs))
   /* Attachment removal is followed immediately by a renderer refresh. The
      watcher invalidates these caches too, but only after its debounce; without
@@ -4102,8 +4113,19 @@ function entryProps (entry) {
  * Ordered cheapest first: the tag and property tests are the only ones that
  * walk the text, and the property one walks only its head.
  */
-function passesFilters (key, entry, filters) {
-  if (filters.type.length && !filters.type.every((kind) => kind === entry.kind)) return false
+/**
+ * `facts` is what this *query* knows about the entry — its kind, and the tags
+ * assigned to its path — as opposed to what the index holds about the note.
+ *
+ * Passed in rather than read off the entry because the two used to be the same
+ * object: the search loop wrote `kind` and `fileTags` onto every entry in the
+ * index, for every note in the vault, on every keystroke. That is a vault's
+ * worth of writes into a long-lived cache to carry one query's worth of state
+ * — and the state leaked, far enough that `index-cache.js` has to strip both
+ * fields back out before it is allowed to write the cache to disk.
+ */
+function passesFilters (key, entry, filters, facts = entry) {
+  if (filters.type.length && !filters.type.every((kind) => kind === facts.kind)) return false
   if (filters.path.length) {
     const where = key.toLowerCase()
     if (!filters.path.every((p) => where.includes(p))) return false
@@ -4113,7 +4135,7 @@ function passesFilters (key, entry, filters) {
     if (!filters.file.every((f) => named.includes(f))) return false
   }
   if (filters.tag.length) {
-    const assigned = entry.fileTags || []
+    const assigned = facts.fileTags || []
     if (!filters.tag.every((wanted) =>
       assigned.some((tag) => tag === wanted || tag.startsWith(`${wanted}/`)) ||
       hasTag(entry.text, wanted))) return false
@@ -4294,99 +4316,6 @@ async function searchPdfDocuments (q, only = null) {
   return { results, unsearchedPaths: [...new Set(unsearchedPaths)], keys }
 }
 
-/* Past this many matches of one term in one note, the exact number stops being
-   information — it is a ranking input, and the handful of hits shown were
-   settled long before. */
-const SPOT_CAP = 500
-
-/* How many positions are worth keeping across a whole note. The caller shows
-   at most a few lines; the rest of a note's matches are counted, not
-   remembered. Holding all 500 meant allocating an array that size for every
-   matching note on every keystroke, to throw away all but the first few.
-
-   Shared out between the terms rather than taken first-come: one common word
-   would otherwise spend the whole budget and leave the rarer word — the one
-   that says why this note matched — with no line to show for it. */
-const SPOTS_KEPT = 24
-const SPOTS_MIN_PER_TERM = 4
-
-/**
- * Where the terms land in one note, and how often — or null if any term is
- * absent. Positions only; the lines they fall on are read afterwards, for the
- * handful that are actually shown.
- */
-function findSpots (text, terms) {
-  /* Presence first, for every term, before any of them is scanned in full. A
-     note has to hold all of them, so the one that is absent should stop the
-     work rather than come after it — a common first word would otherwise be
-     walked end to end only for a rare second word to discard the note. */
-  for (const term of terms) if (!term.has.test(text)) return null
-
-  const budget = Math.max(SPOTS_MIN_PER_TERM, Math.floor(SPOTS_KEPT / terms.length))
-  const spots = []
-  let total = 0
-
-  for (const { find } of terms) {
-    let found = 0
-    find.lastIndex = 0
-    for (let m = find.exec(text); m; m = find.exec(text)) {
-      found++
-      if (found <= budget) spots.push(m.index)
-      // A pattern that can match nothing — `x*` — would otherwise spin here.
-      if (m[0] === '') find.lastIndex++
-      if (found >= SPOT_CAP) break
-    }
-    total += found
-  }
-
-  // The caller reads them in order, and with more than one term they arrive
-  // interleaved by term rather than by position.
-  if (terms.length > 1) spots.sort((a, b) => a - b)
-  return { spots, total }
-}
-
-const HEADING_LINE = /^ {0,3}#{1,6}\s/
-
-/**
- * The first few matches, as the lines they fall on.
- *
- * A line is shown once however many times the term appears on it, which is
- * what the readout has always meant — and `heading` is recorded here because
- * this is the one pass that has the line in hand, and ranking wants it.
- *
- * `spots` must be in ascending order, which buys the two things below: the
- * line number is counted forward from the last one worked out rather than from
- * the top of the note for each hit, and "a line already shown" is the previous
- * hit's line rather than a set of every line so far.
- */
-function hitLines (text, spots, max = 4) {
-  const out = []
-  let shown = -1
-  let scanned = 0     // how far the line count has been carried
-  let atLine = 1
-
-  for (const at of spots) {
-    const from = text.lastIndexOf('\n', at - 1) + 1
-    if (from === shown) continue
-    shown = from
-
-    for (let i = text.indexOf('\n', scanned); i !== -1 && i < from; i = text.indexOf('\n', i + 1)) atLine++
-    scanned = from
-
-    let to = text.indexOf('\n', at)
-    if (to === -1) to = text.length
-    const line = text.slice(from, to)
-    out.push({
-      line: atLine,
-      text: line.trim().slice(0, 220),
-      col: at - from,
-      heading: HEADING_LINE.test(line)
-    })
-    if (out.length >= max) break
-  }
-  return out
-}
-
 /**
  * Runs against the in-memory index rather than the disk. The first query after
  * a change pays for a sync — a stat per note plus a read of whatever actually
@@ -4449,9 +4378,8 @@ async function searchVault (raw, opts = {}) {
   const whiteboardKeys = []
 
   for (const [key, entry] of looking) {
-    entry.kind = 'note'
-    entry.fileTags = assignedTags[key] || []
-    if (!narrowed && !passesFilters(key, entry, q.filters)) continue
+    const facts = { kind: 'note', fileTags: assignedTags[key] || [] }
+    if (!narrowed && !passesFilters(key, entry, q.filters, facts)) continue
 
     /* A filter on its own is a query: `tag:book` asks for the notes carrying
        it, and the note's opening line is the only context there is to show. */
@@ -4491,8 +4419,8 @@ async function searchVault (raw, opts = {}) {
      megabytes of pasted-image data, which is neither useful search text nor a
      string the search path should scan on every keystroke. */
   for (const [key, entry] of whiteboardsLooking) {
-    entry.fileTags = assignedTags[key] || []
-    if (!narrowed && !passesFilters(key, entry, q.filters)) continue
+    const facts = { kind: entry.kind, fileTags: assignedTags[key] || [] }
+    if (!narrowed && !passesFilters(key, entry, q.filters, facts)) continue
     if (!q.terms.length) {
       whiteboardKeys.push(key)
       results.push({
@@ -4577,6 +4505,12 @@ async function searchVault (raw, opts = {}) {
      happened to hold is not ranking the vault — on a query that matches widely
      the best note could be absent altogether, which is the opposite of what the
      ordering is for. */
+  /* `localeCompare` with no options, deliberately. The tree walk above hoists
+     `BY_NAME` because its comparator passed an options object, which built a
+     fresh collator per comparison; a bare `localeCompare` is the cached default
+     one already and beats an explicit `Intl.Collator` here by about 2.5×. It is
+     also the ordering this has always had — `BY_NAME` is `numeric: true`, which
+     would quietly move "Note 10" from before "Note 2" to after "Note 9". */
   results.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))
 
   const truncated = results.length > 200
@@ -4711,10 +4645,18 @@ ipcMain.handle('search:replace', async (_e, raw, replacement, opts = {}) => {
      a time — but the writes below do not. */
   const only = Array.isArray(opts.only) ? new Set(opts.only) : null
 
+  /* Asked for here rather than inherited. These filters read a note's kind and
+     its assigned tags, and this pass used to see whatever the *last search* had
+     written onto the index entries — so `tag:` in a replace meant the right
+     thing only because a search had usually just run, and meant nothing at all
+     when one had not. It is one map lookup; it may as well be true. */
+  const replaceTags = await fileTags.all()
+
   const pending = []
   for (const [key, entry] of index) {
     if (only && !only.has(key)) continue
-    if (!passesFilters(key, entry, q.filters)) continue
+    if (!passesFilters(key, entry, q.filters,
+      { kind: 'note', fileTags: replaceTags[key] || [] })) continue
     // Nothing to count and nothing to write: the overwhelming common case.
     if (!has.test(entry.text)) continue
 
@@ -6050,10 +5992,57 @@ runner('node', {
   steps: (file) => [['node', [file]]]
 })
 
+/* The environments a `python` block runs in. Lazily built, kept outside the
+   vault, and rebuilt without comment whenever one is missing. */
+const pythonEnvs = makePythonEnvs({
+  root: () => app.getPath('userData'),
+  vault: () => vaultPath || '',
+  pathFor: runnerPath,
+  installerOverride: () => readConfig().pythonInstaller || null
+})
+
+/** Off only if the reader turns it off: installing is what makes a block that
+ *  imports something work at all, and the alternative is a traceback. */
+const mayInstallPython = () => readConfig().autoInstallPythonDeps !== false
+
 /* stdout is a pipe, so Python otherwise block-buffers it and a long-running
    block can look silent until it exits. `-u` makes each print available to the
    streaming panel immediately; the renderer coalesces the resulting chunks. */
-runner('python', { file: 'block.py', steps: (f) => [['python3', ['-u', f]]] })
+runner('python', {
+  file: 'block.py',
+  /* Which interpreter, decided before the steps are built — see `prepare`
+     below and electron/python-env.js for why it is not the system's. Falls
+     back to `python3` when an environment cannot be made, so a block still
+     runs on a machine where nothing can be installed. */
+  /* The environment comes back with the run rather than being looked up again
+     when something needs installing: which environment a note belongs to is
+     one decision, and asking twice invites the install and the run to disagree
+     about where they are pointed. */
+  prepare: async (noteRel, code) => {
+    /* A script that declares its own dependencies gets them, at the versions
+       it asked for, instead of the note's shared environment and whatever
+       "latest" means today. uv reads the block; nothing here parses it. */
+    if (hasInlineDeps(code) && await pythonEnvs.usesUv()) return { script: true }
+
+    const dir = await pythonEnvs.dirFor(noteRel)
+    const python = await pythonEnvs.ensure(dir)
+    /* Not just the interpreter: a block that shells out to `pip`, or calls a
+       console script it installed, has to land inside the same environment its
+       imports came from. See `activation` in electron/python-env.js. */
+    return { dir, python, env: python ? pythonEnvs.activation(dir) : null }
+  },
+  steps: (f, _dir, _code, ready) => (ready?.script
+    /* Resolving the declared dependencies is a build: it is one-time work that
+       belongs to getting the script ready, and holding it to the program's
+       ten seconds would kill the first run of anything with a real dependency
+       list. `--no-project` so a pyproject.toml elsewhere in the vault cannot
+       adopt the script; `--no-sync` because the build step just did that. */
+    ? [
+        ['uv', ['sync', '--script', f], BUILD],
+        ['uv', ['run', '--no-project', '--no-sync', '--script', f]]
+      ]
+    : [[ready?.python || 'python3', ['-u', f]]])
+})
 runner('sh', { file: 'block.sh', steps: (f) => [['sh', [f]]] })
 runner('bash', { file: 'block.sh', steps: (f) => [['bash', [f]]] })
 runner('zsh', { file: 'block.sh', steps: (f) => [['zsh', [f]]] })
@@ -6354,6 +6343,9 @@ const MAX_RUN_BYTES = 1024 * 1024
    frames — or a 1600×1200 still — before the truncation warning is earned. */
 const MAX_PPM_BYTES = 32 * 1024 * 1024
 const DEFAULT_TIMEOUT_MS = 10_000
+/* Enough to hold a deep traceback and the line that matters at the end of it.
+   Read by the missing-import retry in `run:start` and by nothing else. */
+const STDERR_TAIL_BYTES = 8192
 
 const runs = new Map()   // id -> { child, timer, dir, done }
 let nextRunId = 0
@@ -6426,9 +6418,36 @@ function startRun (id, cmd, args, { cwd, timeoutMs, env: extraEnv, quiet = false
   // the pixels are the image, not a transcript — keep up to MAX_PPM_BYTES
   // so a multi-frame render survives intact.
   let isPPMStream = false
+  /* The tail of stderr, kept rather than only streamed. A traceback is the one
+     piece of a run's output the main process has a use for after the fact: it
+     is where "no module named x" is said, and installing x is the difference
+     between a block that works and one that never can. The tail, not the
+     whole, because the interesting line is the last one — and a run that
+     printed a megabyte to stderr has not earned a megabyte of retention. */
+  /* Kept as the last few chunks rather than as one growing string. Rebuilding
+     `tail = (tail + text).slice(-8192)` copies eight kilobytes for every chunk
+     that arrives, so a program that writes a megabyte to stderr in small
+     pieces pays for the tail hundreds of times over. Chunks are pushed and the
+     front is dropped once there is more than a tail's worth; the join happens
+     once, if anyone asks. */
+  const errChunks = []
+  let errHeld = 0
+  const keepStderr = (text) => {
+    errChunks.push(text)
+    errHeld += text.length
+    while (errChunks.length > 1 && errHeld - errChunks[0].length >= STDERR_TAIL_BYTES) {
+      errHeld -= errChunks.shift().length
+    }
+  }
+  const stderrTail = () => {
+    const joined = errChunks.length === 1 ? errChunks[0] : errChunks.join('')
+    return joined.length > STDERR_TAIL_BYTES ? joined.slice(-STDERR_TAIL_BYTES) : joined
+  }
+
   const pipe = (stream, name) => {
     stream.setEncoding('utf8')
     stream.on('data', (text) => {
+      if (name === 'stderr') keepStderr(text)
       if (!isPPMStream && name === 'stdout' && sizes[name] === 0) {
         const head = String(text).trimStart()
         if (head.startsWith('P3\n') || head.startsWith('P3\r') || head.startsWith('P3 ')) isPPMStream = true
@@ -6456,7 +6475,7 @@ function startRun (id, cmd, args, { cwd, timeoutMs, env: extraEnv, quiet = false
       clearTimeout(run.timer)
       clearTimeout(run.killTimer)
       runs.delete(id)
-      resolve({ ms: Date.now() - started, truncated, ...payload })
+      resolve({ ms: Date.now() - started, truncated, errTail: stderrTail(), ...payload })
     }
 
     child.on('error', (err) => {
@@ -6493,7 +6512,24 @@ function runTimeoutMs (key, fallback) {
  * has to mean ten seconds from pressing Run, or a language that compiles first
  * would quietly get twice the budget of one that does not.
  */
-async function runSequence (id, steps, { cwd, timeoutMs, cleanup, quiet = false }) {
+/**
+ * @returns {Promise<{ code: number | null, signal?: string | null, error?: string | null,
+ *   timedOut?: boolean, ms: number, buildMs: number }>} what the last step
+ *   answered, with the whole sequence's timings folded in. Spelled out because
+ *   the shape is a union assembled across the loop below — the early breaks
+ *   each contribute a different field — and a caller asking "did this finish
+ *   cleanly?" needs to be able to see all of them.
+ */
+/**
+ * @param {number} id
+ * @param {any[][]} steps
+ * @param {{cwd: string, timeoutMs: number, cleanup?: string,
+ *   env?: Record<string, string>|null, quiet?: boolean}} how
+ * @returns {Promise<{code: number|null, signal?: string|null, error?: string|null,
+ *   timedOut?: boolean, errTail?: string, ms: number, buildMs: number}>}
+ */
+async function runSequence (id, steps, how) {
+  const { cwd, timeoutMs, cleanup, env, quiet = false } = how
   // The PATH these steps run under, before the first of them is spawned.
   await ensureLoginPath()
   let left = timeoutMs        // the program's remaining budget
@@ -6517,6 +6553,7 @@ async function runSequence (id, steps, { cwd, timeoutMs, cleanup, quiet = false 
     result = await startRun(id, cmd, args, {
       cwd,
       timeoutMs: opts.build ? BUILD_TIMEOUT_MS : left,
+      env,
       quiet
     })
 
@@ -6582,9 +6619,16 @@ function warmRunner (lang) {
   return warming
 }
 
+/* How many runs are in flight, and how many have ever begun. Together they
+   answer the one question `collectRunPages` needs: did anything else run while
+   this did? Nothing was running when we started, and nothing has started
+   since, is the whole of "this run had the directory to itself". */
+let runsInFlight = 0
+let runsEverStarted = 0
+
 ipcMain.handle('run:warm', (_e, lang) => warmRunner(lang))
 
-ipcMain.handle('run:start', async (event, lang, code) => {
+ipcMain.handle('run:start', async (event, lang, code, noteRel) => {
   const spec = runnerFor(lang)
   if (!spec) throw new Error(`Tulip cannot run "${lang}" blocks.`)
   if (typeof code !== 'string') throw new Error('Nothing to run.')
@@ -6601,7 +6645,14 @@ ipcMain.handle('run:start', async (event, lang, code) => {
   const file = path.join(dir, typeof spec.file === 'function' ? spec.file(code) : spec.file)
   await fs.writeFile(file, code, 'utf8')
 
-  const plan = executionPlan(spec.steps(file, dir, code))
+  /* Whatever the language needs in place before it can name a command — for
+     python, the environment this note's blocks run in. The PATH a probe here
+     would use has to be the PATH the run gets, so it is settled first. */
+  await ensureLoginPath()
+  const note = typeof noteRel === 'string' && noteRel ? noteRel : null
+  const ready = spec.prepare ? await spec.prepare(note, code).catch(() => null) : null
+
+  const plan = executionPlan(spec.steps(file, dir, code, ready))
   const steps = plan.steps
   // A language that spends its first seconds starting itself up says so; the
   // `runTimeout` setting still overrides whatever it asked for.
@@ -6609,8 +6660,39 @@ ipcMain.handle('run:start', async (event, lang, code) => {
 
   // The vault is the working directory, so a snippet's relative paths mean what
   // they mean in the note. Without one, the scratch directory stands in.
-  runSequence(id, steps, { cwd: vaultPath || dir, timeoutMs, cleanup: dir })
-    .then((result) => toRun('run:done', { id, ...result }))
+  const cwd = vaultPath || dir
+  const pagesBefore = vaultPath ? await htmlFilesIn(cwd) : new Map()
+
+  /* Claimed before the first step is spawned and released when the last one
+     settles, so the window these describe is the whole of the run rather than
+     the part of it that happened to be executing. See `collectRunPages`. */
+  const alone = runsInFlight === 0
+  const startedNth = ++runsEverStarted
+  runsInFlight++
+  const from = Date.now()
+
+  /* The temp directory is this handler's to remove, not `runSequence`'s: a run
+     that installs a missing import runs the same file twice, and a sequence
+     that tidied up after the first attempt would leave the second nothing to
+     run. Removed in `finally`, so both paths out of here are covered. */
+  runWithMissingImports(id, steps, { cwd, timeoutMs, ready })
+    .then(async (result) => {
+      /* Only a run that finished on its own terms may take a file away. One
+         that was stopped, timed out or failed has left the directory in a
+         state nobody described, and guessing which of the leavings were its
+         own is exactly the guess this is here to stop making. */
+      const clean = !result.error && !result.timedOut && !result.signal && result.code === 0
+      const pages = vaultPath
+        ? await collectRunPages(cwd, pagesBefore, {
+            alive: { from, to: Date.now() },
+            mayRemove: clean && alone && runsEverStarted === startedNth
+          })
+        : []
+      // `errTail` is the retry's working material and means nothing to the
+      // renderer, which was streamed every one of those bytes as they arrived.
+      const { errTail: _tail, ...reportable } = result
+      toRun('run:done', { id, ...reportable, pages })
+    })
     /* A failure before `run:done` is sent leaves the block on screen saying
        "Running…" for the rest of the session — and unrunnable, since the
        renderer keeps the state keyed by its code and Stop cannot find an id
@@ -6626,10 +6708,94 @@ ipcMain.handle('run:start', async (event, lang, code) => {
       })
       discard(dir)
     })
-    .finally(() => plan.release?.())
+    .finally(() => {
+      runsInFlight--
+      plan.release?.()
+      discard(dir)
+    })
 
   return { id, cmd: steps[0][0], timeoutMs }
 })
+
+/* How many times a single Run may stop to install something. Each pass
+   installs one distribution and runs again, so a block importing three absent
+   packages is three passes — slower than resolving them all at once, but a
+   traceback only ever names the first import that failed, so there is nothing
+   to resolve all at once from. The cap is what stops a block whose import
+   fails for some *other* reason from installing forever. */
+const MAX_IMPORT_INSTALLS = 3
+
+/**
+ * Run a block, and if it died only because something was not installed,
+ * install it and run again.
+ *
+ * The reader sees one run. The traceback from the attempt that failed has
+ * already streamed into the panel by the time anything is installed — it is
+ * the honest account of what happened, and hiding it would mean holding every
+ * run's output back on the chance it might be retried.
+ */
+async function runWithMissingImports (id, steps, { cwd, timeoutMs, ready }) {
+  let result = await runSequence(id, steps, { cwd, timeoutMs, env: ready?.env })
+
+  /* Nothing to install into: either the language has no environment of its
+     own, or one could not be made and the block ran on the system interpreter
+     — where installing is not this app's business.
+
+     A script carrying its own dependency list is also left alone. It said what
+     it needs; if an import is still missing, the list is wrong, and quietly
+     installing the package would hide the one thing worth telling the author. */
+  if (!ready?.python || !mayInstallPython()) return result
+
+  const tried = new Set()
+  for (let pass = 0; pass < MAX_IMPORT_INSTALLS; pass++) {
+    /* Only a program that ran and failed on its own. A run that was stopped by
+       hand, timed out, or never started is not asking for anything to be
+       installed — and retrying a stopped run would restart the very thing the
+       reader just stopped. */
+    if (result.error || result.timedOut || result.signal || result.code === 0) break
+
+    const pkg = missingPackage(result.errTail)
+    /* Already installed once this run and still missing: installing it again
+       will not change the answer. The commonest cause is a distribution whose
+       import name this table maps wrongly, and looping on it would be the
+       worst possible response. */
+    if (!pkg || tried.has(pkg)) break
+    tried.add(pkg)
+
+    toRun('run:out', { id, stream: 'stdout', text: `\nInstalling ${pkg}…\n` })
+    const installed = await pythonEnvs.install(ready.dir, pkg, {
+      // The installer's own progress, so a large download is visibly working
+      // rather than apparently hung.
+      onOutput: (text) => toRun('run:out', { id, stream: 'stdout', text })
+    })
+    if (!installed.ok) {
+      /* Why, not just that. "No network", "there is no such package" and "no
+         wheel for this platform" are the same sentence without the reason, and
+         they are three quite different things to do next. */
+      const why = installed.reason ? ` ${installed.reason}` : ''
+      toRun('run:out', { id, stream: 'stderr', text: `Could not install ${pkg}.${why}\n` })
+      break
+    }
+    // Stop pressed while the download was going: honour it rather than
+    // starting the program the reader has stopped waiting for.
+    if (cancelled.has(id)) break
+
+    /* The run after an install gets a build's budget rather than a program's.
+       The first import of a freshly installed library does one-time work —
+       writing bytecode, building font and shader caches — that belongs to
+       installing it and not to the block: measured at ~10s for manim against
+       0.7s for every import after it. Judged by the ordinary ten-second
+       timeout that first run is killed every time, and because the kill
+       interrupts the very work that would have made the next run fast, it is
+       killed every time *again*. The reader sees a library that installs
+       perfectly and then never runs. */
+    result = await runSequence(id, steps, {
+      cwd, env: ready.env, timeoutMs: Math.max(timeoutMs, BUILD_TIMEOUT_MS)
+    })
+  }
+
+  return result
+}
 
 /* Runs the page has asked to stop. Kept separately from `runs` because a
    sequence is only *in* `runs` while one of its steps is actually running. */
@@ -6878,12 +7044,8 @@ async function newestVideo (dir) {
 }
 
 /** Manim on the PATH, else the module under python3 — both are normal installs. */
-async function manimCommand () {
-  const configured = readConfig().manimCommand
-  if (configured) return String(configured).split(/\s+/)
-  // The probe is the first thing a render does, so it is also where the login
-  // shell's PATH has to have arrived.
-  await ensureLoginPath()
+/** Is manim on the PATH a render will use? */
+function systemManim () {
   return new Promise((resolve) => {
     // The same PATH a run gets, so the probe and the render cannot disagree
     // about which manim is installed.
@@ -6891,10 +7053,91 @@ async function manimCommand () {
       stdio: 'ignore',
       env: { ...process.env, PATH: runnerPath() }
     })
-    probe.on('error', () => resolve(['python3', '-m', 'manim']))
-    probe.on('close', (code) => resolve(code === 0 ? ['manim'] : ['python3', '-m', 'manim']))
+    probe.on('error', () => resolve(false))
+    probe.on('close', (code) => resolve(code === 0))
   })
 }
+
+/**
+ * What to invoke to render a scene.
+ *
+ * A manim installed on the machine is preferred over one Tulip installed: it
+ * is the one the reader chose, and on this machine it is commonly a `uv tool`
+ * that works perfectly while `python3 -m manim` — the old fallback — cannot
+ * see it at all. Tulip's own copy is for the machine that has no manim, where
+ * the alternative is a block that can never render.
+ *
+ * @param {{id?: number}} [reporting]  a run to stream an install into
+ */
+async function manimCommand (reporting = {}) {
+  const configured = readConfig().manimCommand
+  if (configured) return String(configured).split(/\s+/)
+  // The probe is the first thing a render does, so it is also where the login
+  // shell's PATH has to have arrived.
+  await ensureLoginPath()
+
+  const shared = pythonEnvs.sharedDir()
+  const mine = await pythonEnvs.tool(shared, 'manim')
+  if (mine) return [mine]
+
+  if (await systemManim()) return ['manim']
+
+  if (mayInstallPython()) {
+    const { id } = reporting
+    if (id) toRun('run:out', { id, stream: 'stdout', text: '\nInstalling manim…\n' })
+    const done = await pythonEnvs.install(shared, 'manim', {
+      onOutput: (text) => { if (id) toRun('run:out', { id, stream: 'stdout', text }) }
+    })
+    if (!done.ok && id && done.reason) {
+      toRun('run:out', { id, stream: 'stderr', text: `Could not install manim. ${done.reason}\n` })
+    }
+    const installed = done.ok && await pythonEnvs.tool(shared, 'manim')
+    if (installed) return [installed]
+  }
+
+  /* Nothing found and nothing installed. The old fallback stands, because on a
+     machine where manim is a library in the system interpreter it is right —
+     and where it is not, its failure names manim, which is the useful thing to
+     put in front of the reader. */
+  return ['python3', '-m', 'manim']
+}
+
+/* ------------------------------------------------- managing environments
+
+   What settings shows. `list` is a walk of every file under every
+   environment, so it is asked for when the panel opens and not on a timer. */
+
+ipcMain.handle('python:envs', async () => {
+  /* The notes that still exist, so an environment left behind by one that does
+     not can say so. Read here rather than in python-env.js, which deliberately
+     knows nothing about the index. */
+  /** @type {Set<string>|null} */
+  let live = null
+  if (vaultPath) {
+    await ensureIndex()
+    live = new Set(index.keys())
+  }
+  return pythonEnvs.list(live)
+})
+
+ipcMain.handle('python:env-remove', async (_e, dir) => {
+  if (typeof dir !== 'string' || !dir) return false
+  return pythonEnvs.remove(dir)
+})
+
+/** Every environment whose note this vault no longer has. */
+ipcMain.handle('python:env-prune', async () => {
+  if (!vaultPath) return 0
+  await ensureIndex()
+  const live = new Set(index.keys())
+  const all = await pythonEnvs.list(live)
+  let gone = 0
+  for (const env of all) {
+    if (!env.orphaned) continue
+    if (await pythonEnvs.remove(env.dir)) gone++
+  }
+  return gone
+})
 
 ipcMain.handle('manim:lookup', async (_e, noteName, code, scene) => {
   const found = await artefactAt(await manimTarget(noteName, code, manimQuality()))
@@ -6927,7 +7170,7 @@ ipcMain.handle('manim:render', async (event, noteName, code, scene) => {
     const file = path.join(dir, 'scene.py')
     await fs.writeFile(file, code, 'utf8')
 
-    const [cmd, ...lead] = await manimCommand()
+    const [cmd, ...lead] = await manimCommand({ id })
     const result = await startRun(
       id,
       cmd,

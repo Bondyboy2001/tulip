@@ -78,9 +78,28 @@ function lineDiff (a, b, origin = 1) {
  */
 export { lineDiff }
 
+/* Splitting on newlines gives a file that ends with one a final empty string,
+   and that empty string is not a line anybody wrote. Left in, it is common to
+   both sides of almost every diff and shows up as a blank context row hanging
+   off the bottom of the change — see `wholeFile` in src/history.js, which drops
+   it for the same reason and in the same words.
+
+   The cost is that adding or removing only the final newline now reads as no
+   change at all. That is the right trade for a notes app: the blank row was on
+   screen constantly, and the other case is invisible in a diff either way. */
+const lines = (text) => {
+  const whole = String(text ?? '')
+  // An empty file is no lines at all. Split would call it one empty line, and
+  // writing into it would then read as having deleted something.
+  if (whole === '') return []
+  const split = whole.split('\n')
+  if (split.at(-1) === '') split.pop()
+  return split
+}
+
 export function fileDiff (before, after, { budget = 4000 } = {}) {
-  const a = String(before ?? '').split('\n')
-  const b = String(after ?? '').split('\n')
+  const a = lines(before)
+  const b = lines(after)
 
   let head = 0
   while (head < a.length && head < b.length && a[head] === b[head]) head++

@@ -48,6 +48,11 @@ const CONFIG_KEYS = {
   historyInVault: boolean,
   manimQuality: string,
   pdfText: boolean,
+  /* Whether a python block that fails on a missing import may install it — see
+     electron/python-env.js. A preference, so it is here; `pythonInstaller`,
+     which names the command that does the installing, is deliberately not, for
+     the same reason `manimCommand` is not. */
+  autoInstallPythonDeps: boolean,
   texEngine: string,
   zoom: number,
 

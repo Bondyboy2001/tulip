@@ -32,6 +32,45 @@ export function isRunnable (lang) {
   return RUNNABLE.has(String(lang || '').trim().toLowerCase())
 }
 
+/**
+ * Is this one of the names a given runner answers to?
+ *
+ * A fence says ```python and a file on the stage says `py` — `codeToken` hands
+ * back the extension — and both are the same runner. Callers that care which
+ * language they are looking at have to ask through the alias list rather than
+ * comparing to one spelling of it, which is a test that passes on notes and
+ * quietly fails on files.
+ */
+export function isLanguage (lang, id) {
+  const aliases = RUNNERS[id]
+  return !!aliases && aliases.includes(String(lang || '').trim().toLowerCase())
+}
+
+/* Which note a run belongs to — see `run.start` in electron/preload.js, where
+   it decides the environment a python block imports from.
+
+   A resolver rather than a value, installed once, because "the note on screen"
+   is a thing the renderer already knows and would otherwise have to remember
+   to re-state at every tab switch. Threading it through instead would mean a
+   note argument on `attachRunControl`, on the panel and button builders, and
+   on the session store's keys — five signatures widened to carry something
+   that is the same for every block in the note. */
+let noteOfRun = () => null
+
+/** Said once at boot: how to ask what note the reader is looking at. */
+export function resolveRunNote (resolver) {
+  noteOfRun = typeof resolver === 'function' ? resolver : () => null
+}
+
+/** Belt and braces around a resolver that runs during a tab switch. */
+function runNote () {
+  try {
+    return noteOfRun() || null
+  } catch {
+    return null
+  }
+}
+
 /* Every result this session, keyed by the language and the code together. Two
    blocks with the same body are the same run — but only in the same language;
    the same three lines under ```py and ```jl are two different programs, and
@@ -224,6 +263,34 @@ function warmRunner (lang) {
  * different fields, so a cleared block kept the exit code of the run before it
  * and reported it again the moment anything repainted.
  */
+/**
+ * One run, as the panels read it. Written down because `let state = null`
+ * types the variable as `null` and every field read off it afterwards then
+ * looks like a mistake — which buried the real findings in this file under a
+ * few dozen that were only ever about the initialiser.
+ *
+ * @typedef {object} RunState
+ * @property {string} stdout
+ * @property {string} stderr
+ * @property {{stdout: object, stderr: object}} ansi
+ * @property {string} status       'running' | 'done'
+ * @property {number|null} code    the exit code, null if it never got one
+ * @property {number|null} id      main's id for the run while it is going
+ * @property {number} ms
+ * @property {number} buildMs
+ * @property {boolean} stopRequested
+ * @property {string|null} signal
+ * @property {string|null} error
+ * @property {boolean} timedOut
+ * @property {boolean} truncated
+ * @property {string|null} path    the file a render produced, if it was one
+ * @property {unknown[]} pages
+ * @property {string} [key]
+ * @property {Set<() => void>} [settlers]
+ * @property {() => void} [render]
+ */
+
+/** @returns {RunState} */
 function blankRun (status) {
   return {
     ...outputState(),
@@ -237,7 +304,8 @@ function blankRun (status) {
     error: null,
     timedOut: false,
     truncated: false,
-    path: null
+    path: null,
+    pages: []
   }
 }
 
@@ -387,7 +455,7 @@ export async function runBlocksInOrder (blocks, onProgress) {
        restarted: killing a run somebody started by hand to start the identical
        run again is work for nothing. */
     if (state.status !== 'running') {
-      await launch(state, () => api.run.start(block.lang, block.code))
+      await launch(state, () => api.run.start(block.lang, block.code, runNote()))
     }
     await whenSettled(state)
     summary.ran++
@@ -909,6 +977,21 @@ function drawOutput (panel, state, lang, code) {
     panel.append(el('div', 'run-out-note',
       'Output truncated — the block printed more than Tulip will hold.'))
   }
+  /* The pages the run wrote — see `collectRunPages` in main.js. Each is a
+     guest in the same fence a run ```html block gets: its script and style
+     work, and nothing reaches out of it. Mounted on the next tick because
+     guest.js imports this module, and the cycle is only safe once both have
+     finished loading. */
+  if (state.status === 'done' && state.pages?.length) {
+    for (const page of state.pages) {
+      const frame = el('div', 'run-out-page')
+      frame.append(el('div', 'run-out-page-name', page.name))
+      panel.append(frame)
+      import('./guest.js').then(({ buildGuest }) => {
+        if (frame.isConnected) frame.append(buildGuest(page.html, 'html-run-view'))
+      }).catch(() => {})
+    }
+  }
 }
 
 /* The stable DOM behind a running output panel. Only the newly arrived suffix
@@ -960,7 +1043,7 @@ function incrementalOutput (panel, state, lang, code) {
 /** The one button's two meanings: whichever of them the block is asking for. */
 async function startOrStop (state, lang, code) {
   if (state.status === 'running') { requestStop(state); return }
-  await launch(state, () => api.run.start(lang, code))
+  await launch(state, () => api.run.start(lang, code, runNote()))
 }
 
 /**
@@ -1229,6 +1312,18 @@ function ppmToAnimated (text) {
  * picture's tooltip; the one caption that survives is the truncation warning,
  * because a silently cut animation looks like a finished one.
  */
+/** A finished render — a film — filling the popup the way a picture does. */
+function drawRunMedia (panel, media) {
+  if (media.parentElement) { panel.hidden = false; return }
+  const well = el('div', 'run-image-well')
+  well.append(media)
+  const figure = el('figure', 'run-image')
+  figure.append(well)
+  panel.replaceChildren(figure)
+  panel.hidden = false
+  panel.classList.remove('is-bad')
+}
+
 function drawRunImage (panel, state, image) {
   const frames = image._frames || 1
   const shape = `${image.width}×${image.height}` + (frames > 1 ? `, ${frames} frames` : '')
@@ -1293,8 +1388,11 @@ function legalRunSize (w, h, box) {
  * @param {HTMLElement} host           the popup the output panel goes in
  * @param {() => {lang: string, code: string}} source  the file as it is now
  */
-export function mountFileRun ({ button, host, source }) {
-  let state = null
+export function mountFileRun ({ button, host, source, artefact = null }) {
+  /* Null until the first Run, and never read before then — `watch` sets it and
+     everything that reads it hangs off a painter `watch` registered. */
+  /** @type {RunState} */
+  let state = /** @type {any} */ (null)
 
   /* The size lives here, not on the panel: the popup element is one for the
      life of the window and the size outlives any particular run. */
@@ -1433,8 +1531,17 @@ export function mountFileRun ({ button, host, source }) {
     paintSize()
     const copy = copyButton(() => state.stdout + state.stderr, 'Copy output')
     const draw = incrementalOutput(panel, state, lang, code)
+    /** The decoded picture, kept so a repaint does not decode it again.
+     *  @type {any} */
     let ppmCanvas = null
+    /** @type {string|null} */
     let lastPPMText = null
+    /* The rendered film, kept across repaints. Rebuilding it on every paint
+       would restart playback under anyone watching it. */
+    /** @type {any} */
+    let media = null
+    /** @type {string|null} */
+    let lastMediaPath = null
     const paint = () => {
       /* Long output is read through a window (see the panel's max-height), and
          a window on a program that is still printing has to follow the last
@@ -1443,6 +1550,26 @@ export function mountFileRun ({ button, host, source }) {
          box before it is scrolled to. */
       if (state.status === 'running') {
         queueMicrotask(() => { panel.scrollTop = panel.scrollHeight })
+      }
+      /* A render that produced a file: the file is the output, and whatever
+         the tool said on the way there is not what the reader came for. */
+      if (state.status === 'done' && state.path && artefact) {
+        if (lastMediaPath !== state.path) {
+          media = artefact.make(state.path)
+          lastMediaPath = state.path
+          /* The popup takes the film's shape once the film knows it. Manim is
+             16:9 by default but the scene decides, so it is read rather than
+             assumed. */
+          media.addEventListener?.('loadedmetadata', () => {
+            const w = media.videoWidth || media.naturalWidth || 0
+            const h = media.videoHeight || media.naturalHeight || 0
+            if (w && h) setAspect(w / h)
+          }, { once: true })
+        }
+        drawRunMedia(panel, media)
+        show(!panel.hidden)
+        copy.hidden = true
+        return
       }
       if (state.status === 'done' && state.code === 0 && isPPM(state.stdout) && !state.stderr) {
         if (lastPPMText !== state.stdout) {
@@ -1492,10 +1619,15 @@ export function mountFileRun ({ button, host, source }) {
     state.render()
   }
 
-  button.addEventListener('click', () => {
+  button.addEventListener('click', async () => {
     if (state?.status === 'running') { requestStop(state); return }
     const { lang, code } = source()
     if (!isRunnable(lang)) return
+    /* A source file can be a scene rather than a program — see `isManimSource`
+       in src/manim.js. Running one means rendering it, because the film is the
+       point of it and `python scene.py` merely defines a class and exits with
+       nothing to show. What comes back is a path, not a transcript. */
+    const draws = !!artefact?.matches?.(lang, code)
     const next = stateFor(lang, code)
     watch(next, lang, code)
     /* Pressing Run means asking to see the run: a panel closed after the last
@@ -1505,7 +1637,25 @@ export function mountFileRun ({ button, host, source }) {
     /* Unchanged text that is already running — a run left going when the file
        was switched away from — is joined rather than restarted, exactly as a
        block's own button would. */
-    if (next.status !== 'running') launch(next, () => api.run.start(lang, code))
+    if (next.status === 'running') return
+
+    /* Already rendered, unchanged: the file on disk is named after a hash of
+       this exact source, so there is nothing to work out again. A block asks
+       the same question through `artefactRun`; without it here, re-running an
+       untouched scene spent a minute reproducing a file it already had. */
+    if (draws) {
+      const found = await artefact?.lookup?.(code).catch(() => null)
+      if (found?.path) {
+        Object.assign(next, blankRun('done'), { code: 0, ms: 0, path: found.path })
+        renderNow(next)
+        settleRun(next)
+        return
+      }
+    }
+
+    launch(next, () => (draws
+      ? artefact?.start(code)
+      : api.run.start(lang, code, runNote())))
   })
 
   face()

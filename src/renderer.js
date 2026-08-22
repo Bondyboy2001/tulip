@@ -12,6 +12,7 @@ import {
 } from './vault-paths.js'
 import { CONTEXT_MODES } from './models.js'
 import { DEFAULT_ZOOM } from './zoom.js'
+import { fileSize } from './units.js'
 import { highlightInto } from './highlight.js'
 /* `el` is this module's own name for the DOM registry, so blocks.js's element
    builder comes in under another — the same aliasing settings.js and copilot.js
@@ -41,12 +42,13 @@ import { routeFragmentClick, activateFocusedWikilink } from './links.js'
 import { settled, repin, othersOf, rightOf } from './tabstrip.js'
 import { safeCut } from './reading-split.js'
 import {
-  attachRunControl, clearBlockOutputs, isRunnable, mountFileRun, onAskToFix, retirePainters,
-  runBlocksInOrder
+  attachRunControl, clearBlockOutputs, isLanguage, isRunnable, mountFileRun, onAskToFix,
+  resolveRunNote, retirePainters, runBlocksInOrder
 } from './runcode.js'
 import { htmlFence, isHtmlRun } from './htmlrun.js'
+import { buildGuest } from './guest.js'
 import { isThree, threeFence } from './threejs.js'
-import { attachManim, isManim } from './manim.js'
+import { attachManim, isManim, isManimSource, videoFor } from './manim.js'
 import { attachTikz, isTikz } from './tikz.js'
 import { attachMermaid, isMermaid } from './mermaid.js'
 import { attachSvg, isSvg } from './svg.js'
@@ -66,10 +68,8 @@ import { mountSite } from './site.js'
 import { mountPanelAccessibility } from './panel-state.js'
 import { mountSavedSearches } from './saved-searches.js'
 import { COUNTRIES, countryCode, languageIdentity } from './countries.js'
-import { localizeChrome } from './platform.js'
 
 const api = window.tulip
-localizeChrome(document, api.platform)
 const $ = (id) => document.getElementById(id)
 
 /* ------------------------------------------------------- failures, out loud
@@ -296,6 +296,7 @@ const el = {
   pdfPens: $('pdf-pens'),
   foldAll: $('btn-fold-all'),
   site: $('site'),
+  htmlview: $('htmlview'),
   siteTools: $('site-tools'),
   siteBack: $('site-back'),
   siteForward: $('site-forward'),
@@ -358,6 +359,9 @@ const viewingLanguageTable = () => state.current?.kind === 'language'
    having no prose views to switch between. A data file is not edited here at
    all; it has a grid. */
 const viewingCode = () => state.current?.kind === 'code'
+/* An HTML source file is the one code kind with a second view of itself: its
+   Reading view is the page it describes, rendered in the run-block sandbox. */
+const viewingHtml = () => viewingCode() && /\.html?$/i.test(state.current?.path || '')
 const viewingData = () => state.current?.kind === 'data'
 /* A notebook is neither. It is text on disk, but the text is nbformat's JSON
    and the document is the cells inside it — so it gets a viewer, like the
@@ -2915,6 +2919,12 @@ const showView = (view) => {
   editor?.setRaw(view === 'raw')
 }
 
+/* Which note a run belongs to, so a python block imports from its own note's
+   environment rather than one shared with the whole vault. Asked at each Run
+   rather than pushed on every tab switch — the tab is the thing that already
+   knows, and this way there is nothing to keep in step. */
+resolveRunNote(() => state.current?.path || null)
+
 /* The toolbar's Run for a source file, and the dock its output streams into.
    The text is read at the moment of the click — the editor's if one is built,
    the buffer's it was loaded from otherwise — so what runs is what is on
@@ -2927,6 +2937,21 @@ const fileRun = mountFileRun({
     lang: codeToken(state.current?.path || ''),
     code: editor ? editor.state.doc.toString() : buffer.text
   }),
+  /* A .py file that is a Manim scene is run by rendering it, and what comes
+     back is the film rather than a transcript — the same bargain a ```manim
+     block strikes, offered to a whole file on the stage. The video lands in
+     the vault beside the note's other attachments, named by a hash of the
+     source, so an unchanged scene opens already rendered. */
+  artefact: {
+    matches: (lang, code) => isLanguage(lang, 'python') && isManimSource(code),
+    /* No scene named: main picks the last one in the file, which is the one
+       people write last and mean — the same rule a block follows. */
+    start: (code) => api.manim.render(state.current?.name || 'Untitled', code, ''),
+    /* Is it already rendered? Answered without running anything, so pressing
+       Run on an untouched scene shows the film rather than making it again. */
+    lookup: (code) => api.manim.lookup(state.current?.name || 'Untitled', code, ''),
+    make: videoFor
+  }
 })
 let fileRunPath = null
 
@@ -2938,6 +2963,47 @@ let fileRunPath = null
  * together here rather than each pane being hidden and unhidden from a dozen
  * places.
  */
+/**
+ * The page an .html file describes, put on screen — or taken down.
+ *
+ * Built from the text on hand (the editor's, or the buffer's before the editor
+ * exists) and keyed on it, so switching views over an unchanged file keeps the
+ * running page, and switching back after an edit shows the edited one. Taken
+ * down whenever it is not on screen: a guest is a process, and a page drawing
+ * a canvas sixty times a second should not do so behind the source it came
+ * from.
+ */
+/* What the guest on screen was built from: the file it came from, and the
+   document itself — held by identity, not by value.
+
+   The text is never compared, and never copied to be compared. CodeMirror's
+   `Text` is persistent, so a transaction that does not change the document
+   hands back the very same object, and `!==` is the whole test. The version
+   this replaced keyed on the page's own source and kept the key in
+   `dataset` — which put a copy of the entire file into an HTML attribute, and
+   then read those bytes back out and compared them character by character on
+   every `applyPanes`. `buildDecorations` gave up its `doc.toString()` for the
+   same reason; this is the same copy, in the same place, on a colder path. */
+/** @type {{ path: string | null, doc: import('@codemirror/state').Text | string | null }} */
+let htmlViewSource = { path: null, doc: null }
+
+function paintHtmlView (open) {
+  const host = el.htmlview
+  if (!host) return
+  if (!open) {
+    if (host.firstChild) host.replaceChildren()
+    htmlViewSource = { path: null, doc: null }
+    return
+  }
+  const file = state.current?.path || null
+  const doc = editor ? editor.state.doc : buffer.text
+  if (htmlViewSource.path === file && htmlViewSource.doc === doc) return
+  htmlViewSource = { path: file, doc }
+  // The one place the document is flattened, and only to build a guest with.
+  host.replaceChildren(
+    buildGuest(typeof doc === 'string' ? doc : doc.toString(), 'htmlview-page'))
+}
+
 function applyPanes () {
   const pdfOpen = viewingPdf()
   const texOpen = viewingTex()
@@ -2958,7 +3024,7 @@ function applyPanes () {
      Editing, so a held 'raw' gives way to Editing while one is open, and its
      editable grid is entered rather than the backing pipes briefly shown. */
   const want = heldView ?? state.view
-  const tabular = viewingLanguageTable() || dataOpen || notebookOpen
+  const tabular = viewingLanguageTable() || dataOpen || notebookOpen || viewingHtml()
   const show = lockedHere() ? 'read' : (tabular && want === 'raw' ? 'edit' : want)
   heldView = show === want ? null : want
   if (state.view !== show) showView(show)
@@ -2969,7 +3035,8 @@ function applyPanes () {
   const text = viewingText()
   /* The kinds shown as source: the editor pane, and nothing else the note
      chrome offers. TeX is the one of them that also has a preview beside it. */
-  const sourceOnly = texOpen || codeOpen
+  const sourceOnly = texOpen || (codeOpen && !viewingHtml())
+  const htmlOpen = viewingHtml() && state.view === 'read'
   el.stage.classList.toggle('is-tex', texOpen)
   el.texDivider.hidden = !texOpen
   el.texPreview.hidden = !texOpen
@@ -2979,11 +3046,13 @@ function applyPanes () {
   // left open it would be a bar over a note, searching a paper nobody can see.
   if (!pdfOpen) pdfFind?.close()
   el.site.hidden = !siteOpen
+  el.htmlview.hidden = !htmlOpen
+  paintHtmlView(htmlOpen)
   el.whiteboard.hidden = !whiteboardOpen
   el.data.hidden = !dataOpen
   el.notebook.hidden = !notebookOpen
   el.fileview.hidden = !fileOpen
-  el.reading.hidden = !text || sourceOnly || state.view !== 'read'
+  el.reading.hidden = !text || sourceOnly || htmlOpen || state.view !== 'read'
   el.editorHost.hidden = !text || (!sourceOnly && state.view === 'read')
   el.pdfTools.hidden = !pdfOpen
   el.siteTools.hidden = !siteOpen
@@ -3012,7 +3081,7 @@ function applyPanes () {
      Claimed here rather than in either viewer's own wheel handler because the
      window's zoom is applied in the main process, which never sees the event
      the page prevented. */
-  api.zoom.claim?.(pdfOpen || siteOpen || whiteboardOpen)
+  api.zoom.claim?.(pdfOpen || siteOpen || whiteboardOpen || htmlOpen)
   paintZoomBadge()
   el.app.dataset.kind = state.current?.kind || 'note'
   syncSidebarPaneAvailability()
@@ -5600,7 +5669,16 @@ const paneTabBelow = (name) => el.paneTabsBelow.querySelector(`.pane-tab[data-pa
 /* PDFs cannot participate in the Markdown backlink graph. Keep the control
    out of the tab order as well as out of sight, and hand an already-open Links
    pane to the PDF's own navigation instead of showing a known-empty panel. */
-const sidebarPaneAvailable = (name) => name !== 'links' || !viewingPdf()
+/* Spelling is for prose — the same kinds renderSpelling declines to check.
+   A tab that only ever says "checked in notes" over a Python file is a tab
+   that should not be there. */
+const spellingApplies = () =>
+  !(viewingPdf() || viewingSite() || viewingWhiteboard() ||
+    viewingCode() || viewingData() || viewingNotebook())
+const sidebarPaneAvailable = (name) =>
+  name === 'links' ? !viewingPdf()
+    : name === 'spelling' ? spellingApplies()
+      : true
 
 function syncSidebarPaneAvailability () {
   for (const name of Object.keys(PANES)) {
@@ -6436,16 +6514,6 @@ function queueLinks () {
 }
 
 const INFO_WORD = /[\p{sc=Han}\p{sc=Hiragana}\p{sc=Katakana}\p{sc=Hangul}]|[[\p{L}\p{N}'’\-]--[\p{sc=Han}\p{sc=Hiragana}\p{sc=Katakana}\p{sc=Hangul}]]+/gv
-
-function fileSize (bytes) {
-  const n = Number(bytes) || 0
-  if (n < 1024) return `${n} ${n === 1 ? 'byte' : 'bytes'}`
-  const units = ['kB', 'MB', 'GB']
-  let value = n / 1024
-  let unit = 0
-  while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit++ }
-  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`
-}
 
 function infoRow (label, value, title, onClick = null) {
   const row = node('div', 'info-row')
@@ -7666,7 +7734,7 @@ function updateViewControl () {
   for (const button of el.viewSwitch.querySelectorAll('.view-option')) {
     const view = button.dataset.view
     const unavailable = view === 'raw' &&
-      (viewingLanguageTable() || viewingData() || viewingNotebook())
+      (viewingLanguageTable() || viewingData() || viewingNotebook() || viewingHtml())
     const barred = locked && view !== 'read'
     button.hidden = unavailable
     button.disabled = unavailable || barred
@@ -7675,7 +7743,8 @@ function updateViewControl () {
       ? 'This file is locked — unlock it from the command palette to edit it'
       : unavailable
         ? `${VIEW_NAMES[view]} view is unavailable for ${
-            viewingData() ? 'CSV tables' : viewingNotebook() ? 'notebooks' : 'language tables'}`
+            viewingData() ? 'CSV tables' : viewingNotebook() ? 'notebooks'
+              : viewingHtml() ? 'HTML files' : 'language tables'}`
         : `${VIEW_NAMES[view]} view (⌘${VIEWS.indexOf(view) + 1})`
   }
   el.lockMark.hidden = !locked
@@ -7773,6 +7842,20 @@ function setView (view) {
     el.app.dataset.view = view
     applyPanes()
     api.config.set({ view })
+    return
+  }
+  /* An HTML file: Reading is the page, Editing is the editor, and neither is
+     the Markdown reading pane — so nothing below about rendering or scroll
+     positions applies. */
+  if (viewingHtml()) {
+    heldView = null
+    state.view = view
+    el.app.dataset.view = view
+    applyPanes()
+    editor?.setRaw(false)
+    updateViewControl()
+    api.config.set({ view })
+    if (view !== 'read') editor?.focus()
     return
   }
   cancelReadingWarmup()

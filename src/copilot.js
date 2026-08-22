@@ -239,8 +239,36 @@ export function mountCopilot ({
      nobody has "forty-one seconds, forty-two seconds" read to them. */
   busyTime.setAttribute('aria-hidden', 'true')
   busySpinner.setAttribute('aria-hidden', 'true')
-  busyRow.append(busySpinner, busyLabel, busyTime)
+  const busyCaret = element('span', 'ai-busy-caret', '▸')
+  busyCaret.setAttribute('aria-hidden', 'true')
+  busyRow.append(busySpinner, busyLabel, busyTime, busyCaret)
   el.log.append(busyRow)
+
+  /* The strip is also the switch for the reasoning streaming in above it.
+     Live thinking is folded away by default — a wall of half-formed prose
+     scrolling under every reply is the wrong default — and clicking "Working"
+     opens it for this turn and the ones after, until it is clicked shut. The
+     choice outlives the session, since wanting to watch the model think is a
+     disposition rather than a whim. */
+  const THINK_KEY = 'tulip.copilot.showThinking'
+  let showThinking = false
+  try { showThinking = localStorage.getItem(THINK_KEY) === '1' } catch {}
+  function paintThinkingSwitch () {
+    el.log.dataset.think = showThinking ? 'open' : 'shut'
+    busyRow.setAttribute('aria-pressed', showThinking ? 'true' : 'false')
+    busyRow.title = showThinking ? 'Hide thinking' : 'Show thinking'
+  }
+  paintThinkingSwitch()
+  busyRow.tabIndex = 0
+  busyRow.addEventListener('click', () => {
+    showThinking = !showThinking
+    try { localStorage.setItem(THINK_KEY, showThinking ? '1' : '0') } catch {}
+    paintThinkingSwitch()
+    if (following) el.log.scrollTop = el.log.scrollHeight
+  })
+  busyRow.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); busyRow.click() }
+  })
 
   /* The turns running in other conversations. With one copilot there was
      nothing to say — the strip above was the only turn there was. With one per
@@ -276,6 +304,7 @@ export function mountCopilot ({
     const run = visibleRun()
     const rephrased = busyLabel.textContent !== run.phase
     busyLabel.textContent = run.phase
+    busyRow.classList.toggle('has-think', !!run.think?.text)
     const seconds = Math.round((Date.now() - (run.at || Date.now())) / 1000)
     // Silent for the first couple of seconds: a timer on a reply that arrives
     // straight away is noise, not reassurance.
@@ -1150,44 +1179,63 @@ export function mountCopilot ({
     )
     head.append(summary)
     const files = element('div', 'ai-review-files')
+    /* Row per changed file, kept by path so the one Diff control can open all
+       of them. The file itself is context, not another action: the
+       transcript's `Edited …` row already provides the direct jump. */
+    const rowFor = new Map()
     for (const summary of operation.changes) {
       const row = element('div', 'ai-review-file')
-      // The changed file is context, not another action. The transcript's
-      // `Edited …` row already provides the direct jump to the edit.
       const path = element('span', 'ai-review-path', summary.path)
       path.title = summary.path
-      const diff = element('button', 'ghost is-compact', 'Diff')
-      diff.type = 'button'
-      diff.addEventListener('click', async () => {
-        const old = row.querySelector('.history-diff, .ai-review-gone')
-        if (old) { old.remove(); return }
-        let detail = null
-        try {
-          detail = await api.trust.operation(operation.id)
-        } catch {
-          // Falls through to the same line as a missing change: from the
-          // reader's side, a history that cannot be read and one that no
-          // longer holds this turn are the same answer.
-        }
-        const change = detail?.changes.find((item) => item.path === summary.path)
+      row.append(path)
+      rowFor.set(summary.path, row)
+      files.append(row)
+    }
+
+    const actions = element('div', 'ai-review-actions')
+
+    /* One Diff for the turn rather than one per file. A turn is accepted or
+       rejected whole — those two controls have always been about all of it —
+       and reading it should work the same way, in one click, beside them.
+       Fetching once also replaces N round trips with one for a turn that
+       touched several files. */
+    const diff = element('button', 'ghost is-compact ai-review-diff', 'Diff')
+    diff.type = 'button'
+    diff.title = operation.changes.length === 1
+      ? 'Show what changed'
+      : `Show what changed in all ${operation.changes.length} files`
+    diff.addEventListener('click', async () => {
+      const open = files.querySelector('.history-diff, .ai-review-gone')
+      if (open) {
+        for (const shown of files.querySelectorAll('.history-diff, .ai-review-gone')) shown.remove()
+        diff.classList.remove('is-open')
+        return
+      }
+      let detail = null
+      try {
+        detail = await api.trust.operation(operation.id)
+      } catch {
+        // Falls through to the same line as a missing change: from the
+        // reader's side, a history that cannot be read and one that no
+        // longer holds this turn are the same answer.
+      }
+      diff.classList.add('is-open')
+      for (const [path, row] of rowFor) {
+        const change = detail?.changes.find((item) => item.path === path)
         /* A turn old enough to have been evicted from the history — it holds
            whole before/after texts and is capped — has no diff left to show.
            Saying so beats a button that answers a click with nothing, which
            reads as broken rather than as expired. */
-        if (!change) {
-          row.append(element('div', 'ai-review-gone', 'That change is no longer in the history.'))
-          return
-        }
-        row.append(diffBlock(change))
-      })
-      row.append(path, diff)
-      files.append(row)
-    }
-    const actions = element('div', 'ai-review-actions')
+        row.append(change
+          ? diffBlock(change)
+          : element('div', 'ai-review-gone', 'That change is no longer in the history.'))
+      }
+    })
+    actions.append(diff)
     /* Reject is the single rollback for the whole turn. Main snapshots the
        vault before the message goes out, so no per-file restore controls are
        needed here. */
-    const reject = element('button', 'ghost is-compact', 'Reject')
+    const reject = element('button', 'ghost is-compact is-danger', 'Reject')
     reject.type = 'button'
     reject.title = `Reject changes to all ${operation.changes.length} files`
     reject.addEventListener('click', () => {
@@ -1478,6 +1526,44 @@ export function mountCopilot ({
     save()
   }
 
+  /* How long a followed edit shows its own diff for. Long enough to read a
+     few lines, short enough that it is plainly a glance and not a panel the
+     reader now has to close. The fade is CSS; this only has to outlast it. */
+  const STEP_DIFF_MS = 4000
+  let stepDiffTimer = null
+
+  /**
+   * Show the diff for one step row, under it, for a moment.
+   *
+   * Only ever one at a time — following three edits in a row should leave the
+   * transcript as it found it, not three diffs deep.
+   */
+  async function flashStepDiff (row, path, operationId) {
+    clearTimeout(stepDiffTimer)
+    for (const old of el.log.querySelectorAll('.step-diff')) old.remove()
+    if (!operationId || !path) return
+
+    let detail = null
+    try {
+      detail = await api.trust.operation(operationId)
+    } catch {
+      // Nothing to glance at, and nothing worth a warning for a glance.
+    }
+    const change = detail?.changes.find((item) => item.path === path)
+    if (!change || !row.isConnected) return
+
+    const flash = element('div', 'step-diff')
+    flash.append(diffBlock(change))
+    row.insertAdjacentElement('afterend', flash)
+    /* Removed on a timer rather than on the animation ending: the animation is
+       decoration and a reader with reduced motion turns it off, which would
+       otherwise leave the diff on screen for good. */
+    stepDiffTimer = setTimeout(() => {
+      flash.classList.add('is-going')
+      setTimeout(() => flash.remove(), 260)
+    }, STEP_DIFF_MS)
+  }
+
   el.log.addEventListener('click', (event) => {
     const again = event.target.closest('.ai-again')
     if (again) { askAgain(again.closest('.msg-warn')); return }
@@ -1496,14 +1582,22 @@ export function mountCopilot ({
       const path = edited.dataset.path || ''
       const messages = chat().messages
       const at = messages.findIndex((message) => message.node === edited)
-      const review = at < 0 ? null : messages.slice(at + 1).find((message) =>
-        message.t === 'review' && !message.accepted &&
+      const reviews = at < 0 ? [] : messages.slice(at + 1).filter((message) =>
+        message.t === 'review' &&
         message.operation?.changes?.some((change) => change.path === path))
+      const review = reviews.find((message) => !message.accepted)
       onOpen?.(
         path,
         edited.dataset.line ? Number(edited.dataset.line) : null,
         review?.operation?.id || null
       )
+      /* And show what the row is claiming. The tally on it says `+46 −0`; the
+         lines behind that number are one click away everywhere else in the
+         panel and were not here. Shown in passing rather than left open: the
+         row is a jump, not a disclosure, and a diff that stayed would push the
+         rest of the transcript down every time one was followed. Any review
+         will do — including an accepted one, which still holds the text. */
+      flashStepDiff(edited, path, (review || reviews[0])?.operation?.id || null)
       return
     }
 

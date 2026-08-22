@@ -26,6 +26,33 @@ export function isManim (lang) {
   return String(lang || '').trim().toLowerCase() === DRAWN.manim
 }
 
+/* Whether a whole `.py` file on the stage is a scene rather than a program.
+
+   A fenced block says so by being fenced ```manim; a source file has to be
+   read. Both halves are required and neither is enough alone: importing manim
+   is what a helper module does too, and a class called `TitleScene(VGroup)` is
+   not a scene. The base test is `/Scene\b/`, character for character what
+   `sceneName` in electron/main.js uses — the two have to agree, or Tulip
+   offers to render a file that Manim then says has no scene in it. The missing
+   boundary at the front is deliberate there and so it is deliberate here:
+   `MovingCameraScene` and `ThreeDScene` are both scenes.
+
+   Deliberately not clever about it. A file that both defines scenes and does
+   work of its own under `if __name__ == "__main__"` is rare, and the reader
+   who has one can still say what they meant by putting the scene in a note. */
+const IMPORTS_MANIM = /^[ \t]*(?:from[ \t]+manim(?:\.[\w.]+)?[ \t]+import\b|import[ \t]+manim\b)/m
+const SCENE_CLASS = /^[ \t]*class[ \t]+[A-Za-z_]\w*[ \t]*\(([^)]*)\)[ \t]*:/gm
+
+export function isManimSource (code) {
+  const text = String(code || '')
+  if (!IMPORTS_MANIM.test(text)) return false
+  SCENE_CLASS.lastIndex = 0
+  for (const found of text.matchAll(SCENE_CLASS)) {
+    if (/Scene\b/.test(found[1])) return true
+  }
+  return false
+}
+
 /* Renders in flight, keyed by note and code — the same bargain runcode's
    `results` map strikes. A per-attach state stranded the render whenever the
    reading view was rebuilt under it — a note switch and back, mid-render —
@@ -39,7 +66,7 @@ const runs = new Map()
    one decision about what an .mp4 in this vault becomes, shared with every
    other embed — the resolver is trivial here only because main already answered
    the question resolution exists to answer. */
-function videoFor (path) {
+export function videoFor (path) {
   const video = renderEmbed(embedSpec(path, { resolve: () => path }))
 
   /* A scene almost always *builds* to its picture, so frame zero is a black

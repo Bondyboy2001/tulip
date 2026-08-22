@@ -83,7 +83,10 @@ function toDataUrl (page) {
   return `data:text/html;charset=utf-8;base64,${btoa(binary)}`
 }
 
-function buildGuest (page, viewClass) {
+/* Exported for the HTML file view in renderer.js: a vault `.html` opened in
+   Reading is the same bargain as a run block — its own document, in the
+   same fenced partition, and nothing else. */
+export function buildGuest (page, viewClass) {
   const guest = document.createElement('webview')
   guest.className = viewClass
   /* Set before it is attached, because that is when it is decided whether

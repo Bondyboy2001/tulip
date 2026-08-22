@@ -25,18 +25,7 @@
 import { revealLabel } from './platform.js'
 import { el, svgIcon } from './dom.js'
 import { assetUrl, assetKind } from './assets.js'
-
-/** `4.2 MB`. Decimal units, because that is what a file manager shows and this
- *  number is read beside one. */
-function fileSize (bytes) {
-  const n = Number(bytes) || 0
-  if (n < 1000) return `${n} ${n === 1 ? 'byte' : 'bytes'}`
-  const units = ['kB', 'MB', 'GB', 'TB']
-  let size = n / 1000
-  let at = 0
-  while (size >= 1000 && at < units.length - 1) { size /= 1000; at++ }
-  return `${size < 10 ? size.toFixed(1) : Math.round(size)} ${units[at]}`
-}
+import { fileSize } from './units.js'
 
 const extensionOf = (path) => {
   const name = String(path || '').split('/').pop()

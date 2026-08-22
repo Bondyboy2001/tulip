@@ -14,6 +14,7 @@ const copilot = source ? read('src', 'copilot.js') : renderer
 const settings = source ? read('src', 'settings.js') : renderer
 const ask = source ? read('src', 'ask.js') : renderer
 const runcode = source ? read('src', 'runcode.js') : renderer
+const manim = source ? read('src', 'manim.js') : renderer
 const styles = read(source ? 'src' : 'dist', source ? 'styles-features.css' : 'renderer.css')
 const html = read(source ? 'src' : 'dist', 'index.html')
 const main = read('electron', 'main.js')
@@ -326,7 +327,22 @@ if (source) {
   assert.match(renderer, /codeAiPop\.isConnected && codeAiSession\?\.anchor === anchor/)
   assert.doesNotMatch(renderer, /document\.addEventListener\('pointerdown',[\s\S]{0,180}codeAiPop/)
   assert.doesNotMatch(renderer, /codeAiPop\.addEventListener\('keydown',[\s\S]{0,160}Escape/)
-  assert.match(copilot, /element\('button', 'ghost is-compact', 'Reject'\)/)
+  /* Reject is the destructive half of the pair and is coloured as one — see
+     `.ghost.is-danger`, which every theme defines through `--code-removed`. */
+  assert.match(copilot, /element\('button', 'ghost is-compact is-danger', 'Reject'\)/)
+  /* One Diff for the turn, beside Accept and Reject, rather than one per file:
+     a turn is read the same way it is accepted or rejected — whole. */
+  assert.match(copilot, /element\('button', 'ghost is-compact ai-review-diff', 'Diff'\)/)
+  /* Which classes count as a scene has to be the same question in the renderer,
+     which offers to render a .py file, and in main, which then picks the scene
+     out of it. They were briefly `\bScene\b` here and `Scene\b` there, and the
+     difference is every subclass anyone actually uses — `MovingCameraScene`,
+     `ThreeDScene` — offered and then refused. */
+  assert.match(manim, /\/Scene\\b\/\.test/)
+  assert.match(main, /\/Scene\\b\/\.test/)
+  /* And a source file's language arrives as its extension, so the check for
+     "is this python" goes through the alias list rather than one spelling. */
+  assert.match(renderer, /isLanguage\(lang, 'python'\) && isManimSource\(code\)/)
   assert.match(copilot, /const name = entry\.name \|\| noteName\(entry\.path\)/)
   assert.match(copilot, /run: \(\) => selectMention\(from, entry\.path\)/)
   assert.match(copilot, /box\.value = box\.value\.slice\(0, from\) \+ box\.value\.slice\(to\)/)

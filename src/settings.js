@@ -28,6 +28,7 @@ import {
   DEFAULT_CATALOGUE,
   allModels, asOptions, defaultEnabled, modelFromConfig, providerLabel
 } from './models.js'
+import { fileSize } from './units.js'
 
 const SECTIONS = [
   /* What the window looks like, and nothing else. Everything that used to sit
@@ -185,6 +186,31 @@ const SECTIONS = [
         name: 'Show line numbers',
         hint: 'A numbered margin beside source files.',
         fallback: false
+      }
+    ]
+  },
+  /* Where a `python` block's imports come from — see electron/python-env.js.
+     Two settings and a list: whether Tulip may install what a block asks for,
+     and what it has built so far. The list is the only place environments are
+     visible at all, which is why it exists: invisible is the right default,
+     unmanageable is not. */
+  {
+    id: 'python',
+    group: 'Documents',
+    label: 'Python',
+    rows: [
+      {
+        key: 'autoInstallPythonDeps',
+        type: 'toggle',
+        name: 'Install missing packages',
+        hint: 'A block that stops on a missing import has it installed, then runs again. ' +
+          'A script declaring its own dependencies is left alone.',
+        fallback: true
+      },
+      {
+        type: 'environments',
+        name: 'Environments',
+        hint: 'One per note, kept outside the vault. Deleting one costs a rebuild and nothing else.'
       }
     ]
   },
@@ -385,6 +411,23 @@ export function mountSettings ({ el, api, values, onChange }) {
   /* The rebindable commands, from the menu itself — see hotkeys:list. */
   let hotkeyCatalogue = []
   let doctorState = null
+  /**
+   * One python environment, as `python:envs` reports it.
+   * @typedef {object} PythonEnv
+   * @property {string} dir
+   * @property {string|null} note      the note it was built for, if recorded
+   * @property {string|null} vault
+   * @property {boolean} shared        the pool for blocks with no note
+   * @property {boolean} mine          belongs to the vault that is open
+   * @property {boolean} orphaned      its note is gone from this vault
+   * @property {boolean} unknown       built before Tulip recorded whose it was
+   * @property {number} bytes
+   */
+
+  /** The environments last read, or null before the panel has asked. Walking
+   *  every file under every one of them is not something to do on a timer.
+   *  @type {PythonEnv[]|null} */
+  let envState = null
 
   /* ------------------------------------------------------------ controls */
 
@@ -497,6 +540,81 @@ export function mountSettings ({ el, api, values, onChange }) {
   }
 
   const CONTROLS = {
+    environments () {
+      const wrap = node('div', 'ai-doctor')
+      const results = node('div', 'ai-doctor-results')
+      const actions = node('div', 'env-actions')
+      const refresh = node('button', 'model-refresh', envState ? 'Refresh' : 'Show environments')
+      refresh.type = 'button'
+
+      if (envState) {
+        if (!envState.length) {
+          results.append(node('span', 'settings-hint', 'None built yet.'))
+        }
+        for (const env of envState) {
+          const row = node('div', `ai-doctor-provider is-${env.orphaned ? 'problem' : 'ready'}`)
+          const name = env.shared
+            ? 'Shared'
+            : env.note || (env.unknown ? 'Unrecorded' : 'Another vault')
+          const why = env.orphaned
+            ? 'note deleted'
+            : env.shared
+              ? 'blocks with no note of their own'
+              : env.mine ? '' : 'another vault'
+          row.append(
+            node('span', 'ai-doctor-name', name),
+            node('span', 'ai-doctor-version', fileSize(env.bytes)),
+            node('span', 'ai-doctor-status', why)
+          )
+          const drop = node('button', 'ghost is-compact is-danger', 'Delete')
+          drop.type = 'button'
+          drop.title = `Delete this environment — it is rebuilt on the next run that needs it`
+          drop.addEventListener('click', async () => {
+            drop.disabled = true
+            await api.python.removeEnv(env.dir).catch(() => {})
+            envState = await api.python.envs().catch(() => envState)
+            renderBody()
+          })
+          row.append(drop)
+          results.append(row)
+        }
+
+        /* Only offered when there is something to take: a button that reports
+           "removed 0" is a button that should not have been there. */
+        if (envState.some((env) => env.orphaned)) {
+          const prune = node('button', 'ghost is-compact', 'Delete orphaned')
+          prune.type = 'button'
+          prune.title = 'Delete the environments whose notes are gone'
+          prune.addEventListener('click', async () => {
+            prune.disabled = true
+            await api.python.pruneEnvs().catch(() => {})
+            envState = await api.python.envs().catch(() => envState)
+            renderBody()
+          })
+          actions.append(prune)
+        }
+      } else {
+        results.append(node('span', 'settings-hint',
+          'Sizes are what each would cost alone; packages are shared between them, ' +
+          'so the real total is lower.'))
+      }
+
+      refresh.addEventListener('click', async () => {
+        refresh.disabled = true
+        refresh.textContent = 'Reading…'
+        try {
+          envState = await api.python.envs()
+          renderBody()
+        } catch {
+          refresh.disabled = false
+          refresh.textContent = 'Could not read'
+        }
+      })
+      actions.append(refresh)
+      wrap.append(results, actions)
+      return wrap
+    },
+
     doctor () {
       const wrap = node('div', 'ai-doctor')
       const results = node('div', 'ai-doctor-results')
@@ -1174,7 +1292,8 @@ export function mountSettings ({ el, api, values, onChange }) {
       // A full-width control reads better under its label than squeezed
       // beside it — the theme grid and the model list are both of those.
       if (row.type === 'themes' || row.type === 'catalogue' || row.type === 'doctor' ||
-          row.type === 'hotkeys' || row.type === 'languages') line.classList.add('is-stacked')
+          row.type === 'hotkeys' || row.type === 'languages' ||
+          row.type === 'environments') line.classList.add('is-stacked')
       el.body.append(line)
     }
   }

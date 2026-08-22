@@ -326,6 +326,12 @@
              to show — no address yet, or one that would not load. -->
         <div class="site" id="site" hidden></div>
 
+        <!-- A vault .html file, shown as the page it is. The Reading view of
+             an HTML source file: a guest in the run-block partition (see
+             src/guest.js), so the page's script and style work, with no
+             network and no reach into the app or the vault. -->
+        <div class="htmlview" id="htmlview" hidden></div>
+
         <!-- A first-class vault document, mounted lazily. Excalidraw owns the
              canvas inside this host; Tulip owns its tab, file, toolbar and
              persistence just as it does for PDF and website viewers. -->

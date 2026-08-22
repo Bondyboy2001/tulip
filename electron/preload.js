@@ -141,9 +141,14 @@ contextBridge.exposeInMainWorld('tulip', {
    * Executing a fenced block. The renderer sends the language and the code and
    * gets an id back; the process itself, and every decision about what may be
    * run, stays on the other side of this bridge.
+   *
+   * `note` is the block's note, as a vault-relative path — what a python block
+   * gets its environment from, so the packages one note installs are not
+   * quietly in scope for every other note in the vault. Null where a block has
+   * no note behind it, which is a shared environment rather than an error.
    */
   run: {
-    start: (lang, code) => ipcRenderer.invoke('run:start', lang, code),
+    start: (lang, code, note) => ipcRenderer.invoke('run:start', lang, code, note ?? null),
     warm: (lang) => ipcRenderer.invoke('run:warm', lang),
     kill: (id) => ipcRenderer.invoke('run:kill', id)
   },
@@ -173,6 +178,15 @@ contextBridge.exposeInMainWorld('tulip', {
       ipcRenderer.invoke('kernel:complete', path, code, cursorPos),
     inspect: (path, code, cursorPos) =>
       ipcRenderer.invoke('kernel:inspect', path, code, cursorPos)
+  },
+
+  /* The Python environments a note's blocks run in — see electron/python-env.js.
+     Listed for the settings panel, which is the only place they are visible;
+     `prune` takes the ones whose note the vault no longer has. */
+  python: {
+    envs: () => ipcRenderer.invoke('python:envs'),
+    removeEnv: (dir) => ipcRenderer.invoke('python:env-remove', dir),
+    pruneEnvs: () => ipcRenderer.invoke('python:env-prune')
   },
 
   /* Manim renders to a real file in the vault rather than to the page, so it
