@@ -9954,33 +9954,42 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   padding: 28px 24px 60px;
   background: var(--sunk);
   font-family: var(--font-body);
-  font-size: 17px;
+  font-size: 16px;
   line-height: 1.68;
   color: var(--ink);
   outline: none;
 }
 .docx[hidden] { display: none; }
 
-/* The sheet. `--measure` is the app's own reading width, and the page is that
-   plus the margins — so a Word document and a note set the same number of
-   words across a line, whatever the window is doing. */
-.docx-page {
-  max-width: min(calc(var(--measure) + 128px), 100%);
+/* The sheets. Real A4 at screen resolution, with Word's inch of margin — the
+   sizes are SHEET in src/docx.js, which is also what pushes a block that would
+   straddle two sheets onto the next. The frame is scaled down to the pane
+   when the pane is narrower than a page; the page itself never reflows. */
+.docx-frame {
+  position: relative;
+  width: 794px;
   margin-inline: auto;
-  padding: 64px;
-  border: 1px solid var(--line-soft);
-  border-radius: 3px;
+}
+.docx-sheets {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.docx-sheet {
+  height: 1123px;
   background: var(--paper);
-  box-shadow: 0 1px 3px rgb(0 0 0 / 0.10), 0 8px 24px rgb(0 0 0 / 0.06);
-  /* A document ends where its text ends; a page does not. The minimum is what
-     keeps an empty file looking like a sheet rather than a strip. */
-  min-height: 420px;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.12), 0 6px 20px rgb(0 0 0 / 0.08);
+}
+.docx-sheet + .docx-sheet { margin-top: 28px; }
+.docx-page {
+  position: relative;
+  padding: 96px;
+  min-height: 1123px;
+  background: transparent;
 }
 .docx-page:focus-visible { outline: none; }
-/* Something has to say the page takes typing. A caret alone does not, and the
-   app's own accent is what says "this is the live surface" everywhere else. */
-.docx.is-editing .docx-page { border-color: color-mix(in srgb, var(--accent) 26%, var(--line)); }
-
+/* The first sheet carries the one sign that the page takes typing. */
+.docx.is-editing .docx-sheet:first-child { box-shadow: 0 1px 2px rgb(0 0 0 / 0.12), 0 6px 20px rgb(0 0 0 / 0.08), 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent); }
 .docx-p { margin: 0 0 0.9em; overflow-wrap: anywhere; }
 /* Word's own tab stops are a page layout Tulip is not reproducing; what a tab
    inside a paragraph has to do is keep the space it stands for. */

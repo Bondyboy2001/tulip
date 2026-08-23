@@ -11,6 +11,10 @@ import { mkdir, writeFile, copyFile } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
+/* The executable the package exports, not the .bin shim: on Windows the shim
+   is a .cmd, which spawn will not start without a shell since Node closed
+   that hole, and the test died with ENOENT before it began. */
+import electron from 'electron'
 
 const root = path.dirname(fileURLToPath(new URL('.', import.meta.url)))
 const cache = path.join(root, 'node_modules/.cache')
@@ -140,7 +144,7 @@ app.whenReady().then(async () => {
 /* The outermost backstop. Everything above assumes Electron got far enough to
    run the code that reports; this covers the case where it did not, so the
    worst a wedged run can cost is five minutes rather than the whole job. */
-const run = spawnSync(path.join(root, 'node_modules/.bin/electron'), [main], {
+const run = spawnSync(electron, [main], {
   encoding: 'utf8',
   timeout: 300000,
   env: { ...process.env, ELECTRON_DISABLE_SECURITY_WARNINGS: '1' }

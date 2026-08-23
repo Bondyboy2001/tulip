@@ -71,7 +71,7 @@ app.whenReady().then(async () => {
 }).catch((err) => { console.error(err); app.exit(1) })
 `)
 
-const result = spawnSync('node_modules/.bin/electron', [path.join(dir, 'host.mjs')], {
+const result = spawnSync(electron, [path.join(dir, 'host.mjs')], {
   stdio: ['inherit', 'pipe', 'pipe'], encoding: 'utf8'
 })
 process.stdout.write((result.stdout || '').split('\n').filter((l) => !/^\s*$/.test(l)).join('\n') + '\n')

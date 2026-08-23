@@ -14,6 +14,10 @@ import { mkdir, writeFile, copyFile, readFile } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
+/* The executable the package exports, not the .bin shim: on Windows the shim
+   is a .cmd, which spawn will not start without a shell since Node closed
+   that hole, and the test died with ENOENT before it began. */
+import electron from 'electron'
 
 const root = path.dirname(fileURLToPath(new URL('.', import.meta.url)))
 const cache = path.join(root, 'node_modules/.cache')
@@ -86,7 +90,7 @@ app.whenReady().then(async () => {
 })
 `)
 
-const runElectron = () => spawnSync(path.join(root, 'node_modules/.bin/electron'), [main], {
+const runElectron = () => spawnSync(electron, [main], {
   encoding: 'utf8',
   timeout: 150_000,
   maxBuffer: 64 * 1024 * 1024,

@@ -24,6 +24,10 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+/* The executable the package exports, not the .bin shim: on Windows the shim
+   is a .cmd, which spawn will not start without a shell since Node closed
+   that hole, and the test died with ENOENT before it began. */
+import electron from 'electron'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const scratch = mkdtempSync(path.join(tmpdir(), 'tulip-ipc-'))
@@ -42,7 +46,7 @@ writeFileSync(path.join(profile, 'config.json'), JSON.stringify({ vaultPath: vau
    away from a syntax error in a test nobody was editing. */
 const harness = path.join(root, 'scripts', 'test-ipc.harness.cjs')
 
-const run = spawnSync(path.join(root, 'node_modules/.bin/electron'), [harness, `--user-data-dir=${profile}`], {
+const run = spawnSync(electron, [harness, `--user-data-dir=${profile}`], {
   encoding: 'utf8',
   cwd: root,
   timeout: 120000,

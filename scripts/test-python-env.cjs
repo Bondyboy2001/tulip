@@ -211,13 +211,21 @@ async function main () {
     assert.equal(await envs.dirFor('Notes/Alpha.md'), await envs.dirFor('Notes/Alpha.md'))
   })
 
-  await ok('two notes of the same name in different folders do not collide', async () => {
+  if (hasUv) await ok('two notes of the same name in different folders do not collide', async () => {
     assert.notEqual(await envs.dirFor('A/Note.md'), await envs.dirFor('B/Note.md'))
   })
 
   if (hasUv) await ok('the vault is part of the identity', async () => {
-    const other = makePythonEnvs({ root: () => root, vault: () => '/vault/two', pathFor: () => '' })
-    assert.notEqual(await envs.dirFor('Notes/Alpha.md'), await other.dirFor('Notes/Alpha.md'))
+    /* The same installer as `envs`, so both sides key a note's own directory
+       and the vault is the only thing that differs between them. */
+    const other = makePythonEnvs({
+      root: () => root,
+      vault: () => '/vault/two',
+      pathFor: () => `${os.homedir()}/.local/bin${path.delimiter}${process.env.PATH}`
+    })
+    const one = await envs.dirFor('Notes/Alpha.md')
+    const two = await other.dirFor('Notes/Alpha.md')
+    assert.notEqual(one, two, `two vaults share an environment: ${one}`)
   })
 
   if (!hasUv) {

@@ -1,0 +1,10 @@
+# The tests match source against regular expressions written with \n, and a
+# checkout that turned every line ending into \r\n failed all of them on the
+# Windows runner. Text is LF everywhere; binaries are left alone.
+* text=auto eol=lf
+*.png binary
+*.icns binary
+*.ico binary
+*.woff2 binary
+*.pdf binary
+*.docx binary

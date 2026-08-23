@@ -34,6 +34,14 @@ import { el } from './dom.js'
    heading — it is simply drawn at the smallest one. */
 const headingTag = (level) => `h${Math.min(Math.max(level, 1), 6)}`
 
+/* An A4 sheet at 96 dots to the inch, with the inch of margin Word leaves, and
+   the gap between one sheet and the next. The page is drawn at this size and
+   scaled down to fit the pane, never reflowed: a page that grew with the window
+   would not be a page. */
+export const SHEET = { width: 794, height: 1123, margin: 96, gap: 28 }
+const STRIDE = SHEET.height + SHEET.gap
+const SHEET_TEXT = SHEET.height - 2 * SHEET.margin
+
 /** The marks a run can carry, as the classes they are drawn with. */
 const MARKS = [
   ['bold', 'is-bold'],
@@ -88,6 +96,11 @@ export function mountDocx ({
   let current = null
   /** @type {any} */
   let page = null
+  /* The sheets drawn under the page, and the frame that scales them both. */
+  /** @type {any} */
+  let sheets = null
+  /** @type {any} */
+  let frame = null
   let readonly = false
   let dirty = false
   /** @type {Promise<any> | null} */
@@ -491,6 +504,7 @@ export function mountDocx ({
     const entry = stack.pop()
     if (here) (redo ? past : future).push(here)
     restore(entry)
+    paginate()
     previous = snapshot()
     lastKind = ''
     revision++
@@ -518,6 +532,7 @@ export function mountDocx ({
    *  anything else is a step of its own. */
   function touched (kind = 'edit') {
     record(kind)
+    paginate()
     previous = snapshot()
     revision++
     setDirty(true)
@@ -1114,6 +1129,71 @@ export function mountDocx ({
     })
   }
 
+  /* ---------------------------------------------------------------- pages
+
+   The document is one editable column, because everything about editing it —
+   the caret, the history, the save — wants one. The pages are drawn under that
+   column, and the column is made to honour them: any block that would cross
+   from one sheet into the next is pushed down to start on the next, by padding
+   that the save never reads and the signatures never see. A block taller than
+   a sheet has nowhere to go and simply runs across. */
+
+  /** The blocks a page break can fall between, in order. */
+  function leaves (root) {
+    const out = []
+    for (const kid of root.children) {
+      const child = /** @type {any} */ (kid)
+      if (child.tagName === 'UL' || child.tagName === 'OL') { out.push(...leaves(child)); continue }
+      out.push(child)
+      if (child.tagName === 'LI') {
+        for (const inner of child.children) {
+          if (inner.tagName === 'UL' || inner.tagName === 'OL') out.push(...leaves(inner))
+        }
+      }
+    }
+    return out
+  }
+
+  /** The height of a block's own lines — for a list item, up to its sub-list. */
+  function ownHeight (node) {
+    for (const inner of node.children) {
+      if (inner.tagName === 'UL' || inner.tagName === 'OL') return inner.offsetTop - node.offsetTop
+    }
+    return node.offsetHeight
+  }
+
+  function paginate () {
+    if (!page || !sheets) return
+    const blocks = leaves(page)
+    for (const block of blocks) block.style.paddingTop = ''
+    for (const block of blocks) {
+      const top = block.offsetTop - SHEET.margin
+      const height = ownHeight(block)
+      const sheet = Math.floor(top / STRIDE)
+      const end = sheet * STRIDE + SHEET_TEXT
+      const inGap = top >= end
+      if (inGap || (top + height > end && height <= SHEET_TEXT)) {
+        block.style.paddingTop = `${(sheet + 1) * STRIDE - top}px`
+      }
+    }
+    const last = blocks[blocks.length - 1]
+    const bottom = last ? last.offsetTop + last.offsetHeight - SHEET.margin : 0
+    const count = Math.max(1, Math.floor(Math.max(bottom - 1, 0) / STRIDE) + 1)
+    page.style.minHeight = `${count * STRIDE - SHEET.gap}px`
+    while (sheets.children.length > count) sheets.lastChild.remove()
+    while (sheets.children.length < count) sheets.append(el('div', 'docx-sheet'))
+  }
+
+  /** Scale the sheets down to the pane when it is narrower than a page. */
+  function fit () {
+    if (!frame) return
+    const room = host.clientWidth - 48
+    const scale = Math.min(1, Math.max(0.25, room / SHEET.width))
+    frame.style.zoom = String(scale)
+  }
+
+  if (typeof ResizeObserver !== 'undefined') new ResizeObserver(() => fit()).observe(host)
+
   /* -------------------------------------------------------------- opening */
 
   /** Draw a document that has been read, and remember what saving it takes. */
@@ -1121,9 +1201,14 @@ export function mountDocx ({
     kept = { ppr: [], rpr: [], raw: [], hyper: [], tables: [] }
     host.replaceChildren()
 
+    frame = el('div', 'docx-frame')
+    sheets = el('div', 'docx-sheets')
     page = el('article', 'docx-page')
     drawBlocks(page, answer.blocks)
-    host.append(page)
+    frame.append(sheets, page)
+    host.append(frame)
+    fit()
+    paginate()
     /* A pixel offset is the only place a document with no caret and no pages
        has to offer, and it is the right one here: nothing about the page moves
        between two reads of the same file. */
@@ -1167,6 +1252,8 @@ export function mountDocx ({
     clearTimeout(saveTimer)
     current = null
     page = null
+    sheets = null
+    frame = null
     setDirty(false)
     host.replaceChildren()
   }

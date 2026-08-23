@@ -84,7 +84,7 @@ app.whenReady().then(async () => {
   }
 })`)
 
-const run = spawnSync('node_modules/.bin/electron', ['node_modules/.cache/docx-main.mjs'],
+const run = spawnSync(electron, ['node_modules/.cache/docx-main.mjs'],
   { encoding: 'utf8' })
 const line = run.stdout.trim().split('\n').filter(Boolean).pop() || ''
 let probe

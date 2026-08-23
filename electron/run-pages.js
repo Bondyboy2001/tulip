@@ -84,7 +84,12 @@ async function htmlFilesIn (dir) {
    the rounding. It cannot cost anything: the question being asked is "was this
    here before the run began", and nothing that happened within a millisecond
    of the answer could change it. */
-const CLOCK_GRAIN_MS = 1
+const CLOCK_GRAIN_MS = process.platform === 'win32'
+  /* Windows stamps files from a clock that ticks every 15.6ms by default, so
+     a page born in the last tick of a run can report a time a dozen
+     milliseconds before the run's own `Date.now()`. */
+  ? 20
+  : 1
 
 async function collectRunPages (dir, before, { alive, mayRemove }) {
   const pages = []
