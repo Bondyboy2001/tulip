@@ -114,7 +114,7 @@ const CLEAN = [
    lower the ceiling to match in the same commit that earned the drop; the
    gate says so rather than doing it, because a self-lowering ceiling would
    also quietly absorb a fix that later regresses. */
-const CEILING = 2437
+const CEILING = 2291
 
 /* The same tree does not count the same everywhere: a hosted runner's tsc
    sees a slightly different `@types` resolution (platform-specific optional

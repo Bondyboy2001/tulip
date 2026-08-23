@@ -374,6 +374,19 @@ contextBridge.exposeInMainWorld('tulip', {
     tabClaim: () => ipcRenderer.invoke('tab:claim')
   },
 
+  /* Which window is editing a document Tulip cannot merge — a Word document, a
+     notebook, a whiteboard or a grid. Two buffers over one of those cannot be
+     reconciled, so only one window holds one at a time; see the account beside
+     the handlers in main. */
+  document: {
+    /** May this window edit it? `{ taken: true }` means another one is. */
+    claim: (path) => ipcRenderer.invoke('document:claim', path),
+    /** Given up, because it was closed or moved off. */
+    release: (path) => ipcRenderer.invoke('document:release', path),
+    /** Taken over. Resolves once the window that had it has saved. */
+    take: (path) => ipcRenderer.invoke('document:take', path)
+  },
+
   /* Said once, when the window is worth looking at: settings applied, tree
      drawn, the note that was open back on the page. The window is not shown
      until this arrives, so a launch is a dock bounce and then the text —
@@ -417,7 +430,13 @@ contextBridge.exposeInMainWorld('tulip', {
       // out of date, wherever the asking happened.
       'dictionary:changed',
       // Another window has taken a tab this one was dragging: let go of it.
-      'tab:claimed'
+      'tab:claimed',
+      // Another window has taken over a document this one was editing. Its
+      // edits are already on disk by the time this arrives.
+      'document:yielded',
+      // Nobody is editing that document any more — the window that had it
+      // closed, or moved off it.
+      'document:free'
     ]
     if (!allowed.includes(channel)) return () => {}
     const listener = (_e, payload) => fn(payload)

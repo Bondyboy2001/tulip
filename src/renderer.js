@@ -144,6 +144,7 @@ const state = {
   revision: null,
   assets: [],
   resolveAsset: () => null,
+  /** @type {any} */
   current: null,      // { path, name, dir } — the active tab's note
   /* One entry per open tab. A tab is a note *and* the trail that led to it:
      back and forward belong to the tab you are in, the way they do in a
@@ -162,6 +163,11 @@ const state = {
      from the config at boot and written back on every change — see
      `toggleLock`. */
   locked: new Set(),
+  /* The documents another window is editing, as vault-relative paths. Unlike
+     `locked` this is not the reader's choice and is never persisted: it is
+     what main answered when this window asked to edit one of the four kinds
+     that cannot be merged. See `claimDocument`. */
+  heldElsewhere: new Set(),
   picked: new Set(),   // multi-selected file paths in the tree
   pickAnchor: null,    // where a shift-range measures from
   dragging: null,      // paths currently being dragged in the tree
@@ -422,6 +428,23 @@ const canLock = () => Boolean(state.current) &&
   ((viewingText() && !SOURCE_KINDS.has(state.current.kind)) ||
    viewingData() || viewingNotebook() || viewingDocx())
 const lockedHere = () => Boolean(state.current && state.locked.has(state.current.path))
+
+/* ------------------------------------------- one editor per document
+
+   A note open in two windows is merged. A Word document, a notebook, a
+   whiteboard or a grid open in two windows cannot be — see the account beside
+   the handlers in electron/main.js — so the second window reads it and does not
+   get a buffer over it.
+
+   Held is enforced at the same two doors a lock is, and for the same reason:
+   every way of reaching the text goes through one of them. What differs is what
+   the reader is told, and what gets them out of it — a lock is theirs to
+   remove, and this is another window's to give up. */
+const isUnmergeablePath = (path) => isDocxPath(path) || isNotebookPath(path) ||
+  isWhiteboardPath(path) || isDataPath(path)
+const heldHere = () => Boolean(state.current && state.heldElsewhere.has(state.current.path))
+/** Whether the document on screen is taking edits at all. */
+const readOnlyHere = () => lockedHere() || heldHere()
 /* Files of no known kind that turned out to be text when they were opened.
    The probe is a read, so its answer is kept: `noteRef` is asked what kind of
    thing a path is on every repaint, and it cannot go to disk to find out. A
@@ -2737,6 +2760,10 @@ function enterDoc (path, { history, newTab }) {
  * asked the question in.
  */
 function settleDoc (path, { chat = true } = {}) {
+  /* Whichever kind it is, and only the four that need it — see
+     `isUnmergeablePath`. Here rather than in each viewer's own opener because
+     every kind arrives through this one. */
+  claimDocument(path)
   renderTabs()
   // Opening a document never changes the tree's shape, only which row is lit.
   markActiveRow()
@@ -2764,6 +2791,10 @@ async function leaveDoc () {
      say — `enterDoc` marks the place too, but by then the page it would have
      asked about is gone. */
   markPlace()
+  /* The document being left stops being this window's to edit. Not awaited:
+     nothing below depends on it, and a slow answer would hold up the teardown
+     of a viewer the reader has already moved off. */
+  releaseDocument(state.current?.path)
   cancelReadingWarmup()
   stopReadingHighlights({ reset: true })
   if (viewingTex()) {
@@ -2781,6 +2812,91 @@ async function leaveDoc () {
      reason this viewer is torn down rather than left in place. */
   else if (viewingFile()) fileViewInstance?.close()
 }
+
+/* ------------------------------------------- claiming what cannot be merged
+
+   The claim is asked for once the document is on screen and given up when the
+   window moves off it. Asking is a round trip, so for the moment it is in
+   flight the document is editable — which is safe, because nothing writes
+   inside it: the shortest autosave here is the Word viewer's, at 900ms. */
+
+/** The path this window holds the claim on, so that leaving can give it up. */
+let claimedPath = null
+
+/** Ask to be the window editing `path`. */
+async function claimDocument (path) {
+  if (!path || !isUnmergeablePath(path)) return
+  const answer = await api.document.claim(path).catch(() => null)
+  /* The reader moved on while the answer was in flight. A claim that landed
+     for a document nobody is looking at any more is given straight back, or it
+     would keep every other window out of a file this one has left. */
+  if (state.current?.path !== path) {
+    if (answer?.ok) api.document.release(path).catch(() => {})
+    return
+  }
+  if (answer?.ok) {
+    claimedPath = path
+    state.heldElsewhere.delete(path)
+  } else {
+    state.heldElsewhere.add(path)
+    toast(`Another window is editing “${docLabel(path)}”. This one is showing it read-only — ` +
+      '“Edit here” in the command palette takes it over.')
+  }
+  applyPanes()
+}
+
+/** Give up the claim on `path`, if this window had it. */
+async function releaseDocument (path) {
+  if (!path) return
+  state.heldElsewhere.delete(path)
+  if (claimedPath !== path) return
+  claimedPath = null
+  await api.document.release(path).catch(() => {})
+}
+
+/**
+ * Take a document over from the window that is editing it.
+ *
+ * Main flushes that window's edits to disk before it answers, so the reread
+ * below is a read of everything it had typed — taking a document over is never
+ * a way of losing the other side's work.
+ */
+async function takeDocument () {
+  const path = state.current?.path
+  if (!path || !isUnmergeablePath(path) || !heldHere()) return
+  const answer = await api.document.take(path).catch(() => null)
+  if (!answer?.ok) { toast('That document could not be taken over.'); return }
+  claimedPath = path
+  state.heldElsewhere.delete(path)
+  /* What is on screen was read before the other window's last edits. Read it
+     again, or this window would take the document over and immediately write a
+     version that is already behind. */
+  await reloadCurrent()
+  applyPanes()
+  setStatusRight('Editing here')
+}
+
+/* Nobody is editing it any more. A window showing it read-only asks for it
+   again rather than staying locked out of a file no window holds — which is
+   what closing the window that had it should mean. */
+api.on('document:free', (path) => {
+  if (!path || !state.heldElsewhere.has(path)) return
+  state.heldElsewhere.delete(path)
+  /* Only the window looking at it asks. Everything else simply forgets, and
+     will ask on its own account the next time it opens the document. */
+  if (state.current?.path === path) claimDocument(path)
+  else applyPanes()
+})
+
+/* Another window took it. By the time this arrives, whatever was typed here is
+   already on disk — main waits for that before it answers the taker. */
+api.on('document:yielded', (path) => {
+  if (claimedPath === path) claimedPath = null
+  state.heldElsewhere.add(path)
+  if (state.current?.path !== path) return
+  applyPanes()
+  toast(`Another window is editing “${docLabel(path)}” now. Your changes were saved.`)
+})
 
 async function openText (path, { focus = true, history = true, place = null, newTab = false, chat = true } = {}) {
   if (state.dirty) await saveNow()
@@ -3185,7 +3301,7 @@ function applyPanes () {
      and a Word document are read or edited, and neither has a source to show —
      a `.docx` least of all, being a zip. */
   const tabular = viewingLanguageTable() || dataOpen || notebookOpen || docxOpen || viewingHtml()
-  const show = lockedHere() ? 'read' : (tabular && want === 'raw' ? 'edit' : want)
+  const show = readOnlyHere() ? 'read' : (tabular && want === 'raw' ? 'edit' : want)
   heldView = show === want ? null : want
   if (state.view !== show) showView(show)
   /* Whether the note's own panes are on screen at all. None of the viewed
@@ -3220,7 +3336,7 @@ function applyPanes () {
   /* A Word document's bar is the editing surface's chrome, so it goes with the
      Reading view rather than sitting there greyed out under one. */
   if (el.docxTools) {
-    el.docxTools.hidden = !docxOpen || state.view === 'read' || lockedHere()
+    el.docxTools.hidden = !docxOpen || state.view === 'read' || readOnlyHere()
     if (!el.docxTools.hidden) paintDocxTools()
   }
   /* The switch is for the documents with more than one view of themselves: the
@@ -3237,9 +3353,14 @@ function applyPanes () {
   if (!runnableFile || fileRunPath !== state.current?.path) fileRun.reset()
   fileRunPath = runnableFile ? state.current.path : null
   if (runnableFile) fileRun.warm(codeToken(state.current.path))
-  if (dataOpen) dataInstance?.setReadonly(state.view === 'read')
-  if (notebookOpen) notebookInstance?.setReadonly(state.view === 'read')
-  if (docxOpen) docxInstance?.setReadonly(state.view === 'read' || lockedHere())
+  /* `show` is already 'read' for a held or locked document, so these three
+     mostly follow from it; said again for the two that can be asked to edit
+     without the view ever changing — a grid takes a keystroke straight into a
+     cell, and a whiteboard is one canvas in both views. */
+  if (dataOpen) dataInstance?.setReadonly(state.view === 'read' || readOnlyHere())
+  if (notebookOpen) notebookInstance?.setReadonly(state.view === 'read' || readOnlyHere())
+  if (docxOpen) docxInstance?.setReadonly(state.view === 'read' || readOnlyHere())
+  if (whiteboardOpen) whiteboardInstance?.setReadonly(readOnlyHere())
   updateViewControl()
   el.studyStart.hidden = !viewingLanguageTable()
   paintKeyboard()
@@ -4657,14 +4778,22 @@ async function keepBufferOverDisk (path, kind = 'note') {
       : kind === 'Word document'
         ? 'This Word document'
         : kind === 'file' ? 'This file' : 'This note'
-  let copy = null
-  try { copy = await api.file.conflictCopy(path) } catch { copy = null }
-  toast(copy
-    ? `${noun} changed on disk while you had unsaved work. Your version was kept, theirs is in “${docLabel(copy)}”.`
-    : `${noun} changed on disk while you had unsaved work. Your version was kept.`)
+  /** @type {any} */
+  let made = null
+  try { made = await api.file.conflictCopy(path) } catch { made = null }
+  const copy = made?.path || null
+  /* A run of conflicts over one file shares one copy — see the handler in main
+     — and saying so once is the whole point of that. Repeating it every second
+     is what made the old behaviour unreadable as well as untidy. */
+  if (!made?.repeat) {
+    toast(copy
+      ? `${noun} changed on disk while you had unsaved work. Your version was kept, theirs is in “${docLabel(copy)}”.`
+      : `${noun} changed on disk while you had unsaved work. Your version was kept.`)
+  }
   /* A new file appeared beside the open one, and the tree is drawn from a
-     snapshot that predates it. */
-  if (copy) await loadTree()
+     snapshot that predates it. An episode writing over the copy it already made
+     adds no row, so the tree is left alone. */
+  if (copy && !made.repeat) await loadTree()
   return copy
 }
 
@@ -8139,12 +8268,14 @@ function setView (view) {
      asks by calling this. The preference itself is left alone: the reader has
      not changed their mind about how notes open, they have picked up a
      document that is not taking edits. */
-  if (lockedHere()) {
+  if (readOnlyHere()) {
     /* Reading is refused too, quietly: the document is already in it, and the
        one thing the click would otherwise do is write "read" over the
        preference the reader is having held for them. */
     if (view !== 'read') {
-      toast('This file is locked — unlock it from the command palette to edit it.')
+      toast(lockedHere()
+        ? 'This file is locked — unlock it from the command palette to edit it.'
+        : 'Another window is editing this — “Edit here” in the command palette takes it over.')
     }
     return
   }
@@ -8438,7 +8569,7 @@ function commandList () {
      The rows and columns are only offered where the caret is actually in a
      table; a palette row that answers "put the caret in a table first" is a row
      that should not have been there. */
-  if (viewingDocx() && state.view !== 'read' && !lockedHere()) {
+  if (viewingDocx() && state.view !== 'read' && !readOnlyHere()) {
     commands.push({ id: 'docx-bullets', title: 'Make a bulleted list' })
     commands.push({ id: 'docx-numbers', title: 'Make a numbered list' })
     commands.push({ id: 'docx-no-list', title: 'Remove list formatting' })
@@ -8467,6 +8598,12 @@ function commandList () {
     commands.push(lockedHere()
       ? { id: 'unlock-file', title: 'Unlock this file' }
       : { id: 'lock-file', title: 'Lock this file' })
+  }
+  /* Only where another window actually has it. Like the lock's own row, the
+     palette is the only way to this — there is no chord and no button, because
+     it is the answer to a situation rather than a thing to reach for. */
+  if (heldHere()) {
+    commands.push({ id: 'edit-here', title: 'Edit here (take it over from the other window)' })
   }
   if (viewingWhiteboard()) {
     commands.push(
@@ -10240,6 +10377,7 @@ function runCommand (id, dir = state.current?.dir || '') {
        which one it is is the file's current state rather than two behaviours. */
     case 'lock-file':
     case 'unlock-file': toggleLock(); break
+    case 'edit-here': takeDocument(); break
     case 'reading': setView(reading() ? 'edit' : 'read'); break
     case 'view-edit': setView('edit'); break
     case 'view-read': setView('read'); break

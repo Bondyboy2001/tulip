@@ -2634,6 +2634,7 @@ function createWindow ({ open = null } = {}) {
     windows.delete(win)
     reveals.delete(contentsId)
     documentZoomClaims.delete(contentsId)
+    releaseClaimsOwnedBy(contentsId)
     stopRunsOwnedBy(win)
     stopKernelsOwnedBy(win)
     if (primary) {
@@ -2782,6 +2783,122 @@ ipcMain.handle('tab:claim', async (event) => {
     sendTo(from, 'tab:claimed', claim.path)
   }
   return { path: claim.path }
+})
+
+/* ==================================================== one editor per document
+
+   Two windows editing one note is a case Tulip settles: the buffers are merged
+   against the version both sides last agreed on, and where they both rewrote
+   the same lines the reader is asked. Two windows editing a Word document, a
+   notebook, a whiteboard or a grid is a case it cannot settle — there is no
+   three-way merge of a zip of XML or of a run of cell outputs — and the bargain
+   those four fall back on is the older one: the buffer wins, and the disk's
+   version is copied aside.
+
+   That bargain does not converge when both sides keep taking it. Each window
+   saves on its own clock, finds the file is no longer the one it read, copies
+   the other's version aside and writes its own over it — once per autosave, for
+   as long as both are open. What it leaves behind is a conflict copy a second,
+   and for whichever side lost the last round, no copy at all: its work is
+   simply gone.
+
+   So the second window does not get a buffer. One of those four kinds is
+   claimed by the window editing it, and a second window opens it read-only
+   until it is given up — by the holder closing it, or by the reader asking for
+   it here, which puts the holder's edits on disk before this window reads the
+   file. Notes are not claimed: they have a merge, and taking two windows away
+   from a note would be taking away something that works. */
+
+/** realpath → the id of the `webContents` editing it. Keyed by id rather than
+ *  by window for the same reason the tab drag above is: an id can be compared
+ *  without holding a reference to a window that may already have closed. */
+const editClaims = new Map()
+
+/** The path a claim is filed under: resolved, so that two windows reaching one
+ *  file by different names cannot both believe they hold it. */
+async function claimKey (p) {
+  if (typeof p !== 'string' || !p || p.length > 1024) return null
+  try {
+    return await realSafePath(p)
+  } catch {
+    return null
+  }
+}
+
+/** The window editing `abs`, or null — dropping the claim where the window
+ *  that held it has gone. A window that closes without saying so must not
+ *  leave a document nobody can edit. */
+function claimHolder (abs) {
+  const id = editClaims.get(abs)
+  if (id === undefined) return null
+  const win = liveWindows().find((w) => w.webContents.id === id)
+  if (!win) { editClaims.delete(abs); return null }
+  return win
+}
+
+/** A document nobody is editing any more. The windows showing it read-only are
+ *  told, so that closing the window that had it hands it back rather than
+ *  leaving every other window locked out of a file nobody holds. */
+function announceFree (abs) {
+  broadcast('document:free', rel(abs))
+}
+
+/** Everything a closing window was editing, given up. */
+function releaseClaimsOwnedBy (id) {
+  for (const [abs, owner] of editClaims) {
+    if (owner !== id) continue
+    editClaims.delete(abs)
+    announceFree(abs)
+  }
+}
+
+/**
+ * This window would like to edit the document. Answers whether it may.
+ *
+ * `taken` rather than an error: a second window opening a document somebody
+ * else is editing is an ordinary thing to do, and what it gets is the document
+ * to read.
+ */
+ipcMain.handle('document:claim', async (event, p) => {
+  const abs = await claimKey(p)
+  if (!abs) return { ok: false }
+  const holder = claimHolder(abs)
+  if (holder && holder.webContents.id !== event.sender.id) return { ok: false, taken: true }
+  editClaims.set(abs, event.sender.id)
+  return { ok: true }
+})
+
+/** Given up — the document was closed, or the window moved off it. */
+ipcMain.handle('document:release', async (event, p) => {
+  const abs = await claimKey(p)
+  if (abs && editClaims.get(abs) === event.sender.id) {
+    editClaims.delete(abs)
+    announceFree(abs)
+  }
+  return { ok: true }
+})
+
+/**
+ * Taken over: this window edits it from now on, and the one that held it drops
+ * to reading.
+ *
+ * The holder's edits reach the disk BEFORE this window is told it may read the
+ * file again — the same ordering a tab carried between windows keeps, and for
+ * the same reason. Without it the taking window would open the version from
+ * before whatever was last typed, and then write that back.
+ */
+ipcMain.handle('document:take', async (event, p) => {
+  const abs = await claimKey(p)
+  if (!abs) return { ok: false }
+  const holder = claimHolder(abs)
+  if (holder && holder.webContents.id !== event.sender.id) {
+    await askRendererToFlush(holder)
+    sendTo(holder, 'document:yielded', p)
+  }
+  /* Set after the flush, not before: until the holder's work is on disk this
+     window has no business believing the document is its. */
+  editClaims.set(abs, event.sender.id)
+  return { ok: true }
 })
 
 /**
@@ -3505,8 +3622,46 @@ ipcMain.handle('pdf:source', async (_e, p) => {
  * mostly base64 and a whiteboard is not ours to reformat. Returns the new
  * path, or null when there was nothing on disk to keep.
  */
+/* One conflict copy per episode, rather than one per save.
+
+   A conflict is not usually a single event. Something outside Tulip is writing
+   the file — Word, a sync client — and it writes again while the reader is
+   still typing, so the next autosave conflicts too. Answering each of those
+   with a file of its own turned a disagreement lasting a minute into forty
+   files, all but the last of them superseded, and buried the one the reader
+   actually needed.
+
+   So a run of conflicts over one file shares one copy. The first makes it; the
+   rest overwrite it, which keeps the other side's LATEST version rather than
+   its earliest — the newest is the one worth having, and the older ones were
+   never separately interesting. A quiet minute ends the episode, and the next
+   conflict after that is a new disagreement and gets a file of its own. */
+const CONFLICT_EPISODE_MS = 60_000
+/** abs → the copy a live episode is writing to, and when it was last written. */
+const conflictEpisodes = new Map()
+
 ipcMain.handle('file:conflict-copy', async (_e, p) => {
   const abs = await realSafePath(p)
+  const now = Date.now()
+  const episode = conflictEpisodes.get(abs)
+
+  /* Still the same disagreement, and the copy it made is still there. Written
+     over rather than added to. */
+  if (episode && now - episode.at < CONFLICT_EPISODE_MS && fsSync.existsSync(episode.target)) {
+    try {
+      await fs.copyFile(abs, episode.target)
+    } catch {
+      return null
+    }
+    episode.at = now
+    noteSelfWrite(episode.target)
+    indexDirty = true
+    invalidateVaultSnapshot()
+    /* `repeat` so the window can say it once rather than once a second: the
+       file it named the first time is the file this went into. */
+    return { path: rel(episode.target), repeat: true }
+  }
+
   const ext = path.extname(abs)
   const stem = path.basename(abs, ext)
   const target = freeName(path.dirname(abs), `${stem} (conflicted copy)`, ext)
@@ -3519,10 +3674,11 @@ ipcMain.handle('file:conflict-copy', async (_e, p) => {
   } catch {
     return null
   }
+  conflictEpisodes.set(abs, { target, at: now })
   noteSelfWrite(target)
   indexDirty = true
   invalidateVaultSnapshot()
-  return rel(target)
+  return { path: rel(target), repeat: false }
 })
 
 ipcMain.handle('file:write', async (_e, p, content, metadata = null) => {

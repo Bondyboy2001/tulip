@@ -124,9 +124,28 @@ if (source) {
   /* A locked file is held in its reading view, and the hold is written in one
      place each: `setView` refuses to leave reading, and `applyPanes` puts a
      locked document back into it however it was opened. Both are one line to
-     lose and neither shows up in a screenshot of an unlocked note. */
-  assert.match(renderer, /if \(lockedHere\(\)\) \{[\s\S]{0,320}if \(view !== 'read'\)/)
-  assert.match(renderer, /const show = lockedHere\(\) \? 'read' :/)
+     lose and neither shows up in a screenshot of an unlocked note.
+
+     `readOnlyHere` is the same two doors serving a second reason to be in the
+     reading view: a document another window is editing. Two buffers over a
+     file Tulip cannot merge is what made conflict copies once a second — see
+     the account beside the handlers in electron/main.js — and this is where
+     the second window is stopped from having one. */
+  assert.match(renderer, /if \(readOnlyHere\(\)\) \{[\s\S]{0,420}if \(view !== 'read'\)/)
+  assert.match(renderer, /const show = readOnlyHere\(\) \? 'read' :/)
+  assert.match(renderer, /const readOnlyHere = \(\) => lockedHere\(\) \|\| heldHere\(\)/)
+  /* The claim is asked for wherever a document lands and given up wherever one
+     is left. Both are one line, in the two functions every kind goes through. */
+  assert.match(renderer, /function settleDoc \([\s\S]{0,400}claimDocument\(path\)/)
+  assert.match(renderer, /async function leaveDoc \([\s\S]{0,600}releaseDocument\(state\.current\?\.path\)/)
+  /* The four kinds with no merge, and only those: a note has one, and taking
+     two windows away from a note would take away something that works. */
+  assert.match(renderer,
+    /const isUnmergeablePath = \(path\) => isDocxPath\(path\) \|\| isNotebookPath\(path\) \|\|\s*\n\s*isWhiteboardPath\(path\) \|\| isDataPath\(path\)/)
+  /* Taking a document over is a palette row and nothing else — the answer to a
+     situation rather than a thing to reach for — and it runs `takeDocument`. */
+  assert.match(renderer, /id: 'edit-here', title: 'Edit here[^']*'/)
+  assert.match(renderer, /case 'edit-here': takeDocument\(\)/)
   /* The palette offers whichever of the two the file is not, and both run the
      same command — a row that cannot act on what is open is not offered. */
   assert.match(renderer, /id: 'unlock-file'[\s\S]{0,80}id: 'lock-file'/)
@@ -207,10 +226,13 @@ if (source) {
      follow, the control would move and the document would not. */
   assert.match(renderer,
     /el\.viewSwitch\.hidden = \(!text && !dataOpen && !notebookOpen && !docxOpen\) \|\| sourceOnly/)
-  assert.match(renderer, /if \(dataOpen\) dataInstance\?\.setReadonly\(state\.view === 'read'\)/)
-  assert.match(renderer, /if \(notebookOpen\) notebookInstance\?\.setReadonly\(state\.view === 'read'\)/)
+  assert.match(renderer, /if \(dataOpen\) dataInstance\?\.setReadonly\(state\.view === 'read' \|\| readOnlyHere\(\)\)/)
+  assert.match(renderer, /if \(notebookOpen\) notebookInstance\?\.setReadonly\(state\.view === 'read' \|\| readOnlyHere\(\)\)/)
   assert.match(renderer,
-    /if \(docxOpen\) docxInstance\?\.setReadonly\(state\.view === 'read' \|\| lockedHere\(\)\)/)
+    /if \(docxOpen\) docxInstance\?\.setReadonly\(state\.view === 'read' \|\| readOnlyHere\(\)\)/)
+  /* A whiteboard is one canvas in both views, so the reading view alone never
+     made it read-only — and a board another window is editing has to be. */
+  assert.match(renderer, /if \(whiteboardOpen\) whiteboardInstance\?\.setReadonly\(readOnlyHere\(\)\)/)
   /* A viewer holds the path it writes back to, and a rename or a move has to
      reach it. All three are asserted because all three were broken: the next
      autosave after a rename wrote to a file that no longer existed. The
@@ -245,7 +267,7 @@ if (source) {
   assert.match(renderer, /function docxToolListener \(run\) \{[\s\S]*?mousedown: \(event\) => \{\s*\n\s*event\.preventDefault\(\)[\s\S]*?click: \(event\) => \{\s*\n\s*if \(pressed\)/)
   assert.match(renderer, /el\[key\]\?\.addEventListener\('mousedown', on\.mousedown\)\s*\n\s*el\[key\]\?\.addEventListener\('click', on\.click\)/)
   assert.match(renderer, /el\.docxOpenWord\?\.addEventListener\('mousedown', openInWord\.mousedown\)\s*\n\s*el\.docxOpenWord\?\.addEventListener\('click', openInWord\.click\)/)
-  assert.match(renderer, /el\.docxTools\.hidden = !docxOpen \|\| state\.view === 'read' \|\| lockedHere\(\)/)
+  assert.match(renderer, /el\.docxTools\.hidden = !docxOpen \|\| state\.view === 'read' \|\| readOnlyHere\(\)/)
 
   /* The two structures a Word document can gain, and the four ways a table it
      has can be changed. All eight are palette rows and nothing else, so a

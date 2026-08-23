@@ -201,6 +201,9 @@ export function mountWhiteboard ({
   let flushRequested = false
   let palette = theme()
   let renderKey = 0
+  /* Excalidraw's own view mode. Set when another window is editing this board —
+     two canvases over one file cannot be merged, so only one of them draws. */
+  let readonly = false
 
   const setDirty = (next, repeat = false) => {
     if (dirty === next && !repeat) return
@@ -247,6 +250,10 @@ export function mountWhiteboard ({
       initialData,
       name: boardName(current.path),
       theme: palette,
+      /* A prop rather than a remount: `key` is deliberately unchanged, so
+         turning this on leaves the scroll, the zoom and the selection where
+         the reader had them. */
+      viewModeEnabled: readonly,
       autoFocus: true,
       aiEnabled: false,
       handleKeyboardGlobally: false,
@@ -360,6 +367,16 @@ export function mountWhiteboard ({
   }
 
   return {
+    /** Whether the board takes drawing. The Reading view does not use this —
+     *  a whiteboard is one canvas in both — but a board another window is
+     *  editing does. */
+    setReadonly (flag) {
+      const next = Boolean(flag)
+      if (readonly === next) return
+      readonly = next
+      paint()
+    },
+
     async open (path, place = null) {
       const source = await file.read(path)
       let scene

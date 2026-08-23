@@ -515,6 +515,106 @@ async function checks () {
     }
   })
 
+  /* ---- one editor per document ----
+
+     Two windows editing a file Tulip cannot merge is the situation that made
+     conflict copies at the rate of one a second and destroyed whichever side
+     lost the round — see the account beside the handlers in main. What stops it
+     is a claim, and a claim is only meaningful between two REAL windows: the
+     holder is looked up among the live ones, so that a window which closes
+     without saying so cannot leave a document nobody may edit. Hence a second
+     window here rather than two numbers. */
+
+  await check('a document is claimed by one window, and refused to the next', async () => {
+    await call('file:write', 'Claimed.docx', 'x')
+    const first = BrowserWindow.getAllWindows()[0]
+    await call('window:new', null)
+    const second = BrowserWindow.getAllWindows().find((w) => w !== first)
+    assert.ok(second, 'the second window was never made')
+
+    const asWindow = (win, channel, ...args) =>
+      handlers.get(channel)({ sender: win.webContents }, ...args)
+
+    const mine = await asWindow(first, 'document:claim', 'Claimed.docx')
+    assert.equal(mine.ok, true, 'the first window could not claim a free document')
+
+    const theirs = await asWindow(second, 'document:claim', 'Claimed.docx')
+    assert.equal(theirs.ok, false, 'two windows both hold it — the case this exists to stop')
+    assert.equal(theirs.taken, true, 'a document somebody else has is taken, not an error')
+
+    /* Asking twice from the window that already holds it is not a conflict with
+       itself: a document reopened in the same window must not lock it out. */
+    const again = await asWindow(first, 'document:claim', 'Claimed.docx')
+    assert.equal(again.ok, true, 'the holder was refused its own claim')
+
+    /* Taken over: the holder is told, and only after its edits have been asked
+       for — main waits for the flush before it answers the taker, so what the
+       taking window reads is everything the other one had typed. */
+    const said = []
+    const realSend = first.webContents.send
+    first.webContents.send = (channel, payload) => { said.push({ channel, payload }) }
+    try {
+      const took = await asWindow(second, 'document:take', 'Claimed.docx')
+      assert.equal(took.ok, true, 'the takeover was refused')
+      assert.ok(said.some((m) => m.channel === 'app:flush'),
+        'the holder was never asked to save before it was taken over')
+      const yielded = said.find((m) => m.channel === 'document:yielded')
+      assert.ok(yielded, 'the holder was never told it had lost the document')
+      assert.equal(yielded.payload, 'Claimed.docx')
+    } finally {
+      first.webContents.send = realSend
+    }
+
+    /* And the claim really did change hands. */
+    const back = await asWindow(first, 'document:claim', 'Claimed.docx')
+    assert.equal(back.ok, false, 'the window that was taken from still holds it')
+
+    /* Given up, and everyone told — a window that closes must not leave a file
+       nobody may edit. */
+    const freed = []
+    const realFirstSend = first.webContents.send
+    first.webContents.send = (channel, payload) => { freed.push({ channel, payload }) }
+    try {
+      await asWindow(second, 'document:release', 'Claimed.docx')
+      assert.ok(freed.some((m) => m.channel === 'document:free' && m.payload === 'Claimed.docx'),
+        'nothing announced that the document was free again')
+    } finally {
+      first.webContents.send = realFirstSend
+    }
+    const reclaimed = await asWindow(first, 'document:claim', 'Claimed.docx')
+    assert.equal(reclaimed.ok, true, 'a released document could not be claimed')
+    await asWindow(first, 'document:release', 'Claimed.docx')
+    second.destroy()
+  })
+
+  /* ---- one conflict copy per episode ----
+
+     A disagreement is rarely one event: whatever is writing the file outside
+     Tulip writes again while the reader is still typing, so the next autosave
+     conflicts too. A file per conflict turned a bad minute into forty files and
+     buried the one that mattered. */
+
+  await check('a run of conflicts over one file shares a copy, holding the newest', async () => {
+    await call('file:write', 'Episode.md', 'version-1')
+    const first = await call('file:conflict-copy', 'Episode.md')
+    assert.ok(first && first.path, 'no copy was made at all')
+    assert.equal(first.repeat, false, 'the first conflict of an episode is not a repeat')
+
+    const names = [first.path]
+    for (let i = 2; i <= 4; i++) {
+      await call('file:write', 'Episode.md', `version-${i}`)
+      const next = await call('file:conflict-copy', 'Episode.md')
+      assert.equal(next.repeat, true, `conflict ${i} started a second episode`)
+      names.push(next.path)
+    }
+    assert.equal(new Set(names).size, 1, `an episode made ${new Set(names).size} files`)
+
+    /* The newest of their versions, not the oldest: the later ones supersede
+       what came before, and the reader wants the one they have not seen. */
+    assert.equal(fs.readFileSync(path.join(VAULT, first.path), 'utf8'), 'version-4',
+      'the copy was left holding a version that had already been superseded')
+  })
+
   /* ---------------- the exports, which write outside the vault ----------------
 
      Every other write in this file is checked for staying inside the vault.
