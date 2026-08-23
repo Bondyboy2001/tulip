@@ -3,6 +3,10 @@ import * as esbuild from 'esbuild'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
+/* The executable the package exports, not the .bin shim: on Windows the shim
+   is a .cmd, which spawn will not start without a shell since Node closed
+   that hole, and the test died with ENOENT before it began. */
+import electron from 'electron'
 
 await mkdir('node_modules/.cache', { recursive: true })
 await esbuild.build({

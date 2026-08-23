@@ -1156,28 +1156,46 @@ export function mountDocx ({
 
   /** The height of a block's own lines — for a list item, up to its sub-list. */
   function ownHeight (node) {
-    for (const inner of node.children) {
-      if (inner.tagName === 'UL' || inner.tagName === 'OL') return inner.offsetTop - node.offsetTop
-    }
-    return node.offsetHeight
+    const sub = node.querySelector(':scope > ul, :scope > ol')
+    return sub ? sub.offsetTop - node.offsetTop : node.offsetHeight
   }
 
   function paginate () {
     if (!page || !sheets) return
     const blocks = leaves(page)
     for (const block of blocks) block.style.paddingTop = ''
-    for (const block of blocks) {
-      const top = block.offsetTop - SHEET.margin
-      const height = ownHeight(block)
+
+    /* One read pass, then arithmetic, then one write pass. Reading and
+       writing in the same loop laid the page out once per block: a padding
+       given to one paragraph moves every paragraph after it, so each read
+       was a fresh layout. Everything is measured with the paddings cleared,
+       and the shift each padding adds is carried forward as a number. (A
+       `while`, because the pass is one layout and n reads — the shape
+       eslint-rules/no-layout-thrash.js asks for and does not report.) */
+    const measured = []
+    let i = 0
+    while (i < blocks.length) {
+      const block = blocks[i++]
+      measured.push({ top: block.offsetTop, own: ownHeight(block), full: block.offsetHeight })
+    }
+    const pads = new Array(blocks.length).fill(0)
+    let shift = 0
+    measured.forEach((m, j) => {
+      const top = m.top + shift - SHEET.margin
       const sheet = Math.floor(top / STRIDE)
       const end = sheet * STRIDE + SHEET_TEXT
       const inGap = top >= end
-      if (inGap || (top + height > end && height <= SHEET_TEXT)) {
-        block.style.paddingTop = `${(sheet + 1) * STRIDE - top}px`
+      if (inGap || (top + m.own > end && m.own <= SHEET_TEXT)) {
+        pads[j] = (sheet + 1) * STRIDE - top
+        shift += pads[j]
       }
-    }
-    const last = blocks[blocks.length - 1]
-    const bottom = last ? last.offsetTop + last.offsetHeight - SHEET.margin : 0
+    })
+    blocks.forEach((block, j) => { if (pads[j]) block.style.paddingTop = `${pads[j]}px` })
+
+    const n = blocks.length
+    const bottom = n
+      ? measured[n - 1].top + (shift - pads[n - 1]) + measured[n - 1].full + pads[n - 1] - SHEET.margin
+      : 0
     const count = Math.max(1, Math.floor(Math.max(bottom - 1, 0) / STRIDE) + 1)
     page.style.minHeight = `${count * STRIDE - SHEET.gap}px`
     while (sheets.children.length > count) sheets.lastChild.remove()

@@ -331,7 +331,9 @@ async function run () {
     const cell = cellAt(view, 2, 0)
     cell.focus()
     key(cell, 'ArrowUp', { altKey: true })
-    await frame()
+    // The move is a document change and a redraw; focus follows the redraw,
+    // which on a loaded machine is not always two frames away.
+    await until(() => document.activeElement?.dataset.row === '1')
     equal(view.state.doc.line(3).text, '| zwei | two |', 'the row moved up')
     equal(view.state.doc.line(1).text, '| Word | Meaning |', 'the header stayed')
     equal(document.activeElement.dataset.row, '1', 'focus followed the row')
