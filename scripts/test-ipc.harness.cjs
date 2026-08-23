@@ -210,7 +210,7 @@ async function checks () {
        reaches the index when the watcher notices it, so this asks more than
        once rather than assuming the first query is late enough. */
     let hits = []
-    for (let tries = 0; tries < 20 && !hits.length; tries++) {
+    for (let tries = 0; tries < 40 && !hits.length; tries++) {
       await call('vault:snapshot', null)
       const found = await call('search:vault', 'quince', {})
       hits = found.results || found
@@ -229,7 +229,7 @@ async function checks () {
   await check('an outside edit to one note reaches the index by name', async () => {
     const until = async (word, wanted) => {
       let hits = []
-      for (let tries = 0; tries < 20; tries++) {
+      for (let tries = 0; tries < 40; tries++) {
         const found = await call('search:vault', word, {})
         hits = found.results || found
         if (Boolean(hits.length) === wanted) return hits

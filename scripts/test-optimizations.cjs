@@ -231,6 +231,7 @@ async function lazyFeatureContracts () {
   {
     let clock = 1000
     const disk = new Map()
+    const at = (key) => path.join('/vault', key)   // what isOurs will stat, on this platform
     const selfWrites = makeSelfWrites({
       rootFor: () => '/vault',
       now: () => clock,
@@ -247,18 +248,18 @@ async function lazyFeatureContracts () {
     assert.equal(selfWrites.isOurs('a.md'), false)
     assert.equal(selfWrites.isOurs('never.md'), false)
     // A stamped note is ours while the file matches the stamp...
-    disk.set('/vault/b.md', { mtimeMs: 5, size: 10 })
+    disk.set(at('b.md'), { mtimeMs: 5, size: 10 })
     selfWrites.note('b.md', { mtimeMs: 5, size: 10 })
     assert.equal(selfWrites.isOurs('b.md'), true)
     // ...ours while it is mid-rename or gone...
-    disk.delete('/vault/b.md')
+    disk.delete(at('b.md'))
     assert.equal(selfWrites.isOurs('b.md'), true)
     // ...and somebody else's the moment the file on disk differs, even inside
     // the window — the sync-client case.
-    disk.set('/vault/b.md', { mtimeMs: 7, size: 10 })
+    disk.set(at('b.md'), { mtimeMs: 7, size: 10 })
     assert.equal(selfWrites.isOurs('b.md'), false)
     // Forgotten, so a later event in the same window is not taken for ours.
-    disk.set('/vault/b.md', { mtimeMs: 5, size: 10 })
+    disk.set(at('b.md'), { mtimeMs: 5, size: 10 })
     assert.equal(selfWrites.isOurs('b.md'), false)
   }
 

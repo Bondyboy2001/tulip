@@ -32,9 +32,7 @@ const cache = () => makeIndexCache({ dir, vaultPath: VAULT })
 const entry = (name, text, extra = {}) =>
   ({ name, text, mtime: 1000, size: text.length, ...extra })
 
-/* The coalescing writer settles on a later tick, so a save has to be waited
-   for before the file it wrote can be read back. */
-const settled = () => new Promise((resolve) => setTimeout(resolve, 60))
+
 
 async function main () {
   await check('a vault with no cache loads as empty rather than failing', async () => {
@@ -44,7 +42,7 @@ async function main () {
   await check('what was saved comes back', async () => {
     const store = cache()
     store.save(new Map([['a.md', entry('a', 'alpha')], ['b.md', entry('b', 'beta')]]))
-    await settled()
+    await store.idle()
     const back = await store.load()
     assert.equal(back.size, 2)
     assert.equal(back.get('a.md').text, 'alpha')
@@ -56,7 +54,7 @@ async function main () {
   await check('a later save replaces the one before it', async () => {
     const store = cache()
     store.save(new Map([['a.md', entry('a', 'rewritten')]]))
-    await settled()
+    await store.idle()
     const back = await store.load()
     assert.equal(back.size, 1)
     assert.equal(back.get('a.md').text, 'rewritten')
@@ -114,16 +112,16 @@ async function main () {
     const store = makeIndexCache({ dir, vaultPath: '/somewhere/Huge' })
     const huge = new Map([['big.md', entry('big', 'x'.repeat(MAX_CACHE_BYTES + 1))]])
     assert.deepEqual(store.save(huge), { skipped: 'too large' })
-    await settled()
+    await store.idle()
     assert.equal(fs.existsSync(store.path), false)
   })
 
   await check('refusing a large save leaves an earlier small one intact', async () => {
     const store = makeIndexCache({ dir, vaultPath: '/somewhere/Grew' })
     store.save(new Map([['a.md', entry('a', 'small and valid')]]))
-    await settled()
+    await store.idle()
     store.save(new Map([['a.md', entry('a', 'x'.repeat(MAX_CACHE_BYTES + 1))]]))
-    await settled()
+    await store.idle()
     const back = await store.load()
     assert.equal(back.get('a.md').text, 'small and valid')
   })
@@ -136,7 +134,7 @@ async function main () {
     store.save(new Map([['a.md', entry('a', 'text', {
       kind: 'note', fileTags: ['x', 'y'], aliases: ['other name']
     })]]))
-    await settled()
+    await store.idle()
     const raw = JSON.parse(await fsp.readFile(store.path, 'utf8'))
     assert.deepEqual(raw.entries['a.md'], { name: 'a', text: 'text', mtime: 1000, size: 4 })
   })
@@ -150,7 +148,7 @@ async function main () {
     ]))
     assert.ok(result.written, 'the trimmed cache is still written')
     assert.equal(result.dropped, 1)
-    await settled()
+    await store.idle()
     const back = await store.load()
     assert.deepEqual([...back.keys()].sort(), ['a.md', 'b.md'])
   })
@@ -161,7 +159,7 @@ async function main () {
     assert.notEqual(one.path, two.path)
     one.save(new Map([['a.md', entry('a', 'from one')]]))
     two.save(new Map([['a.md', entry('a', 'from two')]]))
-    await settled()
+    await Promise.all([one.idle(), two.idle()])
     assert.equal((await one.load()).get('a.md').text, 'from one')
     assert.equal((await two.load()).get('a.md').text, 'from two')
   })
@@ -169,7 +167,7 @@ async function main () {
   await check('clearing leaves nothing behind', async () => {
     const store = makeIndexCache({ dir, vaultPath: '/vaults/Temporary' })
     store.save(new Map([['a.md', entry('a', 'here')]]))
-    await settled()
+    await store.idle()
     await store.clear()
     assert.equal((await store.load()).size, 0)
   })

@@ -10,6 +10,9 @@ import * as esbuild from 'esbuild'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
 import path from 'node:path'
+/* The executable the package exports, not the .bin shim, which Windows cannot
+   spawn without a shell. The import inside host.mjs below is the host's own. */
+import electron from 'electron'
 
 const args = process.argv.slice(2)
 const note = args.find((arg) => !arg.startsWith('--'))

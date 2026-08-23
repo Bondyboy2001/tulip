@@ -60,6 +60,7 @@ const fileFor = (dir, vaultPath) =>
 function makeIndexCache ({ dir, vaultPath }) {
   const target = fileFor(dir, vaultPath)
   const writer = makeCoalescedWriter()
+  let lastWrite = Promise.resolve()
 
   return {
     /* The file this vault's cache lives in, so a caller can say where — and so
@@ -160,9 +161,13 @@ function makeIndexCache ({ dir, vaultPath }) {
          cache that failed to write is a slower first search next time and
          nothing else. Serialized by the writer, when it writes: a burst of
          syncs pays for one body, not one each. */
-      writer.flush(target, serialize).catch(() => {})
+      lastWrite = writer.flush(target, serialize).catch(() => {})
       return dropped ? { written: estimate, dropped } : { written: estimate }
     },
+
+    /** Settles when the last save has reached the disk — for the tests, which
+     *  read the file back and used to guess at how long that takes. */
+    idle: () => lastWrite,
 
     /** Forget this vault's cache entirely. */
     async clear () {
