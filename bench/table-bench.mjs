@@ -182,8 +182,9 @@ if (process.argv.includes('--check')) {
      above the measured baseline but below the multi-frame pauses that brought
      this benchmark into existence. */
   // build: 220 was the laptop's figure; the macOS hosted runner measured 226
-  // and the Windows one 316 — a slower machine, not a slower table.
-  const ceilings = { build: process.platform === 'win32' ? 400 : 260, keystroke: 45, elsewhere: 20, select: 80 }
+  // and the Windows one 316 then 400 on identical commits — a noisy machine,
+  // not a slower table. The alarm is for multi-frame pauses, so it gets room.
+  const ceilings = { build: process.platform === 'win32' ? 800 : 260, keystroke: 45, elsewhere: 20, select: 80 }
   const failed = Object.entries(ceilings)
     .filter(([key, limit]) => typeof results[key] !== 'number' || results[key] > limit)
   if (failed.length) {
