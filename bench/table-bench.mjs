@@ -181,7 +181,8 @@ if (process.argv.includes('--check')) {
      that a shared CI machine behaves like an idle laptop. Each is comfortably
      above the measured baseline but below the multi-frame pauses that brought
      this benchmark into existence. */
-  const ceilings = { build: 220, keystroke: 45, elsewhere: 20, select: 80 }
+  // build: 220 was the laptop's figure; the macOS hosted runner measured 226.
+  const ceilings = { build: 260, keystroke: 45, elsewhere: 20, select: 80 }
   const failed = Object.entries(ceilings)
     .filter(([key, limit]) => typeof results[key] !== 'number' || results[key] > limit)
   if (failed.length) {

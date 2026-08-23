@@ -185,6 +185,11 @@ async function checks () {
 
   /* ---- search, over the index these handlers keep ---- */
 
+  /* What the index holds, for a failure message: on a runner the watcher
+     either delivered the file or it did not, and the path each note was read
+     under is the whole of the evidence. */
+  const indexed = async () => (await call('vault:notes')).map((n) => [n.path, n.text?.length ?? null])
+
   await check('search finds a word in a note that was never opened', async () => {
     const found = await call('search:vault', 'pomegranate', {})
     const hits = found.results || found
@@ -216,7 +221,8 @@ async function checks () {
       hits = found.results || found
       if (!hits.length) await new Promise((resolve) => setTimeout(resolve, 250))
     }
-    assert.ok(JSON.stringify(hits).includes('Minutes.docx'), 'the Word document did not match')
+    assert.ok(JSON.stringify(hits).includes('Minutes.docx'),
+      `the Word document did not match — indexed: ${JSON.stringify(await indexed())}`)
     const hit = hits.find((r) => r.path === 'Minutes.docx')
     assert.equal(hit.kind, 'docx', 'it came back as some other kind of result')
     assert.ok(/quince/.test(JSON.stringify(hit.hits)), 'no line of the document was quoted')
@@ -239,7 +245,8 @@ async function checks () {
     }
     fs.writeFileSync(path.join(VAULT, 'Seed.md'), '# Seed\n\nA pomegranate and a loquat.\n')
     const found = await until('loquat', true)
-    assert.ok(JSON.stringify(found).includes('Seed.md'), 'the edited note was not re-read')
+    assert.ok(JSON.stringify(found).includes('Seed.md'),
+      `the edited note was not re-read — indexed: ${JSON.stringify(await indexed())}`)
     fs.writeFileSync(path.join(VAULT, 'Gone.md'), '# Gone\n\nmedlar\n')
     assert.ok((await until('medlar', true)).length, 'the new note was not indexed')
     fs.unlinkSync(path.join(VAULT, 'Gone.md'))
