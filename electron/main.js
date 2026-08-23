@@ -6371,7 +6371,10 @@ function claimExecutionSlot (kind) {
   let slot = slots.find((candidate) => !candidate.busy)
   if (!slot) {
     slot = {
-      path: path.join(runCacheDir(), `${EXEC_SLOT_PREFIX}${kind}-${slots.length}`),
+      /* `.exe` on Windows: CreateProcess will start an extensionless file by
+         full path, but MinGW's linker and the shell that follows it will
+         not, and the run ended with no exit code at all. */
+      path: path.join(runCacheDir(), `${EXEC_SLOT_PREFIX}${kind}-${slots.length}${process.platform === 'win32' ? '.exe' : ''}`),
       busy: false
     }
     slots.push(slot)
