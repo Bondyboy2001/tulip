@@ -71,6 +71,15 @@ assert.match(preload, /doctor:\s*\(\)/)
 assert.match(preload, /tex:compile/)
 assert.match(main, /createTexCompiler/)
 assert.match(source ? read('src', 'styles.css') : styles, /\.tex-preview/)
+/* The file tree's own tints ride in the render-blocking core sheet. They once
+   sat at the tail of the language keyboard's section, which the build slices
+   out into `language.css` (see FEATURE_STYLE_SECTIONS), so a shift-click
+   selected the right rows and painted none of them until a language table had
+   been opened in that session. */
+if (!source) {
+  assert.match(styles, /\.row\.is-picked\s*\{/, 'the multi-select tint is in the core sheet')
+  assert.match(styles, /\.row\.is-drop-target\s*\{/, 'the drop-target tint is in the core sheet')
+}
 /* KaTeX's stylesheet is emitted beside index.html, so it is resolved against
    the document. `import.meta.url` is wherever esbuild's splitting last put
    math.js — and when that was a shared chunk, the link asked for

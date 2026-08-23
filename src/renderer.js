@@ -134,6 +134,10 @@ const state = {
      tree does not carry them — they live inside notes, and the sidebar is a
      walk of names — so they are asked for separately; see refreshAliases. */
   aliases: {},
+  /* The emoji hung on rows of the file tree, as path -> one glyph. Kept beside
+     the tree rather than in it: the walk that builds the tree is of the disk,
+     and these live in a sidecar (see file-marks in main.js). */
+  marks: {},
   /* The tree's one tab stop, as a path. The arrows move it; renderTree puts it
      back on the same row, or on the open note if that row has gone. */
   treeFocus: null,
@@ -328,7 +332,6 @@ const el = {
   siteReload: $('site-reload'),
   siteAddress: $('site-address'),
   siteSave: $('site-save'),
-  siteOpen: $('site-open'),
   whiteboard: $('whiteboard'),
   drawerScrim: $('drawer-scrim')
 }
@@ -1287,7 +1290,6 @@ function paintSiteBar (view) {
   el.siteReload.title = view.loading ? 'Stop loading' : keyLabel('Reload (⌘R)')
   el.siteReload.setAttribute('aria-label', view.loading ? 'Stop loading' : 'Reload')
   el.siteSave.hidden = !view.drifted
-  el.siteOpen.disabled = !view.url
 }
 
 /** A highlighted passage as the message it becomes: where it is, then what it
@@ -1414,10 +1416,6 @@ el.siteSave.addEventListener('click', () => {
   site.saveHome()
   setStatusRight('This file now points here')
 })
-el.siteOpen.addEventListener('click', () => {
-  if (site.url()) api.openExternal(site.url())
-})
-
 /* Typing an address is how a website file is pointed somewhere else, so this
    field commits to disk — see goTo in site.js, which is where that decision
    lives. Escape puts back where the page actually is, so the bar is never left
@@ -1740,6 +1738,11 @@ async function loadTree () {
   let redraw = false
 
   if (revision.tree !== before.tree) {
+    /* A rename carries a row's mark with it — main relocates the sidecar — so
+       the map this window is holding is keyed to names that have moved. Read
+       again before the rows are drawn, and only when the tree actually moved:
+       a snapshot that changed nothing changed no keys either. */
+    await loadMarks()
     /* Before the redraw, not after: a note that arrived with `aliases` in its
        head changes what every `[[…]]` in the vault resolves to, and refreshing
        afterwards would draw the links once with the old answer. */
@@ -1808,6 +1811,17 @@ function applyAssets (next, revision, { defer = false } = {}) {
  *  throw *after* writing the file — the picture landed in the vault and the
  *  `![[…]]` that names it never reached the note. */
 const loadAssets = async () => applyAssets((await api.vault.snapshot()).assets)
+
+/** The marks, re-read. A small JSON file main already has in memory, so this
+ *  is a round trip and not a walk. */
+async function loadMarks () {
+  try {
+    state.marks = (await api.fileMarks.all()) || {}
+  } catch {
+    // A vault that is closed or unreadable simply has no marks to draw.
+    state.marks = {}
+  }
+}
 
 /* Ids for the groups a folder owns. A counter rather than the folder's path:
    a path is not a legal id fragment, and nothing outside this file looks these
@@ -1887,8 +1901,13 @@ function patchTree (before, after) {
  * place. Rows that were already right are not touched.
  */
 function patchLevel (container, children, replace, depth, replacedFolders) {
+  /* `:scope >`, because a level is the rows *this* container holds and not the
+     ones an open folder inside it holds. An unscoped query reached through the
+     `.children` divs too, so every row in an open folder counted as a row of
+     the level above — absent from that level's list, and therefore removed.
+     One note arriving at the root emptied every open folder in the tree. */
   const byPath = new Map()
-  for (const row of container.querySelectorAll('.row[data-path]')) {
+  for (const row of container.querySelectorAll(':scope > .row[data-path]')) {
     byPath.set(row.dataset.path, row)
   }
   const keep = new Set()
@@ -1905,7 +1924,7 @@ function patchLevel (container, children, replace, depth, replacedFolders) {
   /* Then the new order, one pass: keep, replace or insert as each row needs.
      Both lists are sorted the same way, so a single cursor over the drawn
      rows places every insertion where the sort puts it. */
-  const drawn = [...container.querySelectorAll('.row[data-path]')]
+  const drawn = [...container.querySelectorAll(':scope > .row[data-path]')]
   let cursor = 0
   for (const node of children) {
     const row = byPath.get(node.path)
@@ -2113,6 +2132,9 @@ function buildLevel (nodes, depth) {
     label.textContent = node.name
     row.append(label)
 
+    const mark = state.marks[node.path]
+    if (mark) row.append(markBadge(mark))
+
     if (node.type === 'folder') {
       const open = state.expanded.has(node.path)
       if (open) row.classList.add('is-open')
@@ -2283,12 +2305,23 @@ function clickRow (node, event) {
   const path = node.path
   const rows = visibleRows()
 
-  if (event.shiftKey && state.pickAnchor) {
-    const from = rows.indexOf(state.pickAnchor)
+  /* A shift-click is a range, and a range needs somewhere to measure from. The
+     anchor is normally the last row clicked, but the first click of a session
+     is often the shift-click itself — the note being read was opened from a
+     tab, a search or a link, never from the tree — and a range with no anchor
+     used to collapse to the single row clicked, which reads as shift-click
+     doing nothing at all. The open note stands in: it is the row the user can
+     see highlighted, and it is where every other file manager measures from. */
+  const anchor = state.pickAnchor
+    || (rows.includes(state.current?.path) ? state.current.path : null)
+
+  if (event.shiftKey && anchor) {
+    const from = rows.indexOf(anchor)
     const to = rows.indexOf(path)
     if (from !== -1 && to !== -1) {
       const [lo, hi] = from < to ? [from, to] : [to, from]
       state.picked = new Set(rows.slice(lo, hi + 1))
+      state.pickAnchor = anchor
       /* The range's far end becomes current without disturbing the anchor, so
          a second shift-click re-extends from the same place rather than from
          where the last one landed. markPicked runs after the open as well as
@@ -2549,8 +2582,11 @@ async function moveInto (destDir, paths = state.dragging || []) {
     else if (viewingData()) dataInstance?.retarget(followed.to)
     else if (viewingNotebook()) notebookInstance?.retarget(followed.to)
     state.current = noteRef(followed.to)
-    renderTabs()
-    sessionOnly({ lastNote: followed.to })
+    /* Same as a rename, and for the same reason: a document arriving under a
+       new path is a document arriving. The claim in particular — without it
+       this window edits the moved file holding nothing, and a second window
+       opens it and gets a buffer of its own. */
+    settleDoc(followed.to)
   }
   /* The open note may be one of the rewritten: its own writes no longer come
      back through the watcher, so the buffer is told to catch up here. */
@@ -2837,10 +2873,17 @@ async function claimDocument (path) {
   if (answer?.ok) {
     claimedPath = path
     state.heldElsewhere.delete(path)
-  } else {
+  } else if (answer?.taken) {
     state.heldElsewhere.add(path)
     toast(`Another window is editing “${docLabel(path)}”. This one is showing it read-only — ` +
       '“Edit here” in the command palette takes it over.')
+  } else {
+    /* Not taken — the answer never came, or main could not resolve the path.
+       An unanswered claim is not another window's claim: saying so would show
+       a window that does not exist and pin the document read-only, with the
+       one way out (“Edit here”) failing for the very same reason. The
+       document stays editable, which is where it started. */
+    state.heldElsewhere.delete(path)
   }
   applyPanes()
 }
@@ -3049,6 +3092,12 @@ async function openViewed (path, { focus = true, history = true, place = null, n
     const tab = activeTab()
     if (tab) tab.path = previous?.path || null
     state.current = previous ? noteRef(previous.path) : null
+    /* `settleDoc` above asked for the document before it was known to be
+       readable, and the answer almost always beats the failure. Given up here
+       — after `state.current` is back, so that a claim still in flight sees the
+       window has moved off and hands itself back too. Otherwise one unreadable
+       file locks every other window out of it for this window's whole life. */
+    releaseDocument(path)
     if (previous) await openNote(previous.path, { focus: false, history: false })
     else { applyPanes(); closeCurrentNote() }
     renderTabs()
@@ -9588,6 +9637,88 @@ function copyPaths (paths) {
   setStatusRight(paths.length === 1 ? 'Path copied' : `${paths.length} paths copied`)
 }
 
+/* ------------------------------------------------------------ row marks
+
+   An icon a reader hangs on a file or a folder — read, ongoing, needs work.
+   The vault has no place to record that (a folder is not a document, and a
+   `.pdf` has nowhere to be told it has been read), so it is filed against the
+   path in a sidecar and drawn at the end of the row.
+   ================================================================== */
+
+/* What the picker offers. Emoji rather than drawn glyphs, because the meaning
+   is the reader's and not the app's: the same tick is "done" to one person and
+   "checked this one" to another. The order runs from the marks a reading list
+   wants — read, reading, to read — through progress, then flags. Anything not
+   here can still be pasted into the field under the grid. */
+const MARK_CHOICES = [
+  '✅', '📖', '📕', '🔖', '🚧', '⏳', '🔁', '🆕',
+  '⭐', '🔥', '📌', '❗', '❓', '💡', '📝', '🎯',
+  '🌱', '🧪', '🐛', '🏁', '❤️', '🔒', '💤', '🗑️'
+]
+
+/** The badge itself. `title` because an emoji at the end of a row is the whole
+ *  of the explanation, and there is nowhere else to say what it is. */
+function markBadge (mark) {
+  const badge = document.createElement('span')
+  badge.className = 'row-mark'
+  badge.textContent = mark
+  badge.title = 'Icon'
+  return badge
+}
+
+/** Redraw one row's badge, without rebuilding the row it hangs on — a full
+ *  renderTree here would drop the focus and the drag state of a tree the
+ *  reader is in the middle of using. */
+function paintRowMark (path) {
+  const row = el.tree.querySelector(`.row[data-path="${cssEscape(path)}"]`)
+  if (!row) return
+  row.querySelector('.row-mark')?.remove()
+  const mark = state.marks[path]
+  if (mark) row.append(markBadge(mark))
+}
+
+/** Hang a mark on a path, or — for the empty string — take it off. */
+async function setMark (path, mark) {
+  let saved
+  try {
+    saved = await api.fileMarks.set(path, mark)
+  } catch (err) {
+    toast(reason(err, 'That icon could not be saved.'))
+    return
+  }
+  /* What main kept, not what was asked for: a value it refused is a row that
+     must go on reading as it did. */
+  if (saved) state.marks[path] = saved
+  else delete state.marks[path]
+  paintRowMark(path)
+}
+
+/** The grid, as a menu of its own — opened from the row's menu, at the same
+ *  corner, so it reads as that item having unfolded. */
+function showIconMenu (event, paths) {
+  /* One row shows what it is already wearing — the picker is then a way to
+     change it as much as to set it. A selection of many shows a mark only when
+     they agree, because there is no single answer to show otherwise. */
+  const marks = new Set(paths.map((path) => state.marks[path] || ''))
+  const current = marks.size === 1 ? [...marks][0] : ''
+  const apply = (mark) => Promise.all(paths.map((path) => setMark(path, mark)))
+  const items = [{
+    grid: MARK_CHOICES,
+    on: current,
+    // Picking the mark a row already wears takes it off, the way a toggle does.
+    pick: (mark) => apply(mark === current ? '' : mark)
+  }, {
+    field: 'Paste any emoji…',
+    value: current,
+    commit: (mark) => apply(mark)
+  }]
+  if (paths.some((path) => state.marks[path])) {
+    items.push({ sep: true })
+    items.push({ label: 'Remove icon', run: () => apply('') })
+  }
+  renderContextMenu(items, event)
+}
+
 function showContextMenu (event, node) {
   const items = []
 
@@ -9611,6 +9742,10 @@ function showContextMenu (event, node) {
       run: () => paths.forEach((p) => api.file.reveal(p))
     })
     items.push({ label: `Copy ${paths.length} paths`, run: () => copyPaths(paths) })
+    items.push({
+      label: `Add icon to ${paths.length} items…`,
+      run: () => showIconMenu(event, paths)
+    })
     items.push({ label: `Move ${paths.length} items to…`, run: () => openMovePicker(paths) })
     items.push({ sep: true })
     items.push({
@@ -9636,6 +9771,10 @@ function showContextMenu (event, node) {
   if (node.type !== 'folder' && isEditableTextPath(node.path)) {
     items.push({ label: 'Show history…', run: () => noteHistory.show(node.path) })
   }
+  items.push({
+    label: state.marks[node.path] ? 'Change icon…' : 'Add icon…',
+    run: () => showIconMenu(event, [node.path])
+  })
   items.push({ label: 'Move to…', run: () => openMovePicker([node.path]) })
   items.push({ label: revealLabel(), run: () => api.file.reveal(node.path) })
   items.push({ label: 'Copy path', run: () => copyPaths([node.path]) })
@@ -9662,6 +9801,8 @@ function renderContextMenu (items, event) {
   el.ctx.replaceChildren()
   for (const item of items) {
     if (item.sep) { el.ctx.append(document.createElement('hr')); continue }
+    if (item.grid) { el.ctx.append(menuGrid(item)); continue }
+    if (item.field) { el.ctx.append(menuField(item)); continue }
     const btn = document.createElement('button')
     btn.textContent = item.label
     btn.setAttribute('role', 'menuitem')
@@ -9699,6 +9840,47 @@ function renderContextMenu (items, event) {
     ctxReturn = document.activeElement
     el.ctx.querySelector('button:not([disabled])')?.focus()
   }
+}
+
+/** A menu row that is a grid of glyphs rather than a line of text — the icon
+ *  picker. Buttons, so the menu's own arrow-key walk reaches every one of
+ *  them; wide enough that the grid, not the label column, sets the menu's
+ *  width. */
+function menuGrid ({ grid, on, pick }) {
+  const box = document.createElement('div')
+  box.className = 'ctx-grid'
+  box.setAttribute('role', 'group')
+  for (const glyph of grid) {
+    const btn = document.createElement('button')
+    btn.type = 'button'
+    btn.textContent = glyph
+    btn.title = glyph
+    btn.setAttribute('role', 'menuitemradio')
+    btn.setAttribute('aria-checked', String(glyph === on))
+    if (glyph === on) btn.classList.add('is-on')
+    btn.addEventListener('click', () => { hideContextMenu(); pick(glyph) })
+    box.append(btn)
+  }
+  return box
+}
+
+/** And a row that is a text field: the twenty-four in the grid are a
+ *  convenience, not the vocabulary. Anything pasted here that main will keep
+ *  becomes the mark. */
+function menuField ({ field, value, commit }) {
+  const input = document.createElement('input')
+  input.className = 'ctx-field'
+  input.placeholder = field
+  input.value = value || ''
+  input.setAttribute('aria-label', field)
+  input.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return
+    event.preventDefault()
+    const typed = input.value.trim()
+    hideContextMenu()
+    commit(typed)
+  })
+  return input
 }
 
 /** Move a rendered local image to the system Trash and remove every reference
@@ -9790,6 +9972,9 @@ function hideContextMenu () {
    leaves it, and Tab is not a way out — a menu that Tab escapes leaves the
    reader somewhere behind an overlay they cannot see past. */
 el.ctx.addEventListener('keydown', (event) => {
+  /* Except in a field, where the arrows and Tab belong to the text being
+     typed. Escape still leaves — it is the way out of every layer. */
+  if (event.target instanceof HTMLInputElement && event.key !== 'Escape') return
   const items = [...el.ctx.querySelectorAll('button:not([disabled])')]
   if (!items.length) return
   const at = items.indexOf(document.activeElement)
@@ -10067,6 +10252,12 @@ el.emptyActions.addEventListener('click', (e) => {
 
 /** Return the pane to its empty state after the open document goes away. */
 function closeCurrentNote () {
+  /* Closing is leaving. `leaveDoc` gives the claim up on the way to another
+     document, but this is the way out of one to nothing at all — ⌘T, the last
+     tab closed, a deleted file's tabs dropped — and without it the window goes
+     on holding a document it is not showing, locking every other window out of
+     a file nobody is editing. */
+  releaseDocument(state.current?.path)
   if (viewingTex()) {
     clearTimeout(texCompileTimer)
     texCompileGeneration++

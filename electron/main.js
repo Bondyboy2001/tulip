@@ -446,6 +446,37 @@ const fileTags = makePathStore({
   onSave: () => { indexGeneration++ }
 })
 
+/* One glyph a reader hung on a row of the file tree: a tick for "read", a
+   cone for "still working on this", whatever the emoji means to the person who
+   picked it. It says nothing about the file's contents, so it does not belong
+   inside the file — and it has to survive a rename, which is exactly what a
+   path store does.
+
+   Graphemes, not code points: a flag is two code points and a waving hand with
+   a skin tone is three, and counting the wrong unit would refuse the icons
+   people actually reach for. Whitespace is refused outright — an invisible
+   mark is a row that looks unmarked and sorts as marked. */
+const cleanFileMark = (value) => {
+  const mark = String(value || '').trim()
+  if (!mark || /\s/.test(mark)) return null
+  const segmenter = typeof Intl.Segmenter === 'function'
+    ? new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+    : null
+  const glyphs = segmenter ? [...segmenter.segment(mark)].length : [...mark].length
+  // Two, so a pair like "‼️" or a flag plus a tick still fits, and a pasted
+  // sentence does not.
+  if (glyphs > 2) return null
+  return mark
+}
+
+/* Which row wears which mark. No index to invalidate: nothing is searched by
+   these, they are only drawn. */
+const fileMarks = makePathStore({
+  name: 'file-marks',
+  vault: () => vaultPath,
+  clean: cleanFileMark
+})
+
 /* How wide the columns of a table were left. A `.csv` has nowhere inside it to
    record that — the file is the data and nothing else — so fitting the columns
    of a big export used to be undone by closing the tab. A width below the
@@ -1638,6 +1669,12 @@ async function relocate (srcAbs, targetAbs) {
   noteSelfWrite(srcAbs)
   noteSelfWrite(targetAbs)
   await fs.rename(srcAbs, targetAbs)
+  /* Re-keyed rather than given up and asked for again: the window editing the
+     document still is, and a release would announce the document free the one
+     moment it is not. Left behind, the old key is a claim on a path that may
+     be filled again later — and then a window would be locked out of a file
+     nobody has open. */
+  relocateClaims(srcAbs, targetAbs, isDir)
   /* Everything filed against a path rather than inside the file — tags, the
      table's column widths, and whatever is registered next — moves with it. */
   await relocateAll(fromPath, toPath, isDir)
@@ -2843,6 +2880,20 @@ function announceFree (abs) {
   broadcast('document:free', rel(abs))
 }
 
+/** The claims on a file that has just moved, moved with it — a folder taking
+ *  everything claimed underneath it. Called from `relocate`, which is the one
+ *  road every rename and move goes down. */
+function relocateClaims (srcAbs, targetAbs, isDir) {
+  for (const [abs, owner] of [...editClaims]) {
+    let next = null
+    if (abs === srcAbs) next = targetAbs
+    else if (isDir && abs.startsWith(srcAbs + path.sep)) next = targetAbs + abs.slice(srcAbs.length)
+    if (!next) continue
+    editClaims.delete(abs)
+    editClaims.set(next, owner)
+  }
+}
+
 /** Everything a closing window was editing, given up. */
 function releaseClaimsOwnedBy (id) {
   for (const [abs, owner] of editClaims) {
@@ -2890,9 +2941,22 @@ ipcMain.handle('document:release', async (event, p) => {
 ipcMain.handle('document:take', async (event, p) => {
   const abs = await claimKey(p)
   if (!abs) return { ok: false }
-  const holder = claimHolder(abs)
-  if (holder && holder.webContents.id !== event.sender.id) {
+  /* A loop rather than one look, because the holder can change while its
+     flush is awaited: two readers pressing “Edit here” together both waited
+     on the same window, and both were answered yes with neither told — two
+     buffers over one file that cannot be merged. Bounded, so that windows
+     trading a document between them cannot hold this open for ever. */
+  for (let round = 0; round < 8; round++) {
+    const holder = claimHolder(abs)
+    if (!holder || holder.webContents.id === event.sender.id) break
     await askRendererToFlush(holder)
+    // Somebody else took it out from under this one while the flush ran; that
+    // window has already been told, and the new holder is dealt with next time
+    // round.
+    if (editClaims.get(abs) !== holder.webContents.id) continue
+    /* Cleared before the telling, so a second taker waiting on the same window
+       finds the document free rather than flushing one that has given it up. */
+    editClaims.delete(abs)
     sendTo(holder, 'document:yielded', p)
   }
   /* Set after the flush, not before: until the holder's work is on disk this
@@ -4079,6 +4143,16 @@ ipcMain.handle('file-tags:get', async (_e, p) => {
 ipcMain.handle('file-tags:set', async (_e, p, values) => {
   const abs = await realSafePath(p)
   return (await fileTags.set(rel(abs), values)) || []
+})
+
+/* The whole map at once, because the tree draws every row it has: asking per
+   row would be one round trip per note in the vault. */
+ipcMain.handle('file-marks:all', async () => (vaultPath ? await fileMarks.all() : {}))
+
+ipcMain.handle('file-marks:set', async (_e, p, mark) => {
+  const abs = await realSafePath(p)
+  // Always a string: the empty one is "no mark", which is no entry at all.
+  return (await fileMarks.set(rel(abs), mark)) || ''
 })
 
 /**

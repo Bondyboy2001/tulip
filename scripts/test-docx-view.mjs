@@ -303,6 +303,16 @@ ok('a paragraph becomes a list item', () => {
 
 ok('and the same button again takes it back out', () => assert.ok(r.unlisted))
 
+ok('every paragraph a selection covers becomes a list item', () => {
+  assert.equal(r.selectionListed, 2, 'both lines the selection covered')
+  assert.equal(r.selectionListSort, 'OL')
+  assert.ok(r.selectionOneList, 'one list, not one per line — the numbering runs on')
+})
+
+ok('and the same button again takes the whole selection back out', () => {
+  assert.equal(r.selectionUnlisted, 2)
+})
+
 ok('a table is made with the shape it was asked for', () => {
   assert.deepEqual(r.tableShape, [2, 3])
   assert.ok(r.tableHasHeader, 'the first row is the header row Word would draw')

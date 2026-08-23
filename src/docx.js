@@ -344,8 +344,14 @@ export function mountDocx ({
       if (css.fontWeight) style.bold = css.fontWeight === 'bold' || Number(css.fontWeight) >= 600
       if (css.fontStyle) style.italic = css.fontStyle === 'italic'
       if (css.textDecorationLine) {
-        style.underline = css.textDecorationLine.includes('underline')
-        style.strike = css.textDecorationLine.includes('line-through')
+        /* Added to what the run already carries rather than replacing it: one
+           property says both marks, so a span Chromium wrote `line-through` on
+           inside an underlined paragraph would otherwise be written back
+           struck through and no longer underlined. `none` is the one form that
+           means the marks are off. */
+        const off = css.textDecorationLine.includes('none')
+        style.underline = !off && (style.underline || css.textDecorationLine.includes('underline'))
+        style.strike = !off && (style.strike || css.textDecorationLine.includes('line-through'))
       }
       if (child.tagName === 'SUP') style.vert = 'sup'
       if (child.tagName === 'SUB') style.vert = 'sub'
@@ -709,6 +715,22 @@ export function mountDocx ({
     return page?.contains(lastParagraph) ? lastParagraph : null
   }
 
+  /** Every paragraph the selection spans, in page order — or the one the caret
+   *  is in, for a collapsed selection or a command reached from the palette.
+   *  A style asked for over a selection belongs to every line it covers, not
+   *  only the one its anchor happened to land in. */
+  function selectedParagraphs () {
+    const selection = window.getSelection()
+    const range = selection && !selection.isCollapsed &&
+        page?.contains(selection.anchorNode)
+      ? selection.getRangeAt(0)
+      : null
+    if (!range) return [hereParagraph()].filter(Boolean)
+    const hit = [...page.querySelectorAll('.docx-p, .docx-h, .docx-li')]
+      .filter(node => range.intersectsNode(node))
+    return hit.length ? hit : [hereParagraph()].filter(Boolean)
+  }
+
   /**
    * Redraw one paragraph from what it now says, keeping the selection where it
    * was.
@@ -754,9 +776,11 @@ export function mountDocx ({
    */
   async function setHeading (level) {
     if (!editable() || !(await allowed())) return
-    const node = hereParagraph()
-    if (!node) return
-    if (node.dataset.li) { onWarn('A list item cannot be a heading.'); return }
+    const nodes = selectedParagraphs()
+    if (!nodes.length) return
+    if (nodes.some(node => node.dataset.li)) {
+      onWarn('A list item cannot be a heading.'); return
+    }
     const styleId = level ? current.headingStyles[level] : ''
     if (level && !styleId) {
       onWarn(`This document has no Heading ${level} style for Tulip to apply.`)
@@ -765,26 +789,30 @@ export function mountDocx ({
 
     /* `w:pStyle` is the first child `w:pPr` may have, so putting the new one at
        the front is not a shortcut — it is where the schema says it goes. */
-    const rest = String(kept.ppr[Number(node.dataset.ppr)] || '')
-      .replace(/^<w:pPr>/, '').replace(/<\/w:pPr>$/, '')
-      .replace(/<w:pStyle[^>]*\/>/, '')
-    const inner = (styleId ? `<w:pStyle w:val="${styleId}"/>` : '') + rest
+    const where = offsetsIn(nodes[nodes.length - 1])
+    let landed = null
+    for (const node of nodes) {
+      const rest = String(kept.ppr[Number(node.dataset.ppr)] || '')
+        .replace(/^<w:pPr>/, '').replace(/<\/w:pPr>$/, '')
+        .replace(/<w:pStyle[^>]*\/>/, '')
+      const inner = (styleId ? `<w:pStyle w:val="${styleId}"/>` : '') + rest
 
-    const where = offsetsIn(node)
-    const drawn = drawParagraph({
-      type: level ? 'heading' : 'paragraph',
-      level,
-      runs: runsIn(node, { rpr: '' }),
-      align: null,
-      style: '',
-      ppr: inner ? `<w:pPr>${inner}</w:pPr>` : '',
-      at: node.dataset.at ? node.dataset.at.split(',').map(Number) : null
-    })
-    // Its words did not change; its style did, and only a signature that can
-    // never match says so to the save.
-    restamp(drawn)
-    node.replaceWith(drawn)
-    if (where) placeCaret(drawn, where.start, where.end)
+      const drawn = drawParagraph({
+        type: level ? 'heading' : 'paragraph',
+        level,
+        runs: runsIn(node, { rpr: '' }),
+        align: null,
+        style: '',
+        ppr: inner ? `<w:pPr>${inner}</w:pPr>` : '',
+        at: node.dataset.at ? node.dataset.at.split(',').map(Number) : null
+      })
+      // Its words did not change; its style did, and only a signature that can
+      // never match says so to the save.
+      restamp(drawn)
+      node.replaceWith(drawn)
+      if (node === nodes[nodes.length - 1]) landed = drawn
+    }
+    if (where && landed) placeCaret(landed, where.start, where.end)
     touched()
   }
 
@@ -816,57 +844,95 @@ export function mountDocx ({
     return `<w:pPr>${inner.slice(0, at)}${numPr}${inner.slice(at)}</w:pPr>`
   }
 
+  /** The sort of list a paragraph is in, or nothing where it is not in one. */
+  const listOf = (node) => node.dataset.li
+    ? (node.parentElement?.tagName === 'OL' ? 'ordered' : 'bullet')
+    : null
+
   /**
-   * Make the paragraph the caret is in a list item, or an ordinary paragraph
-   * again.
+   * Make what is selected a list, or ordinary paragraphs again.
+   *
+   * Every paragraph the selection covers, not only the one the anchor landed
+   * in: selecting four lines and pressing the bullet button means four bullets
+   * in Word, and it meant one here. The same rule `setHeading` follows, and for
+   * the same reason — a command aimed at a selection is about the selection.
    *
    * @param {'bullet' | 'ordered' | null} sort
    */
   async function setList (sort) {
     if (!editable() || !(await allowed())) return
-    const node = hereParagraph()
-    if (!node) return
-    const inList = Boolean(node.dataset.li)
-    /* Asking for the list it is already in means asking to leave it, which is
-       what the same button does in Word and what the pressed state on the bar
-       has to mean for it to be worth showing. */
-    const already = inList &&
-      (node.parentElement?.tagName === 'OL' ? 'ordered' : 'bullet') === sort
-    if (already) sort = null
-    if (!sort && !inList) return
-    const where = offsetsIn(node)
+    const nodes = selectedParagraphs()
+    if (!nodes.length) return
 
-    /* Built afresh rather than reclassed: a list item is drawn inside its list
-       and a paragraph is not, so the two are different elements in different
-       places, carrying the same runs and the same properties. */
-    const drawn = drawParagraph({
-      type: 'paragraph',
-      runs: runsIn(node, { rpr: '' }),
-      align: null,
-      style: '',
-      ppr: withList(kept.ppr[Number(node.dataset.ppr)] || '', sort),
-      at: node.dataset.at ? node.dataset.at.split(',').map(Number) : null
-    })
-    restamp(drawn)
+    /* Asking for the list they are already in means asking to leave it, which
+       is what the same button does in Word and what the pressed state on the
+       bar has to mean for it to be worth showing. Over a selection it takes
+       all of them to mean that: a mix of bullets and plain lines is somebody
+       making the whole of it a list, not leaving one. */
+    if (nodes.every((node) => listOf(node) === sort)) sort = null
+    if (!sort && !nodes.some((node) => node.dataset.li)) return
 
-    let landed = drawn
-    if (!sort) {
-      unwrapItem(node, drawn)
-    } else {
-      const item = document.createElement('li')
-      item.className = 'docx-li'
-      for (const key of Object.keys(drawn.dataset)) {
-        item.dataset[key] = /** @type {any} */ (drawn.dataset)[key]
+    /* Where to leave the caret. The last paragraph's own offsets, since that is
+       where a selection ends — the same place setHeading puts it back. */
+    const where = offsetsIn(nodes[nodes.length - 1])
+    let landed = null
+
+    for (const node of nodes) {
+      const inList = Boolean(node.dataset.li)
+      // Already what it is being asked to be, in the mixed selection above.
+      if (!sort && !inList) continue
+
+      /* Built afresh rather than reclassed: a list item is drawn inside its
+         list and a paragraph is not, so the two are different elements in
+         different places, carrying the same runs and the same properties. */
+      const drawn = drawParagraph({
+        type: 'paragraph',
+        runs: runsIn(node, { rpr: '' }),
+        align: null,
+        style: '',
+        ppr: withList(kept.ppr[Number(node.dataset.ppr)] || '', sort),
+        at: node.dataset.at ? node.dataset.at.split(',').map(Number) : null
+      })
+      restamp(drawn)
+
+      let made = drawn
+      if (!sort) {
+        unwrapItem(node, drawn)
+      } else {
+        const item = document.createElement('li')
+        item.className = 'docx-li'
+        for (const key of Object.keys(drawn.dataset)) {
+          item.dataset[key] = /** @type {any} */ (drawn.dataset)[key]
+        }
+        item.dataset.li = '1'
+        item.append(...drawn.childNodes)
+        made = item
+        if (inList) unwrapItem(node, item, sort)
+        else wrapInList(node, item, sort)
+        /* Each item is converted where it stands, so a run of them arrives as a
+           run of one-item lists — and two adjacent lists draw as two, with the
+           numbering starting over at the second. Folding each into the one
+           above puts the selection back together as the single list it looks
+           like it should be. */
+        joinPrevious(item.parentElement)
       }
-      item.dataset.li = '1'
-      item.append(...drawn.childNodes)
-      landed = item
-      if (inList) unwrapItem(node, item, sort)
-      else wrapInList(node, item, sort)
+      if (node === nodes[nodes.length - 1]) landed = made
     }
 
-    if (where) placeCaret(landed, where.start, where.end)
+    if (where && landed) placeCaret(landed, where.start, where.end)
     touched()
+  }
+
+  /** Fold a list into the one directly above it, where that is a list of the
+   *  same sort. What a `.docx` holds is a run of paragraphs each naming a
+   *  numbering — the list elements are this viewer's own — so joining two of
+   *  them changes what is drawn and nothing about what is saved. */
+  function joinPrevious (list) {
+    const above = list?.previousElementSibling
+    if (!above || above.tagName !== list.tagName) return
+    if (!above.classList.contains('docx-list') || !list.classList.contains('docx-list')) return
+    above.append(...list.children)
+    list.remove()
   }
 
   /**

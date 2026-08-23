@@ -866,8 +866,7 @@ function youtubePlayer (spec, onReady) {
 
 /**
  * A web page standing in a note: a framed guest with a slim header naming the
- * site and offering the browser, because a page inside a note answers "what
- * does it say" and the browser answers everything else.
+ * site (the address sits in its tooltip).
  */
 function webEmbed (spec, onReady) {
   const box = document.createElement('figure')
@@ -882,15 +881,7 @@ function webEmbed (spec, onReady) {
   site.textContent = spec.label
   site.title = spec.url
 
-  /* `embed-link` is the class the editor already routes to the browser; the
-     reading view follows any https anchor. One class, both views wired. */
-  const open = document.createElement('a')
-  open.className = 'embed-web-open embed-link'
-  open.href = spec.url
-  open.textContent = 'Open ↗'
-  open.title = `Open in your browser\n${spec.url}`
-
-  head.append(site, open)
+  head.append(site)
 
   const view = document.createElement('webview')
   view.className = 'embed-view embed-web-view'
@@ -904,7 +895,7 @@ function webEmbed (spec, onReady) {
   view.addEventListener('did-fail-load', (e) => {
     if (e.errorCode === -3 || !e.isMainFrame) return
     /* The page would not load. Say so in the frame rather than leaving white,
-       and keep the header: the link out is now the useful part. */
+       and keep the header so the site is still named. */
     const note = document.createElement('div')
     note.className = 'embed-web-fail'
     note.textContent = `Couldn\u2019t load this page (${e.errorDescription || e.errorCode})`

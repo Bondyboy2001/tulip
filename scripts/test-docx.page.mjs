@@ -96,6 +96,21 @@ function caret (node, start, end = start) {
   node.focus?.()
 }
 
+/** A selection running from inside one paragraph to inside another — what a
+ *  drag down the page leaves behind, and the only thing that can ask a command
+ *  whether it acts on more than the line the anchor is in. */
+function caretAcross (from, to) {
+  const range = document.createRange()
+  range.selectNodeContents(from)
+  range.collapse(true)
+  const end = document.createRange()
+  end.selectNodeContents(to)
+  range.setEnd(end.endContainer, end.endOffset)
+  const selection = window.getSelection()
+  selection.removeAllRanges()
+  selection.addRange(range)
+}
+
 const chord = (host, key, extra = {}) => host.dispatchEvent(
   new KeyboardEvent('keydown', { key, metaKey: true, bubbles: true, cancelable: true, ...extra }))
 
@@ -449,6 +464,34 @@ export async function run () {
   const blanked = writes.at(-1)?.edit
   const blank = blanked?.items.find((item) => item.p && !item.at)
   result.blankLineRuns = blank ? blank.p.runs.length : -1
+
+  /* A selection is what the button acts on, not the line its anchor landed in.
+     Across a bullet item and the plain paragraph under it, so the mixed case is
+     the one under test: both become items of one numbered list. */
+  window.__stage = 'a list from a selection'
+  await docx.open('Notes/Field notes.docx')
+  docx.setReadonly(false)
+  const lastBullet = [...host.querySelectorAll('#host .docx-li')]
+    .find((li) => li.textContent.startsWith('outer two'))
+  const below = [...host.querySelectorAll('#host .docx-p')]
+    .find((p) => p.textContent.startsWith('after the list'))
+  caretAcross(lastBullet, below)
+  await docx.setList('ordered')
+  const numbered = [...host.querySelectorAll('#host .docx-li')]
+    .filter((li) => /^(outer two|after the list)/.test(li.textContent))
+  result.selectionListed = numbered.length
+  result.selectionOneList = numbered.length === 2 &&
+    numbered[0].parentElement === numbered[1].parentElement
+  result.selectionListSort = numbered[0]?.parentElement?.tagName
+
+  /* And the same button again over the same selection leaves the list — both
+     of them, not the one the anchor is in. */
+  window.__stage = 'and out of it again'
+  caretAcross(numbered[0], numbered[1])
+  await docx.setList('ordered')
+  result.selectionUnlisted = [...host.querySelectorAll('#host .docx-p')]
+    .filter((p) => /^(outer two|after the list)/.test(p.textContent) && !p.dataset.li).length
+
 
   /* ------------------------------------------------- the one question */
 

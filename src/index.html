@@ -357,14 +357,11 @@
                autocomplete="off" autocapitalize="off" autocorrect="off"
                placeholder="Type an address…" aria-label="Address" />
 
-        <div class="site-bar-group">
-          <!-- Only once the page has wandered from what the file says, which is
-               the only moment the offer means anything. -->
-          <button class="site-btn is-wide" id="site-save" hidden
-                  title="Point this file at the page on screen">Save</button>
-          <button class="site-btn is-wide" id="site-open"
-                  title="Open in your browser">Open ↗</button>
-        </div>
+        <!-- Directly in the bar rather than in a group of its own: it is the
+             only thing on this side now, and an empty group would still be
+             holding the bar's gap open the whole time the button is hidden. -->
+        <button class="site-btn is-wide" id="site-save" hidden
+                title="Point this file at the page on screen">Save</button>
       </div>
 
       <div class="stage" id="stage">

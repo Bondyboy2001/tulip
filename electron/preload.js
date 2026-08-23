@@ -64,6 +64,12 @@ contextBridge.exposeInMainWorld('tulip', {
     get: (p) => ipcRenderer.invoke('file-tags:get', p),
     set: (p, tags) => ipcRenderer.invoke('file-tags:set', p, tags)
   },
+  /* The emoji a reader hung on a row of the file tree. Read as one map — the
+     tree draws every row it has — and written one row at a time. */
+  fileMarks: {
+    all: () => ipcRenderer.invoke('file-marks:all'),
+    set: (p, mark) => ipcRenderer.invoke('file-marks:set', p, mark)
+  },
   /* How wide a table's columns were left. A `.csv` has nowhere inside it to
      record that, so it is filed against the path instead — see csv.js. */
   tableWidths: {

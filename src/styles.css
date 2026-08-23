@@ -1260,6 +1260,36 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
   color: var(--ink);
   font-weight: 550;
 }
+
+/* Multi-selected rows in the file tree. Distinct from .is-active, which marks
+   the one note actually open in the editor. */
+.row.is-picked { --row-fill: var(--selected, color-mix(in srgb, var(--accent) 17%, transparent)); }
+.row.is-picked.is-active { --row-fill: color-mix(in srgb, var(--accent) 26%, transparent); }
+
+/* Drag and drop in the file tree. */
+/* Whatever is in hand mid-drag — a row of the tree, a tab of the strip — is
+   dimmed where it was, so it reads as travelling rather than duplicated. */
+.is-dragging { opacity: .45; }
+.row.is-drop-target {
+  --row-fill: color-mix(in srgb, var(--accent) 22%, transparent);
+  --row-ring: inset 0 0 0 1px var(--accent);
+}
+/* Every tint above reaches the same pill through `--row-fill`, and all of them
+   belong in this section rather than beside the code that sets the class. The
+   build slices styles.css into lazily loaded feature sheets by section comment
+   (see FEATURE_STYLE_SECTIONS in build.mjs), so these rules once sat at the
+   tail of the language keyboard's section and shipped in `language.css`: a
+   shift-click selected the right rows and painted none of them until a
+   language table had been opened. */
+
+/* Notes dragged in from Finder land in whatever folder is under the cursor, so
+   the whole panel has to be able to say it will take them — the outline is the
+   root's version of the highlight a folder row gets. */
+.tree.is-drop-target {
+  box-shadow: inset 0 0 0 1.5px var(--accent);
+  border-radius: 5px;
+}
+
 .row .label {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1270,6 +1300,22 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
   line-height: 1.25;
 }
 .row.is-folder { color: var(--muted); font-weight: 550; }
+
+/* The icon a reader hung on the row — see the file tree's context menu. At the
+   far end of the row, after the label's ellipsis, so a long name is what gets
+   shortened and the mark stays where the eye scans for it: one column down the
+   right edge of the tree. `flex: none` because an emoji is not text to fit,
+   and the line-height is pinned so a glyph with a tall box cannot make one row
+   taller than its neighbours. */
+.row-mark {
+  flex: none;
+  margin-left: 2px;
+  font-size: 11.5px;
+  line-height: 1;
+  /* Full colour, undimmed on inactive rows: the mark is the reader's own note
+     to themselves, and a state that fades is one that stops being read. */
+  opacity: 1;
+}
 
 .twist {
   flex: none;
@@ -2482,6 +2528,49 @@ ol.tk-ordered-list > li > .tk-olnum {
 .ctx button.danger { color: var(--accent); }
 .ctx hr { border: 0; border-top: 1px solid var(--line-soft); margin: 4px 6px; }
 .ctx .key { color: var(--faint); font-family: var(--font-mono); font-size: 11px; }
+
+/* The icon picker: a block of glyphs inside the menu rather than two dozen
+   rows of one glyph each. Eight to a line, which is the width the rest of the
+   menu already wants; the buttons are square so the grid reads as a palette
+   and not as a sentence. */
+.ctx-grid {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 1px;
+  padding: 3px 4px 5px;
+}
+.ctx-grid button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 5px;
+  font-size: 15px;
+  line-height: 1;
+}
+.ctx-grid button:hover { background: var(--accent-dim); }
+/* The one already worn, said with the ring the app uses for "this is the
+   current choice" elsewhere. */
+.ctx-grid button.is-on { box-shadow: inset 0 0 0 1.5px var(--accent); }
+.ctx-grid button:focus-visible { background: var(--accent-dim); }
+
+/* Anything not in the grid, pasted. */
+.ctx-field {
+  display: block;
+  width: calc(100% - 8px);
+  margin: 0 4px 3px;
+  padding: 4px 7px;
+  font: inherit;
+  color: var(--ink);
+  background: var(--sunk);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  outline: none;
+}
+.ctx-field:focus { border-color: var(--accent); }
 
 /* A row that is a switch, drawn as the box it is. A bare tick says what is on
    but leaves what is off saying nothing at all — an empty box is a state, and
@@ -5390,31 +5479,6 @@ ol.tk-ordered-list > li > .tk-olnum {
   max-width: none;
 }
 
-/* Multi-selected rows in the file tree. Distinct from .is-active, which marks
-   the one note actually open in the editor. */
-.row.is-picked { --row-fill: var(--selected, color-mix(in srgb, var(--accent) 17%, transparent)); }
-.row.is-picked.is-active { --row-fill: color-mix(in srgb, var(--accent) 26%, transparent); }
-
-/* Drag and drop in the file tree. */
-/* Whatever is in hand mid-drag — a row of the tree, a tab of the strip — is
-   dimmed where it was, so it reads as travelling rather than duplicated. */
-.is-dragging { opacity: .45; }
-.row.is-drop-target {
-  --row-fill: color-mix(in srgb, var(--accent) 22%, transparent);
-  --row-ring: inset 0 0 0 1px var(--accent);
-}
-/* The four tints above and the one below live apart because the tree's own
-   rules and the drag-and-drop rules are separate sections; all of them reach
-   the same pill through `--row-fill`. */
-
-/* Notes dragged in from Finder land in whatever folder is under the cursor, so
-   the whole panel has to be able to say it will take them — the outline is the
-   root's version of the highlight a folder row gets. */
-.tree.is-drop-target {
-  box-shadow: inset 0 0 0 1.5px var(--accent);
-  border-radius: 5px;
-}
-
 /* ------------------------------- editing code frame, measured against reading
    The theme layer's `.cm-line { padding: 0 10px; margin: 0 -10px }` (there so
    the active-line band bleeds past the text) outranks any plain .tk-code-*
@@ -5830,12 +5894,6 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   color: var(--ink-soft);
   font-weight: 550;
 }
-.embed-web-open {
-  flex: none;
-  color: var(--faint);
-  text-decoration: none;
-}
-.embed-web-open:hover { color: var(--accent); }
 .embed-web-view {
   /* Not 100%: the box's height *is* the guest's height, so it is set here —
      and overridden inline when the note wrote `|WxH`. */
