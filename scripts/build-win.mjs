@@ -130,10 +130,10 @@ const pkg = JSON.parse(await readFile(path.join(ROOT, 'package.json'), 'utf8'))
 const { name, version, description, main, license } = pkg
 
 step('drawing the icon')
-const electronBin = path.join(
-  ROOT, 'node_modules', '.bin',
-  process.platform === 'win32' ? 'electron.cmd' : 'electron'
-)
+/* The executable itself, which is what the `electron` package exports — not
+   the .cmd shim in .bin, which execFile on Windows refuses (EINVAL) now that
+   Node will not start a batch file without a shell. */
+const electronBin = (await import('electron')).default
 await run(electronBin, [path.join(ROOT, 'scripts', 'make-icon.cjs')], { cwd: ROOT })
 
 step('assembling the folder')

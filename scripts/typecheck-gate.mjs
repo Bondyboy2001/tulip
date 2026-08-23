@@ -129,7 +129,11 @@ const DRIFT = 8
 /** tsc exits nonzero when it has findings, which is the normal case here. */
 function runTsc () {
   try {
-    return execFileSync('npx', ['tsc', '-p', 'tsconfig.json', '--noEmit'], {
+    /* tsc's own entry point under this node, not `npx`: on Windows `npx` is
+       a .cmd, which execFile cannot start without a shell since Node closed
+       that hole, and the gate failed there with ENOENT before it ran. */
+    const tsc = path.join(root, 'node_modules', 'typescript', 'bin', 'tsc')
+    return execFileSync(process.execPath, [tsc, '-p', 'tsconfig.json', '--noEmit'], {
       cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']
     })
   } catch (err) {

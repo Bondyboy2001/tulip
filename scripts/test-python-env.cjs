@@ -192,7 +192,14 @@ const envs = makePythonEnvs({
 })
 
 async function main () {
-  await ok('a note and the shared pool are different environments', async () => {
+  /* Without uv every note shares one environment — by design, see dirFor —
+     so the two identity checks below would fail on a machine that has only
+     pip, which is what a hosted CI runner is. Decided first, and they are
+     passed over rather than asserted against a design they do not apply to. */
+  const hasUv = await envs.dirFor('probe.md') !== await envs.dirFor(null)
+  if (!hasUv) console.log('# uv not installed — the pip path shares one environment, as designed')
+
+  if (hasUv) await ok('a note and the shared pool are different environments', async () => {
     const mine = await envs.dirFor('Notes/Alpha.md')
     const shared = await envs.dirFor(null)
     assert.notEqual(mine, shared)
@@ -208,14 +215,12 @@ async function main () {
     assert.notEqual(await envs.dirFor('A/Note.md'), await envs.dirFor('B/Note.md'))
   })
 
-  await ok('the vault is part of the identity', async () => {
+  if (hasUv) await ok('the vault is part of the identity', async () => {
     const other = makePythonEnvs({ root: () => root, vault: () => '/vault/two', pathFor: () => '' })
     assert.notEqual(await envs.dirFor('Notes/Alpha.md'), await other.dirFor('Notes/Alpha.md'))
   })
 
-  const hasUv = await envs.dirFor('probe.md') !== await envs.dirFor(null)
   if (!hasUv) {
-    console.log('# uv not installed — the pip path shares one environment, as designed')
     console.log(`\npython env: ${passed}/${passed}`)
     fs.rmSync(root, { recursive: true, force: true })
     return

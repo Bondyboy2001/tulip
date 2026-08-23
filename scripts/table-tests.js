@@ -195,8 +195,14 @@ async function run () {
     point.setStart(text, 3)
     point.collapse(true)
     const box = point.getBoundingClientRect()
+    point.setStart(text, 4)
+    point.collapse(true)
+    const next = point.getBoundingClientRect()
     const cellBox = cell.getBoundingClientRect()
-    const x = box.x
+    /* A quarter of the way into the fourth character, not exactly on the
+       boundary before it: on the boundary the hit test rounds either way with
+       the font, and a hosted runner's font is not this machine's. */
+    const x = box.x + Math.max(1, (next.x - box.x) / 4)
     const y = cellBox.top + cellBox.height / 2
 
     cell.dispatchEvent(new MouseEvent('mousedown', {
