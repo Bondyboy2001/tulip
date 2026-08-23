@@ -40,6 +40,9 @@
 
 import { spawn } from 'node:child_process'
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
+/* The executable the package exports, not the .bin shim, which Windows cannot
+   spawn without a shell. */
+import electron from 'electron'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
@@ -129,15 +132,45 @@ function driver (socket) {
  * the debugging port — so the NEXT run attaches to the window that never went
  * away and reports a launch that never happened.
  */
+/* A launch that never answers must fail, not wait. The page-target and load
+   loops each have a deadline, but the debugger socket and every CDP round trip
+   had none — and on a hosted runner where the app did not come up, the job
+   sat in this function until GitHub killed it hours later. One clock over the
+   whole attempt, and the app's own stderr in the error, because a window that
+   never opened says why there and nowhere else. */
+const LAUNCH_MS = 90_000
+
 async function runOnce (userData) {
   const child = spawn(
-    path.join(ROOT, 'node_modules', '.bin', 'electron'),
+    electron,
     ['.', `--remote-debugging-port=${PORT}`, `--user-data-dir=${userData}`],
-    { cwd: ROOT, detached: true, stdio: 'ignore' }
+    { cwd: ROOT, detached: process.platform !== 'win32', stdio: ['ignore', 'ignore', 'pipe'] }
   )
+  let tail = ''
+  child.stderr.on('data', (chunk) => { tail = (tail + chunk).slice(-4000) })
+  child.stderr.on('error', () => {})
+  const gone = new Promise((resolve) => child.once('exit', resolve))
 
   let socket
+  let clock
+  const expired = new Promise((_, reject) => {
+    clock = setTimeout(() => reject(new Error(`the app did not come up within ${LAUNCH_MS / 1000}s\n${tail}`)), LAUNCH_MS)
+  })
   try {
+    return await Promise.race([expired, measure()])
+  } finally {
+    clearTimeout(clock)
+    try { socket?.close() } catch { /* already gone */ }
+    try { process.kill(-child.pid) } catch { try { child.kill() } catch { /* already gone */ } }
+    /* Waited for, not assumed: the next launch binds the same debugging port,
+       and an app still on its way out is an "address already in use" that has
+       nothing to do with what is being measured. Then Chromium's lock files,
+       which it unlinks on the way out, get a moment too. */
+    await Promise.race([gone, sleep(5000)])
+    await sleep(400)
+  }
+
+  async function measure () {
     const target = await pageTarget(Date.now() + 30_000)
     socket = new WebSocket(target.webSocketDebuggerUrl)
     await new Promise((resolve, reject) => {
@@ -168,14 +201,7 @@ async function runOnce (userData) {
       if (result.value) return JSON.parse(result.value)
       await sleep(50)
     }
-    throw new Error('the page never finished loading')
-  } finally {
-    try { socket?.close() } catch { /* already gone */ }
-    try { process.kill(-child.pid) } catch { /* already gone */ }
-    // Chromium unlinks its lock files on the way out; starting the next launch
-    // on top of a directory still being released is how a run fails for a
-    // reason that has nothing to do with what is being measured.
-    await sleep(400)
+    throw new Error(`the page never finished loading\n${tail}`)
   }
 }
 

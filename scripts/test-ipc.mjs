@@ -19,7 +19,7 @@
  * `--user-data-dir`, so nothing here can see, let alone touch, a real vault.
  */
 
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -35,8 +35,13 @@ const vault = path.join(scratch, 'vault')
 const profile = path.join(scratch, 'profile')
 mkdirSync(vault, { recursive: true })
 mkdirSync(profile, { recursive: true })
+/* The real path, because the vault is what the app watches: on Windows the
+   temp directory comes back as an 8.3 name (`RUNNER~1`), and a recursive
+   watch on the short name can stay silent about files written under the long
+   one. Resolved here so both sides of the harness name the same folder. */
+const watched = realpathSync(vault)
 writeFileSync(path.join(vault, 'Seed.md'), '# Seed\n\nA note that was already here, mentioning pomegranate.\n')
-writeFileSync(path.join(profile, 'config.json'), JSON.stringify({ vaultPath: vault }))
+writeFileSync(path.join(profile, 'config.json'), JSON.stringify({ vaultPath: watched }))
 
 
 /* The checks themselves live in scripts/test-ipc.harness.cjs and run inside an
@@ -50,7 +55,7 @@ const run = spawnSync(electron, [harness, `--user-data-dir=${profile}`], {
   encoding: 'utf8',
   cwd: root,
   timeout: 120000,
-  env: { ...process.env, TULIP_IPC_VAULT: vault, TULIP_IPC_OUTSIDE: scratch }
+  env: { ...process.env, TULIP_IPC_VAULT: watched, TULIP_IPC_OUTSIDE: scratch }
 })
 
 const line = (run.stdout || '').split('\n').find((l) => l.startsWith('TULIP_IPC_RESULTS '))
