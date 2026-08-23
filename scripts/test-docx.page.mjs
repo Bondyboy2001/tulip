@@ -396,6 +396,60 @@ export async function run () {
   const listItem = made_edit?.items.find((item) => item.p?.runs.some((run) => run.text?.startsWith('quo')))
   result.listPlaceholderGone = !/TULIP_/.test(listItem?.p.ppr || '')
 
+  /* ---------------------------------------------- emptied altogether
+
+     A contenteditable will give up its last paragraph, and Word documents Tulip
+     itself had written with an empty body were the result: nothing on the page
+     to put a caret in, so every button on the bar did nothing and everything
+     typed afterwards was dropped by the next save. */
+
+  window.__stage = 'emptying the document'
+  await docx.open('Notes/Field notes.docx')
+  docx.setReadonly(false)
+  const all = document.createRange()
+  all.selectNodeContents(page())
+  const selection = window.getSelection()
+  selection.removeAllRanges()
+  selection.addRange(all)
+  document.execCommand('delete')
+  await settle()
+  /* And once more, which is what takes the last paragraph itself. */
+  page().focus()
+  document.execCommand('delete')
+  await settle()
+  result.emptiedTo = page().children.length
+  result.emptiedShape = [...page().children].map((n) => n.tagName)
+
+  document.execCommand('insertText', false, 'typed into nothing')
+  await settle()
+  result.typedIntoEmpty = page().textContent
+  result.typedIntoAParagraph = page().querySelector('.docx-p')?.textContent || ''
+
+  // The bar's commands act on the paragraph the caret is in, so there has to
+  // be one for them to reach.
+  await docx.setList('bullet')
+  result.listedFromEmpty = !!page().querySelector('.docx-li')
+
+  await docx.save({ flush: true })
+  const emptied = writes.at(-1)?.edit
+  result.emptySaveItems = emptied?.items.length
+  result.emptySaveText = emptied?.items.flatMap((item) => item.p?.runs.map((run) => run.text) || []).join('')
+
+  /* An empty paragraph is drawn with a <br> so that it has a height and
+     somewhere to put a caret. It is not a line break the document holds, and
+     reading it back as one gave every blank line a `w:br` it did not have. */
+  window.__stage = 'a blank line'
+  await docx.open('Notes/Field notes.docx')
+  docx.setReadonly(false)
+  const ending = [...host.querySelectorAll('.docx-p')].find((p) => p.textContent === 'after the list')
+  caret(ending, ending.textContent.length)
+  host.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+  await settle()
+  await docx.save({ flush: true })
+  const blanked = writes.at(-1)?.edit
+  const blank = blanked?.items.find((item) => item.p && !item.at)
+  result.blankLineRuns = blank ? blank.p.runs.length : -1
+
   /* ------------------------------------------------- the one question */
 
   window.__stage = 'the warning'

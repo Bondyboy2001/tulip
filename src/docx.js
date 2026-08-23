@@ -184,8 +184,15 @@ export function mountDocx ({
   const drawRuns = (parent, runs) => {
     for (const run of runs) parent.append(drawRun(run))
     // An empty paragraph is a blank line in the document, and a <p> with
-    // nothing in it has no height — nor anywhere to put a caret.
-    if (!runs.length) parent.append(document.createElement('br'))
+    // nothing in it has no height — nor anywhere to put a caret. Marked,
+    // because it is the room for a caret and not a break the document holds:
+    // read back as one, an empty paragraph gained a <w:br/> every time it was
+    // saved, and a blank line in Word became two.
+    if (!runs.length) {
+      const filler = document.createElement('br')
+      filler.dataset.filler = '1'
+      parent.append(filler)
+    }
   }
 
   /** The element a paragraph or heading is drawn as, remembering enough about
@@ -315,7 +322,12 @@ export function mountDocx ({
       }
       if (!(child instanceof HTMLElement)) continue
 
-      if (child.tagName === 'BR') { runs.push({ ...inherited, break: true }); continue }
+      if (child.tagName === 'BR') {
+        // The <br> an empty paragraph is drawn with stands for the caret's
+        // room rather than for a line break — see `drawRuns`.
+        if (!child.dataset.filler) runs.push({ ...inherited, break: true })
+        continue
+      }
       if (child.tagName === 'IMG') {
         const raw = kept.raw[Number(child.dataset.raw)] || ''
         if (raw) runs.push({ raw })
@@ -327,6 +339,14 @@ export function mountDocx ({
       const style = { ...inherited }
       if (TAG_MARKS[child.tagName]) style[TAG_MARKS[child.tagName]] = true
       for (const [key, className] of MARKS) if (child.classList.contains(className)) style[key] = true
+      /* Chromium's own commands sometimes say it in CSS rather than a tag. */
+      const css = child.style
+      if (css.fontWeight) style.bold = css.fontWeight === 'bold' || Number(css.fontWeight) >= 600
+      if (css.fontStyle) style.italic = css.fontStyle === 'italic'
+      if (css.textDecorationLine) {
+        style.underline = css.textDecorationLine.includes('underline')
+        style.strike = css.textDecorationLine.includes('line-through')
+      }
       if (child.tagName === 'SUP') style.vert = 'sup'
       if (child.tagName === 'SUB') style.vert = 'sub'
       if (child.dataset.rpr !== undefined) style.rpr = kept.rpr[Number(child.dataset.rpr)] || ''
@@ -504,6 +524,7 @@ export function mountDocx ({
     const entry = stack.pop()
     if (here) (redo ? past : future).push(here)
     restore(entry)
+    ensureParagraph()
     paginate()
     previous = snapshot()
     lastKind = ''
@@ -525,12 +546,65 @@ export function mountDocx ({
     onDirty(next)
   }
 
+  /**
+   * The page holds at least one paragraph, and nothing outside one.
+   *
+   * Chromium will take the last paragraph out of a `contenteditable` — select
+   * the whole document and press Backspace twice — and leave an <article> with
+   * nothing in it. Every command on the bar acts on the paragraph the caret is
+   * in, so with no paragraph to be in, all of them silently did nothing; and
+   * what was typed afterwards went in as a bare text node, which `itemsIn`
+   * reads past and a save therefore threw away. A document has a paragraph,
+   * and so does the page drawing it.
+   */
+  function ensureParagraph () {
+    if (!page) return
+    const make = (runs) => {
+      const made = drawParagraph({
+        type: 'paragraph',
+        runs,
+        align: null,
+        style: '',
+        /* Nowhere in the file it came from: it is written out rather than
+           spliced, which is what puts the paragraph back into the document as
+           well as onto the page. */
+        ppr: '',
+        at: null
+      })
+      restamp(made)
+      return made
+    }
+
+    /** @type {any} */
+    let landed = null
+    /* Text the browser left loose in the page rather than in a paragraph. It
+       is what was typed into a document with none, and it is the one thing
+       here that a save would otherwise lose. */
+    for (const node of [...page.childNodes]) {
+      if (node.nodeType !== Node.TEXT_NODE) continue
+      const text = node.nodeValue || ''
+      if (!text) { node.remove(); continue }
+      landed = make([{ text, rpr: '' }])
+      node.replaceWith(landed)
+    }
+    if (!page.children.length) {
+      landed = make([])
+      page.append(landed)
+    }
+    /* The caret was inside what was just replaced, so it has to be put
+       somewhere — but only when it was in this page to begin with. */
+    if (landed && document.activeElement === page) {
+      placeCaret(landed, landed.textContent?.length || 0)
+    }
+  }
+
   /** Something changed. Every editing path here ends in this, so the dirty
    *  flag, the word count, the history and the autosave cannot disagree.
    *
    *  `kind` is what the history coalesces on: a run of typing is one step, and
    *  anything else is a step of its own. */
   function touched (kind = 'edit') {
+    ensureParagraph()
     record(kind)
     paginate()
     previous = snapshot()
@@ -590,7 +664,13 @@ export function mountDocx ({
       if (done && at + length >= end) { range.setEnd(text, end - at); done = 2; break }
       at += length
     }
-    if (done !== 2) { range.selectNodeContents(node); range.collapse(false) }
+    if (done !== 2) {
+      /* Nothing to land in. An empty paragraph holds one <br>, and a caret put
+         *after* it is one Chromium draws on a line of its own — so the caret
+         goes before it, where the first letter typed will go. */
+      range.selectNodeContents(node)
+      range.collapse(done === 0 && !node.textContent)
+    }
     const selection = window.getSelection()
     selection?.removeAllRanges()
     selection?.addRange(range)
@@ -656,6 +736,10 @@ export function mountDocx ({
        crossing three runs and half of a fourth means — which `execCommand`
        already decides the way people expect. */
     document.execCommand(what)
+    /* With nothing selected the command sets the style the next typing takes,
+       and redrawing the paragraph now would throw that away — the <b> the
+       typing leaves behind is read back, by `runsIn`, when it is typed. */
+    if (window.getSelection()?.isCollapsed) return
     normalize(node)
     touched()
   }
@@ -852,6 +936,13 @@ export function mountDocx ({
     const node = hereParagraph()
     const where = node && offsetsIn(node)
     if (!node || !where) return
+
+    /* Return on an empty item is how a list ends in Word: the item becomes the
+       paragraph after the list, not a second bullet with nothing on it. */
+    if (node.dataset.li && !node.textContent && !node.querySelector('img')) {
+      await setList(null)
+      return
+    }
 
     const before = []
     const after = []
@@ -1223,6 +1314,10 @@ export function mountDocx ({
     sheets = el('div', 'docx-sheets')
     page = el('article', 'docx-page')
     drawBlocks(page, answer.blocks)
+    /* A document whose body holds no paragraph at all — one this app itself
+       used to be able to write, before `ensureParagraph` — is drawn with the
+       one it needs to be typed into again. */
+    ensureParagraph()
     frame.append(sheets, page)
     host.append(frame)
     fit()
@@ -1307,8 +1402,20 @@ export function mountDocx ({
     }
   })
 
-  host.addEventListener('input', () => {
+  host.addEventListener('input', (event) => {
     if (!editable()) return
+    /* Backspace at the start of a paragraph pulls the one above in, and
+       Chromium dresses what it moved in inline styles copied from the old
+       place — white-space, font, colour — that no save reads and no file
+       wants. Redrawn from its runs, it is one paragraph of this page's shape. */
+    const type = /** @type {InputEvent} */ (event).inputType || ''
+    if (type.startsWith('delete') || type.startsWith('format') || type === 'insertText') {
+      /* Likewise the <b> a pending ⌘B wraps the next letter in: read back and
+         redrawn, it is a bold run with the caret at its end, so what is typed
+         next stays bold. */
+      const node = hereParagraph()
+      if (node && node.querySelector('[style], b, i, u, s, strong, em, strike')) { normalize(node); restamp(node) }
+    }
     /* The one path an ordinary keystroke takes. `allowed` may put the document
        back into its reading view — the reader said take it to Word instead —
        and in that case the keystroke already in the page is undone by drawing

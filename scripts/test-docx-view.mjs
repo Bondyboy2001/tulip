@@ -322,6 +322,38 @@ ok('and the save writes the table it did not have before', () => {
   assert.ok(r.tableBordered, 'a table Tulip made came out with no borders')
 })
 
+/* ---------------------------------------------- emptied altogether */
+
+/* A `contenteditable` will give up its last paragraph, and what was left was an
+   empty <article>: nowhere to put a caret, so every command on the bar acted on
+   no paragraph and did nothing, and what was typed afterwards went in as a bare
+   text node that the save read straight past. Tulip wrote real documents with
+   no paragraph in them this way, and once written they could not be typed into
+   again. */
+ok('a document emptied of its last paragraph keeps one to type into', () => {
+  assert.equal(r.emptiedTo, 1, 'the page was left with nothing to put a caret in')
+  assert.deepEqual(r.emptiedShape, ['P'])
+})
+
+ok('and what is typed into it lands in a paragraph, not loose in the page', () => {
+  assert.equal(r.typedIntoEmpty, 'typed into nothing')
+  assert.equal(r.typedIntoAParagraph, 'typed into nothing',
+    'the typing was loose in the page, where a save cannot see it')
+})
+
+ok('and the bar can still reach it', () => assert.ok(r.listedFromEmpty))
+
+ok('and the save carries what was typed rather than dropping it', () => {
+  assert.equal(r.emptySaveItems, 1)
+  assert.equal(r.emptySaveText, 'typed into nothing')
+})
+
+/* The <br> an empty paragraph is drawn with is the room for a caret, not a
+   break the document holds. Read back as one, every blank line gained a
+   `w:br` — so one blank line in Word became two. */
+ok('a blank line is written as a blank line, not as a line break', () =>
+  assert.equal(r.blankLineRuns, 0, 'an empty paragraph was saved with a run in it'))
+
 /* ------------------------------------------------- the one question */
 
 ok('a document with fields in it asks once, before the first edit', () => {
