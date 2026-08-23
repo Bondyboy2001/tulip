@@ -118,7 +118,11 @@ const CONFIG_KEYS = {
      id with no shipped dictionary is skipped at load, so the list is only
      length-checked here. */
   spellLanguages: stringList,
-  autosave: orCleared(boolean),
+  /* Milliseconds after the last keystroke, which is how the renderer reads it
+     (`Number(cfg.autosave) || 600`). It was allowlisted as a boolean, with no
+     settings row to write it — and had one been added, `Number(true)` is a
+     1ms autosave. */
+  autosave: orCleared(number),
 
   /* The copilot. */
   aiMode: string,

@@ -2,6 +2,7 @@
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
+const { spawnSync } = require('node:child_process')
 const electron = require('electron')
 const { app, ipcMain } = electron
 
@@ -219,6 +220,30 @@ async function checks () {
     const hit = hits.find((r) => r.path === 'Minutes.docx')
     assert.equal(hit.kind, 'docx', 'it came back as some other kind of result')
     assert.ok(/quince/.test(JSON.stringify(hit.hits)), 'no line of the document was quoted')
+  })
+
+  /* The watcher names the file that moved, and the index syncs that one file
+     rather than walking the vault: an outside edit to a note is found, and a
+     note removed from outside stops being found. Both go through the targeted
+     path in `syncIndex`, which is the one that stats one file, not every one. */
+  await check('an outside edit to one note reaches the index by name', async () => {
+    const until = async (word, wanted) => {
+      let hits = []
+      for (let tries = 0; tries < 20; tries++) {
+        const found = await call('search:vault', word, {})
+        hits = found.results || found
+        if (Boolean(hits.length) === wanted) return hits
+        await new Promise((resolve) => setTimeout(resolve, 250))
+      }
+      return hits
+    }
+    fs.writeFileSync(path.join(VAULT, 'Seed.md'), '# Seed\n\nA pomegranate and a loquat.\n')
+    const found = await until('loquat', true)
+    assert.ok(JSON.stringify(found).includes('Seed.md'), 'the edited note was not re-read')
+    fs.writeFileSync(path.join(VAULT, 'Gone.md'), '# Gone\n\nmedlar\n')
+    assert.ok((await until('medlar', true)).length, 'the new note was not indexed')
+    fs.unlinkSync(path.join(VAULT, 'Gone.md'))
+    assert.equal((await until('medlar', false)).length, 0, 'the removed note is still found')
   })
 
   await check('search finds nothing for a word nothing says', async () => {
@@ -569,6 +594,59 @@ async function checks () {
       path.join(OUT, 'no-such-folder', 'deep', 'note.html'))
     assert.equal(done.ok, false, 'it did not claim to have written')
     assert.ok(done.error, 'and it says why, for the toast')
+  })
+
+  /* The compiled-language pipeline, end to end: compile, publish the binary
+     under its cache name, copy it into the execution slot, run it. Those middle
+     two steps were `/bin/mv` and `/bin/cp` — paths that do not exist on Windows,
+     so every compiled block there failed *after* paying for the compile. They
+     are fs calls now, and this is the check that they still do the job: nothing
+     short of running the program proves the copy arrived executable.
+
+     C++ rather than Rust because `c++` is the platform compiler and is present
+     wherever a toolchain is at all; a machine without one skips instead of
+     failing, since an absent compiler is not this project's defect. */
+  await check('a compiled block compiles, is staged and runs', async () => {
+    const win = BrowserWindow.getAllWindows()[0]
+    if (!win) throw new Error('main created no window to own a run')
+
+    const cpp = spawnSync('c++', ['--version'], { encoding: 'utf8' })
+    if (cpp.error || cpp.status !== 0) return   // no toolchain here; not a failure
+
+    /* run:start answers with the id and nothing else — the result arrives later
+       as a `run:done` to the owning window. So the window's own send is what
+       gets listened to, which is also the path the app really uses. */
+    const said = []
+    const contents = win.webContents
+    const realSend = contents.send.bind(contents)
+    contents.send = (channel, payload) => { said.push({ channel, payload }); return realSend(channel, payload) }
+
+    try {
+      const source = '#include <cstdio>\nint main() { std::printf("staged ok\\n"); return 0; }\n'
+      const started = await handlers.get('run:start')({ sender: contents }, 'cpp', source, null)
+      const id = started.id
+      /* Whatever names the run has to be a string: it goes back over IPC, and a
+         function there is an uncloneable-object throw at the call site. */
+      assert.ok(started.cmd === null || typeof started.cmd === 'string',
+        'run:start named the run with something IPC can carry')
+
+      const done = await new Promise((resolve, reject) => {
+        const until = setTimeout(() => reject(new Error('the run never finished')), 90000)
+        const poll = setInterval(() => {
+          const hit = said.find((m) => m.channel === 'run:done' && m.payload && m.payload.id === id)
+          if (!hit) return
+          clearInterval(poll); clearTimeout(until); resolve(hit.payload)
+        }, 50)
+      })
+
+      assert.equal(done.code, 0, 'the staged binary ran and exited cleanly')
+      const out = said.filter((m) => m.channel === 'run:out' && m.payload.id === id)
+        .map((m) => m.payload.text).join('')
+      assert.match(out, /staged ok/, 'and what it printed came back')
+      assert.ok(done.buildMs >= 0, 'the compile was timed as a build')
+    } finally {
+      contents.send = realSend
+    }
   })
 
   await check('the window is printed to a real PDF', async () => {

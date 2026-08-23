@@ -70,6 +70,8 @@ const signature = (runs) => runs.map((run) => (run.raw
  *                      editing a Word document has to ask
  * @param onDirty       told when the page and the file stop matching
  * @param onSaved       told that a write landed
+ * @param onConflict    the file changed on disk under unsaved edits; answers
+ *                      whether to write the page over it regardless
  * @param onStatus      told what the status bar should say about the document
  * @param onWarn        told when something the reader asked for did not happen
  */
@@ -78,6 +80,7 @@ export function mountDocx ({
   ask = /** @type {(q: any) => Promise<boolean>} */ (async () => true),
   onDirty = /** @type {(dirty: boolean) => void} */ (() => {}),
   onSaved = /** @type {() => void} */ (() => {}),
+  onConflict = /** @type {(path: string) => Promise<boolean>} */ (async () => false),
   onStatus = /** @type {(text: string) => void} */ (() => {}),
   onWarn = /** @type {(text: string) => void} */ (() => {})
 }) {
@@ -1042,13 +1045,18 @@ export function mountDocx ({
     const path = current.path
     const { items, marks } = plan()
     saving = (async () => {
-      const answer = await docx.write(path, {
-        stamp: current.stamp,
-        body: current.body,
-        after: current.after,
-        items
-      })
-      if (!answer?.ok) throw new Error(answer.error || 'That Word document could not be saved.')
+      const edit = { stamp: current.stamp, body: current.body, after: current.after, items }
+      let answer = await docx.write(path, edit)
+      /* The file on disk is no longer the one the page was read from. The
+         page's edits cannot be spliced into a stranger, and reopening would
+         throw them away — so the host is asked to put the disk's version aside
+         (a conflict copy, the same as a note gets), and the write goes again
+         against the bytes the page was read from. The reader's version is
+         kept, and so is theirs. */
+      if (!answer?.ok && answer?.stale && current?.path === path && await onConflict(path)) {
+        answer = await docx.write(path, { ...edit, force: true })
+      }
+      if (!answer?.ok) throw new Error(answer?.error || 'That Word document could not be saved.')
       // The document may have been closed, or another one opened, while the
       // write was in flight; what came back is then about a file nobody is
       // looking at.
@@ -1294,7 +1302,7 @@ export function mountDocx ({
     const lines = []
     const walk = (node) => {
       for (const child of node.children) {
-          if (child.tagName === 'TR') {
+        if (child.tagName === 'TR') {
           lines.push([...child.children].map((cell) => cell.textContent?.trim() || '').join('\t'))
           continue
         }

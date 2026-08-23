@@ -72,6 +72,25 @@ const all = Object.keys(scripts)
   .filter((name) => name.startsWith('test:') && !NOT_A_TEST.has(name))
   .sort()
 
+/* The other direction. The suite is whatever package.json names, which means a
+   test file with no `test:` script is a test that never runs — and one did
+   exactly that for months, rotting to a syntax error while the two contracts
+   it guarded regressed. A file under scripts/ named like a test has to be
+   named by some script, or the runner refuses to start. */
+{
+  const { readdir } = await import('node:fs/promises')
+  const named = Object.values(scripts).join('\n')
+  const orphans = (await readdir('scripts'))
+    .filter((file) => /^test-.*\.(mjs|cjs|js)$/.test(file))
+    .filter((file) => !file.includes('.harness.') && !file.includes('.page.'))
+    .filter((file) => !named.includes(`scripts/${file}`))
+  if (orphans.length) {
+    console.error(`run-tests: test file with no test: script: ${orphans.join(', ')}`)
+    console.error('A test nobody runs is a test that rots. Add a script in package.json.')
+    process.exit(2)
+  }
+}
+
 if (!all.length) {
   console.error('run-tests: package.json declares no test: scripts')
   process.exit(2)

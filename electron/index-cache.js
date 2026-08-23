@@ -128,9 +128,18 @@ function makeIndexCache ({ dir, vaultPath }) {
         entries: Object.fromEntries(kept)
       })
 
-      let body = serialize()
+      /* Sized by adding up, not by serializing to find out. The old way built
+         the whole body here, synchronously, on every sync of the index — a
+         `JSON.stringify` of every note in the vault, on the main process, to
+         learn a length — and then handed a closure returning that body to a
+         writer whose entire purpose is to serialize lazily and once per burst.
+         The estimate is an upper bound on what JSON adds per entry (the key,
+         the field names, the quoting); the text dominates and is exact. */
+      const cost = ([key, entry]) => key.length + entry.name.length + entry.text.length + 80
+      let estimate = 0
+      for (const item of kept) estimate += cost(item)
       let dropped = 0
-      if (body.length > MAX_CACHE_BYTES) {
+      if (estimate > MAX_CACHE_BYTES) {
         /* Over budget, the old behaviour was to skip the write and leave any
            existing file in place — which silently froze the cache at whatever
            launch last fit, forever. Dropping the largest notes instead keeps
@@ -139,20 +148,20 @@ function makeIndexCache ({ dir, vaultPath }) {
            mtime mismatch. Largest first because one 4MB note costs the budget
            of a thousand ordinary ones. */
         kept.sort((a, b) => b[1].text.length - a[1].text.length)
-        while (kept.length && body.length > MAX_CACHE_BYTES) {
+        while (kept.length && estimate > MAX_CACHE_BYTES) {
           const drop = Math.max(1, Math.ceil(kept.length * 0.1))
-          kept.splice(0, drop)
+          for (const item of kept.splice(0, drop)) estimate -= cost(item)
           dropped += drop
-          body = serialize()
         }
         if (!kept.length) return { skipped: 'too large' }
       }
       /* Not awaited by the caller — see the call site in `syncIndex` — but the
          promise is answered here so a rejection is not an unhandled one. A
          cache that failed to write is a slower first search next time and
-         nothing else. */
-      writer.flush(target, () => body).catch(() => {})
-      return dropped ? { written: body.length, dropped } : { written: body.length }
+         nothing else. Serialized by the writer, when it writes: a burst of
+         syncs pays for one body, not one each. */
+      writer.flush(target, serialize).catch(() => {})
+      return dropped ? { written: estimate, dropped } : { written: estimate }
     },
 
     /** Forget this vault's cache entirely. */

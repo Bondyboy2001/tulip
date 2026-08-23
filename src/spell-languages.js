@@ -19,5 +19,3 @@ import SPELL_LANGUAGES from '../electron/spell-languages.json'
 
 export { SPELL_LANGUAGES }
 
-/** The ids, for the callers that validate rather than display. */
-export const SPELL_LANGUAGE_IDS = SPELL_LANGUAGES.map((entry) => entry.id)

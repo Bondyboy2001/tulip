@@ -23,7 +23,7 @@ export function normalizeSavedSearches (value) {
    than inline because the empty case is a decision and not an oversight: an
    emptied name is not a nameless folder, it is a folder back to being called
    what it has always been called when it had no name of its own. */
-export function renamedTo (item, typed) {
+function renamedTo (item, typed) {
   return { ...item, name: String(typed || '').trim() || item.query }
 }
 

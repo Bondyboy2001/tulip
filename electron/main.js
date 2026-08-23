@@ -17,6 +17,7 @@ const { restoreConflicts } = require('./copilot-restore')
 const { TrustStore } = require('./trust-store')
 const { makeStore: makeReviewStore } = require('./review-store')
 const { makeIndexCache } = require('./index-cache')
+const { makeSelfWrites } = require('./self-writes')
 const { mapLimit, WALK_LIMIT } = require('./map-limit')
 /* Which files a run wrote, and which it may take back. Lifted out so the
    deletion guards can be tested directly — see electron/run-pages.js. */
@@ -764,6 +765,23 @@ const MAX_WHITEBOARD_INDEX_BYTES = 32 * 1024 * 1024
 const MAX_DOCX_INDEX_BYTES = 8 * 1024 * 1024
 
 let indexDirty = true
+
+/* Files the watcher named since the last sync, when it could name them. A
+   single note saved by a sync client used to set `indexDirty` and cost a stat
+   of every note, whiteboard and document in the vault — the classifier had
+   worked out exactly which file moved, and the flag threw that away. These are
+   synced one at a time; the full walk is kept for what genuinely needs it: a
+   folder renamed, an event with no name, the app's own multi-file operations. */
+const indexDirtyPaths = new Set()
+
+/** Say the index is behind the disk — for one file when the file is known. */
+function markIndexDirty (relPath) {
+  if (indexDirty) return
+  const ext = relPath ? path.posix.extname(relPath).toLowerCase() : ''
+  const known = ext && (MD_EXT.has(ext) || ext === WHITEBOARD_EXT || ext === DOCX_EXT)
+  if (known) indexDirtyPaths.add(relPath)
+  else indexDirty = true
+}
 let syncing = null
 
 /* The same index, on disk, so a launch does not start from nothing — see
@@ -820,10 +838,49 @@ async function syncIndex () {
     index.clear()
     whiteboardIndex.clear()
     docxIndex.clear()
+    indexDirtyPaths.clear()
     forgetLinkTables()
     return
   }
+
+  /* Named files only, when that is all that moved. Each is stat'ed and, if it
+     has changed, read — or dropped when it is gone — and nothing else in the
+     vault is touched. A name that turns out to be a folder, or a file whose
+     kind this cannot place, hands over to the full walk below. */
+  if (!indexDirty && indexDirtyPaths.size) {
+    const targeted = [...indexDirtyPaths]
+    indexDirtyPaths.clear()
+    let changed = false
+    let fallBack = false
+    await mapLimit(targeted, WALK_LIMIT, async (key) => {
+      const abs = path.join(vaultPath, ...key.split('/'))
+      const ext = path.posix.extname(key).toLowerCase()
+      const table = MD_EXT.has(ext) ? index : ext === WHITEBOARD_EXT ? whiteboardIndex : docxIndex
+      let stat
+      try { stat = await fs.stat(abs) } catch {
+        if (table.delete(key)) changed = true
+        return
+      }
+      if (!stat.isFile()) { fallBack = true; return }
+      const cached = table.get(key)
+      if (cached && cached.mtime === stat.mtimeMs && cached.size === stat.size) return
+      const entry = await indexEntryFor(abs, stat, ext)
+      if (!entry) return
+      table.set(key, entry)
+      changed = true
+    })
+    if (!fallBack) {
+      if (changed) {
+        forgetLinkTables()
+        saveIndexCache()
+      }
+      return
+    }
+    indexDirty = true
+  }
+
   indexDirty = false
+  indexDirtyPaths.clear()
 
   /* Before the walk, and only ever on the first sync of a vault: what the last
      session read, so the walk below has something to compare against instead
@@ -832,6 +889,11 @@ async function syncIndex () {
   await seedIndexFromCache()
 
   const { notes, whiteboards = [], docx = [] } = await getVaultSnapshot()
+
+  /* Whether anything in any table moved. A walk that confirms every entry —
+     the common outcome of a watcher event about something else — has nothing
+     to write out, and used to serialize the whole vault to say so. */
+  let changed = false
 
   const seen = new Set()
   await mapLimit(notes, WALK_LIMIT, async (abs) => {
@@ -854,9 +916,10 @@ async function syncIndex () {
       mtime: stat.mtimeMs,
       size: stat.size
     })
+    changed = true
   })
 
-  for (const key of [...index.keys()]) if (!seen.has(key)) index.delete(key)
+  for (const key of [...index.keys()]) if (!seen.has(key)) { index.delete(key); changed = true }
 
   const seenWhiteboards = new Set()
   await mapLimit(whiteboards, WALK_LIMIT, async (abs) => {
@@ -878,9 +941,10 @@ async function syncIndex () {
       size: stat.size,
       kind: 'whiteboard'
     })
+    changed = true
   })
   for (const key of [...whiteboardIndex.keys()]) {
-    if (!seenWhiteboards.has(key)) whiteboardIndex.delete(key)
+    if (!seenWhiteboards.has(key)) { whiteboardIndex.delete(key); changed = true }
   }
 
   /* Word documents are unzipped and parsed to be indexed, which is dearer than
@@ -903,25 +967,51 @@ async function syncIndex () {
       size: stat.size,
       kind: 'docx'
     })
+    changed = true
   })
-  for (const key of [...docxIndex.keys()]) if (!seenDocx.has(key)) docxIndex.delete(key)
+  for (const key of [...docxIndex.keys()]) if (!seenDocx.has(key)) { docxIndex.delete(key); changed = true }
 
   // Which notes exist may have changed, and that is the whole of what the link
   // tables are built from.
   forgetLinkTables()
 
-  /* And out to disk, coalesced, so the next launch starts from here. Not
-     awaited: the index in memory is already correct and every caller of this
-     is waiting on that, not on the copy. A vault too big to cache whole gets
-     its largest notes dropped from the copy — worth a line in the log,
-     because the symptom (a slow first search, every launch) points nowhere. */
+  if (changed) saveIndexCache()
+}
+
+/** One file's entry, as the walk would build it; null where it cannot be read. */
+async function indexEntryFor (abs, stat, ext) {
+  const name = ext === DOCX_EXT || ext === WHITEBOARD_EXT
+    ? path.basename(abs, path.extname(abs))
+    : stripExt(path.basename(abs))
+  const base = { name, mtime: stat.mtimeMs, size: stat.size }
+  if (ext === DOCX_EXT) {
+    return { ...base, kind: 'docx', text: stat.size <= MAX_DOCX_INDEX_BYTES ? await docxTextOf(abs) : '' }
+  }
+  if (ext === WHITEBOARD_EXT) {
+    let text = ''
+    if (stat.size <= MAX_WHITEBOARD_INDEX_BYTES) text = whiteboardText(await fs.readFile(abs, 'utf8').catch(() => ''))
+    return { ...base, kind: 'whiteboard', text }
+  }
+  let text = ''
+  if (stat.size <= MAX_INDEX_BYTES) {
+    try { text = await fs.readFile(abs, 'utf8') } catch { return null }
+  }
+  return { ...base, text }
+}
+
+/* Out to disk, coalesced, so the next launch starts from here. Not awaited:
+   the index in memory is already correct and every caller is waiting on that,
+   not on the copy. A vault too big to cache whole gets its largest notes
+   dropped from the copy — worth a line in the log, because the symptom (a
+   slow first search, every launch) points nowhere. */
+function saveIndexCache () {
   const saved = indexCache?.save(index)
   if (saved?.dropped) console.warn(`index cache over budget: ${saved.dropped} largest notes left out`)
   else if (saved?.skipped) console.warn('index cache skipped: vault too large to cache at all')
 }
 
 function ensureIndex () {
-  if (!indexDirty && !syncing) return Promise.resolve()
+  if (!indexDirty && !indexDirtyPaths.size && !syncing) return Promise.resolve()
   if (!syncing) {
     syncing = syncIndex().finally(() => { syncing = null })
   }
@@ -1063,8 +1153,8 @@ function touchIndex (absPath, text, stamp) {
  *  and the walk carries on. */
 async function docxTextOf (abs) {
   try {
-    const { readDocxBuffer, docxText } = require('./docx')
-    return docxText(readDocxBuffer(await fs.readFile(abs)).blocks)
+    const { readDocxBufferAsync, docxText } = require('./docx')
+    return docxText((await readDocxBufferAsync(await fs.readFile(abs))).blocks)
   } catch {
     return ''
   }
@@ -1600,22 +1690,20 @@ function notesUnder (target, isDir) {
    echoing back from an edit made outside the app. Without this, every save
    dropped the caches and sent the renderer off on two vault walks that
    discovered nothing. */
-const selfWrites = new Map()   // vault-relative path -> Date.now() at the write
-const SELF_WRITE_MS = 500
+/* See electron/self-writes.js: a clock for renames and temp files, and the
+   finished file's own mtime and size for a write that has one. */
+const selfWrites = makeSelfWrites({ rootFor: () => vaultPath })
 
-function noteSelfWrite (abs) {
+function noteSelfWrite (abs, stamp = null) {
   if (!vaultPath) return
   const p = rel(abs)
   if (p.startsWith('..')) return   // config and chat files live outside the vault
-  const now = Date.now()
-  for (const [key, at] of selfWrites) if (now - at > SELF_WRITE_MS) selfWrites.delete(key)
-  selfWrites.set(p, now)
+  selfWrites.note(p, stamp)
 }
 
 function isSelfWrite (filename) {
   if (!filename) return false   // no name means no way to tell; let it through
-  const at = selfWrites.get(filename.split(path.sep).join('/'))
-  return at !== undefined && Date.now() - at <= SELF_WRITE_MS
+  return selfWrites.isOurs(filename.split(path.sep).join('/'))
 }
 
 /**
@@ -1763,8 +1851,12 @@ async function writeAtomic (abs, content, { durable = true } = {}) {
        that can outrun SELF_WRITE_MS — the rename's own watch event then arrives
        to an expired stamp and the app reads its own autosave as an outside
        edit. The window has to start when the event the watcher will see is
-       generated, not when the write was asked for. */
-    noteSelfWrite(abs)
+       generated, not when the write was asked for.
+
+       And with the stamp, so that the window closes the moment the file is no
+       longer the one this write produced: a sync client replacing it inside
+       the half second is an outside edit, not an echo. */
+    noteSelfWrite(abs, stamp)
   } catch (err) {
     await fs.unlink(tmp).catch(() => {})
     throw err
@@ -1793,7 +1885,7 @@ function watchVault () {
      touched a folder on the other side of the vault. */
   let changed = new Set()
   let changedPdfs = new Set()
-  let sweepPdfs = false
+  let sweepPdfs = new Set()   // folder prefixes to sweep; '' means everything
   let notifyUnknown = false
   try {
     watcher = fsSync.watch(vaultPath, { recursive: true }, (_event, filename) => {
@@ -1822,11 +1914,11 @@ function watchVault () {
       documentsChanged()
       // Marked immediately, not on the debounce: a search that lands inside the
       // quiet window must still see that something moved.
-      if (change.index) indexDirty = true
+      if (change.index) markIndexDirty(change.path)
       if (change.snapshot) invalidateVaultSnapshot()
       if (change.notify && change.path) changed.add(change.path)
       if (change.notify && !change.path) notifyUnknown = true
-      if (change.pdf === 'sweep') sweepPdfs = true
+      if (change.pdf === 'sweep') sweepPdfs.add(change.path || '')
       else if (change.pdf) changedPdfs.add(change.pdf)
       clearTimeout(timer)
       timer = setTimeout(() => {
@@ -1836,9 +1928,11 @@ function watchVault () {
         notifyUnknown = false
         const pdfs = [...changedPdfs]
         changedPdfs = new Set()
-        if (sweepPdfs) {
-          sweepPdfs = false
-          sweepPdfText().catch(() => {})
+        if (sweepPdfs.size) {
+          const prefixes = [...sweepPdfs]
+          sweepPdfs = new Set()
+          sweepPdfText(prefixes).catch(() => {})
+          for (const pdf of pdfs) if (!prefixes.includes('')) ensurePdfText(pdf).catch(() => {})
         } else {
           for (const pdf of pdfs) ensurePdfText(pdf).catch(() => {})
         }
@@ -2856,6 +2950,12 @@ function applyHotkeys (template) {
   hotkeyCatalogue = [...seen.values()]
 }
 
+/* Every accelerator here is `CmdOrCtrl`, never a bare `Cmd`. Electron treats
+   Cmd as macOS-only and simply drops the binding everywhere else, so the
+   Windows build shipped a menu whose shortcuts — Save, Find, New Note, all of
+   them — did nothing at all, while still printing the key beside the item.
+   `CmdOrCtrl` is ⌘ on a Mac and Ctrl elsewhere, which is what both platforms
+   already expect. scripts/test-platform.mjs asserts the bare form stays gone. */
 function buildMenu () {
   const template = [
     {
@@ -2873,10 +2973,10 @@ function buildMenu () {
            anywhere else; "Open Recent" is where every editor puts the list. */
         { label: 'Check for Updates…', command: 'check-for-updates', click: () => toFocused('menu', 'check-for-updates') },
         { type: 'separator' },
-        { label: 'Open Vault…', accelerator: 'Cmd+Shift+O', click: () => pickVault() },
+        { label: 'Open Vault…', accelerator: 'CmdOrCtrl+Shift+O', click: () => pickVault() },
         { label: 'Open Recent Vault…', command: 'open-recent-vault', click: () => toFocused('menu', 'open-recent-vault') },
         { type: 'separator' },
-        { label: 'Settings…', accelerator: 'Cmd+,', command: 'settings', click: () => toFocused('menu', 'settings') },
+        { label: 'Settings…', accelerator: 'CmdOrCtrl+,', command: 'settings', click: () => toFocused('menu', 'settings') },
         { type: 'separator' },
         { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' },
         { type: 'separator' },
@@ -2886,26 +2986,26 @@ function buildMenu () {
     {
       label: 'File',
       submenu: [
-        { label: 'New Note', accelerator: 'Cmd+N', command: 'new-note', click: () => toFocused('menu', 'new-note') },
+        { label: 'New Note', accelerator: 'CmdOrCtrl+N', command: 'new-note', click: () => toFocused('menu', 'new-note') },
         { label: 'New Whiteboard', command: 'new-whiteboard', click: () => toFocused('menu', 'new-whiteboard') },
         { label: 'New Website', command: 'new-website', click: () => toFocused('menu', 'new-website') },
         { label: 'New Language', command: 'new-language', click: () => toFocused('menu', 'new-language') },
-        { label: 'New Folder', accelerator: 'Cmd+Shift+N', command: 'new-folder', click: () => toFocused('menu', 'new-folder') },
+        { label: 'New Folder', accelerator: 'CmdOrCtrl+Shift+N', command: 'new-folder', click: () => toFocused('menu', 'new-folder') },
         { type: 'separator' },
-        { label: 'New Tab', accelerator: 'Cmd+T', command: 'new-tab', click: () => toFocused('menu', 'new-tab') },
-        { label: 'Close Tab', accelerator: 'Cmd+W', command: 'close-tab', click: () => toFocused('menu', 'close-tab') },
-        { label: 'Reopen Closed Tab', accelerator: 'Cmd+Shift+T', command: 'reopen-tab', click: () => toFocused('menu', 'reopen-tab') },
+        { label: 'New Tab', accelerator: 'CmdOrCtrl+T', command: 'new-tab', click: () => toFocused('menu', 'new-tab') },
+        { label: 'Close Tab', accelerator: 'CmdOrCtrl+W', command: 'close-tab', click: () => toFocused('menu', 'close-tab') },
+        { label: 'Reopen Closed Tab', accelerator: 'CmdOrCtrl+Shift+T', command: 'reopen-tab', click: () => toFocused('menu', 'reopen-tab') },
         { type: 'separator' },
         { label: 'Reveal in Finder', command: 'reveal', click: () => toFocused('menu', 'reveal') },
         { type: 'separator' },
-        { label: 'Save', accelerator: 'Cmd+S', command: 'save', click: () => toFocused('menu', 'save') },
+        { label: 'Save', accelerator: 'CmdOrCtrl+S', command: 'save', click: () => toFocused('menu', 'save') },
         /* The toolbar's own Run for the source file on screen, reachable from
            the keyboard. ⌘R is free here — this menu has never carried the
            browser's reload. The renderer guards it: with anything but a
            runnable source file open, the command says so and does nothing. */
-        { label: 'Run File', accelerator: 'Cmd+R', command: 'run-file', click: () => toFocused('menu', 'run-file') },
+        { label: 'Run File', accelerator: 'CmdOrCtrl+R', command: 'run-file', click: () => toFocused('menu', 'run-file') },
         /* Not Cmd+P, which has always been the command palette here. */
-        { label: 'Print…', accelerator: 'Cmd+Alt+P', command: 'print-note', click: () => toFocused('menu', 'print-note') },
+        { label: 'Print…', accelerator: 'CmdOrCtrl+Alt+P', command: 'print-note', click: () => toFocused('menu', 'print-note') },
         { label: 'Export as PDF…', command: 'export-pdf', click: () => toFocused('menu', 'export-pdf') },
         { label: 'Export as HTML…', command: 'export-html', click: () => toFocused('menu', 'export-html') },
         { label: 'Export as Markdown…', command: 'export-markdown', click: () => toFocused('menu', 'export-markdown') },
@@ -2934,7 +3034,7 @@ function buildMenu () {
         { label: 'Run All Above', command: 'nb-run-above', click: () => toFocused('menu', 'nb-run-above') },
         { label: 'Run All Below', command: 'nb-run-below', click: () => toFocused('menu', 'nb-run-below') },
         { type: 'separator' },
-        { label: 'Interrupt', accelerator: 'Cmd+.', command: 'nb-interrupt', click: () => toFocused('menu', 'nb-interrupt') },
+        { label: 'Interrupt', accelerator: 'CmdOrCtrl+.', command: 'nb-interrupt', click: () => toFocused('menu', 'nb-interrupt') },
         { label: 'Restart Kernel…', command: 'nb-restart', click: () => toFocused('menu', 'nb-restart') },
         { label: 'Restart and Run All…', command: 'nb-restart-all', click: () => toFocused('menu', 'nb-restart-all') }
       ]
@@ -2946,41 +3046,41 @@ function buildMenu () {
            means depends on what is on screen: a note undoes an edit, a PDF
            undoes a highlight, and a plain text field wants the browser's own
            history — which the renderer asks for back through `edit:undo`. */
-        { label: 'Undo', accelerator: 'Cmd+Z', command: 'undo', click: () => toFocused('menu', 'undo') },
-        { label: 'Redo', accelerator: 'Shift+Cmd+Z', command: 'redo', click: () => toFocused('menu', 'redo') },
+        { label: 'Undo', accelerator: 'CmdOrCtrl+Z', command: 'undo', click: () => toFocused('menu', 'undo') },
+        { label: 'Redo', accelerator: 'Shift+CmdOrCtrl+Z', command: 'redo', click: () => toFocused('menu', 'redo') },
         { type: 'separator' },
         { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' },
         { type: 'separator' },
-        { label: 'Find in Note', accelerator: 'Cmd+F', command: 'find', click: () => toFocused('menu', 'find') },
-        { label: 'Search Vault', accelerator: 'Cmd+Shift+F', command: 'search', click: () => toFocused('menu', 'search') }
+        { label: 'Find in Note', accelerator: 'CmdOrCtrl+F', command: 'find', click: () => toFocused('menu', 'find') },
+        { label: 'Search Vault', accelerator: 'CmdOrCtrl+Shift+F', command: 'search', click: () => toFocused('menu', 'search') }
       ]
     },
     {
       label: 'View',
       submenu: [
-        { label: 'Back', accelerator: 'Cmd+[', command: 'back', click: () => toFocused('menu', 'back') },
-        { label: 'Forward', accelerator: 'Cmd+]', command: 'forward', click: () => toFocused('menu', 'forward') },
+        { label: 'Back', accelerator: 'CmdOrCtrl+[', command: 'back', click: () => toFocused('menu', 'back') },
+        { label: 'Forward', accelerator: 'CmdOrCtrl+]', command: 'forward', click: () => toFocused('menu', 'forward') },
         { type: 'separator' },
-        { label: 'Previous Tab', accelerator: 'Alt+Cmd+Left', command: 'prev-tab', click: () => toFocused('menu', 'prev-tab') },
-        { label: 'Next Tab', accelerator: 'Alt+Cmd+Right', command: 'next-tab', click: () => toFocused('menu', 'next-tab') },
+        { label: 'Previous Tab', accelerator: 'Alt+CmdOrCtrl+Left', command: 'prev-tab', click: () => toFocused('menu', 'prev-tab') },
+        { label: 'Next Tab', accelerator: 'Alt+CmdOrCtrl+Right', command: 'next-tab', click: () => toFocused('menu', 'next-tab') },
         { type: 'separator' },
-        { label: 'Quick Switcher', accelerator: 'Cmd+O', command: 'switcher', click: () => toFocused('menu', 'switcher') },
+        { label: 'Quick Switcher', accelerator: 'CmdOrCtrl+O', command: 'switcher', click: () => toFocused('menu', 'switcher') },
         { label: 'Jump to Heading', command: 'headings', click: () => toFocused('menu', 'headings') },
-        { label: 'Command Palette', accelerator: 'Cmd+P', command: 'commands', click: () => toFocused('menu', 'commands') },
+        { label: 'Command Palette', accelerator: 'CmdOrCtrl+P', command: 'commands', click: () => toFocused('menu', 'commands') },
         { type: 'separator' },
-        { label: 'Toggle Sidebar', accelerator: 'Cmd+B', command: 'sidebar', click: () => toFocused('menu', 'sidebar') },
+        { label: 'Toggle Sidebar', accelerator: 'CmdOrCtrl+B', command: 'sidebar', click: () => toFocused('menu', 'sidebar') },
         // The old key still works. A menu item carries one accelerator, so the
         // second one needs a twin of its own, kept out of the menu.
-        { label: 'Toggle Sidebar', accelerator: 'Cmd+\\', visible: false, command: 'sidebar', click: () => toFocused('menu', 'sidebar') },
-        { label: 'Toggle Outline', accelerator: 'Cmd+Shift+E', command: 'outline', click: () => toFocused('menu', 'outline') },
-        { label: 'Toggle Backlinks', accelerator: 'Cmd+Shift+K', command: 'links', click: () => toFocused('menu', 'links') },
-        { label: 'Toggle Info', accelerator: 'Cmd+Shift+I', command: 'info', click: () => toFocused('menu', 'info') },
-        { label: 'Toggle Copilot', accelerator: 'Cmd+Shift+A', command: 'copilot', click: () => toFocused('menu', 'copilot') },
-        { label: 'Reading View', accelerator: 'Cmd+1', command: 'view-read', click: () => toFocused('menu', 'view-read') },
-        { label: 'Editing View', accelerator: 'Cmd+2', command: 'view-edit', click: () => toFocused('menu', 'view-edit') },
-        { label: 'Raw View', accelerator: 'Cmd+3', command: 'view-raw', click: () => toFocused('menu', 'view-raw') },
-        { label: 'Toggle Reading View', accelerator: 'Cmd+E', command: 'reading', click: () => toFocused('menu', 'reading') },
-        { label: 'Toggle Theme', accelerator: 'Cmd+Shift+L', command: 'theme', click: () => toFocused('menu', 'theme') },
+        { label: 'Toggle Sidebar', accelerator: 'CmdOrCtrl+\\', visible: false, command: 'sidebar', click: () => toFocused('menu', 'sidebar') },
+        { label: 'Toggle Outline', accelerator: 'CmdOrCtrl+Shift+E', command: 'outline', click: () => toFocused('menu', 'outline') },
+        { label: 'Toggle Backlinks', accelerator: 'CmdOrCtrl+Shift+K', command: 'links', click: () => toFocused('menu', 'links') },
+        { label: 'Toggle Info', accelerator: 'CmdOrCtrl+Shift+I', command: 'info', click: () => toFocused('menu', 'info') },
+        { label: 'Toggle Copilot', accelerator: 'CmdOrCtrl+Shift+A', command: 'copilot', click: () => toFocused('menu', 'copilot') },
+        { label: 'Reading View', accelerator: 'CmdOrCtrl+1', command: 'view-read', click: () => toFocused('menu', 'view-read') },
+        { label: 'Editing View', accelerator: 'CmdOrCtrl+2', command: 'view-edit', click: () => toFocused('menu', 'view-edit') },
+        { label: 'Raw View', accelerator: 'CmdOrCtrl+3', command: 'view-raw', click: () => toFocused('menu', 'view-raw') },
+        { label: 'Toggle Reading View', accelerator: 'CmdOrCtrl+E', command: 'reading', click: () => toFocused('menu', 'reading') },
+        { label: 'Toggle Theme', accelerator: 'CmdOrCtrl+Shift+L', command: 'theme', click: () => toFocused('menu', 'theme') },
         { label: 'Change Theme…', command: 'themes', click: () => toFocused('menu', 'themes') },
         { type: 'separator' },
         { label: 'Default Size', accelerator: 'CmdOrCtrl+0', click: () => zoomCommand(0) },
@@ -3001,12 +3101,12 @@ function buildMenu () {
       submenu: [
         /* Not ⌘N: that has been New Note since Tulip had one window, and a
            note is what people press it for far more often than a window. */
-        { label: 'New Window', accelerator: 'Cmd+Alt+N', click: () => createWindow() },
+        { label: 'New Window', accelerator: 'CmdOrCtrl+Alt+N', click: () => createWindow() },
         { type: 'separator' },
         { role: 'minimize' },
         { role: 'zoom' },
         { type: 'separator' },
-        { label: 'Close Window', accelerator: 'Cmd+Shift+W', role: 'close' },
+        { label: 'Close Window', accelerator: 'CmdOrCtrl+Shift+W', role: 'close' },
         { type: 'separator' },
         { role: 'front' }
       ]
@@ -3021,7 +3121,7 @@ function buildMenu () {
          to list them. */
       role: 'help',
       submenu: [
-        { label: 'Keyboard Shortcuts', accelerator: 'Cmd+/', command: 'shortcuts', click: () => toFocused('menu', 'shortcuts') },
+        { label: 'Keyboard Shortcuts', accelerator: 'CmdOrCtrl+/', command: 'shortcuts', click: () => toFocused('menu', 'shortcuts') },
         { type: 'separator' },
         { label: 'Tulip on GitHub', click: () => shell.openExternal(REPO_URL) },
         { label: 'Report an Issue…', click: () => shell.openExternal(`${REPO_URL}/issues/new`) },
@@ -3184,13 +3284,38 @@ const SNIFF_BYTES = 8192
  * at the same file is a second read, which is what makes a document edited in
  * Word and looked at again show the edit.
  */
+/* The bytes a Word document had when it was read, kept by path.
+
+   A save splices the page's edits into the file on disk by offset, so it has
+   to be the file that was read. When it is not — Word saved it again, a sync
+   client brought the other side's — the splice is refused, and the reader's
+   edits would be stuck in a page that can never be written: the disk is a
+   different document now, and reopening it would throw the typing away. The
+   way out is the same bargain a note gets: the disk's version is copied aside,
+   and the page is written over it — spliced into *these* bytes, the ones its
+   offsets are offsets into. A few entries, because a document is a few
+   megabytes and the reader has a handful open at most. */
+const docxOriginals = new Map()
+const DOCX_ORIGINALS_KEPT = 6
+const DOCX_ORIGINAL_MAX_BYTES = 64 * 1024 * 1024
+function rememberDocxOriginal (abs, buffer) {
+  docxOriginals.delete(abs)
+  if (buffer.length > DOCX_ORIGINAL_MAX_BYTES) return
+  docxOriginals.set(abs, buffer)
+  while (docxOriginals.size > DOCX_ORIGINALS_KEPT) {
+    docxOriginals.delete(docxOriginals.keys().next().value)
+  }
+}
+
 ipcMain.handle('docx:read', async (_e, p) => {
   try {
     const abs = await realSafePath(p)
     const stat = await fs.stat(abs)
     if (!stat.isFile()) return { ok: false, error: 'That is not a file.' }
-    const { readDocxBuffer } = require('./docx')
-    const doc = readDocxBuffer(await fs.readFile(abs))
+    const { readDocxBufferAsync } = require('./docx')
+    const buffer = await fs.readFile(abs)
+    const doc = await readDocxBufferAsync(buffer)
+    rememberDocxOriginal(abs, buffer)
     return { ok: true, ...doc, size: stat.size, modified: stat.mtimeMs }
   } catch (err) {
     return { ok: false, error: err.message }
@@ -3213,9 +3338,22 @@ ipcMain.handle('docx:read', async (_e, p) => {
 ipcMain.handle('docx:write', async (_e, p, edit) => {
   try {
     const abs = await realSafePath(p)
-    const { readDocxBuffer, writeDocxBuffer } = require('./docx')
-    const made = writeDocxBuffer(await fs.readFile(abs), edit)
+    const { readDocxBuffer, writeDocxBuffer, isStaleDocxError } = require('./docx')
+    let made
+    try {
+      made = writeDocxBuffer(await fs.readFile(abs), edit)
+    } catch (err) {
+      if (!isStaleDocxError(err)) throw err
+      /* The file is not the one the page was read from. Without `force` the
+         renderer is told so and decides — it puts the disk's version aside
+         first, then asks again with `force`, and the page is spliced into the
+         bytes it was read from rather than the stranger's. */
+      const original = edit?.force ? docxOriginals.get(abs) : null
+      if (!original) return { ok: false, stale: true, error: err.message }
+      made = writeDocxBuffer(original, edit)
+    }
     await writeAtomic(abs, made, { durable: readConfig().durability === 'full' })
+    rememberDocxOriginal(abs, made)
     documentsChanged()
     const stat = await fs.stat(abs).catch(() => null)
     const document = readDocxBuffer(made)
@@ -3287,9 +3425,26 @@ ipcMain.handle('file:probe', async (_e, p) => {
  *  something that can — and for a `.docx`, which it can show but not edit, it
  *  is the way to the program that owns the format. Returns the reason when the
  *  OS refuses, which is what the viewer puts on screen. */
+/* What the desktop would *run* rather than open. A vault is an ordinary
+   folder that is shared and synced, so a file in it is not a file the reader
+   put there; `shell.openPath` on a `.command` or a `.exe` is a double-click on
+   it, with no dialog of Tulip's in between. Documents go through; programs
+   are refused with the reason, and the reader can open them from the Finder
+   where the OS asks its own questions. */
+const EXECUTABLE_EXT = new Set([
+  '.app', '.command', '.sh', '.bash', '.zsh', '.tool', '.terminal', '.workflow',
+  '.exe', '.bat', '.cmd', '.com', '.ps1', '.vbs', '.js', '.jse', '.wsf', '.wsh',
+  '.scr', '.pif', '.lnk', '.msi', '.msp', '.reg', '.jar', '.pkg', '.dmg',
+  '.run', '.bin', '.desktop', '.appimage', '.pyw', '.url'
+])
+
 ipcMain.handle('file:open-default', async (_e, p) => {
   try {
-    const problem = await shell.openPath(await realSafePath(p))
+    const abs = await realSafePath(p)
+    if (EXECUTABLE_EXT.has(path.extname(abs).toLowerCase())) {
+      return { ok: false, error: 'That file is a program, not a document. Open it from the Finder if you mean to run it.' }
+    }
+    const problem = await shell.openPath(abs)
     return problem ? { ok: false, error: problem } : { ok: true }
   } catch (err) {
     return { ok: false, error: err.message }
@@ -5104,10 +5259,30 @@ function mentionRow (key, entry, spots) {
   }
 }
 
+/* The last few answers, each good for as long as the index it was read from.
+   Nothing here was cached before: the whole vault was scanned again for the
+   backlinks of a note on every switch to it — A, B, back to A — and again on
+   every `vault:changed`, for a pane that mostly shows the same rows. The index
+   generation moves on every write to the index, the reader's own autosave
+   included, so an answer can never outlive the text it was built from. */
+const linksToMemo = new Map()
+const LINKS_TO_MEMO_KEPT = 8
+
 ipcMain.handle('links:to', async (_e, notePath) => {
   const none = { linked: [], unlinked: [], outgoing: [] }
   if (!vaultPath || !notePath) return none
   await ensureIndex()
+  const held = linksToMemo.get(notePath)
+  if (held && held.generation === indexGeneration && held.vault === vaultPath) return held.answer
+  const answer = computeLinksTo(notePath)
+  linksToMemo.delete(notePath)
+  linksToMemo.set(notePath, { generation: indexGeneration, vault: vaultPath, answer })
+  while (linksToMemo.size > LINKS_TO_MEMO_KEPT) linksToMemo.delete(linksToMemo.keys().next().value)
+  return answer
+})
+
+function computeLinksTo (notePath) {
+  const none = { linked: [], unlinked: [], outgoing: [] }
 
   const self = index.get(notePath)
   if (!self) return none
@@ -5232,7 +5407,7 @@ ipcMain.handle('links:to', async (_e, notePath) => {
   unlinked.sort(rank)
 
   return { linked: linked.slice(0, 200), unlinked: unlinked.slice(0, 200), outgoing: outgoing.slice(0, 200) }
-})
+}
 
 /**
  * Files a pasted or dropped attachment. The layout is decided here rather than
@@ -5935,10 +6110,16 @@ function ensurePdfText (relPath, { onWork } = {}) {
  * needs, while a directory rename or watcher event still has a conservative
  * way to refresh all sidecars.
  */
-async function sweepPdfText () {
+/** Every PDF under `prefixes` (vault-relative folders; '' for the whole vault)
+ *  checked for a text sidecar. A folder renamed used to mean every PDF in the
+ *  vault, when the classifier had said which folder. */
+async function sweepPdfText (prefixes = ['']) {
   if (!vaultPath) return
   const { pdfs } = await getVaultSnapshot()
-  for (const pdf of pdfs) ensurePdfText(pdf)
+  const under = prefixes.includes('')
+    ? () => true
+    : (abs) => { const key = rel(abs); return prefixes.some((p) => key === p || key.startsWith(`${p}/`)) }
+  for (const pdf of pdfs) if (under(pdf)) ensurePdfText(pdf)
 }
 
 /** PDFs that this turn actually concerns: the document on screen and PDF
@@ -6119,6 +6300,26 @@ const BUILD = { build: true }
 const STAGE = { build: true, report: false }
 const BUILD_TIMEOUT_MS = 120_000
 
+/* Copying the built binary into its slot, and moving a finished build over the
+   name it is cached under, used to be `/bin/cp` and `/bin/mv` — two paths that
+   simply do not exist on Windows, where every compiled block therefore failed
+   at the step after the one that did the work. Both are a single fs call, so
+   they are made here instead of spawned.
+
+   Still steps, and not something done around the sequence, because their place
+   in it is the point: the cancel check, the stop-on-first-failure and the
+   build clock above all apply to them exactly as they did to the tools. */
+const fsStep = (run, opts) => [run, null, { ...opts, fs: true }]
+
+/* The mode goes with it. The file is about to be executed, and a copy that
+   arrives without its executable bit is a permission error at the last step. */
+const stageBinary = (from, to) => fsStep(async () => {
+  await fs.copyFile(from, to)
+  await fs.chmod(to, 0o755)
+}, STAGE)
+
+const publishBinary = (from, to) => fsStep(() => fs.rename(from, to), BUILD)
+
 const sha1 = (text, chars = 16) =>
   crypto.createHash('sha1').update(text).digest('hex').slice(0, chars)
 
@@ -6187,7 +6388,7 @@ function compiledPlan (kind, binary, buildSteps) {
   return {
     steps: [
       ...buildSteps,
-      ['/bin/cp', [binary, slot.path], STAGE],
+      stageBinary(binary, slot.path),
       [slot.path, []]
     ],
     release: slot.release
@@ -6313,7 +6514,7 @@ function compiledRunner (id, { file, prefix, seed, warmCode, compile }) {
       }
       return compiledPlan(prefix, binary, [
         build(source, `${binary}.tmp`),
-        ['/bin/mv', [`${binary}.tmp`, binary], BUILD]
+        publishBinary(`${binary}.tmp`, binary)
       ])
     }
   })
@@ -6744,9 +6945,13 @@ async function runSequence (id, steps, how) {
   let left = timeoutMs        // the program's remaining budget
   let ms = 0                  // wall clock across every step, build included
   let buildMs = 0
+  /** @type {{code: number|null, signal?: string|null, error?: string|null,
+   *   timedOut?: boolean, errTail?: string, ms?: number}|null} */
   let result = null
 
-  for (const [cmd, args, opts = {}] of steps) {
+  /** @type {{build?: boolean, report?: boolean, fs?: boolean}} */
+  const NO_OPTS = {}
+  for (const [cmd, args, opts = NO_OPTS] of steps) {
     // Stop pressed between a compile and the program it produced: without this
     // the kill lands on a process that has already exited and the next step
     // starts anyway.
@@ -6759,18 +6964,34 @@ async function runSequence (id, steps, how) {
       break
     }
 
-    result = await startRun(id, cmd, args, {
-      cwd,
-      timeoutMs: opts.build ? BUILD_TIMEOUT_MS : left,
-      env,
-      quiet
-    })
-
-    ms += result.ms
-    if (opts.build) {
-      if (opts.report !== false) buildMs += result.ms
+    if (opts.fs) {
+      /* An fs step answers in the same shape a spawned one does, so the loop
+         below it — the timing, the break on failure — reads one kind of
+         result and not two. A failed copy is a failed step, not a throw:
+         the sequence's job is to stop and report, and a rejection here would
+         take the cleanup and the slot release with it. */
+      const at = Date.now()
+      try {
+        await cmd()
+        result = { code: 0, ms: Date.now() - at }
+      } catch (error) {
+        result = { code: 1, error: error.message, ms: Date.now() - at }
+      }
     } else {
-      left -= result.ms
+      result = await startRun(id, cmd, args, {
+        cwd,
+        timeoutMs: opts.build ? BUILD_TIMEOUT_MS : left,
+        env,
+        quiet
+      })
+    }
+
+    const took = result.ms || 0
+    ms += took
+    if (opts.build) {
+      if (opts.report !== false) buildMs += took
+    } else {
+      left -= took
     }
 
     if (result.error || result.timedOut || result.signal || result.code !== 0) break
@@ -6812,7 +7033,7 @@ function warmRunner (lang) {
       await fs.writeFile(source, spec.compiled.warmCode, 'utf8')
       const result = await runSequence(id, [
         spec.compiled.build(source, binary),
-        ['/bin/cp', [binary, slot.path], STAGE],
+        stageBinary(binary, slot.path),
         [slot.path, []]
       ], { cwd: dir, timeoutMs: DEFAULT_TIMEOUT_MS, cleanup: dir, quiet: true })
       return { ok: result.code === 0 }
@@ -6923,7 +7144,13 @@ ipcMain.handle('run:start', async (event, lang, code, noteRel) => {
       discard(dir)
     })
 
-  return { id, cmd: steps[0][0], timeoutMs }
+  /* The first step that is actually spawned. An fs step carries a function
+     where a command name goes, which does not survive the trip over IPC — and
+     is not what a caller asking "what is this running?" means anyway: for a
+     compiled block already in the cache, the first step is the copy into the
+     execution slot rather than the program. */
+  const spawned = steps.find(([, , opts = {}]) => !opts.fs)
+  return { id, cmd: spawned ? spawned[0] : null, timeoutMs }
 })
 
 /* How many times a single Run may stop to install something. Each pass
@@ -8915,6 +9142,7 @@ app.on('before-quit', () => {
   if (watcher) watcher.close()
   killAllRuns()
   kernels?.disposeSync()
+  pythonEnvs?.disposeSync()
   aiInstance?.stopAll('SIGKILL')
   trust?.flushSync()
   flushDurabilitySync()

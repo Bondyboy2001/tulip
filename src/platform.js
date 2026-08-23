@@ -15,7 +15,7 @@
 const platform = () => globalThis.tulip?.platform || 'darwin'
 
 export const isMac = () => platform() === 'darwin'
-export const isWindows = () => platform() === 'win32'
+const isWindows = () => platform() === 'win32'
 
 /* The glyphs, and the words the rest of the desktop world uses for them. ⌘ and
    ⌃ both land on Ctrl: Tulip's own menu maps Cmd to Ctrl on Windows, so two
@@ -69,7 +69,7 @@ export function keyLabel (text) {
 }
 
 /** What the system file manager is called here. */
-export const revealName = () => (isMac() ? 'Finder' : isWindows() ? 'File Explorer' : 'the file manager')
+const revealName = () => (isMac() ? 'Finder' : isWindows() ? 'File Explorer' : 'the file manager')
 
 /** The label on a button that shows a file in it. */
 export const revealLabel = () => (isMac() ? 'Reveal in Finder' : `Show in ${revealName()}`)

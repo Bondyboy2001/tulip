@@ -227,7 +227,10 @@ class KernelHost {
       } catch { /* not listening yet */ }
       await sleep(POLL_MS)
     }
-    try { child.kill('SIGKILL') } catch { /* already gone */ }
+    /* The tree, not the launcher: `jupyter` is a wrapper around the server
+       that binds the port, and killing the wrapper alone left that server
+       running — one more orphan holding one more port on every retry. */
+    killTree(child, 'SIGKILL')
     throw new Error('The Jupyter server did not start in time.')
   }
 

@@ -10,6 +10,7 @@ const { makeStore: makeReviewStore } = require('../electron/review-store')
 const { TrustStore } = require('../electron/trust-store')
 const { makeStore: makeLanguageStore, matchRows } = require('../electron/language-history-store')
 const { classifyVaultEvent } = require('../electron/vault-events')
+const { makeSelfWrites, SELF_WRITE_MS } = require('../electron/self-writes')
 const { parseByteRange, streamFileRange } = require('../electron/range-response')
 
 const table = (word, meaning) => `| Word | English |\n| --- | --- |\n| ${word} | ${meaning} |\n`
@@ -224,6 +225,43 @@ async function lazyFeatureContracts () {
   vaultEvents()
   await rangeStreaming()
   await lazyFeatureContracts()
+  /* ----------------------------------------------------------- self-writes
+     A write that knows what it produced is ours only while the file is still
+     what it produced; an outside write inside the window is not swallowed. */
+  {
+    let clock = 1000
+    const disk = new Map()
+    const selfWrites = makeSelfWrites({
+      rootFor: () => '/vault',
+      now: () => clock,
+      statSync: (abs) => {
+        const stamp = disk.get(abs)
+        if (!stamp) { const err = new Error('ENOENT'); err.code = 'ENOENT'; throw err }
+        return stamp
+      }
+    })
+    // Clock-only notes behave as before: ours inside the window, not after.
+    selfWrites.note('a.md')
+    assert.equal(selfWrites.isOurs('a.md'), true)
+    clock += SELF_WRITE_MS + 1
+    assert.equal(selfWrites.isOurs('a.md'), false)
+    assert.equal(selfWrites.isOurs('never.md'), false)
+    // A stamped note is ours while the file matches the stamp...
+    disk.set('/vault/b.md', { mtimeMs: 5, size: 10 })
+    selfWrites.note('b.md', { mtimeMs: 5, size: 10 })
+    assert.equal(selfWrites.isOurs('b.md'), true)
+    // ...ours while it is mid-rename or gone...
+    disk.delete('/vault/b.md')
+    assert.equal(selfWrites.isOurs('b.md'), true)
+    // ...and somebody else's the moment the file on disk differs, even inside
+    // the window — the sync-client case.
+    disk.set('/vault/b.md', { mtimeMs: 7, size: 10 })
+    assert.equal(selfWrites.isOurs('b.md'), false)
+    // Forgotten, so a later event in the same window is not taken for ours.
+    disk.set('/vault/b.md', { mtimeMs: 5, size: 10 })
+    assert.equal(selfWrites.isOurs('b.md'), false)
+  }
+
   console.log('optimizations: all checks passed')
 })().catch((err) => {
   console.error(err)

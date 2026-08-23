@@ -10,7 +10,7 @@
  *   node scripts/test-docx.cjs
  */
 const { deflateRawSync } = require('node:zlib')
-const { readDocxBuffer, writeDocxBuffer, blankDocxBuffer } = require('../electron/docx')
+const { readDocxBuffer, readDocxBufferAsync, writeDocxBuffer, blankDocxBuffer, isStaleDocxError } = require('../electron/docx')
 
 let failures = 0
 const check = (name, ok, detail = '') => {
@@ -244,6 +244,25 @@ const saved = readDocxBuffer(writeDocxBuffer(FILE, {
 
 check('the paragraph that was edited says what it was given',
   saved.blocks[1].runs[0].text === 'Tuesday', runText(saved.blocks[1]))
+
+/* The walk's reader inflates off the main thread and must read the same
+   document the synchronous one does. */
+readDocxBufferAsync(FILE).then((fromPool) => {
+  check('the async reader sees the same blocks', JSON.stringify(fromPool.blocks) === JSON.stringify(doc.blocks), 'blocks differ')
+  check('and the same stamp', fromPool.stamp === doc.stamp, `${fromPool.stamp} vs ${doc.stamp}`)
+}).catch((err) => check('the async reader reads the fixture', false, err.message))
+
+/* A stale stamp is refused with a code the caller can act on — main uses it
+   to offer the splice against the bytes the page was read from instead. */
+{
+  let stale = null
+  try {
+    writeDocxBuffer(FILE, { stamp: 'not-this-file', body: doc.body, after: doc.after, items: edited })
+  } catch (err) { stale = err }
+  check('a write against a changed file is refused', stale !== null, 'no error')
+  check('and the refusal is recognisable', isStaleDocxError(stale), String(stale?.code))
+  check('other errors are not', !isStaleDocxError(new Error('x')), 'plain error taken for stale')
+}
 check('and is still the heading it was',
   saved.blocks[1].type === 'heading' && saved.blocks[1].level === 2,
   `${saved.blocks[1].type} ${saved.blocks[1].level}`)

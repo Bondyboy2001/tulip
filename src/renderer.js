@@ -1207,6 +1207,12 @@ function ensureDocx () {
           renderTabs()
           setStatusRight('Saved')
         },
+        /* The document changed on disk under unsaved edits. The same answer a
+           note gets: theirs is copied aside, and the page is written over it. */
+        onConflict: async (path) => {
+          await keepBufferOverDisk(path, 'Word document')
+          return true
+        },
         onStatus: () => updateStatus(),
         onWarn: (message) => toast(message)
       })
@@ -1462,7 +1468,7 @@ async function writeDraft () {
   if (draftPath === path && draftDoc === doc) return
   draftPath = path
   draftDoc = doc
-  await api.draft.save(path, doc.toString()).catch(() => {
+  await api.draft.save(path, docText(doc)).catch(() => {
     /* Unwritten, so not the draft on disk. Forgetting it here is what lets the
        next tick try again instead of standing down on a write that never
        landed. */
@@ -1517,7 +1523,7 @@ function lintBuffer () {
   if (!editor) return
 
   const { selection } = editor.state
-  const changes = lintEdits(editor.state.doc.toString()).filter(
+  const changes = lintEdits(docText(editor.state.doc)).filter(
     (edit) => !selection.ranges.some((range) => edit.from <= range.to && edit.to >= range.from))
   if (!changes.length) return
 
@@ -1566,8 +1572,12 @@ async function saveNow () {
      the note is written twice for every save. */
   lintBuffer()
   const doc = editor.state.doc
+  /* Once. CodeMirror does not memoize `toString`, and this text was built
+     twice per save — for the write and again for the tab's base — on every
+     autosave of a note, which on a large one is two copies of it every 600ms. */
+  const text = docText(doc)
   try {
-    await api.file.write(wrote, doc.toString())
+    await api.file.write(wrote, text)
     /* A keystroke can land while the write is in flight. It sets dirty again
        and queues its own save — and clearing the flag unconditionally here
        would make that queued save find a "clean" note and return without
@@ -1577,7 +1587,7 @@ async function saveNow () {
     if (editor.state.doc === doc && state.current?.path === wrote) {
       state.dirty = false
       const tab = activeTab()
-      if (tab && tab.path === wrote) tab.base = doc.toString()
+      if (tab && tab.path === wrote) tab.base = text
       renderTabs()
       setStatusRight('Saved')
       /* The note is on disk, so the copy kept against a crash has nothing left
@@ -2539,9 +2549,27 @@ function linkNote (count) {
 }
 
 function toggleFolder (path) {
-  state.expanded.has(path) ? state.expanded.delete(path) : state.expanded.add(path)
+  const opening = !state.expanded.has(path)
+  opening ? state.expanded.add(path) : state.expanded.delete(path)
   api.config.set({ expanded: [...state.expanded] })
+  /* In place, the way `revealInTree` already does it. Opening fills the
+     folder's own container; shutting empties it. The full rebuild — every row
+     in the vault, with its icons and listeners — is kept for the one case the
+     row cannot be found, which is a tree that is not on screen. */
+  if (opening ? unfoldRow(path) : foldRow(path)) return
   renderTree()
+}
+
+/** Shut a folder's row in place. @returns whether the row was there to shut. */
+function foldRow (path) {
+  const row = el.tree?.querySelector(`.row[data-path="${cssEscape(path)}"]`)
+  const kids = el.tree?.querySelector(`.children[data-for="${cssEscape(path)}"]`)
+  if (!row || !kids) return false
+  row.classList.remove('is-open')
+  row.setAttribute('aria-expanded', 'false')
+  kids.classList.remove('is-open')
+  kids.replaceChildren()
+  return true
 }
 
 /**
@@ -3252,20 +3280,37 @@ const DOCX_TOOLS = [
   ['docxDeleteColumn', () => docxInstance?.editTable('delete-column')]
 ]
 
-for (const [key, run] of DOCX_TOOLS) {
-  /* `mousedown` rather than `click`, prevented: pressing a button moves the
-     focus off the page, and with it the selection these commands act on. The
-     viewer keeps its own note of where the caret was, but not taking it away
-     in the first place is what keeps the caret where the reader left it. */
-  el[key]?.addEventListener('mousedown', (event) => {
-    event.preventDefault()
-    run()
-    paintDocxTools()
-  })
+/* `mousedown` rather than `click`, prevented: pressing a button moves the
+   focus off the page, and with it the selection these commands act on. The
+   viewer keeps its own note of where the caret was, but not taking it away in
+   the first place is what keeps the caret where the reader left it.
+
+   A keyboard has no mousedown. Enter or Space on a focused button arrives as
+   a `click` with no pointer behind it, and with only the mousedown listener
+   every one of these buttons was reachable by Tab and did nothing — so the
+   click is honoured when it was not preceded by our mousedown. */
+function docxToolListener (run) {
+  let pressed = false
+  return {
+    mousedown: (event) => {
+      event.preventDefault()
+      pressed = true
+      run(event)
+    },
+    click: (event) => {
+      if (pressed) { pressed = false; return }
+      run(event)
+    }
+  }
 }
 
-el.docxOpenWord?.addEventListener('mousedown', async (event) => {
-  event.preventDefault()
+for (const [key, run] of DOCX_TOOLS) {
+  const on = docxToolListener(() => { run(); paintDocxTools() })
+  el[key]?.addEventListener('mousedown', on.mousedown)
+  el[key]?.addEventListener('click', on.click)
+}
+
+const openInWord = docxToolListener(async () => {
   const path = state.current?.path
   if (!path) return
   /* Word and Tulip must not both be holding unsaved versions of one file, so
@@ -3274,6 +3319,8 @@ el.docxOpenWord?.addEventListener('mousedown', async (event) => {
   const answer = await api.file.openDefault(path)
   if (!answer?.ok) toast(answer?.error || 'The system could not open that file.')
 })
+el.docxOpenWord?.addEventListener('mousedown', openInWord.mousedown)
+el.docxOpenWord?.addEventListener('click', openInWord.click)
 
 /** What the bar says about where the caret is. */
 function paintDocxTools () {
@@ -5483,7 +5530,7 @@ function updateStatus () {
      The title is still read: the copilot is told it, because a model cannot
      see the page. See copilotContext.
 
-     Notes already carry their counts in Info, alongside reading time, headings,
+     Notes already carry their counts in Info, alongside headings,
      links and tags. Repeating two of them across the foot of every page spends
      permanent chrome on information that has a proper home. */
 
@@ -6201,7 +6248,12 @@ function renderOutline () {
     return
   }
 
-  const next = state.current ? headings(noteText()) : []
+  /* Through `headingsFor` when there is a document: a memo keyed on the
+     document itself, already filled by the editor's decoration pass, so this
+     tick costs nothing. The string scan is for a note opened straight into
+     the reading view, which has no parsed document yet. */
+  const view = /** @type {any} */ (editor)
+  const next = state.current ? (view ? headingsFor(view.state.doc) || [] : headings(noteText())) : []
   const sig = state.current?.path || 'none'
   /* Compared heading by heading rather than by joining them all into one
      string. This runs on every typing tick the panel is open, and the string it
@@ -6827,7 +6879,9 @@ function countTextFacts (text) {
     /* From the text this was handed, not from the parsed document: the Info
        pane is painted on the way into every note, and a note opened into the
        reading view has no parsed document to count. */
-    headings: headings(text).length,
+    headings: (/** @type {any} */ (editor) && noteText() === text
+      ? headingsFor(/** @type {any} */ (editor).state.doc) || []
+      : headings(text)).length,
     links: links.size
   }
 }
@@ -6907,6 +6961,8 @@ async function goToSpelling (key) {
  * Nothing to say about this document: no underlines, and the pane's reason for
  * having no rows — which is only worth writing if anyone is looking at it.
  */
+const SPELLING_LIMIT = 400_000
+
 function spellingBlank (why) {
   editor?.setMisspellings([])
   if (paneOpen('spelling')) spellingMessage(why)
@@ -6947,7 +7003,16 @@ async function renderSpelling () {
   spellingDoc = doc
   spellingPaneWas = paneOpen('spelling')
 
-  const text = doc.toString()
+  /* The one whole-document pass left that runs on every typing pause: a copy
+     of the text, a walk of the syntax tree, three scans and a RangeSet of every
+     flagged word. The reading view stops at 1.5MB and says so; this stops
+     sooner, because it runs every half second rather than once. */
+  if (doc.length > SPELLING_LIMIT) {
+    spellingBlank('This note is too long to spell-check as you type.')
+    return
+  }
+
+  const text = docText(doc)
   const groups = groupWords(wordsIn(text, editor.state))
   // Positions first: the rows below may not be rebuilt, and a click has to
   // land where the word is now rather than where it was two edits ago.
@@ -11131,8 +11196,17 @@ async function showOrphanedImages () {
      an IPC round trip and a disk read per note — was asking it to fetch what it
      already had, a couple of thousand times over. The scanning stays here: what
      counts as a reference is the resolver the views themselves use. */
-  for (const note of await api.vault.notes()) {
+  const notes = await api.vault.notes()
+  let scanned = 0
+  for (const note of notes) {
     if (!NOTE_EXT.test(note.path)) continue
+    /* The window has to paint between notes: this is four regex passes over
+       every note in the vault in one loop, and without a yield the status
+       line set above is the last thing drawn until it is over. */
+    if (++scanned % 200 === 0) {
+      setStatusRight(`Looking for orphaned images… ${scanned}/${notes.length}`)
+      await new Promise((resolve) => setTimeout(resolve))
+    }
     const { text } = note
     const dir = note.path.includes('/') ? note.path.slice(0, note.path.lastIndexOf('/')) : ''
 

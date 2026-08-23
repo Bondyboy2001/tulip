@@ -33,6 +33,7 @@ const path = require('node:path')
 const fs = require('node:fs/promises')
 const crypto = require('node:crypto')
 const { spawn } = require('node:child_process')
+const { killTree } = require('./kill-tree')
 
 const WINDOWS = process.platform === 'win32'
 
@@ -278,13 +279,17 @@ function makePythonEnvs ({ root, vault, pathFor, installerOverride = () => null 
       try {
         child = spawn(cmd, args, {
           env: { ...process.env, PATH: pathFor(), NO_COLOR: '1', PYTHONUNBUFFERED: '1' },
-          stdio: ['ignore', 'pipe', 'pipe']
+          stdio: ['ignore', 'pipe', 'pipe'],
+          /* A group leader, so a timeout or a quit can reach the resolver and
+             build steps an installer forks — see electron/kill-tree.js. */
+          detached: process.platform !== 'win32'
         })
       } catch (err) {
         resolve({ ok: false, output: err.message })
         return
       }
 
+      live.add(child)
       let output = ''
       let settled = false
       /** @type {ReturnType<typeof setTimeout>|null} */
@@ -292,6 +297,7 @@ function makePythonEnvs ({ root, vault, pathFor, installerOverride = () => null 
       const finish = (/** @type {boolean} */ ok) => {
         if (settled) return
         settled = true
+        live.delete(child)
         if (timer) clearTimeout(timer)
         resolve({ ok, output })
       }
@@ -314,11 +320,20 @@ function makePythonEnvs ({ root, vault, pathFor, installerOverride = () => null 
       child.on('close', (code) => finish(code === 0))
 
       timer = setTimeout(() => {
-        child.kill('SIGKILL')
+        killTree(child, 'SIGKILL')
         finish(false)
       }, timeoutMs)
       timer.unref?.()
     })
+  }
+
+  /** Every installer or interpreter still running. A ten-minute install that
+   *  outlives the app keeps writing into a venv the next launch will take for
+   *  finished; the quit path kills these the way it kills runs and kernels. */
+  const live = new Set()
+  function disposeSync () {
+    for (const child of live) killTree(child, 'SIGKILL')
+    live.clear()
   }
 
   /** `uv` if it is installed, else pip. Probed the same way manim is.
@@ -585,7 +600,7 @@ function makePythonEnvs ({ root, vault, pathFor, installerOverride = () => null 
      question differently. */
   return {
     dirFor, sharedDir, ensure, install, tool, activation, usesUv,
-    list, remove, forget, relocate, reset
+    list, remove, forget, relocate, reset, disposeSync
   }
 }
 

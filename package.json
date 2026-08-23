@@ -1,6 +1,6 @@
 {
   "name": "tulip",
-  "version": "0.1.158",
+  "version": "0.1.166",
   "description": "A minimal markdown editor and language-learning vault",
   "main": "electron/main.js",
   "type": "commonjs",
@@ -70,7 +70,9 @@
     "test:notebook": "esbuild scripts/test-notebook.mjs --bundle --format=esm --platform=node --loader:.svg=text --outfile=node_modules/.cache/test-notebook.mjs --log-level=error && node node_modules/.cache/test-notebook.mjs",
     "test:kernel": "node scripts/test-kernel.mjs",
     "test:notebook-view": "node scripts/test-notebook-view.mjs",
-    "test:reading-split": "esbuild scripts/test-reading-split.mjs --bundle --format=esm --platform=node --outfile=node_modules/.cache/test-reading-split.mjs --log-level=error && node node_modules/.cache/test-reading-split.mjs"
+    "test:reading-split": "esbuild scripts/test-reading-split.mjs --bundle --format=esm --platform=node --outfile=node_modules/.cache/test-reading-split.mjs --log-level=error && node node_modules/.cache/test-reading-split.mjs",
+    "test:platform": "esbuild scripts/test-platform.mjs --bundle --format=esm --platform=node --outfile=node_modules/.cache/test-platform.mjs --log-level=error && node node_modules/.cache/test-platform.mjs",
+    "test:settings": "node scripts/test-settings.cjs"
   },
   "_overrides": [
     "Two transitive packages arrive vulnerable and neither publisher has moved.",
@@ -78,7 +80,7 @@
     "  hole. It reaches us through mermaid -> @mermaid-js/parser -> langium.",
     "  4.18.1 is the patched line and is already what the rest of the tree uses.",
     "nanoid: excalidraw pins 3.3.3 and mermaid-to-excalidraw pins 4.0.2, both of",
-    "  which return predictable ids for a non-integer size. 3.3.17 is the patched",
+    "  which return predictable ids for a non-integer size. 3.3.18 is the patched",
     "  end of the line that both of those API generations are compatible with;",
     "  the alternative npm offers is downgrading excalidraw a whole major.",
     "katex: mermaid pins ^0.16, which npm nests as a second near-identical",

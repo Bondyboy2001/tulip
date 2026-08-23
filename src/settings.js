@@ -56,6 +56,47 @@ const SECTIONS = [
       }
     ]
   },
+  /* The three settings that decide what happens to a note on its way to disk.
+     Two of them — durability and where history lives — were read by main and
+     settable over IPC, but reachable only by editing the config file by hand. */
+  {
+    id: 'files',
+    group: 'Options',
+    label: 'Files',
+    rows: [
+      {
+        key: 'autosave',
+        type: 'select',
+        name: 'Autosave',
+        hint: 'How long after you stop typing a note is written to disk.',
+        options: [
+          { value: 300, label: 'Promptly — 0.3s' },
+          { value: 600, label: 'Soon — 0.6s' },
+          { value: 1500, label: 'After a pause — 1.5s' },
+          { value: 3000, label: 'After a longer pause — 3s' }
+        ],
+        fallback: 600
+      },
+      {
+        key: 'durability',
+        type: 'select',
+        name: 'Durability',
+        hint: 'Balanced writes notes immediately and flushes them to the disk’s platters on a timer; Full flushes every save before it returns, which is safer through a power cut and slower on a networked volume.',
+        options: [
+          { value: 'balanced', label: 'Balanced' },
+          { value: 'full', label: 'Full — fsync every save' }
+        ],
+        fallback: 'balanced'
+      },
+      {
+        key: 'historyInVault',
+        type: 'toggle',
+        name: 'Keep version history in the vault',
+        hint: 'Store each note’s history in the vault’s own .tulip folder, so it travels with the notes through Git or a sync client, instead of in this app’s data folder.',
+        fallback: false
+      }
+    ]
+  },
   {
     id: 'hotkeys',
     group: 'Options',

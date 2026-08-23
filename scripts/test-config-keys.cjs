@@ -114,6 +114,15 @@ ok('every key has a callable check', () => {
   }
 })
 
+ok('autosave is a delay in milliseconds, not a switch', () => {
+  // The renderer reads `Number(cfg.autosave) || 600`; a boolean here would
+  // have made `true` a one-millisecond autosave.
+  assert.ok(CONFIG_KEYS.autosave(600))
+  assert.ok(CONFIG_KEYS.autosave(undefined), 'clearing it is allowed')
+  assert.ok(!CONFIG_KEYS.autosave(true))
+  assert.ok(!CONFIG_KEYS.autosave('600'))
+})
+
 ok('the keys main reads for itself are all settable or deliberately absent', () => {
   // Read by main. The first group is settable; the second must never be.
   for (const key of ['zoom', 'pdfText', 'texEngine', 'historyInVault', 'manimQuality',

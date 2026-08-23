@@ -237,8 +237,14 @@ if (source) {
     assert.match(html, new RegExp(`id="${id}"`), `${id} is not in the toolbar`)
   }
   /* Pressed with `mousedown`, prevented: a click moves the focus off the page
-     and takes the selection these commands act on with it. */
-  assert.match(renderer, /el\[key\]\?\.addEventListener\('mousedown', \(event\) => \{\s*\n\s*event\.preventDefault\(\)/)
+     and takes the selection these commands act on with it. And with `click`
+     as well, because Enter and Space on a focused button arrive as a click
+     with no mousedown before it — with mousedown alone the whole bar was
+     reachable by Tab and did nothing. The listener pairs the two so a pointer
+     press is not run twice. */
+  assert.match(renderer, /function docxToolListener \(run\) \{[\s\S]*?mousedown: \(event\) => \{\s*\n\s*event\.preventDefault\(\)[\s\S]*?click: \(event\) => \{\s*\n\s*if \(pressed\)/)
+  assert.match(renderer, /el\[key\]\?\.addEventListener\('mousedown', on\.mousedown\)\s*\n\s*el\[key\]\?\.addEventListener\('click', on\.click\)/)
+  assert.match(renderer, /el\.docxOpenWord\?\.addEventListener\('mousedown', openInWord\.mousedown\)\s*\n\s*el\.docxOpenWord\?\.addEventListener\('click', openInWord\.click\)/)
   assert.match(renderer, /el\.docxTools\.hidden = !docxOpen \|\| state\.view === 'read' \|\| lockedHere\(\)/)
 
   /* The two structures a Word document can gain, and the four ways a table it

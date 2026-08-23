@@ -22,7 +22,9 @@
    document in memory and read it back without a window.
    ================================================================== */
 
-const { inflateRawSync, deflateRawSync } = require('node:zlib')
+const { inflateRawSync, deflateRawSync, inflateRaw } = require('node:zlib')
+const { promisify } = require('node:util')
+const inflateRawAsync = promisify(inflateRaw)
 
 /* ------------------------------------------------------------------ zip
 
@@ -52,6 +54,35 @@ function findEndRecord (buf) {
  * @returns {Map<string, Buffer>}
  */
 function unzip (buf) {
+  const files = new Map()
+  for (const { name, method, raw, uncompressed } of zipEntries(buf)) {
+    if (method === 0) files.set(name, raw)
+    else if (method === 8) files.set(name, inflateRawSync(raw, { maxOutputLength: Math.max(uncompressed, 1) }))
+    // Anything else — the format allows a dozen — is left out rather than
+    // guessed at; a missing part reads as a missing feature, not as nonsense.
+  }
+  return files
+}
+
+/** The same, inflating on the thread pool. The index walk reads documents
+ *  thirty-two at a time and the synchronous inflate made that a queue of
+ *  thirty-two stalls of the main process; this one lets them overlap and
+ *  keeps the event loop free while they do. */
+async function unzipAsync (buf) {
+  const entries = zipEntries(buf)
+  const inflated = await Promise.all(entries.map(({ method, raw, uncompressed }) =>
+    method === 8 ? inflateRawAsync(raw, { maxOutputLength: Math.max(uncompressed, 1) }) : null))
+  const files = new Map()
+  entries.forEach(({ name, method, raw }, i) => {
+    if (method === 0) files.set(name, raw)
+    else if (method === 8) files.set(name, inflated[i])
+  })
+  return files
+}
+
+/** The central directory, walked: each entry's name, method and raw bytes. */
+function zipEntries (buf) {
+  const out = []
   const end = findEndRecord(buf)
   if (end < 0) throw new Error('That file is not a Word document.')
 
@@ -64,7 +95,6 @@ function unzip (buf) {
     throw new Error('That Word document uses a zip format Tulip cannot read.')
   }
 
-  const files = new Map()
   let at = start
   for (let i = 0; i < count; i++) {
     if (at + 46 > buf.length || buf.readUInt32LE(at) !== CENTRAL_SIG) break
@@ -86,12 +116,9 @@ function unzip (buf) {
        read a few bytes into the data. */
     const dataAt = localAt + 30 + buf.readUInt16LE(localAt + 26) + buf.readUInt16LE(localAt + 28)
     const raw = buf.subarray(dataAt, dataAt + compressed)
-    if (method === 0) files.set(name, raw)
-    else if (method === 8) files.set(name, inflateRawSync(raw, { maxOutputLength: Math.max(uncompressed, 1) }))
-    // Anything else — the format allows a dozen — is left out rather than
-    // guessed at; a missing part reads as a missing feature, not as nonsense.
+    out.push({ name, method, raw, uncompressed })
   }
-  return files
+  return out
 }
 
 /* The other direction: a zip written back out. Stored or deflated per entry,
@@ -749,7 +776,15 @@ const fragileIn = (source) =>
  *             headingStyles: Record<number, string> }}
  */
 function readDocxBuffer (buffer) {
-  const files = unzip(buffer)
+  return readDocxFiles(unzip(buffer))
+}
+
+/** `readDocxBuffer`, with the inflating off the main thread. */
+async function readDocxBufferAsync (buffer) {
+  return readDocxFiles(await unzipAsync(buffer))
+}
+
+function readDocxFiles (files) {
   const source = text(files, 'word/document.xml')
   if (!source) throw new Error('That file has no Word document inside it.')
 
@@ -1054,7 +1089,9 @@ function writeDocxBuffer (buffer, edit) {
      are ranges of something else, and splicing them would build a document out
      of two. Refused, and the renderer reopens the file. */
   if (edit.stamp && edit.stamp !== stampOf(source)) {
-    throw new Error('That Word document changed on disk while it was open.')
+    const err = /** @type {Error & { code?: string }} */ (new Error('That Word document changed on disk while it was open.'))
+    err.code = STALE_DOCX
+    throw err
   }
 
   const [from, to] = edit.body
@@ -1184,7 +1221,13 @@ function blankDocxBuffer () {
   ]))
 }
 
+/** The refusal above, recognisable by the caller that can do something about it. */
+const STALE_DOCX = 'DOCX_STALE'
+const isStaleDocxError = (err) => err?.code === STALE_DOCX
+
 module.exports = {
+  isStaleDocxError,
+  readDocxBufferAsync,
   readDocxBuffer, writeDocxBuffer, blankDocxBuffer, docxText, LIST_PLACEHOLDER,
   unzip, zip, parseXml
 }
