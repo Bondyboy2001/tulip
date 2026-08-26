@@ -953,6 +953,16 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
      latter ones did not, which is where the toggle jank actually was. */
   transition: grid-template-columns .26s var(--ease);
 }
+/* Each panel is placed by name, not by the order it appears in. Below 760px
+   the sidebar becomes a fixed drawer and leaves the grid's flow, and
+   auto-placement then slid every remaining panel one column to the left —
+   the main column landed in the rail's track, which is 0 wide with the rail
+   gone. A window zoomed past that width showed a note clipped to its own
+   padding, with the rest of the page a blank sheet of paper. */
+.sidebar { grid-column: 1; }
+.main { grid-column: 2; }
+.sidepane { grid-column: 3; }
+.ai { grid-column: 4; }
 .app > * { min-height: 0; }
 .app[data-sidebar="closed"] { --col-rail: 0; }
 .app[data-side="closed"] { --col-side: 0; }
