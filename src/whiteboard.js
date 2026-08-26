@@ -230,6 +230,11 @@ export function mountWhiteboard ({
       ready = true
       return
     }
+    /* A board another window is editing is looked at, not drawn on — and
+       Excalidraw reports the flip into view mode, and every pan and zoom
+       after it, through this same callback. Counted as edits, they queued a
+       save of this window's stale scene over the holder's file. */
+    if (readonly) return
     revision++
     clearTimeout(changeTimer)
     changeTimer = setTimeout(settleChange, 140)
@@ -347,7 +352,7 @@ export function mountWhiteboard ({
     saving = (async () => {
       do {
         settleChange()
-        if (!current || !latest || !dirty) break
+        if (!current || !latest || !dirty || readonly) break
         const writingRevision = revision
         const source = sceneText(latest)
         const indexText = whiteboardElementsText(latest.elements)
@@ -374,6 +379,16 @@ export function mountWhiteboard ({
       const next = Boolean(flag)
       if (readonly === next) return
       readonly = next
+      /* Whatever was drawn in the moment before the answer came is not this
+         window's to keep: the file is the other window's. Forgotten here
+         rather than left dirty, so the pane does not go on saying there is
+         something unsaved that will never be saved. */
+      if (next) {
+        clearTimeout(changeTimer)
+        changeTimer = null
+        revision = savedRevision
+        setDirty(false)
+      }
       paint()
     },
 

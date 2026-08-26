@@ -2126,6 +2126,12 @@ async function openVault (dir) {
   }
   // The next read of each is of the new vault's own file.
   resetAll()
+  /* And nothing is being edited in it yet. Every window drops the document
+     it was showing when it hears `vault:opened` below, but the release each
+     sends is resolved against this vault — the path it names is not here —
+     so the claims of the vault being left have to be dropped by hand, or
+     they would lock its documents on the way back. */
+  editClaims.clear()
   // Environments are keyed by vault, so none of what is remembered about which
   // ones exist describes this one.
   pythonEnvs.reset()
@@ -2891,6 +2897,12 @@ function relocateClaims (srcAbs, targetAbs, isDir) {
     if (!next) continue
     editClaims.delete(abs)
     editClaims.set(next, owner)
+    /* The holder is told, or it would go on giving up the old name: a rename
+       is a self-write, so no `vault:changed` reaches it, and a release filed
+       under the name it knew would match nothing — the re-keyed claim then
+       outlived the document, and locked every other window out of it. */
+    const holder = liveWindows().find((w) => w.webContents.id === owner)
+    if (holder) sendTo(holder, 'document:relocated', { from: rel(abs), to: rel(next) })
   }
 }
 

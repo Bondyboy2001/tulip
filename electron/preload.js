@@ -442,7 +442,10 @@ contextBridge.exposeInMainWorld('tulip', {
       'document:yielded',
       // Nobody is editing that document any more — the window that had it
       // closed, or moved off it.
-      'document:free'
+      'document:free',
+      // A document this window is editing was renamed or moved; its claim
+      // now answers to the new name.
+      'document:relocated'
     ]
     if (!allowed.includes(channel)) return () => {}
     const listener = (_e, payload) => fn(payload)

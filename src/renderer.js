@@ -2854,7 +2854,9 @@ async function leaveDoc () {
    The claim is asked for once the document is on screen and given up when the
    window moves off it. Asking is a round trip, so for the moment it is in
    flight the document is editable — which is safe, because nothing writes
-   inside it: the shortest autosave here is the Word viewer's, at 900ms. */
+   inside it: the shortest autosave here is the whiteboard's, well over the
+   length of one IPC round trip, and `openViewed` applies the answer again once
+   the viewer has actually mounted. */
 
 /** The path this window holds the claim on, so that leaving can give it up. */
 let claimedPath = null
@@ -2892,9 +2894,14 @@ async function claimDocument (path) {
 async function releaseDocument (path) {
   if (!path) return
   state.heldElsewhere.delete(path)
-  if (claimedPath !== path) return
+  /* The claim can be filed under a newer name than the document is shown by:
+     a folder move re-keys it in main (`document:relocated`), and the tab may
+     still name the old path. Leaving the document gives up whichever name
+     the claim is under now. */
+  const held = claimedPath
+  if (!held || (held !== path && path !== state.current?.path)) return
   claimedPath = null
-  await api.document.release(path).catch(() => {})
+  await api.document.release(held).catch(() => {})
 }
 
 /**
@@ -2909,6 +2916,10 @@ async function takeDocument () {
   if (!path || !isUnmergeablePath(path) || !heldHere()) return
   const answer = await api.document.take(path).catch(() => null)
   if (!answer?.ok) { toast('That document could not be taken over.'); return }
+  /* Main flushes the other window first, which can take a while — long enough
+     for the reader to have moved on. A takeover of a document nobody here is
+     looking at is handed straight back, the way a late claim is. */
+  if (state.current?.path !== path) { api.document.release(path).catch(() => {}); return }
   claimedPath = path
   state.heldElsewhere.delete(path)
   /* What is on screen was read before the other window's last edits. Read it
@@ -2933,6 +2944,17 @@ api.on('document:free', (path) => {
 
 /* Another window took it. By the time this arrives, whatever was typed here is
    already on disk — main waits for that before it answers the taker. */
+/* Renamed or moved while this window was editing it: the claim answers to the
+   new name now, and so must the release that leaving sends. */
+api.on('document:relocated', ({ from, to } = {}) => {
+  if (!from || !to) return
+  if (claimedPath === from) claimedPath = to
+  if (state.heldElsewhere.has(from)) {
+    state.heldElsewhere.delete(from)
+    state.heldElsewhere.add(to)
+  }
+})
+
 api.on('document:yielded', (path) => {
   if (claimedPath === path) claimedPath = null
   state.heldElsewhere.add(path)
@@ -3104,6 +3126,11 @@ async function openViewed (path, { focus = true, history = true, place = null, n
     return false
   }
 
+  /* The claim's answer may have landed while the viewer was still loading —
+     the first whiteboard in a window imports its chunk on the way — and an
+     instance that did not exist then could not be told. Said again now that
+     it does. */
+  applyPanes()
   updateStatus()
   if (focus) viewer.focus()
   return true
@@ -8235,17 +8262,23 @@ function updateViewControl () {
      lost two of its three buttons would read as a document with no editing
      view at all. */
   const locked = lockedHere()
+  /* A document another window is editing is read-only here for the same
+     reason a locked one is, and its editing view is barred the same way — an
+     enabled button that only toasted was a switch that lied. */
+  const held = heldHere()
   for (const button of el.viewSwitch.querySelectorAll('.view-option')) {
     const view = button.dataset.view
     const unavailable = view === 'raw' &&
       (viewingLanguageTable() || viewingData() || viewingNotebook() || viewingDocx() ||
         viewingHtml())
-    const barred = locked && view !== 'read'
+    const barred = (locked || held) && view !== 'read'
     button.hidden = unavailable
     button.disabled = unavailable || barred
     button.setAttribute('aria-pressed', String(view === state.view))
     button.title = barred
-      ? 'This file is locked — unlock it from the command palette to edit it'
+      ? (locked
+          ? 'This file is locked — unlock it from the command palette to edit it'
+          : 'Another window is editing this document — “Edit here” in the command palette takes it over')
       : unavailable
         ? `${VIEW_NAMES[view]} view is unavailable for ${
             viewingData() ? 'CSV tables' : viewingNotebook() ? 'notebooks'

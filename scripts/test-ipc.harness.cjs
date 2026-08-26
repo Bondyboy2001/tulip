@@ -587,6 +587,38 @@ async function checks () {
     second.destroy()
   })
 
+  await check('a renamed document keeps its claim, and the holder is told the new name', async () => {
+    await call('file:write', 'Held.docx', 'x')
+    const first = BrowserWindow.getAllWindows()[0]
+    await call('window:new', null)
+    const second = BrowserWindow.getAllWindows().find((w) => w !== first)
+    const asWindow = (win, channel, ...args) =>
+      handlers.get(channel)({ sender: win.webContents }, ...args)
+
+    assert.equal((await asWindow(first, 'document:claim', 'Held.docx')).ok, true)
+    const told = []
+    const realSend = first.webContents.send
+    first.webContents.send = (channel, payload) => { told.push({ channel, payload }) }
+    try {
+      await call('file:rename', 'Held.docx', 'Kept')
+    } finally {
+      first.webContents.send = realSend
+    }
+    const moved = told.find((m) => m.channel === 'document:relocated')
+    assert.ok(moved, 'the holder was never told its document moved')
+    assert.deepEqual(moved.payload, { from: 'Held.docx', to: 'Kept.docx' })
+    /* Still held under the new name — and, once the holder gives up the name
+       it was told, free: a release filed under the old one matched nothing,
+       and the claim outlived the document. */
+    assert.equal((await asWindow(second, 'document:claim', 'Kept.docx')).taken, true,
+      'the claim did not follow the file')
+    await asWindow(first, 'document:release', 'Kept.docx')
+    assert.equal((await asWindow(second, 'document:claim', 'Kept.docx')).ok, true,
+      'released under its new name, the document is still held')
+    await asWindow(second, 'document:release', 'Kept.docx')
+    second.destroy()
+  })
+
   /* ---- one conflict copy per episode ----
 
      A disagreement is rarely one event: whatever is writing the file outside
