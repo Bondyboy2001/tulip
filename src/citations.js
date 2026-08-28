@@ -144,6 +144,18 @@ function parseBibTeX (source) {
   return entries
 }
 
+/* The last bibliography parsed, kept against its text. `dressCitations` runs
+   at the end of every reading render and once more for every transclusion
+   frame and hover preview on the page, and each of those asked for the file
+   to be parsed again. The file is read again (it may have changed) but the
+   same bytes are not parsed twice. */
+let parsedBib = { text: /** @type {string | null} */ (null), entries: new Map() }
+function parseBibTeXCached (source) {
+  const text = String(source || '')
+  if (parsedBib.text !== text) parsedBib = { text, entries: parseBibTeX(text) }
+  return parsedBib.entries
+}
+
 function surname (name) {
   const value = cleanValue(name)
   if (!value) return ''
@@ -233,12 +245,13 @@ export async function dressCitations (root, {
   const entries = new Map()
   await Promise.all(paths.map(async (path) => {
     try {
-      for (const [key, entry] of parseBibTeX(await read?.(path))) entries.set(key, entry)
+      for (const [key, entry] of parseBibTeXCached(await read?.(path))) entries.set(key, entry)
     } catch { /* one broken source must not hide entries from the others */ }
   }))
   if (root.dataset.citationGeneration !== generation) return
 
   const used = []
+  const usedSet = new Set()
   for (const slot of slots) {
     const keys = (slot.dataset.citeKeys || '').split(/\s+/).filter(Boolean)
     const raw = slot.textContent.replace(/^\[|\]$/g, '')
@@ -248,7 +261,9 @@ export async function dressCitations (root, {
     const missing = keys.filter((key) => !entries.has(key))
     slot.classList.toggle('is-missing', missing.length > 0)
     slot.title = missing.length ? `Missing from bibliography: ${missing.join(', ')}` : ''
-    for (const key of keys) if (entries.has(key) && !used.includes(key)) used.push(key)
+    for (const key of keys) {
+      if (entries.has(key) && !usedSet.has(key)) { usedSet.add(key); used.push(key) }
+    }
   }
   if (!used.length) return
 

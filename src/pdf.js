@@ -806,11 +806,30 @@ export function mountPdf ({
     return out
   }
 
+  /** The same, for every page at once: one pass over the marks rather than
+   *  one per page. Pages with nothing on them are absent. */
+  function marksByPage () {
+    const byPage = new Map()
+    for (const mark of state.marks) {
+      for (const rect of mark.rects) {
+        let list = byPage.get(rect.page)
+        if (!list) byPage.set(rect.page, (list = []))
+        list.push({ mark, rect })
+      }
+    }
+    return byPage
+  }
+
   /** Draws one page's highlights. Percentages, so a zoom needs no redraw. */
-  function paintMarks (page) {
+  function paintMarks (page, marks = marksOn(page.n)) {
+    /* A page with no marks that has none drawn is left alone: `repaintMarks`
+       comes here for every page of the document, most of which are neither
+       marked nor even drawn, and emptying an empty layer is a DOM write for
+       nothing. */
+    if (!marks.length && !page.marks.firstChild) return
     const frag = document.createDocumentFragment()
     let pending = false
-    for (const { mark, rect } of marksOn(page.n)) {
+    for (const { mark, rect } of marks) {
       const div = document.createElement('div')
       div.className = 'pdf-mark'
       div.dataset.mark = mark.id
@@ -827,7 +846,13 @@ export function mountPdf ({
     if (pending) { const id = state.flashing; state.flashing = null; flash(id) }
   }
 
-  const repaintMarks = () => { for (const page of state.pages) paintMarks(page) }
+  /* Every change to the marks — a new one, a colour, an undo — ends here.
+     Scanning the whole mark list once per page made it pages × marks a
+     change; grouped once, it is marks + pages. */
+  const repaintMarks = () => {
+    const byPage = marksByPage()
+    for (const page of state.pages) paintMarks(page, byPage.get(page.n) || [])
+  }
 
   /** Writes the sidecar. Debounced: dragging a colour through five swatches is
    *  one intention, not five files. */
