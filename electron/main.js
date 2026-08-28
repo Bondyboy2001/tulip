@@ -6355,8 +6355,19 @@ function ensurePdfText (relPath, { onWork } = {}) {
 /** Every PDF under `prefixes` (vault-relative folders; '' for the whole vault)
  *  checked for a text sidecar. A folder renamed used to mean every PDF in the
  *  vault, when the classifier had said which folder. */
+const SWEEP_QUIET_MS = 10_000
+const lastSweep = new Map() // vault-relative prefix -> when it was last swept
 async function sweepPdfText (prefixes = ['']) {
   if (!vaultPath) return
+  /* Not twice in ten seconds for the same folder. A sweep is a stat of every
+     PDF under the prefix, and a directory being renamed, unpacked or synced
+     raises a run of these; the second and later add nothing the first did not
+     find, and a PDF that does change reaches `ensurePdfText` by its own event
+     or on demand when it is opened. */
+  const now = Date.now()
+  prefixes = prefixes.filter((p) => !(lastSweep.has(p) && now - lastSweep.get(p) < SWEEP_QUIET_MS))
+  if (!prefixes.length) return
+  for (const p of prefixes) lastSweep.set(p, now)
   const { pdfs } = await getVaultSnapshot()
   const under = prefixes.includes('')
     ? () => true
@@ -9385,6 +9396,11 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   quitting = true
   if (watcher) watcher.close()
+  /* A cache write waiting out its quiet period would otherwise be lost with
+     the process — a slower first search next launch, nothing worse, but a
+     write that can start now may as well. */
+  const cache = /** @type {any} */ (indexCache)
+  cache?.flush()
   killAllRuns()
   kernels?.disposeSync()
   pythonEnvs?.disposeSync()

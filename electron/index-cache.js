@@ -57,10 +57,49 @@ const fileFor = (dir, vaultPath) =>
  * @param dir        where cache files live — main passes a folder under userData
  * @param vaultPath  the absolute vault path, which names the file
  */
-function makeIndexCache ({ dir, vaultPath }) {
+/* How long the index has to have been still before it is written, and how
+   long a write may be put off while it keeps moving. The writer below
+   coalesces a synchronous burst and nothing longer: a sync client landing a
+   file every second, or an agent writing one per tool call, had the whole
+   vault serialized and fsynced once per file. The cache is a boot
+   accelerator; a write that is a few seconds late costs nothing, and one
+   lost with the process costs a re-read of the notes it missed. */
+const QUIET_MS = 2000
+const MAX_WAIT_MS = 20_000
+
+function makeIndexCache ({ dir, vaultPath, quietMs = QUIET_MS, maxWaitMs = MAX_WAIT_MS }) {
   const target = fileFor(dir, vaultPath)
   const writer = makeCoalescedWriter()
   let lastWrite = Promise.resolve()
+  /* The write waiting out its quiet period: the timer, the body to write, when
+     the wait began, and the promise `idle` hands out for it. */
+  /** @type {{ serialize: () => string, settle: () => void, since: number, timer: any, done: Promise<void> } | null} */
+  let pending = null
+  const flushPending = () => {
+    const current = pending
+    if (!current) return
+    clearTimeout(current.timer)
+    pending = null
+    writer.flush(target, current.serialize).catch(() => {}).then(() => current.settle())
+  }
+  const schedule = (serialize) => {
+    let current = pending
+    if (!current) {
+      let settle = () => {}
+      /** @type {Promise<void>} */
+      const done = new Promise((resolve) => { settle = () => resolve() })
+      current = { serialize, settle, since: Date.now(), timer: null, done }
+      pending = current
+      lastWrite = done
+    } else {
+      current.serialize = serialize
+      clearTimeout(current.timer)
+    }
+    const waited = Date.now() - current.since
+    const delay = Math.max(0, Math.min(quietMs, maxWaitMs - waited))
+    current.timer = setTimeout(flushPending, delay)
+    return current.done
+  }
 
   return {
     /* The file this vault's cache lives in, so a caller can say where — and so
@@ -161,8 +200,15 @@ function makeIndexCache ({ dir, vaultPath }) {
          cache that failed to write is a slower first search next time and
          nothing else. Serialized by the writer, when it writes: a burst of
          syncs pays for one body, not one each. */
-      lastWrite = writer.flush(target, serialize).catch(() => {})
+      schedule(serialize)
       return dropped ? { written: estimate, dropped } : { written: estimate }
+    },
+
+    /** Write what is waiting now rather than after the quiet period — for
+     *  quitting. Settles when it has landed. */
+    flush () {
+      flushPending()
+      return lastWrite
     },
 
     /** Settles when the last save has reached the disk — for the tests, which

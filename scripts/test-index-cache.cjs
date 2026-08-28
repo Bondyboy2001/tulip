@@ -27,7 +27,7 @@ const check = async (what, run) => {
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tulip-index-cache-'))
 const VAULT = '/somewhere/Vault'
-const cache = () => makeIndexCache({ dir, vaultPath: VAULT })
+const cache = () => makeIndexCache({ quietMs: 0, dir, vaultPath: VAULT })
 
 const entry = (name, text, extra = {}) =>
   ({ name, text, mtime: 1000, size: text.length, ...extra })
@@ -109,7 +109,7 @@ async function main () {
   })
 
   await check('a vault too large to cache is refused, and says so', async () => {
-    const store = makeIndexCache({ dir, vaultPath: '/somewhere/Huge' })
+    const store = makeIndexCache({ quietMs: 0, dir, vaultPath: '/somewhere/Huge' })
     const huge = new Map([['big.md', entry('big', 'x'.repeat(MAX_CACHE_BYTES + 1))]])
     assert.deepEqual(store.save(huge), { skipped: 'too large' })
     await store.idle()
@@ -117,7 +117,7 @@ async function main () {
   })
 
   await check('refusing a large save leaves an earlier small one intact', async () => {
-    const store = makeIndexCache({ dir, vaultPath: '/somewhere/Grew' })
+    const store = makeIndexCache({ quietMs: 0, dir, vaultPath: '/somewhere/Grew' })
     store.save(new Map([['a.md', entry('a', 'small and valid')]]))
     await store.idle()
     store.save(new Map([['a.md', entry('a', 'x'.repeat(MAX_CACHE_BYTES + 1))]]))
@@ -130,7 +130,7 @@ async function main () {
     /* Search annotates in-memory entries (`kind`, `fileTags`), alias
        resolution memoises `aliases` — bytes the load path would only throw
        away. The save must serialize the four real fields and nothing else. */
-    const store = makeIndexCache({ dir, vaultPath: '/somewhere/Annotated' })
+    const store = makeIndexCache({ quietMs: 0, dir, vaultPath: '/somewhere/Annotated' })
     store.save(new Map([['a.md', entry('a', 'text', {
       kind: 'note', fileTags: ['x', 'y'], aliases: ['other name']
     })]]))
@@ -140,7 +140,7 @@ async function main () {
   })
 
   await check('an oversized vault drops its largest notes and keeps the rest', async () => {
-    const store = makeIndexCache({ dir, vaultPath: '/somewhere/Mostly' })
+    const store = makeIndexCache({ quietMs: 0, dir, vaultPath: '/somewhere/Mostly' })
     const result = store.save(new Map([
       ['big.md', entry('big', 'x'.repeat(MAX_CACHE_BYTES + 1))],
       ['a.md', entry('a', 'alpha')],
@@ -154,8 +154,8 @@ async function main () {
   })
 
   await check('two vaults do not share a file', async () => {
-    const one = makeIndexCache({ dir, vaultPath: '/vaults/One' })
-    const two = makeIndexCache({ dir, vaultPath: '/vaults/Two' })
+    const one = makeIndexCache({ quietMs: 0, dir, vaultPath: '/vaults/One' })
+    const two = makeIndexCache({ quietMs: 0, dir, vaultPath: '/vaults/Two' })
     assert.notEqual(one.path, two.path)
     one.save(new Map([['a.md', entry('a', 'from one')]]))
     two.save(new Map([['a.md', entry('a', 'from two')]]))
@@ -165,7 +165,7 @@ async function main () {
   })
 
   await check('clearing leaves nothing behind', async () => {
-    const store = makeIndexCache({ dir, vaultPath: '/vaults/Temporary' })
+    const store = makeIndexCache({ quietMs: 0, dir, vaultPath: '/vaults/Temporary' })
     store.save(new Map([['a.md', entry('a', 'here')]]))
     await store.idle()
     await store.clear()
