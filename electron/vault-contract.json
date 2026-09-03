@@ -10,7 +10,8 @@
     "regular expression is not a JSON type; both readers build it with the `u`",
     "flag, which is what makes the \\u{...} escapes mean codepoints."
   ],
-  "noteExtensions": [".md", ".markdown", ".mdown", ".lang"],
+  "noteExtensions": [".md", ".markdown", ".mdown", ".lang", ".fc"],
+  "flashcardExtension": ".fc",
   "texExtension": ".tex",
   "pdfExtension": ".pdf",
   "siteExtension": ".website",

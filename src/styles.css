@@ -163,9 +163,13 @@
   --z-panel-menu: 20;    /* a menu belonging to a side panel */
   --z-panel-pop:  30;    /* …and a popover over that menu */
   --z-titlebar:   40;    /* app chrome; the document scrolls under it */
-  --z-drag:       50;    /* something held by the pointer, over the document */
   --z-modal:      60;    /* full-surface modals — the overlay, settings */
   --z-study:      65;
+  /* A narrow window's side drawers. Below the context menu, deliberately: the
+     menu is most often opened *on* a drawer's own rows, and at --z-panel — as
+     these shared with the toast — the drawer covered the menu it had just
+     raised. Above the modals, which is where they already sat. */
+  --z-drawer:     68;
   --z-context:    70;    /* the right-click menu, over any modal */
   --z-panel:      80;    /* toast, history — chrome that outranks a menu */
   --z-orphans:    85;
@@ -953,6 +957,11 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
      latter ones did not, which is where the toggle jank actually was. */
   transition: grid-template-columns .26s var(--ease);
 }
+/* A toggle the renderer is animating itself — see freezePanelSlide — snaps
+   the grid and slides the panel by transform instead. The transition above is
+   for the flips nothing pins: a restore, a breakpoint crossed by a resize. */
+.app.is-sliding { transition: none; }
+.app > * { min-height: 0; }
 /* Each panel is placed by name, not by the order it appears in. Below 760px
    the sidebar becomes a fixed drawer and leaves the grid's flow, and
    auto-placement then slid every remaining panel one column to the left —
@@ -963,10 +972,22 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
 .main { grid-column: 2; }
 .sidepane { grid-column: 3; }
 .ai { grid-column: 4; }
-.app > * { min-height: 0; }
-.app[data-sidebar="closed"] { --col-rail: 0; }
-.app[data-side="closed"] { --col-side: 0; }
-.app[data-ai="closed"] { --col-chat: 0; }
+.app[data-sidebar="closed"] { --col-rail: 0px; }
+.app[data-side="closed"] { --col-side: 0px; }
+.app[data-ai="closed"] { --col-chat: 0px; }
+
+/* Registered so that they do NOT inherit. A custom property inherits by
+   default, and changing an inherited one on `.app` makes Blink recompute the
+   style of every descendant — ten thousand nodes of file tree, for a value
+   only the grid template above ever reads. That recalc was the single largest
+   cost of toggling a panel, paid twice per toggle (the flip and, for `--rail`
+   and friends, the refit), and it grew with the vault. Every consumer of these
+   three is on `.app` itself, so nothing below it loses anything. The initial
+   value is a length because the syntax is: an unregistered `0` would have
+   done, a registered one has to say `0px`. */
+@property --col-rail { syntax: '<length>'; inherits: false; initial-value: 0px; }
+@property --col-side { syntax: '<length>'; inherits: false; initial-value: 0px; }
+@property --col-chat { syntax: '<length>'; inherits: false; initial-value: 0px; }
 
 
 .titlebar {
@@ -1009,7 +1030,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
   display: none;
   position: fixed;
   inset: 0;
-  z-index: calc(var(--z-panel) - 1);
+  z-index: calc(var(--z-drawer) - 1);
   width: 100%;
   height: 100%;
   padding: 0;
@@ -1130,7 +1151,6 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
   overscroll-behavior-x: contain;
   scrollbar-width: none;
 }
-.pane-tabs::-webkit-scrollbar { display: none; }
 .pane-tab {
   position: relative;
   flex: none;
@@ -1385,7 +1405,13 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
    is where the toggle's lag lived. Held at the open width, the animation
    only moves the clipped edge; the tree is laid out once, at whichever end
    of the slide it was already at. */
-.app.is-sliding .sidebar > :not(.grip) { width: var(--frozen-rail, var(--rail)); }
+/* The sidebar's children are held at the rail's width for the length of a
+   slide — but by inline style from `pinStage` in renderer.js, not by a rule
+   here. The rule this replaces was `.app.is-sliding .sidebar > :not(.grip)`,
+   and a compound that is nothing but `:not()` gives the style engine no
+   feature to narrow its invalidation to, so adding `is-sliding` to `.app`
+   restyled the whole tree — every row — on the first frame of the slide and
+   again on the last. Three inline widths touch three nodes. */
 
 .doc-head {
   position: relative;
@@ -1437,6 +1463,9 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
   min-width: 0;
   overflow-x: auto;
   scrollbar-width: none;
+  /* The unoccupied middle of the strip is the window handle. Tabs opt back
+     out below, so clicking or rearranging one never starts a window drag. */
+  -webkit-app-region: drag;
 }
 /* The fade says "there is more strip past this edge", so it is only drawn
    when there is — set from renderTabs. A permanent mask just dimmed the last
@@ -1444,7 +1473,6 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
 .tabs.is-scrollable {
   mask-image: linear-gradient(to right, #000 calc(100% - 18px), transparent);
 }
-.tabs::-webkit-scrollbar { display: none; }
 /* A tab from another window is over the strip. Inset rather than an outline:
    the strip is already up against the window chrome on three sides, and a ring
    drawn outside it lands under the titlebar. */
@@ -1469,6 +1497,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
   white-space: nowrap;
   cursor: pointer;
   flex: 0 1 auto;
+  -webkit-app-region: no-drag;
 }
 .tab:hover { background: var(--hover); color: var(--ink-soft); }
 /* The one you are in is the one with a surface under it — the same device the
@@ -1753,7 +1782,6 @@ ol.tk-ordered-list > li > .tk-olnum {
   padding: .04em .12em;
   border-radius: 3px;
   box-decoration-break: clone;
-  -webkit-box-decoration-break: clone;
 }
 
 /* A block ID is an address, not prose. A standalone one leaves no empty
@@ -1779,10 +1807,9 @@ ol.tk-ordered-list > li > .tk-olnum {
    time, louder, about the least important thing on the page. What is left is
    the one line that has a job: the edge between data about the note and the
    note. */
-/* --------------------------------------------------------------- tags
-   The only frontmatter control in the Info pane. Tags are chips because they
-   are a small unordered set, not rows in a settings form; everything else in
-   the YAML remains source data and stays in Raw view. */
+/* ------------------------------------------------------------- note tags
+   The Info pane keeps the note's tags as removable chips. Other frontmatter
+   remains in the file and can still be edited in Raw view. */
 .tags-editor {
   display: flex;
   flex-wrap: wrap;
@@ -1875,7 +1902,6 @@ ol.tk-ordered-list > li > .tk-olnum {
      this the border runs off the end of one line and starts open on the next,
      which is the one place a boxed span looks broken rather than boxed. */
   box-decoration-break: clone;
-  -webkit-box-decoration-break: clone;
 }
 .reading pre {
   background: var(--sunk);
@@ -1986,6 +2012,55 @@ ol.tk-ordered-list > li > .tk-olnum {
      diamond rather than running underneath it. */
   box-shadow: 0 0 0 5px var(--paper);
 }
+/* The bookmark — see src/bookmark.js. The same section rule as `hr` above,
+   with a small ribbon hanging from it in the middle where the rule has its
+   diamond: the mark is the shape, so it carries no label. The same row in
+   both views — `.bookmark-mark` is the reading view's, `.tk-bookmark` the
+   editing view's widget, set a little tighter to match the editor's leading.
+
+   Spaced with padding, never margin, and the rule drawn inside the box:
+   CodeMirror measures a block widget by its own box and knows nothing of its
+   margins, so a margin here put its map of every line below the bookmark out
+   by that much, and a click below the ribbon landed a line under where it
+   was. The reading view has no such bookkeeping, but the two are one rule. */
+.bookmark-mark, .tk-bookmark {
+  position: relative;
+  padding: 1.3em 0;
+  margin: 0 auto;
+  user-select: none;
+  cursor: default;
+}
+.tk-bookmark { padding: 0.9em 0; }
+.bookmark-mark::before, .tk-bookmark::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 1px;
+  background: linear-gradient(to right,
+    transparent,
+    color-mix(in srgb, var(--faint) 48%, transparent) 22%,
+    color-mix(in srgb, var(--faint) 48%, transparent) 78%,
+    transparent);
+}
+.bookmark-ribbon {
+  position: absolute;
+  left: 50%;
+  /* Hung from the rule: the top of the strip sits just above it, as if the
+     ribbon were tucked under the line and hanging out below. */
+  top: calc(50% - 5px);
+  width: 12px;
+  height: 20px;
+  margin-left: -6px;
+  /* The page's own colour around the strip, so the rule breaks for it the
+     way it breaks for the diamond on a plain rule. */
+  box-shadow: 0 0 0 4px var(--paper);
+  background: var(--paper);
+}
+.bookmark-ribbon svg { display: block; width: 100%; height: 100%; }
+.bookmark-strip { fill: var(--accent); }
+.bookmark-stripe { fill: var(--paper); opacity: 0.35; }
 .reading img { max-width: 100%; border-radius: 4px; }
 /* Wide tables scroll inside their own box rather than pushing the column out. */
 /* Tables are set the way a table in a book is set: rules only where they do
@@ -2103,6 +2178,250 @@ ol.tk-ordered-list > li > .tk-olnum {
   border: solid #fff;
   border-width: 0 1.6px 1.6px 0;
   transform: rotate(42deg);
+}
+
+/* A quiz callout keeps its task-list syntax in the file, but Reading view
+   presents each choice as a single answer button. The feedback and explanation
+   remain hidden until one choice is made, so the card still asks a question
+   instead of displaying its answer beside it. */
+.reading .quiz-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.reading .quiz-options li.task-item {
+  margin: 0;
+  color: inherit;
+  list-style: none;
+  text-decoration: none;
+}
+.reading .quiz-options li.task-item.is-done { color: inherit; text-decoration: none; }
+.reading .quiz-option {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  min-height: 132px;
+  padding: 14px 16px;
+  border: 0;
+  border-radius: 6px;
+  color: #fff;
+  font: 700 15px/1.3 var(--font-ui);
+  text-align: center;
+  text-decoration: none;
+  text-shadow: 0 1px 1px #0005;
+  cursor: pointer;
+  transition: filter .12s var(--ease), transform .12s var(--ease);
+}
+.reading .quiz-option:hover,
+.reading .quiz-option:focus-visible {
+  filter: brightness(1.08);
+  transform: translateY(-1px);
+}
+.reading .quiz-option:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
+.reading .quiz-option:disabled { cursor: default; opacity: 1; transform: none; }
+.reading .quiz-option.is-tone-0 { background: #ed3f57; }
+.reading .quiz-option.is-tone-1 { background: #1368ce; }
+.reading .quiz-option.is-tone-2 { background: #d89e00; }
+.reading .quiz-option.is-tone-3 { background: #26890c; }
+.reading .quiz-option.is-correct { background: #76bd45; }
+.reading .quiz-option.is-wrong { background: #ed3f57; }
+.reading .quiz-option.is-selected { box-shadow: inset 0 0 0 3px #fff, 0 0 0 2px #0003; }
+.reading .quiz-feedback {
+  margin: 15px 0 0;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 750;
+  text-align: center;
+}
+.reading .quiz-feedback[data-result="correct"] { color: var(--code-added); }
+.reading .quiz-feedback[data-result="wrong"] { color: var(--code-removed); }
+.reading .quiz-explanation {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line-soft);
+  color: var(--muted);
+  text-align: center;
+}
+
+/* A quiz may use callout syntax as its portable on-disk representation, but it
+   presents as a study card: neutral frame, clear question, no callout stripe
+   or kind icon. */
+.reading .callout[data-callout="quiz"] {
+  --tone: var(--accent);
+  overflow: hidden;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--paper);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, .08);
+}
+.reading .callout[data-callout="quiz"] > .callout-head {
+  justify-content: center;
+  padding: 28px 28px 12px;
+  color: var(--ink);
+  font: 700 clamp(20px, 2.8vw, 28px)/1.22 var(--font-ui);
+  letter-spacing: 0;
+  text-align: center;
+}
+.reading .callout[data-callout="quiz"] > .callout-head .callout-icon { display: none; }
+.reading .callout[data-callout="quiz"] > .callout-body {
+  margin-top: 0;
+  padding: 10px 20px 22px;
+}
+.reading .callout[data-callout="quiz"] > .quiz-media {
+  margin: 0;
+  padding: 0;
+}
+.reading .callout[data-callout="quiz"] > .quiz-media .embed-img {
+  width: 100%;
+  height: clamp(150px, 30vw, 260px);
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  object-fit: cover;
+}
+.reading .quiz-tags {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 0 0 14px;
+}
+.reading .quiz-tags span {
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: var(--hover);
+  color: var(--muted);
+  font: 600 10.5px/1.25 var(--font-ui);
+}
+
+/* ------------------------------------------------ flashcard editor widget */
+.tk-flashcard-box {
+  box-sizing: border-box;
+  padding: 10px 0;
+  font-family: var(--font-ui);
+}
+.tk-flashcard {
+  position: relative;
+  box-sizing: border-box;
+  overflow: hidden;
+  width: 100%;
+  padding: 0 20px 22px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--paper);
+  color: var(--ink);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, .08);
+}
+.tk-flashcard-head {
+  position: absolute;
+  z-index: 1;
+  top: 10px;
+  right: 10px;
+}
+.tk-flashcard-eyebrow { display: none; }
+.tk-flashcard-edit {
+  padding: 4px 9px;
+  border: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--paper) 90%, transparent);
+  color: var(--ink-soft);
+  font: 600 11px/1.35 var(--font-ui);
+}
+.tk-flashcard-edit:hover,
+.tk-flashcard-edit:focus-visible {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+.tk-flashcard-edit:focus-visible,
+.tk-flashcard-option:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.tk-flashcard-question {
+  margin: 0;
+  padding: 30px 18px 20px;
+  color: var(--ink);
+  font: 700 clamp(20px, 2.8vw, 28px)/1.22 var(--font-ui);
+  text-align: center;
+}
+.tk-flashcard-tags {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: -10px 0 16px;
+}
+.tk-flashcard-tags span {
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: var(--hover);
+  color: var(--muted);
+  font: 600 10.5px/1.25 var(--font-ui);
+}
+.tk-flashcard-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+}
+.tk-flashcard-option {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  min-height: 132px;
+  padding: 14px 16px;
+  border: 0;
+  border-radius: 6px;
+  color: #fff;
+  font: 700 15px/1.3 var(--font-ui);
+  text-align: center;
+  text-decoration: none;
+  text-shadow: 0 1px 1px #0005;
+}
+.tk-flashcard-option:hover,
+.tk-flashcard-option:focus-visible {
+  filter: brightness(1.08);
+}
+.tk-flashcard-option:disabled { cursor: default; opacity: 1; }
+.tk-flashcard-option.is-tone-0 { background: #ed3f57; }
+.tk-flashcard-option.is-tone-1 { background: #1368ce; }
+.tk-flashcard-option.is-tone-2 { background: #d89e00; }
+.tk-flashcard-option.is-tone-3 { background: #26890c; }
+.tk-flashcard-option.is-correct { background: #76bd45; }
+.tk-flashcard-option.is-wrong { background: #ed3f57; }
+.tk-flashcard-option.is-selected { box-shadow: inset 0 0 0 3px #fff, 0 0 0 2px #0003; }
+.tk-flashcard-media {
+  margin: 0 -20px;
+  background: var(--sunk);
+}
+.tk-flashcard-media .embed-img {
+  display: block;
+  width: 100%;
+  height: clamp(150px, 30vw, 260px);
+  border: 0;
+  border-radius: 0;
+  object-fit: cover;
+}
+.tk-flashcard-feedback {
+  margin: 12px 0 0;
+  font-size: 12px;
+  font-weight: 700;
+  text-align: center;
+}
+.tk-flashcard-feedback[data-result="correct"] { color: var(--code-added); }
+.tk-flashcard-feedback[data-result="wrong"] { color: var(--code-removed); }
+.tk-flashcard-explanation {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line-soft);
+  color: var(--muted);
+  font: 500 12.5px/1.5 var(--font-ui);
+  text-align: center;
+  white-space: pre-wrap;
 }
 
 .reading .wikilink { color: var(--accent); text-decoration: none; }
@@ -2444,9 +2763,33 @@ ol.tk-ordered-list > li > .tk-olnum {
   cursor: pointer;
 }
 .panel-list li[aria-selected="true"] { background: var(--accent-dim); }
+.panel-list .panel-group {
+  padding: 10px 11px 3px;
+  border-radius: 0;
+  color: var(--faint);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  cursor: default;
+}
+.panel-list .panel-group:first-child { padding-top: 5px; }
 .panel-list li.has-file-icon { align-items: flex-start; }
 .panel-list li .file-ico { margin-top: 1px; }
-.panel-list li .title { color: var(--ink); }
+/* The column that holds a result's name, its matching line and its folder.
+   `min-width: 0` is what makes the three of them ellipsise: a flex item's
+   default minimum is the width of its own content, so this box grew to fit the
+   longest snippet in the list and took the row with it — the text ran out past
+   the rounded highlight and was cut off square by the panel's edge, ellipsis
+   and all, because the ellipsis needs an overflow to happen in. */
+.panel-list li .title {
+  flex: 1;
+  min-width: 0;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .panel-list li mark { background: none; color: var(--accent); font-weight: 650; }
 .panel-list li .dir {
   margin-left: auto;
@@ -2474,6 +2817,15 @@ ol.tk-ordered-list > li > .tk-olnum {
   color: var(--muted);
   margin-top: 2px;
   overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.panel-list .search-path {
+  display: block;
+  margin-top: 1px;
+  overflow: hidden;
+  color: var(--faint);
+  font: 10.5px/1.3 var(--font-ui);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2795,6 +3147,10 @@ ol.tk-ordered-list > li > .tk-olnum {
   color: var(--code-removed);
   background: color-mix(in srgb, var(--code-removed) 12%, transparent);
 }
+.study-feedback[data-result="close"] {
+  color: var(--code-atom);
+  background: color-mix(in srgb, var(--code-atom) 12%, transparent);
+}
 
 /* What was typed, then what was wanted — with the characters that differ
    marked. Being told the answer after a near miss invites you to read the two
@@ -2827,6 +3183,225 @@ ol.tk-ordered-list > li > .tk-olnum {
   text-align: center;
   font-size: 10.5px;
   color: var(--faint);
+}
+
+/* ------------------------------------------------------ flashcard bank */
+
+.flashcard-bank {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  overflow: auto;
+  padding: 28px clamp(24px, 5vw, 64px) 56px;
+  background: var(--paper);
+  font-family: var(--font-ui);
+}
+
+.flashcard-bank-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  max-width: 880px;
+  margin: 0 auto 30px;
+  padding-bottom: 22px;
+  border-bottom: 1px solid var(--line);
+}
+
+.flashcard-bank-head h2,
+.flashcard-bank-topics h3,
+.flashcard-bank-card h3,
+.flashcard-bank-empty-state h3 { margin: 0; }
+
+.flashcard-bank-head h2 { color: var(--ink); font: 650 24px/1.2 var(--font-ui); }
+.flashcard-bank-head p { margin: 5px 0 0; color: var(--muted); font: 13px/1.4 var(--font-ui); }
+
+.flashcard-bank-topics {
+  max-width: 880px;
+  margin: 0 auto 24px;
+}
+
+.flashcard-bank-topics h3 {
+  margin-bottom: 10px;
+  color: var(--muted);
+  font: 600 11px/1.2 var(--font-ui);
+  letter-spacing: .07em;
+  text-transform: uppercase;
+}
+
+#flashcard-bank-topic-list { display: flex; flex-wrap: wrap; gap: 7px; }
+
+.flashcard-bank-topic {
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--ink-soft);
+  font: 12px/1 var(--font-ui);
+}
+
+.flashcard-bank-topic:hover { border-color: var(--muted); background: var(--hover); color: var(--ink); }
+
+.flashcard-bank-list { display: grid; gap: 8px; max-width: 880px; margin: 0 auto; }
+
+.flashcard-bank-card {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: start;
+  padding: 16px 18px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+}
+
+.flashcard-bank-number { padding-top: 2px; color: var(--faint); font: 11px/1.4 var(--font-mono); }
+.flashcard-bank-card h3 { color: var(--ink); font: 600 15px/1.35 var(--font-ui); }
+.flashcard-bank-answer { margin: 5px 0 0; color: var(--muted); font: 12.5px/1.4 var(--font-ui); }
+.flashcard-bank-card-tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 10px; }
+.flashcard-bank-card-tags span {
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: var(--sunk);
+  color: var(--muted);
+  font: 11px/1 var(--font-ui);
+}
+
+.flashcard-bank-edit {
+  padding: 5px 8px;
+  border-radius: 5px;
+  color: var(--muted);
+  font: 12px/1 var(--font-ui);
+}
+.flashcard-bank-edit:hover { background: var(--hover); color: var(--ink); }
+
+.flashcard-bank-empty { margin: 0; color: var(--faint); font: 12px/1.4 var(--font-ui); }
+.flashcard-bank-empty-state {
+  display: grid;
+  justify-items: start;
+  gap: 9px;
+  padding: 36px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  color: var(--muted);
+}
+.flashcard-bank-empty-state h3 { color: var(--ink); font: 600 16px/1.3 var(--font-ui); }
+.flashcard-bank-empty-state p { margin: 0 0 5px; font: 13px/1.5 var(--font-ui); }
+
+@media (max-width: 640px) {
+  .flashcard-bank { padding: 20px 16px 40px; }
+  .flashcard-bank-head { align-items: center; }
+  .flashcard-bank-card { grid-template-columns: 28px minmax(0, 1fr) auto; padding: 14px; }
+}
+
+/* ------------------------------------------------ flashcard-bank study */
+.fc-study {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-study);
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: color-mix(in srgb, var(--ink) 24%, transparent);
+  backdrop-filter: blur(4px);
+  animation: fade .13s var(--ease);
+}
+.fc-study-box {
+  width: min(620px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: 0 18px 60px -18px #0007;
+  animation: rise .16s var(--ease);
+}
+.fc-study-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.fc-study-head h2 { margin: 0 0 2px; font: 650 15px/1.3 var(--font-ui); }
+#fc-study-progress { color: var(--faint); font: 500 11px/1.3 var(--font-ui); }
+.fc-study-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.fc-study-tag {
+  padding: 5px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  background: var(--paper);
+  font: 600 11px/1.25 var(--font-ui);
+}
+.fc-study-tag[aria-checked="true"] {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  color: var(--accent);
+  background: var(--accent-dim);
+}
+.fc-study-card {
+  overflow: hidden;
+  padding: 0 18px 18px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--paper);
+  text-align: center;
+}
+.fc-study-card > img {
+  display: block;
+  width: calc(100% + 36px);
+  height: clamp(150px, 28vw, 250px);
+  margin: 0 -18px;
+  object-fit: cover;
+}
+.fc-study-card h3 {
+  margin: 0;
+  padding: 28px 16px 20px;
+  font: 700 clamp(20px, 3vw, 28px)/1.25 var(--font-ui);
+}
+.fc-study-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.fc-study-option {
+  min-height: 112px;
+  padding: 13px;
+  border: 0;
+  border-radius: 6px;
+  color: #fff;
+  font: 700 15px/1.3 var(--font-ui);
+  text-shadow: 0 1px 1px #0005;
+}
+.fc-study-option.is-tone-0 { background: #ed3f57; }
+.fc-study-option.is-tone-1 { background: #1368ce; }
+.fc-study-option.is-tone-2 { background: #d89e00; }
+.fc-study-option.is-tone-3 { background: #26890c; }
+.fc-study-option.is-correct { background: #76bd45; }
+.fc-study-option.is-wrong { background: #ed3f57; }
+.fc-study-option.is-selected { box-shadow: inset 0 0 0 3px #fff, 0 0 0 2px #0003; }
+.fc-study-option:disabled { opacity: 1; cursor: default; }
+.fc-study-feedback { margin: 12px 0 0; font: 700 12px/1.4 var(--font-ui); }
+.fc-study-feedback[data-result="correct"] { color: var(--code-added); }
+.fc-study-feedback[data-result="wrong"] { color: var(--code-removed); }
+.fc-study-explanation {
+  margin: 10px 0 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--line-soft);
+  color: var(--muted);
+  font: 500 12.5px/1.5 var(--font-ui);
+  white-space: pre-wrap;
+}
+.fc-study-next {
+  margin-top: 14px;
+  padding: 7px 14px;
+  border-radius: 7px;
+  background: var(--ink);
+  color: var(--paper);
+  font: 650 12px/1.35 var(--font-ui);
+}
+.fc-study-finished { padding: 46px 20px; text-align: center; }
+.fc-study-finished strong { font: 700 24px/1.25 var(--font-ui); }
+.fc-study-finished p { color: var(--muted); font: 500 13px/1.5 var(--font-ui); }
+@media (max-width: 560px) {
+  .fc-study-options { grid-template-columns: 1fr; }
+  .fc-study-option { min-height: 72px; }
 }
 
 /* ------------------------------------------------------------ asking
@@ -2930,6 +3505,206 @@ ol.tk-ordered-list > li > .tk-olnum {
   color: var(--accent);
 }
 .ask-btn:disabled { opacity: .45; pointer-events: none; }
+
+/* --------------------------------------------------------- flashcard form
+
+   The form is deliberately a little wider than the confirmation dialog: a
+   question and its explanation are writing, and four answer choices need room
+   to be read while they are being entered. It still shares the ask buttons so
+   the action register stays familiar. */
+
+.flashcard-composer {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-preview);
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: color-mix(in srgb, var(--ink) 26%, transparent);
+  backdrop-filter: blur(2px);
+  animation: fade .12s var(--ease);
+}
+.flashcard-panel {
+  width: min(460px, 100%);
+  max-height: min(640px, calc(100vh - 32px));
+  overflow-y: auto;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: 0 12px 32px -16px #0008;
+  animation: rise .16s var(--ease);
+}
+.flashcard-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 13px;
+}
+.flashcard-eyebrow {
+  display: none;
+}
+.flashcard-title {
+  margin: 0;
+  font-family: var(--font-ui);
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1.25;
+  color: var(--ink);
+}
+.flashcard-field {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 11px;
+  font-family: var(--font-ui);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.flashcard-field textarea,
+.flashcard-field input[type="text"],
+.flashcard-choice input[type="text"] {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 7px 9px;
+  background: var(--paper);
+  color: var(--ink);
+  font: 12.5px/1.4 var(--font-body);
+  resize: none;
+}
+.flashcard-field textarea { overflow-y: hidden; }
+.flashcard-field-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.flashcard-image-add {
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--muted);
+  font: 550 11px/1.35 var(--font-ui);
+}
+.flashcard-image-add:hover,
+.flashcard-image-add:focus-visible {
+  border-color: var(--faint);
+  color: var(--ink);
+}
+.flashcard-image-add:focus-visible,
+.flashcard-image-preview button:focus-visible {
+  outline: 2px solid var(--ink-soft);
+  outline-offset: 1px;
+}
+.flashcard-image-preview {
+  position: relative;
+  overflow: hidden;
+  min-height: 112px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--sunk);
+}
+.flashcard-image-preview img {
+  display: block;
+  width: 100%;
+  max-height: 210px;
+  object-fit: cover;
+}
+.flashcard-image-preview button {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--paper) 88%, transparent);
+  color: var(--ink-soft);
+  font: 600 11px/1.3 var(--font-ui);
+  box-shadow: 0 1px 5px #0003;
+}
+.flashcard-field textarea:focus,
+.flashcard-field input[type="text"]:focus,
+.flashcard-choice input[type="text"]:focus {
+  outline: 1px solid var(--faint);
+  outline-offset: 0;
+  border-color: var(--faint);
+}
+.flashcard-field textarea::placeholder,
+.flashcard-field input[type="text"]::placeholder,
+.flashcard-choice input[type="text"]::placeholder { color: var(--faint); }
+.flashcard-choices {
+  display: grid;
+  gap: 6px;
+  margin: 0 0 11px;
+  padding: 0;
+  border: 0;
+}
+.flashcard-choices legend {
+  margin-bottom: 7px;
+  font-family: var(--font-ui);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.flashcard-choice {
+  display: grid;
+  grid-template-columns: 82px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+.flashcard-choice > span {
+  color: var(--faint);
+  font: 550 10.5px/1.25 var(--font-ui);
+  text-align: right;
+}
+.flashcard-choice.is-correct > span { color: var(--ink-soft); font-weight: 650; }
+.flashcard-choice input[type="text"] { min-width: 0; }
+.flashcard-choice.is-added { grid-template-columns: 82px minmax(0, 1fr) auto; }
+.flashcard-add-choice {
+  justify-self: start;
+  margin: 1px 0 0 90px;
+  padding: 5px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--muted);
+  font: 550 11.5px/1.35 var(--font-ui);
+}
+.flashcard-add-choice:hover {
+  border-color: var(--faint);
+  color: var(--ink);
+}
+.flashcard-add-choice:focus-visible,
+.flashcard-remove-choice:focus-visible {
+  outline: 2px solid var(--ink-soft);
+  outline-offset: 1px;
+}
+.flashcard-remove-choice {
+  padding: 4px 6px;
+  border-radius: 5px;
+  color: var(--faint);
+  font: 500 10.5px/1.35 var(--font-ui);
+}
+.flashcard-remove-choice:hover { background: var(--hover); color: var(--ink-soft); }
+.flashcard-error {
+  margin: -3px 0 12px;
+  font-family: var(--font-ui);
+  font-size: 11.5px;
+  color: var(--code-removed);
+}
+.flashcard-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 7px;
+}
+.flashcard-submit {
+  border-color: var(--ink-soft);
+  background: var(--ink);
+  color: var(--paper);
+}
+.flashcard-submit:hover { background: var(--ink-soft); color: var(--paper); }
 
 /* ---------------------------------------------------- orphaned images
 
@@ -3680,7 +4455,6 @@ ol.tk-ordered-list > li > .tk-olnum {
   border-radius: 4px;
   padding: .1em .3em;
   box-decoration-break: clone;
-  -webkit-box-decoration-break: clone;
 }
 
 /* Clicked into, so shown as source. Bold under the caret keeps its weight and
@@ -3884,7 +4658,6 @@ ol.tk-ordered-list > li > .tk-olnum {
   color: var(--faint);
   opacity: .5;
   user-select: none;
-  -webkit-user-select: none;
   overflow: hidden;
 }
 
@@ -3990,7 +4763,7 @@ ol.tk-ordered-list > li > .tk-olnum {
 .code-ai-input {
   display: block;
   width: 100%;
-  min-height: 92px;
+  min-height: 76px;
   max-height: 200px;
   resize: vertical;
   padding: 10px 11px 30px;
@@ -4074,6 +4847,16 @@ ol.tk-ordered-list > li > .tk-olnum {
 }
 .run-out-verdict.is-bad { color: var(--code-removed); }
 .run-out-verdict.is-good { color: var(--code-added); }
+
+/* The copy control after the verdict, sized to the line it shares rather
+   than to the block header's 21px, so the bar keeps its height. Centred on
+   itself: the bar aligns its text on the baseline, and an icon has none. */
+.run-out-head .tk-copy {
+  align-self: center;
+  width: 18px;
+  height: 18px;
+  margin: -3px 0;
+}
 
 /* The offer to hand a failure to Copilot, at the other end of the verdict line.
    Pushed left with margin rather than given its own row: it belongs to the
@@ -4319,7 +5102,6 @@ ol.tk-ordered-list > li > .tk-olnum {
 }
 .file-run-pop .run-out {
   margin: 0;
-  min-height: 0;
   border: 0;
   border-radius: 0;
   background: none;
@@ -4785,6 +5567,21 @@ ol.tk-ordered-list > li > .tk-olnum {
   border-radius: 7px;
   color: var(--muted);
   transition: color .14s var(--ease), transform .1s var(--ease);
+}
+.view-option {
+  display: inline-flex;
+  width: auto;
+  min-width: 28px;
+  gap: 5px;
+  padding: 0 7px;
+  font: 600 11px/1 var(--font-ui);
+}
+.view-option[aria-pressed="true"] { background: var(--accent-dim); }
+.view-option-label { white-space: nowrap; }
+
+@media (max-width: 820px) {
+  .view-option { width: 28px; padding: 0; justify-content: center; }
+  .view-option-label { display: none; }
 }
 .view-option:hover:not(:disabled),
 .doc-tool:hover {
@@ -5378,7 +6175,6 @@ ol.tk-ordered-list > li > .tk-olnum {
      unaffected: a trackpad swipe, ⇧-wheel and ⌥1–⌥9 all still reach the end. */
   scrollbar-width: none;
 }
-.lang-keys-row::-webkit-scrollbar { display: none; }
 
 /* Shift stands apart from the letters — it types nothing, and a key that
    changes the others should not look like one of them. */
@@ -5703,7 +6499,6 @@ ol.tk-ordered-list > li > .tk-olnum {
      meant to hide passed straight through it. */
   color: color-mix(in oklab, var(--faint) 55%, var(--sunk));
   user-select: none;
-  -webkit-user-select: none;
 }
 
 
@@ -6481,7 +7276,6 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   background: rgb(20 18 22 / .68);
   box-shadow: 0 1px 5px rgb(0 0 0 / .24);
   backdrop-filter: blur(5px);
-  -webkit-backdrop-filter: blur(5px);
   touch-action: none;
   transition: opacity 120ms ease, background 120ms ease, transform 120ms ease;
 }
@@ -6749,6 +7543,8 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   content: "✓";
   font: 12px/1 var(--font-ui);
 }
+/* Inserted into the note, said the same way a copy is. */
+.msg-action.ai-insert.is-done::after { content: "✓"; }
 
 .msg-bot { padding: 1px 0; }
 .msg-bot h1, .msg-bot h2, .msg-bot h3 {
@@ -7149,7 +7945,6 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   background: conic-gradient(
     var(--accent) calc(var(--used, 0) * 1turn),
     color-mix(in srgb, var(--faint) 34%, transparent) 0);
-  -webkit-mask: radial-gradient(closest-side, transparent 56%, #000 58%);
   mask: radial-gradient(closest-side, transparent 56%, #000 58%);
   cursor: default;
 }
@@ -7615,12 +8410,13 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   color: var(--mode-tint);
   background: color-mix(in srgb, var(--mode-tint) 12%, transparent);
 }
-/* Read is tinted but unringed: nothing has been granted, so there is no
-   standing condition to ring. */
+/* The colour is the whole signal. A granted mode used to be ringed as well,
+   the way the pressed chips below are, and the ring read as a second, louder
+   control on the row — the hue already says which permission is standing. */
 .ai-mode[data-mode][aria-pressed="true"] {
   color: var(--mode-tint);
-  border-color: color-mix(in srgb, var(--mode-tint) 55%, transparent);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--mode-tint) 16%, transparent);
+  border-color: transparent;
+  box-shadow: none;
 }
 
 /* A pressed control is ringed rather than filled: the copilot being allowed
@@ -8908,6 +9704,9 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   background: var(--paper);
   overflow: hidden;
 }
+.model-default { display: grid; gap: 7px; }
+.model-readiness { display: block; }
+.model-readiness.is-ready { color: var(--stem); }
 .model-picker-head {
   display: flex;
   align-items: center;
@@ -9189,6 +9988,19 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 }
 .model-option.is-on .model-tick::after { opacity: 1; }
 .model-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A language this build does not carry — see TULIP_SPELL_LANGUAGES in
+   build.mjs. Dimmed rather than dropped: the list is the same list in every
+   build, and a name silently missing from it is a reader hunting for something
+   they remember being there. */
+.model-option.is-absent { cursor: default; opacity: .55; }
+.model-option.is-absent:hover { background: none; }
+.model-note {
+  flex: none;
+  margin-left: auto;
+  color: var(--faint);
+  font-size: 11px;
+  white-space: nowrap;
+}
 
 /* ================================================================== pdf
    A PDF is the one document Tulip shows that it did not set: the page is a
@@ -9737,6 +10549,219 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   line-height: 1.45;
 }
 
+/* ---------------------------------------------------------- the links
+
+   A document's own cross-references, drawn as invisible anchors over the words
+   that carry them — see layLinks in pdf.js. Above the text layer, which is the
+   only place a click can reach them; placed in fractions of the page, like the
+   highlights, so a zoom needs no redraw. */
+
+.pdf-links {
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-float);
+  /* The layer itself lets everything through — only the anchors catch. A layer
+     that caught clicks would take the whole page's text selection with it. */
+  pointer-events: none;
+}
+.pdf-link {
+  position: absolute;
+  pointer-events: auto;
+  border-radius: 2px;
+  /* Invisible until the pointer finds it: the page already draws its links the
+     way its publisher styled them, and a permanent tint over every reference
+     would recolour a document this app promises not to recolour. */
+  cursor: pointer;
+}
+.pdf-link:hover,
+.pdf-link:focus-visible {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent);
+  outline: none;
+}
+
+/* ------------------------------------------------------ the found words
+
+   `markHit` boxes the matched words when the hit knows its extent along the
+   line, and falls back to the full-width band when it does not. The base rule
+   for the band is beside `markHit`'s reasoning further up this section; this
+   only undoes the edge-to-edge stretch, since a box brings its own left and
+   width inline. */
+
+.pdf-hit.is-words {
+  right: auto;
+  /* A breath of air either side of the words, so the box reads as marking the
+     phrase rather than gripping it. Borders rather than padding because the
+     app's border-box sizing would take padding out of the width the viewer
+     measured; a transparent border widens the box without recolouring it. */
+  border-left: 3px solid transparent;
+  border-right: 3px solid transparent;
+  margin-left: -3px;
+  box-sizing: content-box;
+}
+
+/* -------------------------------------------------------- the password
+
+   The card a locked document asks through — see askPassword in pdf.js. It sits
+   where the first page would be, because it is what stands between the reader
+   and that page. */
+
+.pdf-password {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  z-index: var(--z-affordance);
+}
+.pdf-password-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(320px, calc(100% - 48px));
+  padding: 18px 20px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: 0 2px 6px #0000001a, 0 10px 24px #00000024;
+  font-family: var(--font-ui);
+}
+.pdf-password-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.pdf-password-note {
+  font-size: 12px;
+  color: var(--muted);
+}
+/* The one line that changes between the first asking and the second: the
+   refusal is the news, so it is the line that gets the colour. */
+.pdf-password-note.is-wrong { color: var(--accent); }
+.pdf-password-input {
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 13px;
+}
+.pdf-password-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-dim);
+}
+.pdf-password-row {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.pdf-password-btn {
+  height: 26px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--ink-soft);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 550;
+  cursor: pointer;
+}
+.pdf-password-btn:hover { background: var(--hover); color: var(--ink); }
+.pdf-password-btn.is-primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+/* ------------------------------------------------------- the thumbnails
+
+   The rail of small pages down the left edge — see the thumbnails section of
+   pdf.js for how it is filled. The anchor is a zero-size sticky element, so it
+   holds its place while the document scrolls without taking part in the page
+   flow; the rail hangs off it at the height the viewer measured into
+   `--pdf-thumbs-h`, because inside a zero-height box every percentage is zero. */
+
+:root { --pdf-rail-w: 148px; }
+
+.pdf-thumbs {
+  position: sticky;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+  overflow: visible;
+  z-index: var(--z-float);
+}
+.pdf-thumbs-rail {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  width: var(--pdf-rail-w);
+  height: var(--pdf-thumbs-h, 100vh);
+  padding: 14px 0 18px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  border-right: 1px solid var(--line-soft);
+  background: var(--paper);
+}
+/* The pages give the rail its room rather than sliding under it, and the fit
+   modes measure the sheet's padding back — see scaleFor — so fit-to-width means
+   fitting what is actually left. */
+.pdf.has-thumbs .pdf-sheet { padding-left: calc(var(--pdf-rail-w) + 26px); }
+.pdf.has-thumbs.is-fit .pdf-sheet { padding-left: var(--pdf-rail-w); }
+
+.pdf-thumb {
+  position: relative;
+  flex: none;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: #fff;
+  box-shadow: 0 1px 3px #0000001f;
+  cursor: pointer;
+  /* The ring the current page wears, widened on the way in rather than popped. */
+  transition: box-shadow .12s var(--ease);
+}
+.pdf-thumb:hover { box-shadow: 0 1px 3px #0000001f, 0 0 0 2px var(--line); }
+.pdf-thumb.is-here { box-shadow: 0 1px 3px #0000001f, 0 0 0 2px var(--accent); }
+.pdf-thumb-canvas { display: block; }
+.pdf-thumb-number {
+  position: absolute;
+  bottom: -3px;
+  right: -3px;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--surface);
+  box-shadow: 0 0 0 1px var(--line-soft);
+  color: var(--muted);
+  font-family: var(--font-ui);
+  font-size: 9.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ------------------------------------------------------------- night
+
+   The one deliberate exception to "a paper is white because it is paper": an
+   inversion the reader has asked for by name, for reading in the dark. The
+   hue is turned with the lightness so the page's colours keep their identity —
+   a red figure stays recognisably the red figure, only dimmed. Applied to the
+   thumbnails too, or the rail becomes a strip of lanterns beside a dark page. */
+
+.pdf.is-night .pdf-canvas,
+.pdf.is-night .pdf-thumb-canvas { filter: invert(94%) hue-rotate(180deg); }
+.pdf.is-night .pdf-page,
+.pdf.is-night .pdf-thumb { background: #1d1d1f; }
+/* The selection tint multiplies over the page — see the text layer above — and
+   over an inverted page the light blue vanishes. A darker tint reads on both. */
+.pdf.is-night .textLayer ::selection { background: #46607A; }
+
 /* ------------------------------------------------------------- websites
 
    A page from the web standing in as a document. The chrome is deliberately
@@ -9814,6 +10839,42 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   text-overflow: ellipsis;
   transition: border-color .12s, color .12s;
 }
+/* ------------------------------------- whose page, and how it travels
+
+   One slot at the head of the bar. Over https it holds the site's own icon —
+   what a reader actually recognises a site by — and over plain http it holds
+   two words instead, because "not secure" has never been something a glyph
+   could say. */
+.site-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  height: 25px;
+  padding: 0 7px;
+  border-radius: 7px;
+  color: var(--ink-soft);
+  font-family: var(--font-ui);
+  font-size: 10.5px;
+  letter-spacing: .01em;
+  white-space: nowrap;
+}
+.site-mark.is-secure { padding: 0 4px; }
+.site-mark.is-secure svg { width: 14px; height: 14px; opacity: .7; }
+.site-mark.is-local { background: var(--hover); }
+/* The one state worth a colour. Everything else in this bar is grey because
+   nothing else in it is a warning. */
+.site-mark.is-plain {
+  background: color-mix(in srgb, var(--danger, #c0392b) 14%, transparent);
+  color: var(--danger, #c0392b);
+}
+.site-favicon {
+  width: 15px;
+  height: 15px;
+  border-radius: 3px;
+  object-fit: contain;
+}
+
 .site-address::placeholder { color: var(--faint); }
 .site-address:hover { border-color: var(--faint); }
 .site-address:focus {
@@ -10952,6 +12013,39 @@ h4.docx-h, h5.docx-h, h6.docx-h { font-size: 1.05em; }
 }
 .csv-found.is-empty { color: var(--warn, var(--ink-soft)); }
 
+/* The replace field, shaped like the find box it stands beside. */
+.csv-replace {
+  width: 150px;
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+}
+.csv-replace:focus { outline: none; border-color: var(--accent); }
+
+/* The line the grid says lasting things on — the file could not be decoded,
+   only part of it was read, somebody else's version is on disk. Under the bar
+   and over the table, in the warning tint, because each of these holds until
+   its condition does and each stands one keystroke from lost data. It has no
+   close button on purpose: it goes when the problem goes. */
+.csv-notice {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--warn, #b58900);
+  background: color-mix(in srgb, var(--warn, #b58900) 12%, var(--surface));
+  color: var(--ink);
+  font: 12px/1.4 var(--font-ui);
+}
+.csv-notice[hidden] { display: none; }
+.csv-notice-text { flex: 1 1 auto; min-width: 0; }
+.csv-notice-actions { display: flex; flex: 0 0 auto; gap: 6px; }
+.csv-notice-btn { white-space: nowrap; }
+
 /* The heading strip scrolls sideways with the body but never up: it is
    translated by the scroller's own offset rather than being sticky, which a
    virtualized body cannot be. */
@@ -11016,6 +12110,15 @@ h4.docx-h, h5.docx-h, h6.docx-h { font-size: 1.05em; }
 }
 .csv-th:hover { color: var(--ink); }
 .csv-th.is-active { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+
+/* A heading being dragged to a new position. The lifted column dims — it is on
+   the move, not here — and the drop target grows the bar the column will land
+   against. The frame's own class keeps the pointer honest across the whole
+   drag, including over cells that have their own ideas about it. */
+.csv-frame.is-col-dragging { user-select: none; cursor: grabbing; }
+.csv-frame.is-col-dragging .csv-th { cursor: grabbing; }
+.csv-th.is-col-lifted { opacity: 0.45; }
+.csv-th.is-col-drop { box-shadow: inset 3px 0 0 var(--accent); }
 .csv-th-label { overflow: hidden; text-overflow: ellipsis; }
 .csv-sort {
   margin-left: auto;
@@ -11859,6 +12962,15 @@ h4.docx-h, h5.docx-h, h6.docx-h { font-size: 1.05em; }
 .ai-review-file + .ai-review-file {
   border-top: 1px solid var(--line-soft);
 }
+/* A turn of several files: each row carries its own Reject beside the path.
+   The path keeps the room and the button takes only what it needs. */
+.ai-review-file:has(.ai-review-file-reject) {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+.ai-review-file.is-rejected .ai-review-path {
+  color: var(--muted);
+  text-decoration: line-through;
+}
 .ai-review-path {
   overflow: hidden;
   color: var(--ink);
@@ -12015,68 +13127,54 @@ h4.docx-h, h5.docx-h, h6.docx-h { font-size: 1.05em; }
 
 /* ---------------------------------------------------------- narrow drawers
 
-   At desktop size the side document and Copilot earn permanent columns. Below
-   this point they become drawers instead: the note keeps the whole writing
-   surface, and a dimmed scrim makes the temporary overlap explicit. The width
-   variables still belong to panels.js, so a user's preferred width comes back
-   when the window grows again. */
+   At desktop size the side document earns a permanent column. Below this point
+   it becomes a drawer. Copilot deliberately remains a grid column: opening it
+   must narrow the document rather than cover it, including when browser zoom
+   pushes a wide window through this breakpoint. */
 @media (max-width: 1040px) {
   .app {
-    --col-side: 0;
-    --col-chat: 0;
+    --col-side: 0px;
   }
 
-  .sidepane,
-  .ai {
+  .sidepane {
     position: fixed;
-    top: 0;
+    /* Keep the document header above the drawer. */
+    top: 46px;
     right: 0;
     bottom: 0;
-    z-index: var(--z-panel);
+    z-index: var(--z-drawer);
     width: min(var(--side), calc(100vw - 32px));
-    max-height: 100vh;
+    max-height: calc(100vh - 46px);
     box-shadow: -18px 0 42px color-mix(in srgb, var(--ink) 16%, transparent);
     transform: translateX(105%);
     visibility: hidden;
     pointer-events: none;
     transition: transform .22s var(--ease), visibility 0s linear .22s;
   }
-  .sidepane {
-    right: 0;
-    width: min(var(--side), calc(100vw - 32px));
-  }
-  .ai {
-    width: min(var(--chat), calc(100vw - 32px));
-  }
-  .app[data-side="open"] .sidepane,
-  .app[data-ai="open"] .ai {
+  .app[data-side="open"] .sidepane {
     transform: translateX(0);
     visibility: visible;
     pointer-events: auto;
     transition-delay: 0s;
   }
-  .app[data-ai="open"] .ai { overflow: visible; }
   .app[data-side="open"][data-ai="open"] .sidepane {
     right: var(--chat);
     width: min(var(--side), calc(100vw - var(--chat) - 32px));
   }
-
-  body:has(.app[data-side="open"]) .drawer-scrim,
-  body:has(.app[data-ai="open"]) .drawer-scrim { display: block; }
 }
 
 /* The file rail is the last panel to give up its column. At the smallest
    supported window it becomes a left drawer too, with an explicit close affordance
    in its header. */
 @media (max-width: 760px) {
-  .app { --col-rail: 0; }
+  .app { --col-rail: 0px; }
 
   .sidebar {
     position: fixed;
     top: 0;
     left: 0;
     bottom: 0;
-    z-index: var(--z-panel);
+    z-index: var(--z-drawer);
     width: min(var(--rail), calc(100vw - 56px));
     max-height: 100vh;
     box-shadow: 18px 0 42px color-mix(in srgb, var(--ink) 16%, transparent);
@@ -12091,7 +13189,22 @@ h4.docx-h, h5.docx-h, h6.docx-h { font-size: 1.05em; }
     pointer-events: auto;
     transition-delay: 0s;
   }
-  .app[data-sidebar="closed"] .doc-head { padding-left: 18px; }
+  /* Browser zoom can cross this breakpoint while the native macOS traffic
+     lights stay fixed in the window. The main column now starts at the window
+     edge whether the sidebar drawer is open or closed, so keep its controls
+     clear of that native inset in both states. */
+  .doc-head { padding-left: 92px; }
 
   body:has(.app[data-sidebar="open"]) .drawer-scrim { display: block; }
 }
+
+/* A drawer's closed position is a transform, and its slide is a transition on
+   that transform — so the moment a zoom or a window resize carries the
+   viewport across a breakpoint above, a closed pane goes from an in-flow
+   column (no transform) to a fixed drawer parked off screen, and the slide
+   plays for it: a panel nobody opened crossing the edge of the window, ×
+   and shadow and all, at ⌘+. The renderer marks the frame a resize lands in
+   (see `data-reflow` in renderer.js); the breakpoint flips with no transition
+   and a real open or close still slides. */
+.app[data-reflow] .sidepane,
+.app[data-reflow] .sidebar { transition: none; }

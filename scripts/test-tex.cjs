@@ -9,6 +9,16 @@ const {
   needsForcedRetry
 } = require('../electron/tex-compile')
 
+/* A test whose last await never settles exits 0 with nothing printed — node
+   drains the loop and leaves, and a pending promise is not an error. The
+   serial-supersede scenario below did exactly that for two days. */
+let finished = false
+process.on('beforeExit', () => {
+  if (finished) return
+  console.error('tex: the test ended before its checks did — a promise was left hanging')
+  process.exit(1)
+})
+
 ;(async () => {
   assert.deepEqual(
     directives('% !TEX root = ../main.tex\n% !TEX program = xelatex\n'),
@@ -164,6 +174,7 @@ const {
     await fs.rm(dir, { recursive: true, force: true })
   }
 
+  finished = true
   console.log('tex: all checks passed')
 })().catch((err) => {
   console.error(err)

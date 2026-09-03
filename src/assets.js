@@ -85,9 +85,15 @@ export function assetIndex (paths) {
   const byPath = new Map()
   const byName = new Map()
 
+  /* Keys are composed (NFC) as well as lowercased: an accent is one codepoint
+     from a keyboard and two from a file written through the old macOS
+     convention, and an embed typed one way must find a file named the other.
+     Only the keys — the stored value is the path exactly as the vault spelt
+     it, because that is what the file is opened by. */
+  const fold = (text) => text.toLowerCase().normalize('NFC')
   for (const path of paths) {
-    byPath.set(path.toLowerCase(), path)
-    const name = baseName(path).toLowerCase()
+    byPath.set(fold(path), path)
+    const name = fold(baseName(path))
     if (!byName.has(name)) byName.set(name, [])
     byName.get(name).push(path)
   }
@@ -111,14 +117,14 @@ export function assetIndex (paths) {
     // Relative to the note, then relative to the vault root: the two ways
     // people actually write these.
     const local = normalise(dir ? `${dir}/${wanted}` : wanted)
-    const hit = byPath.get(local.toLowerCase()) || byPath.get(normalise(wanted).toLowerCase())
+    const hit = byPath.get(fold(local)) || byPath.get(fold(normalise(wanted)))
     if (hit) return hit
 
     // Then by bare name anywhere in the vault, so `[[diagram.png]]` works from
     // any note without anyone having to think about folders. Only a name with
     // no path in it earns this — `img/diagram.png` was specific on purpose.
     if (wanted.includes('/')) return null
-    const named = byName.get(wanted.toLowerCase())
+    const named = byName.get(fold(wanted))
     return named ? named[0] : null
   }
 }
@@ -558,13 +564,8 @@ function youtubeId (src) {
  * seconds, because that is the only form the player takes.
  */
 function startSeconds (src) {
-  const found = /[?&](?:t|start)=([\dhms]+)/i.exec(String(src || ''))
-  if (!found) return 0
-  const value = found[1]
-  if (/^\d+$/.test(value)) return Number(value)
-  const parts = /^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/i.exec(value)
-  if (!parts) return 0
-  return Number(parts[1] || 0) * 3600 + Number(parts[2] || 0) * 60 + Number(parts[3] || 0)
+  const found = /[?&](?:t|start)=([\d.hms:]+)/i.exec(String(src || ''))
+  return found ? (parseMediaTime(found[1]) ?? 0) : 0
 }
 
 /** A URL's extension, with the query and fragment taken off first — `?v=2` is

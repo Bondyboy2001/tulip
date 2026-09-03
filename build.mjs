@@ -10,9 +10,43 @@ import { gzipSync } from 'node:zlib'
 
 /* The one list of extra spelling languages, shared with the settings pane and
    the checker — see electron/spell-languages.json for why it is JSON. */
-const SPELL_LANGUAGE_IDS = JSON.parse(
+const EVERY_SPELL_LANGUAGE = JSON.parse(
   await readFile('electron/spell-languages.json', 'utf8')
 ).map((entry) => entry.id)
+
+/* Which of them this build carries.
+ *
+ * All of them by default, which is the only answer that keeps the promise the
+ * dictionaries are there for: an app that runs with the network off has to
+ * carry a language to be able to offer it, and there is nothing to download it
+ * from later. They are also the largest thing in the build after pdf.js — 16MB
+ * of the tree — and somebody who writes in one language is carrying fifteen
+ * they will never turn on.
+ *
+ * So it is a lever rather than a default: `TULIP_SPELL_LANGUAGES=fr,de` builds
+ * those two, and `none` builds none. English is not on the list either way —
+ * it travels inside spellcheck.cjs. A name that is not a language is a build
+ * error rather than a quiet omission, because the failure it would otherwise
+ * produce is a spelling panel that says nothing is misspelled.
+ *
+ * The app is already right about a dictionary that is not there: see
+ * `loadSpellDictionary` in electron/main.js, which returns null and lets the
+ * checker go without that language. The settings pane asks which ones are
+ * present, so a trimmed build says so rather than offering a language that
+ * would do nothing. */
+const SPELL_LANGUAGE_IDS = (() => {
+  const asked = process.env.TULIP_SPELL_LANGUAGES
+  if (asked === undefined || asked.trim() === '') return EVERY_SPELL_LANGUAGE
+  if (asked.trim().toLowerCase() === 'none') return []
+  const wanted = asked.split(',').map((one) => one.trim().toLowerCase()).filter(Boolean)
+  const unknown = wanted.filter((id) => !EVERY_SPELL_LANGUAGE.includes(id))
+  if (unknown.length) {
+    throw new Error(`TULIP_SPELL_LANGUAGES names ${unknown.join(', ')}, which `
+      + `${unknown.length === 1 ? 'is not a language' : 'are not languages'} Tulip has a `
+      + `dictionary for. It knows: ${EVERY_SPELL_LANGUAGE.join(', ')}.`)
+  }
+  return EVERY_SPELL_LANGUAGE.filter((id) => wanted.includes(id))
+})()
 
 const run = promisify(execFile)
 
@@ -40,7 +74,7 @@ const pdfOcrCache = path.join(os.homedir(), 'Library', 'Caches', 'Tulip', 'nativ
 const FEATURE_STYLE_SECTIONS = {
   language: [
     ['/* --------------------------------------------------------- study cards */',
-      '/* ------------------------------------------------------------ asking'],
+      '/* ------------------------------------------------------ flashcard bank */'],
     ['/* ------------------------------------------------- the language keyboard */',
       '/* ------------------------------- editing code frame']
   ],
@@ -292,12 +326,11 @@ await cp('src/index.html', path.join(output, 'index.html'))
    the app is offline and the page's own origin is the only thing it fetches from.
    Together they are about 4 MB — most PDFs touch none of it, but the ones that do
    render as blank pages without it. */
-for (const dir of ['standard_fonts', 'cmaps', 'iccs', 'wasm']) {
-  await cp(`node_modules/pdfjs-dist/${dir}`, path.join(output, 'pdfjs', dir), { recursive: true })
-}
+await Promise.all(['standard_fonts', 'cmaps', 'iccs', 'wasm'].map((dir) =>
+  cp(`node_modules/pdfjs-dist/${dir}`, path.join(output, 'pdfjs', dir), { recursive: true })))
 
 /* The spellchecker's extra languages, one gzipped Hunspell pair per id from
-   src/spell-languages.js. English travels inside spellcheck.cjs (see that
+   electron/spell-languages.json. English travels inside spellcheck.cjs (see that
    bundle below); these are the optional ones, read and inflated by the main
    process only for the languages the config turns on — which is why they ship
    as files rather than being compiled into anything. Gzipped because the raw
@@ -307,7 +340,11 @@ for (const dir of ['standard_fonts', 'cmaps', 'iccs', 'wasm']) {
 
    Compressed once into a cache keyed on the source's mtime rather than on
    every build: the packages only change when npm moves them, and a clean
-   build re-gzipping 64MB to produce yesterday's bytes is a minute of nothing. */
+   build re-gzipping 64MB to produce yesterday's bytes is a minute of nothing.
+
+   Which languages is `SPELL_LANGUAGE_IDS` above — all of them unless the build
+   was told otherwise. The folder is made either way, so a build carrying none
+   is a folder that is empty rather than one that is missing. */
 {
   const dictCache = path.join('node_modules', '.cache', 'tulip-dict')
   const dictOut = path.join(output, 'dict')

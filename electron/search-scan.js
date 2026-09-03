@@ -65,6 +65,29 @@ function findSpots (text, terms) {
 }
 
 const HEADING_LINE = /^ {0,3}#{1,6}\s/
+const FENCE_LINE = /^ {0,3}(`{3,}|~{3,})\s*([^\s`]*)/
+
+/** A fence-language match such as `rust` is useful only when it carries a
+ *  glimpse of the code it found. Keep the matched line as the navigation
+ *  anchor, then borrow the first non-empty line inside that fence. */
+function contextualLine (text, from, to, line) {
+  const fence = FENCE_LINE.exec(line)
+  if (!fence) return line.trim().slice(0, 220)
+
+  const label = fence[2] || fence[1]
+  let cursor = to < text.length ? to + 1 : to
+  while (cursor < text.length) {
+    let end = text.indexOf('\n', cursor)
+    if (end === -1) end = text.length
+    const next = text.slice(cursor, end).trim()
+    if (next && !next.startsWith(fence[1])) {
+      return `${label} · ${next}`.slice(0, 220)
+    }
+    if (next.startsWith(fence[1])) break
+    cursor = end + 1
+  }
+  return line.trim().slice(0, 220)
+}
 
 /**
  * The first few matches, as the lines they fall on.
@@ -97,7 +120,7 @@ function hitLines (text, spots, max = 4) {
     const line = text.slice(from, to)
     out.push({
       line: atLine,
-      text: line.trim().slice(0, 220),
+      text: contextualLine(text, from, to, line),
       col: at - from,
       heading: HEADING_LINE.test(line)
     })
@@ -106,4 +129,4 @@ function hitLines (text, spots, max = 4) {
   return out
 }
 
-module.exports = { findSpots, hitLines, SPOT_CAP, SPOTS_KEPT, SPOTS_MIN_PER_TERM }
+module.exports = { findSpots, hitLines }

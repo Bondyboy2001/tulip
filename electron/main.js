@@ -2,7 +2,7 @@
 
 const {
   app, BrowserWindow, ipcMain, dialog, Menu, shell, nativeTheme, protocol, net, session,
-  clipboard, utilityProcess, Notification
+  clipboard, utilityProcess, Notification, screen
 } = require('electron')
 const path = require('node:path')
 const fs = require('node:fs/promises')
@@ -15,7 +15,17 @@ const { TurnLedger, turnId } = require('./ai-turns')
 const { mergeChatHistory } = require('./chat-history')
 const { restoreConflicts } = require('./copilot-restore')
 const { TrustStore } = require('./trust-store')
-const { makeStore: makeReviewStore } = require('./review-store')
+const { makeKernelDomain } = require('./ipc-kernel')
+const { makeDraftDomain } = require('./ipc-drafts')
+const { makeReviewDomain } = require('./ipc-review')
+const { makeSpellDomain } = require('./ipc-spell')
+const { makePdfDomain } = require('./ipc-pdf')
+const { makeCreateDomain } = require('./ipc-create')
+const { makeRenderDomain } = require('./ipc-render')
+const { makeMetadataDomain } = require('./ipc-metadata')
+const { makeFilesDomain } = require('./ipc-files')
+const { makeVaultWriteDomain } = require('./ipc-vault-write')
+const { makeVaultInfoDomain } = require('./ipc-vault-info')
 const { makeIndexCache } = require('./index-cache')
 const { makeSelfWrites } = require('./self-writes')
 const { mapLimit, WALK_LIMIT } = require('./map-limit')
@@ -25,6 +35,9 @@ const { htmlFilesIn, collectRunPages } = require('./run-pages')
 /* The per-note search scan. Lifted out of this file so it can be
    benchmarked directly — see electron/search-scan.js. */
 const { findSpots, hitLines } = require('./search-scan')
+const {
+  entryProps, passesFilters, scanKind
+} = require('./vault-scan')
 const {
   REQUEST_PATH: AI_RENAME_REQUEST,
   isRequestPath: isAiRenameRequest,
@@ -49,8 +62,13 @@ const { makePathStore, relocateAll, forgetAll, resetAll } = require('./path-stor
    import it needs is not installed — see electron/python-env.js. */
 const { makePythonEnvs, missingPackage, hasInlineDeps } = require('./python-env')
 const { safeFileName } = require('./safe-name')
-const { parseFrontmatter, propsOf, propValues } = require('./frontmatter.cjs')
-const { emptyWhiteboard, whiteboardText } = require('./whiteboard-data')
+const { encodeText, isUnencodableError } = require('./text-encoding')
+const { writeAtomicSync, syncDirectory } = require('./atomic-store')
+const { BACKUP_EXTENSION, backupVault, restoreVault } = require('./vault-backup')
+const {
+  parseFrontmatter, propsOf, propValues, tagsFromProps, writeListProp
+} = require('./frontmatter.cjs')
+const { whiteboardText } = require('./whiteboard-data')
 const { killTree } = require('./kill-tree')
 const PDF_TEXT_FORMAT = require('./pdf-text-format.json').version
 const VAULT_CONTRACT = require('./vault-contract.json')
@@ -103,114 +121,37 @@ process.on('uncaughtException', (err) => {
   try { flushConfig() } catch { /* nothing left to try */ }
 })
 
-const IGNORED_DIRS = new Set(['.git', '.obsidian', '.tulip', 'node_modules', '.trash'])
+/* `__pycache__` earns its place the way node_modules did: a vault whose notes
+   run Python blocks grows one beside every script, each write to it is a
+   watcher event, and nothing in it is anyone's document. Dot-directories like
+   `.venv` need no entry — everything dot-led is already hidden. A folder a
+   reader might genuinely keep work in (`dist`, `build`) is deliberately NOT
+   here: hiding a real folder because of its name is worse than re-indexing. */
+const IGNORED_DIRS = new Set(['.git', '.obsidian', '.tulip', 'node_modules', '__pycache__', '.trash'])
 
-/** A literal string, as a pattern that matches only itself. */
-const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-
-const MD_EXT = new Set(VAULT_CONTRACT.noteExtensions)
-
-/* The same expression src/vault-paths.js builds for the renderer, from the same
-   contract. Both sides strip a note's extension when they turn a path into a
-   name, and a link resolves by comparing those names — so the two spellings
-   drifting apart is a wikilink that points at a note the tree is showing. */
-const NOTE_EXT = new RegExp(
-  `\\.(${VAULT_CONTRACT.noteExtensions
-    .map((ext) => escapeRe(ext.replace(/^\./, ''))).join('|')})$`,
-  'i'
-)
-
-/* The other document kinds a vault holds. Only `file:rename` needs them together —
-   it strips whatever extension the typed name carries, whichever kind was
-   renamed — and stating them as one expression is what keeps that list from
-   being the place a newly supported kind is forgotten. */
-const DOCUMENT_EXT = new RegExp(
-  `(${[
-    VAULT_CONTRACT.texExtension,
-    VAULT_CONTRACT.pdfExtension,
-    VAULT_CONTRACT.siteExtension,
-    VAULT_CONTRACT.whiteboardExtension,
-    VAULT_CONTRACT.notebookExtension,
-    ...VAULT_CONTRACT.codeExtensions,
-    ...Object.keys(VAULT_CONTRACT.dataExtensions)
-  ]
-    .map(escapeRe).join('|')})$`,
-  'i'
-)
-const TEX_EXT = VAULT_CONTRACT.texExtension
-const isTex = (p) => path.extname(String(p || '')).toLowerCase() === TEX_EXT
-const LANGUAGE_TABLE_SUFFIX = VAULT_CONTRACT.languageTableSuffix
-const LANGUAGE_FLAG = new RegExp(VAULT_CONTRACT.languageFlagPattern, 'u')
-const isLanguageTable = (p) =>
-  String(p || '').toLowerCase().endsWith(LANGUAGE_TABLE_SUFFIX)
-const languageTableStem = (p) => {
-  const name = path.basename(String(p || ''))
-  return path.basename(name, path.extname(name))
-}
+/* The vault's kinds, extensions and name rules are one projection of the
+   contract, defined once in electron/vault-kinds.js — the walk, the watcher,
+   the tree, search and the create handlers (electron/ipc-create.js) all ask
+   the same module, so a kind added to the JSON arrives everywhere at once.
+   The reasoning for each kind moved with it; what is here are the names. */
 const {
-  vocabulary: LANGUAGE_TABLE_TEMPLATE,
-  custom: CUSTOM_TABLE_TEMPLATE
-} = VAULT_CONTRACT.languageTableTemplates
-const languageName = (value) => {
-  const text = String(value || '')
-  const match = LANGUAGE_FLAG.exec(text)
-  return { flag: match?.[1] || '', name: match ? text.slice(match[0].length) : text }
-}
-const languageTableLabel = (name) => /^vocabulary$/i.test(name) ? 'Words' : name
-
-/* A PDF is the second thing the vault opens in a tab. It is not a note — it is
-   never written to, never indexed for search, and has no links — so everything
-   that walks the vault asks which of the two it is looking at rather than
-   assuming a file is text. */
-const PDF_EXT = VAULT_CONTRACT.pdfExtension
-const isPdf = (p) => path.extname(p).toLowerCase() === PDF_EXT
-
-/* A website is the third, and the same argument applies twice over: it is not
-   text the vault owns at all, only a line naming a page somewhere else. One
-   address per file, so the file *is* the bookmark — nothing here needs to
-   parse it, which is why the format is a URL on a line and not a record. */
-const SITE_EXT = VAULT_CONTRACT.siteExtension
-const isSite = (p) => path.extname(p).toLowerCase() === SITE_EXT
-
-/* Portable Excalidraw JSON. Tulip owns the vault integration; the scene stays
-   in the upstream format so it can be opened by other whiteboard editors. */
-const WHITEBOARD_EXT = VAULT_CONTRACT.whiteboardExtension
-const isWhiteboard = (p) => path.extname(p).toLowerCase() === WHITEBOARD_EXT
-
-/* A Jupyter notebook. Text on disk — nbformat is JSON — so it is written,
-   versioned and imported exactly as a note is; what it is *not* is a source
-   file, because the editor would show the encoding rather than the cells. The
-   renderer gives it a viewer of its own; see src/notebook.js. */
-const NOTEBOOK_EXT = VAULT_CONTRACT.notebookExtension
-const isNotebook = (p) => path.extname(String(p || '')).toLowerCase() === NOTEBOOK_EXT
-
-/* A Word document. Read, shown and written back — but not the way a note is:
-   the vault does not own the format, so a save splices into the file Word
-   wrote rather than serialising this app's model over it. See electron/docx.js.
-   Named here so the tree can give it its own icon and label instead of listing
-   it among the files the vault has no view of. */
-const DOCX_EXT = VAULT_CONTRACT.docxExtension
-const isDocx = (p) => path.extname(String(p || '')).toLowerCase() === DOCX_EXT
-
-/* Source files and data files. Neither is a note — a `.py` is text the vault
-   edits but never reads as prose, and a `.csv` is a table rather than a
-   document at all — but both are text on disk that the vault owns, so unlike a
-   PDF they are written, versioned and searched exactly as a note is.
-
-   Sets rather than expressions: this is asked once per entry of every vault
-   walk, and the lists are long enough that a regular expression alternation
-   over sixty extensions is the wrong shape for the question. */
-const CODE_EXT = new Set(VAULT_CONTRACT.codeExtensions)
-const isCode = (p) => CODE_EXT.has(path.extname(String(p || '')).toLowerCase())
-
-const DATA_EXT = new Set(Object.keys(VAULT_CONTRACT.dataExtensions))
-const isData = (p) => DATA_EXT.has(path.extname(String(p || '')).toLowerCase())
-
-/* The two together, for the watcher's classifier: a `.py` or a `.csv` changing
-   on disk means the same to the caches as a `.tex` does, and the classifier
-   has to be able to say so rather than falling through to its unknown-name
-   fallback. */
-const TEXT_DOCUMENT_EXT = new Set([...CODE_EXT, ...DATA_EXT])
+  escapeRe, MD_EXT, NOTE_EXT, DOCUMENT_EXT, TEXT_DOCUMENT_EXT,
+  ATTACHMENT_DIR,
+  PDF_TEXT_SUFFIX,
+  TEX_EXT, isTex, isLanguageTable,
+  languageTableStem, languageName, languageTableLabel,
+  PDF_EXT, isPdf, SITE_EXT, isSite, WHITEBOARD_EXT, isWhiteboard,
+  NOTEBOOK_EXT, isNotebook, DOCX_EXT, isDocx, isFlashcard,
+  CODE_EXT, isCode, DATA_EXT, isData
+} = require('./vault-kinds')
+const FINDER_DOCUMENT_EXT = new Set(['.csv', PDF_EXT])
+/* A `.website` file is indexed too, and it is the cheapest entry in the whole
+   table: two short lines. Search used to be unable to find one at all — a site
+   was reachable only by already knowing what its file was called — and now
+   that the file carries the page's title on a `#` line (see `writeAddress` in
+   src/site.js) there is something to find it by. */
+const isIndexedDocumentExt = (ext) =>
+  TEXT_DOCUMENT_EXT.has(ext) || ext === NOTEBOOK_EXT || ext === SITE_EXT
 
 /* Every other text document the Copilot can edit, for the turn review. The
    review card is built by diffing before/after snapshots, and a snapshot that
@@ -301,7 +242,6 @@ const assetMime = (p) =>
    render a video into it. Vaults written under the old name are moved on open
    — see `migrateAttachments` — and the old name is still walked, so a vault
    the migration could not finish keeps resolving its embeds either way. */
-const ATTACHMENT_DIR = VAULT_CONTRACT.attachmentDirectory
 const LEGACY_ATTACHMENT_DIRS = ['.images']
 
 /** Hidden folders the vault walk descends into anyway, because notes point at
@@ -418,7 +358,14 @@ function toFocused (channel, payload) {
  *  rather than the app: a save dialog belongs over the page that opened it. */
 const windowOf = (event) => BrowserWindow.fromWebContents(event.sender)
 
-/** To one named window, if it is still there to hear it. */
+/**
+ * To one named window, if it is still there to hear it. Null arrives when the
+ * window a handler resolved has gone between the call and the send — the
+ * guard is the point, so the type says what the body already knew.
+ * @param {Electron.BrowserWindow | null} win
+ * @param {string} channel
+ * @param {unknown} payload
+ */
 function sendTo (win, channel, payload) {
   if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) {
     win.webContents.send(channel, payload)
@@ -426,8 +373,18 @@ function sendTo (win, channel, payload) {
 }
 
 let vaultPath = null
-let kernels = null
 let aiInstance = null
+
+/* The kernels, their handlers and their window ownership live in
+   electron/ipc-kernel.js. Main keeps only the two hooks a kernel's lifetime
+   hangs from — the vault changing under it, and a window going away. */
+const kernelDomain = makeKernelDomain({
+  sendTo,
+  executionTrusted,
+  ensureLoginPath,
+  runnerPath,
+  getVaultPath: () => vaultPath
+})
 
 const cleanFileTags = (values) => {
   const tags = [...new Set((Array.isArray(values) ? values : [])
@@ -531,7 +488,11 @@ let trust = null
 /* The scheduler's memory. Reads `vaultPath` through a function rather than
    being rebuilt on every vault switch: the store keys everything on the vault
    it was asked about, and re-reads when that changes. */
-const review = makeReviewStore({ vault: () => vaultPath || '' })
+const reviewDomain = makeReviewDomain({
+  getVaultPath: () => vaultPath,
+  focusedWindow
+})
+const { review } = reviewDomain
 /* When a language row first became complete and when it last changed. Kept in
    the same hidden vault state area as review history, not in visible columns. */
 const languageHistory = makeLanguageHistoryStore({ vault: () => vaultPath || '' })
@@ -564,6 +525,20 @@ function writeConfig (patch) {
   return config
 }
 
+/* Execution consent belongs to the absolute vault path. A copied vault must
+   ask again, while a vault reopened from the same folder keeps its answer. */
+function executionTrusted () {
+  return Boolean(vaultPath && Array.isArray(readConfig().trustedVaults) &&
+    readConfig().trustedVaults.includes(vaultPath))
+}
+
+function trustExecutionForVault () {
+  if (!vaultPath) return false
+  const before = Array.isArray(readConfig().trustedVaults) ? readConfig().trustedVaults : []
+  writeConfig({ trustedVaults: [...new Set([...before, vaultPath])] })
+  return true
+}
+
 async function persistConfig () {
   configTimer = null
   try {
@@ -581,10 +556,7 @@ function flushConfig () {
   clearTimeout(configTimer)
   configTimer = null
   try {
-    fsSync.mkdirSync(path.dirname(CONFIG_PATH()), { recursive: true })
-    const tmp = `${CONFIG_PATH()}.${process.pid}.tmp`
-    fsSync.writeFileSync(tmp, JSON.stringify(config, null, 2))
-    fsSync.renameSync(tmp, CONFIG_PATH())
+    writeAtomicSync(CONFIG_PATH(), JSON.stringify(config, null, 2))
   } catch (err) {
     console.error('config write failed', err)
   }
@@ -761,6 +733,15 @@ const whiteboardIndex = new Map() // rel path -> extracted text, never image dat
    search that silently skips a whole kind of document reads as "not in the
    vault" when it means "never looked". */
 const docxIndex = new Map()       // rel path -> extracted text, never the zip
+/* Source files, data files and notebooks — the vault's own text that is not
+   prose. They were the one kind of document the vault opened, edited and
+   versioned but could not FIND: a function name, a column heading or a line of
+   analysis was only searchable while its file happened to be open. Held on the
+   same terms as everything above — text only, validated by mtime and size, a
+   file too large kept with empty text so a search can say it went unread. For
+   a notebook the text is the cells' sources, never the outputs: a plot is a
+   megabyte of base64 that no one is searching for. */
+const documentIndex = new Map()   // rel path -> { name, text, kind, mtime, size }
 
 /* A note big enough to be a paste of a log file would cost more to hold than
    the search is worth; it is indexed as empty rather than skipped, so it still
@@ -809,7 +790,12 @@ const indexDirtyPaths = new Set()
 function markIndexDirty (relPath) {
   if (indexDirty) return
   const ext = relPath ? path.posix.extname(relPath).toLowerCase() : ''
-  const known = ext && (MD_EXT.has(ext) || ext === WHITEBOARD_EXT || ext === DOCX_EXT)
+  /* Every kind the targeted sync below has a table for. A kind missing from
+     this list is not "skipped" — it is a full walk of the vault on every
+     save of that file, which is what every `.py` and `.csv` autosave cost
+     while only notes, whiteboards and Word documents were named here. */
+  const known = ext && (MD_EXT.has(ext) || ext === WHITEBOARD_EXT ||
+    ext === DOCX_EXT || isIndexedDocumentExt(ext))
   if (known) indexDirtyPaths.add(relPath)
   else indexDirty = true
 }
@@ -869,8 +855,9 @@ async function syncIndex () {
     index.clear()
     whiteboardIndex.clear()
     docxIndex.clear()
+    documentIndex.clear()
     indexDirtyPaths.clear()
-    forgetLinkTables()
+    vaultInfoDomain.forgetTables()
     return
   }
 
@@ -886,7 +873,30 @@ async function syncIndex () {
     await mapLimit(targeted, WALK_LIMIT, async (key) => {
       const abs = path.join(vaultPath, ...key.split('/'))
       const ext = path.posix.extname(key).toLowerCase()
-      const table = MD_EXT.has(ext) ? index : ext === WHITEBOARD_EXT ? whiteboardIndex : docxIndex
+      /* Placed by kind, and only into a table whose kind it is. The old form
+         ended in an unconditional else, which quietly filed anything the vault
+         does not index — a `.zip` named by a directory-rename event, say —
+         into the last table on the list, as an entry shaped like a note. A
+         kind with no table has nothing to sync and is simply done. */
+      const table = MD_EXT.has(ext)
+        ? index
+        : ext === WHITEBOARD_EXT
+          ? whiteboardIndex
+          : ext === DOCX_EXT
+            ? docxIndex
+            : isIndexedDocumentExt(ext)
+                ? documentIndex
+                : null
+      if (!table) {
+        /* Nothing indexed answers to this name — unless the name is a folder,
+           which arrives extension-less from a rename and may hold any number
+           of files that are. Only the disk can say which, and a folder (or a
+           name already gone, which a renamed folder's old name is) hands over
+           to the full walk. */
+        const stat = await fs.stat(abs).catch(() => null)
+        if (!stat || !stat.isFile()) fallBack = true
+        return
+      }
       let stat
       try { stat = await fs.stat(abs) } catch {
         if (table.delete(key)) changed = true
@@ -902,7 +912,7 @@ async function syncIndex () {
     })
     if (!fallBack) {
       if (changed) {
-        forgetLinkTables()
+        vaultInfoDomain.forgetTables()
         saveIndexCache()
       }
       return
@@ -919,7 +929,7 @@ async function syncIndex () {
      it claims to be — see the loop. */
   await seedIndexFromCache()
 
-  const { notes, whiteboards = [], docx = [] } = await getVaultSnapshot()
+  const { notes, whiteboards = [], docx = [], sources = [] } = await getVaultSnapshot()
 
   /* Whether anything in any table moved. A walk that confirms every entry —
      the common outcome of a watcher event about something else — has nothing
@@ -1002,11 +1012,72 @@ async function syncIndex () {
   })
   for (const key of [...docxIndex.keys()]) if (!seenDocx.has(key)) { docxIndex.delete(key); changed = true }
 
+  /* Source files, data files and notebooks, on the same terms as everything
+     above: stat first, read only what moved, and hold a too-large file with
+     empty text so a search reports it unread rather than leaving it out. */
+  const seenDocuments = new Set()
+  await mapLimit(sources, WALK_LIMIT, async (abs) => {
+    const key = rel(abs)
+    seenDocuments.add(key)
+    let stat
+    try { stat = await fs.stat(abs) } catch { return }
+    const cached = documentIndex.get(key)
+    if (cached && cached.mtime === stat.mtimeMs && cached.size === stat.size) return
+    documentIndex.set(key, await documentEntryFor(abs, stat))
+    changed = true
+  })
+  for (const key of [...documentIndex.keys()]) {
+    if (!seenDocuments.has(key)) { documentIndex.delete(key); changed = true }
+  }
+
   // Which notes exist may have changed, and that is the whole of what the link
   // tables are built from.
-  forgetLinkTables()
+  vaultInfoDomain.forgetTables()
 
   if (changed) saveIndexCache()
+}
+
+/**
+ * A notebook's searchable text: the sources of its cells, in order, and none of
+ * its outputs. The file is mostly output — one plot is a megabyte of base64 —
+ * and indexing it whole would make the index carry pictures in the name of
+ * finding prose. A file that does not parse indexes as empty rather than
+ * failing the walk; it is still a document, just one with nothing to say yet.
+ */
+function notebookIndexText (source) {
+  try {
+    const cells = JSON.parse(source)?.cells
+    if (!Array.isArray(cells)) return ''
+    return cells
+      .map((cell) => Array.isArray(cell?.source) ? cell.source.join('') : String(cell?.source || ''))
+      .filter(Boolean)
+      .join('\n')
+  } catch {
+    return ''
+  }
+}
+
+/** The kind word a source-side document answers a search under. */
+const documentKindOf = (p) =>
+  isNotebook(p) ? 'notebook' : isSite(p) ? 'site' : isData(p) ? 'data' : 'code'
+
+/** One document-index entry, from a stat and (when small enough) the bytes. */
+async function documentEntryFor (abs, stat) {
+  let text = ''
+  if (stat.size <= MAX_INDEX_BYTES) {
+    const source = await fs.readFile(abs, 'utf8').catch(() => '')
+    text = isNotebook(abs) ? notebookIndexText(source) : source
+  }
+  return {
+    /* With the extension, exactly as the tree names it: `solve.py` and
+       `solve.c` in one folder are two files, and a result list that said
+       "solve" twice would be the tree's old bug in a new place. */
+    name: path.basename(abs),
+    text,
+    mtime: stat.mtimeMs,
+    size: stat.size,
+    kind: documentKindOf(abs)
+  }
 }
 
 /** One file's entry, as the walk would build it; null where it cannot be read. */
@@ -1023,6 +1094,9 @@ async function indexEntryFor (abs, stat, ext) {
     if (stat.size <= MAX_WHITEBOARD_INDEX_BYTES) text = whiteboardText(await fs.readFile(abs, 'utf8').catch(() => ''))
     return { ...base, kind: 'whiteboard', text }
   }
+  if (isIndexedDocumentExt(ext)) {
+    return documentEntryFor(abs, stat)
+  }
   let text = ''
   if (stat.size <= MAX_INDEX_BYTES) {
     try { text = await fs.readFile(abs, 'utf8') } catch { return null }
@@ -1030,7 +1104,23 @@ async function indexEntryFor (abs, stat, ext) {
   return { ...base, text }
 }
 
-/* Out to disk, coalesced, so the next launch starts from here. Not awaited:
+/* ⚠️ WHAT THIS COSTS, AND WHY IT IS STILL WORTH IT. `index` holds every note's
+   full text in main-process memory: measured, about a megabyte of heap per
+   megabyte of prose, so a ten-thousand-note vault of ordinary notes is around
+   64MB resident for the life of the session. That is the price of answering a
+   search from memory rather than from the disk, and of `links:to`, the tag
+   inventory, the alias table and the copilot's snapshots all reading the same
+   copy.
+
+   The obvious next move is to put the index in a utility process, which would
+   take it off main's heap and out of main's GC pauses. It has not been done:
+   every one of those readers would become asynchronous, and each is a place
+   where a stale answer is invisible — a note quietly missing from a result
+   list that still looks complete. The stall that made it urgent is gone
+   (electron/vault-scan.js yields), so what is left is a memory number rather
+   than something anybody feels.
+
+   Out to disk, coalesced, so the next launch starts from here. Not awaited:
    the index in memory is already correct and every caller is waiting on that,
    not on the copy. A vault too big to cache whole gets its largest notes
    dropped from the copy — worth a line in the log, because the symptom (a
@@ -1167,7 +1257,7 @@ function touchIndex (absPath, text, stamp) {
     indexGeneration++
     documentsChanged()
     // A note this index has not seen before is a key the link tables lack.
-    if (!index.has(rel(absPath))) forgetLinkTables()
+    if (!index.has(rel(absPath))) vaultInfoDomain.forgetTables()
     index.set(rel(absPath), {
       name: stripExt(path.basename(absPath)),
       text,
@@ -1223,6 +1313,28 @@ function touchWhiteboardIndex (absPath, source, stamp, extractedText = null) {
       mtime: stat.mtimeMs,
       size: stat.size,
       kind: 'whiteboard'
+    })
+  } catch {
+    indexDirty = true
+  }
+}
+
+/** The same courtesy for a source file, a table or a notebook the app itself
+ *  just saved: search finds what was typed a moment ago rather than waiting
+ *  for the next walk. The text is already in the caller's hand, so nothing is
+ *  read back. */
+function touchDocumentIndex (absPath, text, stamp) {
+  try {
+    const stat = stamp || fsSync.statSync(absPath)
+    indexGeneration++
+    documentIndex.set(rel(absPath), {
+      name: path.basename(absPath),
+      text: stat.size <= MAX_INDEX_BYTES
+        ? (isNotebook(absPath) ? notebookIndexText(text) : String(text ?? ''))
+        : '',
+      mtime: stat.mtimeMs,
+      size: stat.size,
+      kind: documentKindOf(absPath)
     })
   } catch {
     indexDirty = true
@@ -1285,6 +1397,13 @@ async function scanVaultDirectory (dir, includeInTree = true) {
   const evictedHere = entries.filter((entry) => entry.name.endsWith('.icloud')).length
   const kept = entries.filter((entry) => {
     if (IGNORED_DIRS.has(entry.name)) return false
+    /* A symlink is a name for something that lives elsewhere, and elsewhere is
+       exactly where this app must not follow: every open, write and delete
+       resolves through the real-path guards and would refuse it anyway. Listed,
+       it was a row that could only ever error — a symlinked folder showed up as
+       a *file* (readdir reports the link, not what it points at) that nothing
+       could open. Hidden, it is simply not the vault's, like `.git`. */
+    if (entry.isSymbolicLink()) return false
     return !entry.name.startsWith('.') || ATTACHMENT_DIRS.has(entry.name)
   })
   const parts = await mapLimit(kept, WALK_LIMIT, async (entry) => {
@@ -1304,11 +1423,12 @@ async function scanVaultDirectory (dir, includeInTree = true) {
     let node = null
     if (includeInTree && MD_EXT.has(path.extname(entry.name).toLowerCase())) {
       const language = isLanguageTable(abs)
+      const flashcards = isFlashcard(abs)
       const identity = language ? languageName(languageTableStem(entry.name)) : null
       const folderIdentity = language ? languageName(path.basename(dir)) : null
       node = {
         type: 'file',
-        kind: language ? 'language' : 'note',
+        kind: flashcards ? 'flashcards' : language ? 'language' : 'note',
         name: languageTableLabel(identity?.name || stripExt(entry.name)),
         flag: identity?.flag || folderIdentity?.flag || '',
         path: rel(abs)
@@ -1474,7 +1594,20 @@ async function getVaultSnapshot ({ fresh = false } = {}) {
       pdfs: files.filter(isPdf).map(rel),
       whiteboards: files.filter(isWhiteboard),
       docx: files.filter(isDocx),
-      documents: files.filter(isReviewedDocument)
+      documents: files.filter(isReviewedDocument),
+      /* The subset of `documents` the search index reads: the kinds whose text
+         is worth holding. Whiteboards have an index of their own already. A
+         site file is here despite being two lines long, because those two
+         lines are the page's title and its address — which is the whole of
+         what anybody would search for a bookmark by. */
+      sources: files.filter((abs) =>
+        isCode(abs) || isData(abs) || isNotebook(abs) || isSite(abs)),
+      /* Everything the walk kept, as vault-relative paths. The buckets above
+         are each a filter of this list for one consumer; the rename path wants
+         the list itself, because a link can name any file the tree shows and
+         "which files could this `[[Name]]` have meant" is a question about all
+         of them at once. */
+      files: files.map(rel)
     }
     snapshot.revision = snapshotRevision(snapshot)
     // Something changed while we were reading; the answer is already behind.
@@ -1510,16 +1643,71 @@ const CODE_OR_LINK = new RegExp([
   '(?<link>\\[\\[(?<target>[^\\[\\]|]+)(?<alias>\\|[^\\[\\]]*)?\\]\\])'
 ].join('|'), 'gm')
 
-/** How the renderer reads a link target, so the two agree on what resolves. */
-function normaliseTarget (raw) {
-  return stripExt(raw.trim().replace(/\\/g, '/')).replace(/\/+$/, '')
+/**
+ * The extensions the tree hides, and therefore the ones a wikilink is written
+ * without.
+ *
+ * A `.md` is not the only kind named this way. The tree labels a paper, a
+ * board, a notebook and a Word document by their stem too — the icon beside
+ * the row is what says which kind it is — so `[[Report]]` is how a reader
+ * writes a link to `Report.docx`, and `[[Report.docx]]` resolves as well
+ * because the renderer accepts both. Source and data files are the exception
+ * and keep their extension in the label, since `solve.py` and `solve.c` in one
+ * folder would otherwise be two rows both reading "solve".
+ *
+ * Stated here because a rename has to know it. The link rewriter used to strip
+ * only note extensions, which is why renaming a PDF left every `[[book]]` in
+ * the vault pointing at a file that no longer existed, and said "0 links" while
+ * it did so.
+ */
+const LINK_STEM_EXT = new Set([
+  ...VAULT_CONTRACT.noteExtensions,
+  TEX_EXT, PDF_EXT, SITE_EXT, WHITEBOARD_EXT, NOTEBOOK_EXT, DOCX_EXT
+])
+
+/** A path with the extension a link would leave off taken off — and nothing
+ *  taken off a path whose kind wears its extension in the tree. */
+function stripLinkExt (p) {
+  const ext = path.extname(p).toLowerCase()
+  return LINK_STEM_EXT.has(ext) ? p.slice(0, p.length - ext.length) : p
 }
 
-/** Notes sharing a basename, counted over a set of note paths. */
+/**
+ * How the renderer reads a link target, so the two agree on what resolves.
+ *
+ * Both spellings of a document arrive here as the same string: `[[Report]]` and
+ * `[[Report.docx]]` are one link, written twice. So do both spellings of an
+ * accent. A `é` is either one codepoint or two, macOS filesystems have
+ * historically preferred the two-codepoint form while every keyboard produces
+ * the one-codepoint form, and a vault touched by a sync client ends up holding
+ * some of each — so `Café.md` on disk and `[[Café]]` in a note could be two
+ * different strings that no comparison would ever match, and the link simply
+ * did not resolve.
+ *
+ * Composed here rather than in `rel`, deliberately. This is a comparison key
+ * and never a path anything is opened by: normalising the paths themselves
+ * would hand Linux, whose filesystems store exactly the bytes they were given,
+ * a name for a file that does not exist.
+ */
+function normaliseTarget (raw) {
+  return stripLinkExt(raw.trim().replace(/\\/g, '/')).replace(/\/+$/, '').normalize('NFC')
+}
+
+/** The extension a link left implicit, so a rewrite can put back the spelling
+ *  the reader actually used rather than quietly shortening it. */
+function linkExtOf (raw) {
+  const head = raw.trim().replace(/\\/g, '/').replace(/\/+$/, '')
+  const ext = path.extname(head).toLowerCase()
+  return LINK_STEM_EXT.has(ext) ? head.slice(head.length - ext.length) : ''
+}
+
+/** Files sharing a link name, counted over a set of vault paths. Composed for
+ *  the same reason `normaliseTarget` is — this counts the names links are
+ *  compared against, so it has to spell them the way that comparison will. */
 function basenameCounts (paths) {
   const counts = new Map()
   for (const p of paths) {
-    const base = path.basename(stripExt(p)).toLowerCase()
+    const base = path.basename(stripLinkExt(p)).toLowerCase().normalize('NFC')
     counts.set(base, (counts.get(base) || 0) + 1)
   }
   return counts
@@ -1552,7 +1740,30 @@ function retarget (link, move, before, after) {
   return !link.includes('/') && after.get(toBase.toLowerCase()) === 1 ? toBase : to
 }
 
-function rewriteLinks (text, moves, before, after) {
+/**
+ * The moves, arranged so one link can find its own without walking the list.
+ *
+ * A folder rename now carries every file underneath it — pictures and papers
+ * as well as notes — so a big folder is hundreds of moves, and the old loop
+ * asked every one of them about every link in every note that mentioned any of
+ * them. Two maps answer the same question directly: a fully qualified link
+ * looks up its path, a bare one looks up its name.
+ */
+function moveLookup (moves) {
+  const byPath = new Map()
+  const byName = new Map()
+  for (const move of moves) {
+    const from = normaliseTarget(move.from).toLowerCase()
+    if (!byPath.has(from)) byPath.set(from, move)
+    const base = path.basename(from)
+    const same = byName.get(base)
+    if (same) same.push(move)
+    else byName.set(base, [move])
+  }
+  return { byPath, byName }
+}
+
+function rewriteLinks (text, moves, before, after, lookup = moveLookup(moves)) {
   return text.replace(CODE_OR_LINK, (whole, ...rest) => {
     // Named groups arrive as the last argument, after the numbered ones.
     // `isLink` is set only when the wikilink alternative is what matched.
@@ -1566,10 +1777,33 @@ function rewriteLinks (text, moves, before, after) {
     const frag = hash === -1 ? '' : target.slice(hash)
     const link = normaliseTarget(head)
     if (!link) return whole
+    /* `[[book.pdf]]` and `[[book]]` are the same link and both normalise to
+       the same string, but they are not the same *writing*. The extension the
+       reader typed goes back on the end, so a rename edits the target and
+       leaves the spelling alone. */
+    const wore = linkExtOf(head)
 
-    for (const move of moves) {
+    /* The exact path first, then the bare name — the same order `retarget`
+       tested in, and the order that matters: a link that names a whole path
+       means that file even when something else shares its name. */
+    const wanted = link.toLowerCase()
+    const candidates = []
+    const exact = lookup.byPath.get(wanted)
+    if (exact) candidates.push(exact)
+    if (!link.includes('/')) candidates.push(...(lookup.byName.get(wanted) || []))
+    if (!candidates.length) return whole
+
+    for (const move of candidates) {
       const next = retarget(link, move, before, after)
-      if (next !== null) return `[[${next}${frag}${alias}]]`
+      if (next !== null) {
+        /* Only when the new target is of a kind that hides its extension too:
+           renaming `book.pdf` to `notes.csv` cannot leave the link reading
+           `[[notes.pdf]]`. */
+        const suffix = wore && LINK_STEM_EXT.has(path.extname(move.to).toLowerCase())
+          ? path.extname(move.to)
+          : ''
+        return `[[${next}${suffix}${frag}${alias}]]`
+      }
     }
     return whole
   })
@@ -1591,31 +1825,61 @@ async function followMoves (moves) {
   if (!moves.length) return []
 
   indexDirty = true
+  invalidateVaultSnapshot()
   await ensureIndex()
-  const after = basenameCounts(index.keys())
+  /* Every file a link could name, not only the notes.
+
+     The ambiguity rule below turns on whether a bare `[[Name]]` had exactly one
+     possible target before the move. Counted over the index alone, a vault
+     holding both `Report.md` and `Report.docx` looked unambiguous, and renaming
+     the note redirected links that had always meant the document.
+
+     Two details here are load-bearing. The snapshot is invalidated first, so
+     the walk describes the vault as it stands after the rename — the nudge
+     below reconstructs the before-counts from these, and reconstructing them
+     from a stale walk double-counts the very name that moved. And the notes
+     come from the index alone, with the snapshot contributing only the other
+     kinds: a note is in both lists, and counted twice it reads as its own
+     twin, which silences every bare link to it. */
+  const snapshot = await getVaultSnapshot()
+  const linkable = [
+    ...index.keys(),
+    ...(snapshot.files || []).filter((key) => !MD_EXT.has(path.extname(key).toLowerCase()))
+  ]
+  const after = basenameCounts(linkable)
 
   const before = new Map(after)
   const nudge = (key, by) => before.set(key, (before.get(key) || 0) + by)
   for (const { from, to } of moves) {
-    nudge(path.basename(stripExt(from)).toLowerCase(), +1)
-    nudge(path.basename(stripExt(to)).toLowerCase(), -1)
+    nudge(path.basename(stripLinkExt(from)).toLowerCase().normalize('NFC'), +1)
+    nudge(path.basename(stripLinkExt(to)).toLowerCase().normalize('NFC'), -1)
   }
 
   /* Only notes that mention one of the moved names can possibly change. A
      `[[` test would keep almost every note in a vault that uses wikilinks; this
-     rejects the ones that never named the thing, which is nearly all of them. */
-  const mentions = new RegExp(
-    [...new Set(moves.map((m) => path.basename(stripExt(m.from))))].map(escapeRe).join('|'),
-    'i'
-  )
+     rejects the ones that never named the thing, which is nearly all of them.
+
+     Both spellings of every name, because this is the one place the comparison
+     is against raw note text rather than a composed key: a file whose name is
+     stored decomposed would otherwise never match the composed `[[Café]]` a
+     reader typed, and the note would be skipped before `rewriteLinks` — which
+     does compose both sides — ever saw it. */
+  const spellings = new Set()
+  for (const move of moves) {
+    const base = path.basename(stripLinkExt(move.from))
+    spellings.add(base.normalize('NFC'))
+    spellings.add(base.normalize('NFD'))
+  }
+  const mentions = new RegExp([...spellings].map(escapeRe).join('|'), 'i')
 
   /* Decided first, written second. The rewrite itself is synchronous string
      work over the index, and doing it in its own pass keeps `touchIndex` from
      writing into the map this loop is walking. */
+  const lookup = moveLookup(moves)
   const pending = []
   for (const [key, entry] of index) {
     if (!mentions.test(entry.text)) continue
-    const next = rewriteLinks(entry.text, moves, before, after)
+    const next = rewriteLinks(entry.text, moves, before, after, lookup)
     if (next === entry.text) continue
     pending.push({ key, abs: path.resolve(vaultPath, key), next, previous: entry.text })
   }
@@ -1664,7 +1928,7 @@ async function relocate (srcAbs, targetAbs) {
   const fromPath = rel(srcAbs)
   const toPath = rel(targetAbs)
   await ensureIndex()
-  const moves = notesMovedBy(rel(srcAbs), rel(targetAbs), isDir)
+  const moves = await filesMovedBy(rel(srcAbs), rel(targetAbs), isDir)
 
   noteSelfWrite(srcAbs)
   noteSelfWrite(targetAbs)
@@ -1681,11 +1945,18 @@ async function relocate (srcAbs, targetAbs) {
   /* A python environment cannot be carried to a new path — see `relocate` in
      electron/python-env.js — so the notes that moved give theirs up and build
      again on their next run. A folder move is every note under it. */
+  /* Notes only, as before this list grew. A folder move now carries every
+     picture and paper under it so their links can be chased, and asking the
+     environment store about a `.png` would be several hundred pointless
+     lookups per folder rename. */
   await Promise.all(
-    (isDir ? moves : [{ from: fromPath, to: toPath }])
+    (isDir
+      ? moves.filter(({ from }) => MD_EXT.has(path.extname(from).toLowerCase()))
+      : [{ from: fromPath, to: toPath }])
       .map(({ from, to }) => pythonEnvs.relocate(from, to))
   )
   await carryAnnotations(rel(srcAbs), rel(targetAbs))
+  await carryAttachments(rel(srcAbs), rel(targetAbs))
   /* A card's identity begins with the path of the note it came from, so a
      rename that did not carry the review state would silently reset every word
      in the table to never-seen — the same loss as throwing the history away,
@@ -1701,20 +1972,35 @@ async function relocate (srcAbs, targetAbs) {
 }
 
 /**
- * The `.md` files a move carries with it: the file itself, or — when a folder
- * moves — every note underneath it. Must be read from the index *before* the
- * move happens, while those paths still exist.
+ * The files a move carries with it: the file itself, or — when a folder moves —
+ * everything underneath it that a link could have named. Must be read *before*
+ * the move happens, while those paths still exist.
+ *
+ * Notes were once the whole of this list, on the reasoning that only a note is
+ * in the link index. That confused two different things. The index is a map of
+ * which notes *contain* links; what this function answers is which files a link
+ * can *point at*, and the tree has always let a reader write `[[book]]` for a
+ * paper, `[[Report]]` for a Word document and `![[diagram.png]]` for a picture.
+ * Renaming any of those rewrote nothing and reported "0 links", leaving the
+ * link dangling with an explicit reassurance that it had not been.
  */
-function notesMovedBy (from, to, isDir) {
-  if (!isDir) return MD_EXT.has(path.extname(from).toLowerCase()) ? [{ from, to }] : []
+async function filesMovedBy (from, to, isDir) {
+  if (!isDir) return isSnapshotFile(from) ? [{ from, to }] : []
   const prefix = from + '/'
-  return notesUnder(from, true)
-    .map((key) => ({ from: key, to: `${to}/${key.slice(prefix.length)}` }))
+  /* The index for the notes and the snapshot for everything else, joined and
+     de-duplicated: a note appears in both, and rewriting a link twice would
+     apply the second move to the result of the first. */
+  const snapshot = await getVaultSnapshot()
+  const under = new Set([
+    ...notesUnder(from, true),
+    ...(snapshot.files || []).filter((key) => key.startsWith(prefix))
+  ])
+  return [...under].map((key) => ({ from: key, to: `${to}/${key.slice(prefix.length)}` }))
 }
 
 /**
  * The `.md` paths a single path stands for: itself, or — for a folder — every
- * note beneath it. Read from the index, so like `notesMovedBy` it must be
+ * note beneath it. Read from the index, so like `filesMovedBy` it must be
  * called while those paths still exist.
  */
 function notesUnder (target, isDir) {
@@ -1755,15 +2041,6 @@ const pendingDurability = new Set()
 let durabilityTimer = null
 let durabilityFlushing = null
 const DURABILITY_INTERVAL_MS = 30000
-
-async function syncDirectory (dirPath) {
-  const dir = await fs.open(dirPath, 'r')
-  try {
-    await dir.sync()
-  } finally {
-    await dir.close()
-  }
-}
 
 async function syncExistingFile (abs) {
   const file = await fs.open(abs, 'r')
@@ -1940,6 +2217,7 @@ function watchVault () {
         siteExtension: SITE_EXT,
         whiteboardExtension: WHITEBOARD_EXT,
         notebookExtension: NOTEBOOK_EXT,
+        docxExtension: DOCX_EXT,
         documentExtensions: TEXT_DOCUMENT_EXT,
         assetExtensions: ASSET_EXT
       })
@@ -2070,6 +2348,56 @@ async function migrateAttachments (dir) {
   }
 }
 
+/* ------------------------------------------------ tags, into the notes
+   A tag put on a Markdown note used to be filed in `.tulip/file-tags.json`,
+   beside the vault rather than inside the note. That made a tag the one piece
+   of a note's meaning that did not travel with it: a vault carried to another
+   app — or read by anything but Tulip — arrived with the `#tags` typed into
+   the prose intact and the ones set in the Info pane simply gone.
+
+   Now a Markdown note's tags live in its own head, as `tags:`, which is what
+   every other app that reads a vault expects. The sidecar keeps only the kinds
+   with nowhere to put them: a PDF, a Word document, a whiteboard.
+
+   This is the one-time move. It runs on vault open, writes only notes that
+   actually have a sidecar entry, and merges rather than replaces — a note that
+   already declares `tags:` keeps what it declared and gains what was filed
+   against it. Each note is written through the ordinary atomic write, so a
+   failure part-way leaves whole notes on either side of it and the entries it
+   has not reached still in the sidecar to be moved next time. */
+async function migrateNoteTags () {
+  if (!vaultPath) return
+  const assigned = await fileTags.all().catch(() => null)
+  if (!assigned) return
+  const moving = Object.keys(assigned)
+    .filter((key) => MD_EXT.has(path.extname(key).toLowerCase()))
+    .filter((key) => (cleanFileTags(assigned[key]) || []).length)
+  if (!moving.length) return
+
+  let moved = 0
+  for (const key of moving) {
+    const abs = path.join(vaultPath, key)
+    let text
+    try { text = await fs.readFile(abs, 'utf8') } catch { continue }
+    const sidecar = cleanFileTags(assigned[key]) || []
+    const head = tagsFromProps(propsOf(parseFrontmatter(text)))
+    const union = [...new Set([...head, ...sidecar])]
+    /* Written even when the head already says all of it, because the point of
+       the write is to be able to clear the sidecar entry afterwards — and
+       `writeListProp` hands back the same string when nothing moves, so a note
+       that needs no change is not rewritten. */
+    const updated = writeListProp(text, 'tags', union)
+    try {
+      if (updated !== text) { await writeAtomic(abs, updated); moved++ }
+      await fileTags.set(key, [])
+    } catch {
+      // Left in the sidecar, to be tried again on the next open.
+      continue
+    }
+  }
+  if (moved) console.log(`tags: moved ${moved} note${moved === 1 ? '' : 's'} into their own heads`)
+}
+
 /* The vaults connected before this one, newest first.
    ⚠️ Written by main and never by the renderer, which is why `recentVaults` is
    not in electron/config-keys.js: a list of folder paths is exactly the shape
@@ -2120,10 +2448,7 @@ async function openVault (dir) {
   vaultPath = dir
   /* The kernels belonged to the vault that is closing, and their namespaces
      describe notebooks nothing is showing any more. */
-  if (kernels) {
-    kernels.dispose().catch(() => {})
-    kernels.setRoot(dir)
-  }
+  kernelDomain.moveRoot(dir)
   // The next read of each is of the new vault's own file.
   resetAll()
   /* And nothing is being edited in it yet. Every window drops the document
@@ -2144,11 +2469,13 @@ async function openVault (dir) {
      mistaken for a newer answer than this one. */
   writeConfig({ vaultPath: dir, defaultVaultPath: undefined })
   await migrateAttachments(dir).catch(() => {})
+  await migrateNoteTags().catch(() => {})
   index.clear()
   whiteboardIndex.clear()
   docxIndex.clear()
+  documentIndex.clear()
   documentSnapshotCache.clear()
-  forgetLinkTables()
+  vaultInfoDomain.forgetTables()
   /* A different vault means a different cache file, and the index just emptied
      is now allowed to be seeded from it again. */
   useIndexCacheFor(dir)
@@ -2247,7 +2574,10 @@ ipcMain.handle('app:update-check', async () => {
     current,
     latest: tag.replace(/^v/, ''),
     newer: isNewer(tag, current),
-    url: String(latest?.html_url || '')
+    url: String(latest?.html_url || ''),
+    /* Release notes for the update dialog, truncated so a long changelog does
+       not become a long dialog. Plain text: the dialog renders detail as-is. */
+    notes: String(latest?.body || '').slice(0, 2000)
   }
 })
 
@@ -2384,9 +2714,11 @@ ipcMain.on('app:painted', (event) => {
   }
 })
 
-ipcMain.handle('app:flushed', async (event) => {
+ipcMain.handle('app:flushed', async (event, result = {}) => {
   await flushPendingDurability()
-  flushWaits.get(event.sender.id)?.reply()
+  const waiting = flushWaits.get(event.sender.id)
+  if (result?.ok === false) waiting?.fail?.()
+  else waiting?.reply()
 })
 
 /* One entry per window with a flush in flight. Per window rather than one
@@ -2435,8 +2767,9 @@ function askRendererToFlush (win) {
   entry.promise = new Promise((resolve) => {
     const startedAt = Date.now()
     let timer = setTimeout(resolve, FLUSH_QUIET_MS)
-    const done = () => { clearTimeout(timer); resolve() }
-    entry.reply = done
+    const done = (result = { failed: false }) => { clearTimeout(timer); resolve(result) }
+    entry.reply = () => done({ failed: false })
+    entry.fail = () => done({ failed: true })
     entry.working = () => {
       const left = FLUSH_CEILING_MS - (Date.now() - startedAt)
       if (left <= 0) return done()
@@ -2503,11 +2836,67 @@ if (process.platform === 'win32') {
    cannot be told apart from the window it was opened from. */
 const CASCADE = 28
 
+/**
+ * Where the primary window was when the app last quit — see `rememberBounds`.
+ *
+ * Only offered back when enough of the rectangle still lies on some display
+ * to take hold of: a window last seen on a monitor that is no longer plugged
+ * in would otherwise open off the edge of the screen, with no title bar to
+ * drag it back by. Enough, not all of it — a window snapped to half the screen
+ * reports itself a pixel wider than the half, and macOS itself is happy to
+ * show a window that hangs over an edge. The default size then applies, and
+ * the first window fills the screen as it always did. A maximised window is remembered as such rather than by the
+ * screen-sized rectangle it wore: restored as bounds, the green button would
+ * do nothing the next morning.
+ *
+ * @returns {{bounds: {x: number, y: number, width: number, height: number}|null, maximized: boolean}}
+ */
+function rememberedWindow () {
+  const saved = readConfig().window
+  if (!saved || typeof saved !== 'object') return { bounds: null, maximized: false }
+  const { x, y, width, height } = saved
+  const finite = [x, y, width, height].every((n) => Number.isFinite(n))
+  const fits = finite && screen.getAllDisplays().some(({ workArea: a }) => {
+    const across = Math.min(x + width, a.x + a.width) - Math.max(x, a.x)
+    // The title bar is the top of the window: it has to be on the display,
+    // with room under it, or the window cannot be moved at all.
+    const barOn = y >= a.y - 4 && y <= a.y + a.height - 100
+    return across >= 200 && barOn
+  })
+  return {
+    bounds: fits ? { x, y, width, height } : null,
+    maximized: saved.maximized === true
+  }
+}
+
+/** Writes the primary window's place down, debounced with the rest of the config. */
+function rememberBounds (win) {
+  if (win.isDestroyed() || win.isMinimized() || win.isFullScreen()) return
+  const maximized = win.isMaximized()
+  // The rectangle underneath a maximised window is the one it un-maximises
+  // to — `getNormalBounds` reports that rather than the screen.
+  writeConfig({ window: { ...win.getNormalBounds(), maximized } })
+}
+
 function cascadeFrom (win) {
   if (!win || win.isDestroyed()) return {}
   const [x, y] = win.getPosition()
   const [width, height] = win.getSize()
   return { x: x + CASCADE, y: y + CASCADE, width, height }
+}
+
+/* A zoom or resize can leave Chromium's macOS surface waiting for a paint even
+   though its renderer and accessibility tree are both still live. Coalesce a
+   burst into one full repaint; doing this on every drag frame would make the
+   cure more expensive than the layout it follows. */
+const repaintTimers = new WeakMap()
+function scheduleWindowRepaint (win) {
+  if (!win || win.isDestroyed()) return
+  clearTimeout(repaintTimers.get(win))
+  repaintTimers.set(win, setTimeout(() => {
+    repaintTimers.delete(win)
+    if (!win.isDestroyed() && !win.webContents.isDestroyed()) win.webContents.invalidate()
+  }, 60))
 }
 
 /**
@@ -2522,15 +2911,18 @@ function cascadeFrom (win) {
  * @param {string|null} [opts.open]  a vault-relative path to open in it
  */
 function createWindow ({ open = null } = {}) {
-  /* The first window keeps the size it always had, and takes the whole screen;
-     a second one is sized and placed from the window it was opened out of, so
-     it lands somewhere the reader is already looking. */
+  /* The first window opens where the last session left it — see
+     `rememberedWindow` — and fills the screen when there is nothing to go back
+     to; a second one is sized and placed from the window it was opened out of,
+     so it lands somewhere the reader is already looking. */
   const parent = windows.size ? focusedWindow() : null
+  const remembered = windows.size ? { bounds: null, maximized: false } : rememberedWindow()
   const win = new BrowserWindow({
     width: 1180,
     height: 780,
     minWidth: 680,
     minHeight: 460,
+    ...(remembered.bounds || {}),
     ...cascadeFrom(parent),
     ...windowChrome(),
     backgroundColor: nativeTheme.shouldUseDarkColors ? '#141317' : '#FBFAF8',
@@ -2550,6 +2942,21 @@ function createWindow ({ open = null } = {}) {
   })
 
   windows.add(win)
+
+  /* The native menu follows the frontmost window. Its renderer reports the
+     active document separately, so focus only has to rebuild from that saved
+     fact — no round trip during a menu-bar click. */
+  win.on('focus', () => buildMenu())
+
+  /* Chromium normally repaints as a native resize settles. At a large page
+     zoom it can miss that final paint and show only the window background.
+     macOS's green-button "zoom window" transition can arrive as
+     maximize/unmaximize rather than an ordinary resize, so cover both the
+     live and completed forms of the native change. */
+  for (const event of ['resize', 'resized', 'maximize', 'unmaximize']) {
+    win.on(event, () => scheduleWindowRepaint(win))
+  }
+
   // Claimed by `window:role` during boot, and gone once it has been read.
   if (open) pendingOpens.set(win.webContents.id, open)
   /* The first window to exist is the primary one for as long as it does. It is
@@ -2560,12 +2967,24 @@ function createWindow ({ open = null } = {}) {
   if (!primaryWindow) primaryWindow = win
   const primary = primaryWindow === win
 
-  /* The first window opens filling the screen. The width and height above stay
+  /* A first window with no remembered place opens filling the screen, and one
+     remembered maximised comes back that way. The width and height above stay
      what they are — they are the size it returns to when it is un-maximised,
      and a restore size equal to the screen would make the green button do
      nothing. A second window keeps the size it was cascaded at: it was opened
      to be looked at beside something, which a maximise would undo. */
-  if (primary) win.maximize()
+  if (primary && (!remembered.bounds || remembered.maximized)) win.maximize()
+
+  /* The primary window's place is kept, so the next launch opens where this
+     one was left. The live events rather than `resized` and `moved`: those
+     only follow a resize made by hand, and a window sized by a script or by
+     the system — a display coming or going — would be remembered wrong. A drag
+     delivers one per frame, and the config write behind them is debounced. */
+  if (primary) {
+    for (const event of ['resize', 'move', 'maximize', 'unmaximize']) {
+      win.on(event, () => rememberBounds(win))
+    }
+  }
 
   /* Shown when there is something to read, not when there is a frame to fill.
      `ready-to-show` fires as soon as the document has painted once — about
@@ -2674,12 +3093,16 @@ function createWindow ({ open = null } = {}) {
   const contentsId = win.webContents.id
 
   win.on('closed', () => {
+    clearTimeout(repaintTimers.get(win))
+    repaintTimers.delete(win)
     windows.delete(win)
     reveals.delete(contentsId)
     documentZoomClaims.delete(contentsId)
+    menuDocumentKinds.delete(contentsId)
+    searchGenerations.delete(contentsId)
     releaseClaimsOwnedBy(contentsId)
     stopRunsOwnedBy(win)
-    stopKernelsOwnedBy(win)
+    kernelDomain.stopOwnedBy(win)
     if (primary) {
       primaryWindow = null
       try { aiInstance?.stopAll('SIGKILL') } catch { /* nothing running */ }
@@ -2696,7 +3119,13 @@ function createWindow ({ open = null } = {}) {
     // close, not another one.
     if (flushing) return
     flushing = true
-    askRendererToFlush(win).then(() => {
+    askRendererToFlush(win).then((result) => {
+      if (result?.failed) {
+        /* Keep the window open when the renderer explicitly could not save. A
+           draft or a retry is safer than closing over unsaved work. */
+        flushing = false
+        return
+      }
       flushed = true
       /* A quit is every window's business and closing one is its own: `close`
          here is this window going, and the quit that provoked it will come
@@ -2711,6 +3140,7 @@ function createWindow ({ open = null } = {}) {
   win.webContents.on('did-finish-load', () => {
     const saved = readConfig().zoom || DEFAULT_ZOOM
     if (saved !== 1) win.webContents.setZoomFactor(saved)
+    scheduleWindowRepaint(win)
     sendTo(win, 'zoom', Math.round(saved * 100))
   })
 
@@ -2760,6 +3190,63 @@ ipcMain.handle('window:new', (_e, open) => {
   return { ok: true }
 })
 
+/* A document opened from Finder arrives before `ready` on a cold launch and
+   while the app is running thereafter. Keep the path until the vault and
+   windows are ready to receive it; macOS otherwise launches Tulip successfully
+   and silently drops the file it was launched for. */
+const finderOpens = []
+let finderOpensReady = false
+let drainingFinderOpens = null
+
+const finderDocument = (filePath) =>
+  typeof filePath === 'string' && FINDER_DOCUMENT_EXT.has(path.extname(filePath).toLowerCase())
+
+app.on('open-file', (event, filePath) => {
+  if (!finderDocument(filePath)) return
+  event.preventDefault()
+  finderOpens.push(filePath)
+  if (finderOpensReady) drainFinderOpens()
+})
+
+function launchFinderDocument () {
+  while (finderOpens.length) {
+    const wanted = finderOpens.shift()
+    try {
+      const real = fsSync.realpathSync(wanted)
+      if (fsSync.statSync(real).isFile()) return real
+    } catch { /* Finder may have handed over a file that disappeared. */ }
+  }
+  return null
+}
+
+async function openFinderDocument (wanted) {
+  if (!finderDocument(wanted)) return
+  const real = await fs.realpath(wanted)
+  if (!(await fs.stat(real)).isFile()) return
+
+  const relative = vaultPath ? path.relative(vaultPath, real) : ''
+  const insideVault = vaultPath && relative && relative !== '..' &&
+    !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)
+
+  if (!insideVault) {
+    await flushAllWindows()
+    await openVault(path.dirname(real))
+  }
+  createWindow({ open: insideVault ? relative : path.basename(real) })
+  app.focus({ steal: true })
+}
+
+function drainFinderOpens () {
+  if (drainingFinderOpens) return drainingFinderOpens
+  drainingFinderOpens = (async () => {
+    while (finderOpens.length) {
+      const wanted = finderOpens.shift()
+      try { await openFinderDocument(wanted) } catch (err) { logCrash('open-file', err) }
+    }
+  })().finally(() => { drainingFinderOpens = null })
+  return drainingFinderOpens
+}
+
 /* ======================================================= a tab between windows
 
    Dragging a tab from one window's strip onto another's is arbitrated here
@@ -2790,17 +3277,6 @@ ipcMain.on('tab:drag-end', (event) => {
   // Only the window that picked it up may put it down: a stale end from another
   // window would cancel a drag it was never part of.
   if (tabInFlight && tabInFlight.from === event.sender.id) tabInFlight = null
-})
-
-/**
- * What another window is dragging, if anything.
- *
- * Answers null for the window that started the drag, so an ordinary reorder
- * inside one strip is never mistaken for a handoff.
- */
-ipcMain.handle('tab:dragging', (event) => {
-  if (!tabInFlight || tabInFlight.from === event.sender.id) return null
-  return { path: tabInFlight.path }
 })
 
 /**
@@ -3034,23 +3510,81 @@ const { steps: ZOOM_STEPS, start: DEFAULT_ZOOM } = require('./zoom-steps.json')
 const documentZoomClaims = new Set()
 const documentOwnsZoom = (win) => !!win && documentZoomClaims.has(win.webContents.id)
 
+/* The application menu is process-wide on macOS, while the document on screen
+   belongs to one window. Keep the active kind per window so focusing a second
+   window also gives it the right contextual sections. */
+const menuDocumentKinds = new Map()
+const menuDocumentKind = () => {
+  const win = focusedWindow()
+  return win ? menuDocumentKinds.get(win.webContents.id) || '' : ''
+}
+
 /* Zoom is per window — it is the size of the text in front of you, and a
    second window opened to read something beside the first has every reason to
    be at a different one. What is written to the config is the last size asked
    for anywhere, which is what a new window starts at. */
+const zoomWork = new WeakMap()
+const pendingZooms = new WeakMap()
 function zoomFactor () {
   const win = focusedWindow()
   if (!win) return 1
-  return win.webContents.getZoomFactor()
+  return pendingZooms.get(win) || win.webContents.getZoomFactor()
+}
+
+/* A native zoom swaps the size of Chromium's macOS surface before its first
+   paint at that size. The preload gives it a fully painted CSS-equivalent
+   frame first, so the native swap has something to show instead of revealing
+   the window background along the right edge. Two animation frames are enough
+   to commit that staging paint; the timeout keeps a renderer on its way out
+   from ever holding a menu command open. */
+let zoomStageId = 0
+const zoomStageWaits = new Map()
+
+function stageZoom (win, ratio) {
+  return new Promise((resolve) => {
+    const id = ++zoomStageId
+    const timer = setTimeout(() => {
+      zoomStageWaits.delete(id)
+      resolve()
+    }, 75)
+    zoomStageWaits.set(id, () => {
+      clearTimeout(timer)
+      zoomStageWaits.delete(id)
+      resolve()
+    })
+    sendTo(win, 'zoom:stage', { id, ratio })
+  })
+}
+
+ipcMain.on('zoom:staged', (_event, id) => zoomStageWaits.get(Number(id))?.())
+
+async function commitZoom (win, clamped) {
+  if (win.isDestroyed() || win.webContents.isDestroyed()) return
+  const current = win.webContents.getZoomFactor()
+  if (Math.abs(current - clamped) > 0.005) await stageZoom(win, clamped / current)
+  if (win.isDestroyed() || win.webContents.isDestroyed()) return
+  win.webContents.setZoomFactor(clamped)
+  sendTo(win, 'zoom:unstage')
+  scheduleWindowRepaint(win)
+  writeConfig({ zoom: clamped })
+  sendTo(win, 'zoom', Math.round(clamped * 100))
 }
 
 function applyZoom (factor) {
   const win = focusedWindow()
   if (!win) return
   const clamped = Math.min(ZOOM_STEPS.at(-1), Math.max(ZOOM_STEPS[0], factor))
-  win.webContents.setZoomFactor(clamped)
-  writeConfig({ zoom: clamped })
-  sendTo(win, 'zoom', Math.round(clamped * 100))
+  pendingZooms.set(win, clamped)
+  const work = (zoomWork.get(win) || Promise.resolve())
+    .catch(() => {})
+    .then(() => commitZoom(win, clamped))
+  zoomWork.set(win, work)
+  return work.finally(() => {
+    if (zoomWork.get(win) === work) {
+      zoomWork.delete(win)
+      pendingZooms.delete(win)
+    }
+  })
 }
 
 /**
@@ -3150,6 +3684,7 @@ function applyHotkeys (template) {
    `CmdOrCtrl` is ⌘ on a Mac and Ctrl elsewhere, which is what both platforms
    already expect. scripts/test-platform.mjs asserts the bare form stays gone. */
 function buildMenu () {
+  const notebookActive = menuDocumentKind() === 'notebook'
   const template = [
     {
       label: 'Tulip',
@@ -3192,6 +3727,8 @@ function buildMenu () {
         { label: 'Reveal in Finder', command: 'reveal', click: () => toFocused('menu', 'reveal') },
         { type: 'separator' },
         { label: 'Save', accelerator: 'CmdOrCtrl+S', command: 'save', click: () => toFocused('menu', 'save') },
+        { label: 'Back up Vault…', command: 'backup-vault', click: () => toFocused('menu', 'backup-vault') },
+        { label: 'Restore Vault…', command: 'restore-vault', click: () => toFocused('menu', 'restore-vault') },
         /* The toolbar's own Run for the source file on screen, reachable from
            the keyboard. ⌘R is free here — this menu has never carried the
            browser's reload. The renderer guards it: with anything but a
@@ -3204,8 +3741,8 @@ function buildMenu () {
         { label: 'Export as Markdown…', command: 'export-markdown', click: () => toFocused('menu', 'export-markdown') },
         { label: 'Export Whiteboard as PNG…', command: 'export-whiteboard-png', click: () => toFocused('menu', 'export-whiteboard-png') },
         { label: 'Export Whiteboard as SVG…', command: 'export-whiteboard-svg', click: () => toFocused('menu', 'export-whiteboard-svg') },
-        { label: 'Export Notebook as Script…', command: 'export-notebook-script', click: () => toFocused('menu', 'export-notebook-script') },
-        { label: 'Export Notebook as HTML…', command: 'export-notebook-html', click: () => toFocused('menu', 'export-notebook-html') }
+        { label: 'Export Notebook as Script…', visible: notebookActive, command: 'export-notebook-script', click: () => toFocused('menu', 'export-notebook-script') },
+        { label: 'Export Notebook as HTML…', visible: notebookActive, command: 'export-notebook-html', click: () => toFocused('menu', 'export-notebook-html') }
       ]
     },
     {
@@ -3216,6 +3753,7 @@ function buildMenu () {
          renderer's own guard is for; a menu that greys out per document would
          need the menu rebuilt on every tab switch. */
       label: 'Notebook',
+      visible: notebookActive,
       submenu: [
         /* No accelerator on this one, deliberately. ⇧⏎, ⌘⏎ and ⌥⏎ are already
            the three Enters a notebook has, and they are handled in the page
@@ -3352,6 +3890,82 @@ async function pickVault () {
 
 ipcMain.handle('vault:pick', () => pickVault())
 
+/* ------------------------------------------------------------ vault backup
+   Backups are ordinary folders with a manifest and SHA-256 entries. That keeps
+   the result inspectable and portable without adding an archive dependency. */
+async function backupCurrentVault (event) {
+  if (!vaultPath) return { ok: false, error: 'Open a vault before backing it up.' }
+  const flushed = await flushAllWindows()
+  if (flushed.some((result) => result?.failed)) {
+    return { ok: false, error: 'The vault could not be saved before the backup.' }
+  }
+
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+  const suggested = `${path.basename(vaultPath)}-${stamp}${BACKUP_EXTENSION}`
+  const picked = await dialog.showSaveDialog(windowOf(event), {
+    title: 'Back up vault',
+    defaultPath: path.join(app.getPath('documents'), suggested),
+    filters: [{ name: 'Tulip backup folder', extensions: [BACKUP_EXTENSION.slice(1)] }]
+  })
+  if (picked.canceled || !picked.filePath) return { canceled: true }
+
+  const target = picked.filePath.toLowerCase().endsWith(BACKUP_EXTENSION)
+    ? picked.filePath
+    : `${picked.filePath}${BACKUP_EXTENSION}`
+  try {
+    const manifest = await backupVault(vaultPath, target)
+    return { ok: true, path: target, files: manifest.files.length }
+  } catch (error) {
+    return { ok: false, error: error?.message || 'The vault backup could not be created.' }
+  }
+}
+
+async function restoreBackup (event) {
+  const flushed = await flushAllWindows()
+  if (flushed.some((result) => result?.failed)) {
+    return { ok: false, error: 'The vault could not be saved before restoring.' }
+  }
+
+  const picked = await dialog.showOpenDialog(windowOf(event), {
+    title: 'Choose a Tulip backup folder',
+    properties: ['openDirectory']
+  })
+  if (picked.canceled || !picked.filePaths[0]) return { canceled: true }
+  const source = picked.filePaths[0]
+
+  let manifest
+  try {
+    const { verifyBackup } = require('./vault-backup')
+    manifest = await verifyBackup(source)
+  } catch (error) {
+    return { ok: false, error: error?.message || 'That folder is not a valid Tulip backup.' }
+  }
+
+  const destination = await dialog.showOpenDialog(windowOf(event), {
+    title: 'Choose where to restore the vault',
+    properties: ['openDirectory', 'createDirectory']
+  })
+  if (destination.canceled || !destination.filePaths[0]) return { canceled: true }
+
+  const parent = destination.filePaths[0]
+  const name = path.basename(String(manifest.sourceName || 'Vault')) || 'Vault'
+  let target = path.join(parent, `${name} Restored`)
+  for (let number = 2; fsSync.existsSync(target); number++) {
+    target = path.join(parent, `${name} Restored ${number}`)
+  }
+
+  try {
+    await restoreVault(source, target)
+    await openVault(target)
+    return { ok: true, path: target, files: manifest.files.length }
+  } catch (error) {
+    return { ok: false, error: error?.message || 'The backup could not be restored.' }
+  }
+}
+
+ipcMain.handle('vault:backup', backupCurrentVault)
+ipcMain.handle('vault:restore', restoreBackup)
+
 /* -------------------------------------------------------------- sync health
 
    Tulip owns no sync client by design: a vault is synced by whatever the
@@ -3422,49 +4036,50 @@ ipcMain.handle('vault:snapshot', async (_e, known) => {
   return { tree, assets, evicted, revision }
 })
 
-ipcMain.handle('file:read', async (_e, p) => {
-  const abs = await realSafePath(p)
-  const text = await fs.readFile(abs, 'utf8')
-  if (isLanguageTable(abs)) {
-    await languageHistory.sync(rel(abs), text, { trackNew: false }).catch((err) => {
-      console.error('language history sync failed', err)
-    })
-  }
-  return text
-})
+/**
+ * How much of a file the app will pull into a window in one piece.
+ *
+ * Every read below hands the whole file to the renderer as a single string, and
+ * every one of those strings is then parsed, highlighted or laid out on the
+ * main thread. There is no size at which that becomes a good idea, but there is
+ * a size at which it stops being survivable: a stray gigabyte log file opened
+ * from the tree used to lock the window until the process was killed, with no
+ * message and nothing to cancel. Refusing is not a limitation of the format —
+ * it is the difference between "this file is too big to open here" and a beach
+ * ball.
+ */
+/* The read-and-inspect file handlers — file:read, file:read-encoded,
+   file:info, file:probe, file:open-default, file:reveal, file:conflict-copy —
+   live in electron/ipc-files.js, with the read-with-stamp discipline and the
+   conflict-copy episodes. The open-size ceiling stays here: the docx read
+   below refuses through the same `tooBig`. */
+const MAX_OPEN_BYTES = 64 * 1024 * 1024
+
+const tooBig = (abs, size) => Object.assign(
+  new Error(`“${path.basename(abs)}” is ${Math.round(size / (1024 * 1024))} MB, which is too large to open here.`),
+  { code: 'TULIP_TOO_LARGE', size, limit: MAX_OPEN_BYTES }
+)
+
+/* Registered here, where the ceiling the reads honour is defined. `indexDirty`
+   and the trust store are main's, so they cross as accessors. */
+makeFilesDomain({
+  realSafePath,
+  rel,
+  languageHistory,
+  getTrust: () => trust,
+  noteSelfWrite,
+  markIndexDirty: () => { indexDirty = true },
+  invalidateVaultSnapshot: () => invalidateVaultSnapshot(),
+  freeName,
+  maxOpenBytes: MAX_OPEN_BYTES,
+  tooBig
+}).register()
 
 /**
- * What the filesystem knows about a file: its size and its two dates.
+ * A file whose encoding the app did not choose.
  *
- * The Info pane's top half. Everything else it shows is derived from text the
- * renderer already has in the buffer, and these three are the ones only the
- * disk can answer for. `birthtime` is a real creation date on APFS; where a
- * filesystem does not keep one it comes back as the epoch or as the mtime, so
- * the caller is told the number and decides whether it is worth showing.
- */
-ipcMain.handle('file:info', async (_e, p) => {
-  try {
-    const abs = await realSafePath(p)
-    const stat = await fs.stat(abs)
-    const filesystemCreated = stat.birthtimeMs || 0
-    const created = (MD_EXT.has(path.extname(abs).toLowerCase()) || isTex(abs))
-      ? trust?.creationTime(rel(abs), filesystemCreated) || filesystemCreated
-      : filesystemCreated
-    return {
-      ok: true,
-      size: stat.size,
-      modified: stat.mtimeMs,
-      created
-    }
-  } catch (err) {
-    return { ok: false, error: err.message }
-  }
-})
-
-/* How much of a file is looked at to decide whether it is text. A binary
-   announces itself in the first few bytes — a magic number, then a NUL — and a
-   text file that begins with 8KB of clean UTF-8 is a text file. */
-const SNIFF_BYTES = 8192
+/* The encoding sniff's byte count moved with file:probe into
+   electron/ipc-files.js. */
 
 /**
  * A Word document, read into the blocks the renderer draws.
@@ -3505,6 +4120,12 @@ ipcMain.handle('docx:read', async (_e, p) => {
     const abs = await realSafePath(p)
     const stat = await fs.stat(abs)
     if (!stat.isFile()) return { ok: false, error: 'That is not a file.' }
+    /* A `.docx` is a zip, and it is inflated whole — the pictures with it —
+       before a single paragraph can be drawn. The ceiling is the same one every
+       other read in this file answers to, and it is here for the same reason:
+       a file too big to draw should say so rather than take the window with
+       it. */
+    if (stat.size > MAX_OPEN_BYTES) throw tooBig(abs, stat.size)
     const { readDocxBufferAsync } = require('./docx')
     const buffer = await fs.readFile(abs)
     const doc = await readDocxBufferAsync(buffer)
@@ -3531,10 +4152,10 @@ ipcMain.handle('docx:read', async (_e, p) => {
 ipcMain.handle('docx:write', async (_e, p, edit) => {
   try {
     const abs = await realSafePath(p)
-    const { readDocxBuffer, writeDocxBuffer, isStaleDocxError } = require('./docx')
-    let made
+    const { readDocxFiles, writeDocx, isStaleDocxError } = require('./docx')
+    let made, files
     try {
-      made = writeDocxBuffer(await fs.readFile(abs), edit)
+      ({ buffer: made, files } = writeDocx(await fs.readFile(abs), edit))
     } catch (err) {
       if (!isStaleDocxError(err)) throw err
       /* The file is not the one the page was read from. Without `force` the
@@ -3543,13 +4164,16 @@ ipcMain.handle('docx:write', async (_e, p, edit) => {
          bytes it was read from rather than the stranger's. */
       const original = edit?.force ? docxOriginals.get(abs) : null
       if (!original) return { ok: false, stale: true, error: err.message }
-      made = writeDocxBuffer(original, edit)
+      ;({ buffer: made, files } = writeDocx(original, edit))
     }
     await writeAtomic(abs, made, { durable: readConfig().durability === 'full' })
     rememberDocxOriginal(abs, made)
     documentsChanged()
     const stat = await fs.stat(abs).catch(() => null)
-    const document = readDocxBuffer(made)
+    /* From the parts the writer just built rather than from the bytes it
+       zipped them into: reading those back was a second inflate and checksum
+       of every picture in the file, on the main thread, per autosave. */
+    const document = readDocxFiles(files)
     /* Search should find what was typed a moment ago rather than waiting for
        the next walk of the vault — the same courtesy `touchIndex` does a note
        on every autosave. */
@@ -3568,81 +4192,8 @@ ipcMain.handle('docx:write', async (_e, p, edit) => {
   }
 })
 
-/**
- * Whether a file of no known kind is text, and how big it is.
- *
- * Asked at the door in the renderer, for the files the vault has no view of its
- * own for. An extension is a claim rather than a fact — a `.log`, a `.env`, a
- * `.rtf`, a file with no extension at all — so the bytes are what decides. A
- * NUL byte is the giveaway no text encoding produces; a decoder set to be
- * fussy catches what is left.
- *
- * A file that will not even be opened is not text, and is described rather than
- * shown — which is what the viewer does with a picture-less, playerless file
- * anyway, so the error needs no separate path.
- */
-ipcMain.handle('file:probe', async (_e, p) => {
-  try {
-    const abs = await realSafePath(p)
-    const stat = await fs.stat(abs)
-    if (!stat.isFile()) return { ok: false, error: 'That is not a file.' }
-
-    const handle = await fs.open(abs, 'r')
-    let head
-    try {
-      const buffer = Buffer.alloc(Math.min(SNIFF_BYTES, stat.size))
-      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0)
-      head = buffer.subarray(0, bytesRead)
-    } finally {
-      await handle.close()
-    }
-
-    let text = !head.includes(0)
-    if (text && head.length) {
-      /* `fatal` is the whole point: the lenient decoder turns any byte into
-         U+FFFD and would call a JPEG text. A multi-byte character cut in half
-         by the sniff boundary would fail the same way, so the last few bytes
-         are dropped before the check — four is the longest UTF-8 sequence. */
-      const whole = head.length < stat.size ? head.subarray(0, Math.max(0, head.length - 4)) : head
-      try { new TextDecoder('utf8', { fatal: true }).decode(whole) } catch { text = false }
-    }
-
-    return { ok: true, text, size: stat.size, modified: stat.mtimeMs }
-  } catch (err) {
-    return { ok: false, error: err.message }
-  }
-})
-
-/** A file handed to whatever the desktop opens it with. The one honest answer
- *  for a `.zip` or a `.key`: Tulip cannot show it, and the machine already has
- *  something that can — and for a `.docx`, which it can show but not edit, it
- *  is the way to the program that owns the format. Returns the reason when the
- *  OS refuses, which is what the viewer puts on screen. */
-/* What the desktop would *run* rather than open. A vault is an ordinary
-   folder that is shared and synced, so a file in it is not a file the reader
-   put there; `shell.openPath` on a `.command` or a `.exe` is a double-click on
-   it, with no dialog of Tulip's in between. Documents go through; programs
-   are refused with the reason, and the reader can open them from the Finder
-   where the OS asks its own questions. */
-const EXECUTABLE_EXT = new Set([
-  '.app', '.command', '.sh', '.bash', '.zsh', '.tool', '.terminal', '.workflow',
-  '.exe', '.bat', '.cmd', '.com', '.ps1', '.vbs', '.js', '.jse', '.wsf', '.wsh',
-  '.scr', '.pif', '.lnk', '.msi', '.msp', '.reg', '.jar', '.pkg', '.dmg',
-  '.run', '.bin', '.desktop', '.appimage', '.pyw', '.url'
-])
-
-ipcMain.handle('file:open-default', async (_e, p) => {
-  try {
-    const abs = await realSafePath(p)
-    if (EXECUTABLE_EXT.has(path.extname(abs).toLowerCase())) {
-      return { ok: false, error: 'That file is a program, not a document. Open it from the Finder if you mean to run it.' }
-    }
-    const problem = await shell.openPath(abs)
-    return problem ? { ok: false, error: problem } : { ok: true }
-  } catch (err) {
-    return { ok: false, error: err.message }
-  }
-})
+/** A file handed to whatever the desktop opens it with — this handler, like
+    the rest of the read-and-inspect family, lives in electron/ipc-files.js. */
 
 /**
  * Every note's text, in one message.
@@ -3668,648 +4219,87 @@ ipcMain.handle('vault:notes', async () => {
   })
 })
 
-/* Give pdf.js a guarded URL instead of copying the whole document through IPC.
-   Its range requests are answered by the protocol handler below, so a large
-   paper can begin rendering before its final bytes have been read. */
-ipcMain.handle('pdf:source', async (_e, p) => {
-  const abs = await realSafePath(p)
-  if (!isPdf(abs)) throw new Error('Only PDFs have a document source.')
-  ensurePdfText(rel(abs)).catch(() => {})
-  return `tulip-file://vault/${rel(abs).split(path.sep).map(encodeURIComponent).join('/')}`
+/* pdf.js gets its guarded document URL from the `pdf:source` handler, which
+   lives in electron/ipc-pdf.js beside the rest of the PDF handlers; the
+   protocol answering the URL's range requests is registered below, where the
+   session is. */
+
+/* The conflict-copy handler and its episode bookkeeping live in
+   electron/ipc-files.js, with the reasoning for sharing one copy per
+   disagreement. */
+
+/* The write-and-restructure core — file:write, file:rename, file:move,
+   file:delete, file:import — lives in electron/ipc-vault-write.js, together
+   with renameDocument, which the copilot's rename consumption also drives.
+   The machinery these gestures share with the watcher and the index sync —
+   the relocate chain, the index touchers, the path guards, the atomic write —
+   stays here and crosses as the context below. */
+const vaultWriteDomain = makeVaultWriteDomain({
+  realSafePath,
+  realSafeTargetPath,
+  rel,
+  getVaultPath: () => vaultPath,
+  freeName,
+  noteSelfWrite,
+  markIndexDirty: () => { indexDirty = true },
+  invalidateVaultSnapshot: () => invalidateVaultSnapshot(),
+  getTrust: () => trust,
+  languageHistory,
+  review,
+  relocate,
+  notesUnder,
+  trashAttachments,
+  isSnapshotFile,
+  documentsChanged,
+  touchIndex,
+  touchDocumentIndex,
+  touchWhiteboardIndex,
+  getIndex: () => index,
+  ensureIndex,
+  getPythonEnvs: () => pythonEnvs,
+  assertReal,
+  annotationFile: (p) => annotationFile(p),
+  writeAtomic,
+  readConfig,
+  maxVersionedBytes: MAX_VERSIONED_BYTES,
+  maxIndexBytes: MAX_INDEX_BYTES,
+  ignoredDirs: IGNORED_DIRS
 })
+vaultWriteDomain.register()
+/* The eight "new …" handlers live in electron/ipc-create.js, with the name
+   rules they share and the reasoning for each kind's empty file. `indexDirty`
+   and the trust store are main's, so they cross as the accessors below. */
+makeCreateDomain({
+  freeName,
+  realSafePath,
+  noteSelfWrite,
+  rel,
+  getTrust: () => trust,
+  markIndexDirty: () => { indexDirty = true },
+  invalidateVaultSnapshot: () => invalidateVaultSnapshot()
+}).register()
+
+
+/* The per-file metadata handlers live in electron/ipc-metadata.js; the stores
+   themselves stay here, where the index and the search filters read them. */
+makeMetadataDomain({
+  realSafePath,
+  rel,
+  getVaultPath: () => vaultPath,
+  fileTags,
+  fileMarks,
+  tableWidths
+}).register()
 
 /**
- * Put the version currently on disk somewhere safe, under a name of its own.
- *
- * A document changed on disk while it had unsaved edits in a buffer, and the
- * buffer is what the app is about to keep. For markdown that is a three-way
- * merge and both sides survive; for everything else — a whiteboard, a grid, a
- * notebook — there is nothing to merge line by line, so the disk's version was
- * simply dropped, with a toast to say so. A toast is not a copy. Whatever the
- * other side wrote, whether that was a sync client or a Jupyter running beside
- * this one, was gone the moment the next autosave landed.
- *
- * So it is copied first, and only then overwritten. The name follows the
- * convention every sync client already uses and every user has already seen,
- * which is the point: a file called `Analysis (conflicted copy).ipynb` sitting
- * next to `Analysis.ipynb` explains itself without a dialog.
- *
- * Copied byte for byte rather than read and rewritten as text — a notebook is
- * mostly base64 and a whiteboard is not ours to reformat. Returns the new
- * path, or null when there was nothing on disk to keep.
- */
-/* One conflict copy per episode, rather than one per save.
-
-   A conflict is not usually a single event. Something outside Tulip is writing
-   the file — Word, a sync client — and it writes again while the reader is
-   still typing, so the next autosave conflicts too. Answering each of those
-   with a file of its own turned a disagreement lasting a minute into forty
-   files, all but the last of them superseded, and buried the one the reader
-   actually needed.
-
-   So a run of conflicts over one file shares one copy. The first makes it; the
-   rest overwrite it, which keeps the other side's LATEST version rather than
-   its earliest — the newest is the one worth having, and the older ones were
-   never separately interesting. A quiet minute ends the episode, and the next
-   conflict after that is a new disagreement and gets a file of its own. */
-const CONFLICT_EPISODE_MS = 60_000
-/** abs → the copy a live episode is writing to, and when it was last written. */
-const conflictEpisodes = new Map()
-
-ipcMain.handle('file:conflict-copy', async (_e, p) => {
-  const abs = await realSafePath(p)
-  const now = Date.now()
-  const episode = conflictEpisodes.get(abs)
-
-  /* Still the same disagreement, and the copy it made is still there. Written
-     over rather than added to. */
-  if (episode && now - episode.at < CONFLICT_EPISODE_MS && fsSync.existsSync(episode.target)) {
-    try {
-      await fs.copyFile(abs, episode.target)
-    } catch {
-      return null
-    }
-    episode.at = now
-    noteSelfWrite(episode.target)
-    indexDirty = true
-    invalidateVaultSnapshot()
-    /* `repeat` so the window can say it once rather than once a second: the
-       file it named the first time is the file this went into. */
-    return { path: rel(episode.target), repeat: true }
-  }
-
-  const ext = path.extname(abs)
-  const stem = path.basename(abs, ext)
-  const target = freeName(path.dirname(abs), `${stem} (conflicted copy)`, ext)
-  try {
-    /* `COPYFILE_EXCL` so this can never land on a file that appeared between
-       `freeName` looking and the copy happening — losing the disk's version is
-       the exact failure this handler exists to prevent, and doing it to a
-       bystander would be worse. */
-    await fs.copyFile(abs, target, fsSync.constants.COPYFILE_EXCL)
-  } catch {
-    return null
-  }
-  conflictEpisodes.set(abs, { target, at: now })
-  noteSelfWrite(target)
-  indexDirty = true
-  invalidateVaultSnapshot()
-  return { path: rel(target), repeat: false }
-})
-
-ipcMain.handle('file:write', async (_e, p, content, metadata = null) => {
-  /* Fully resolved, exactly as `file:read` resolves it: content flows through
-     the last component here, so a link standing where the note should be would
-     put the note's text wherever it points. The two handlers agreeing also
-     means a note this refuses to write is a note `file:read` already refused
-     to open. */
-  const abs = await realSafePath(p)
-  await fs.mkdir(path.dirname(abs), { recursive: true })
-  /* Through the same temp-file-and-rename the link rewriter uses. This is the
-     autosave path — the one write that happens constantly and unattended — so
-     it is the last one that should be able to leave a half-written note behind
-     if the power goes. */
-  const isMarkdown = MD_EXT.has(path.extname(abs).toLowerCase())
-  /* Source and data files are versioned like notes. They are the vault's own
-     text, edited in the vault's own editor and autosaved by it — which is
-     exactly the argument for keeping the copy that History restores from. A
-     `.py` overwritten by a stray keystroke is no more recoverable from the
-     filesystem than a note is. */
-  /* A notebook is deliberately not on this list. It is text on disk, but most
-     of that text is output — a single plot is a megabyte of base64 — and the
-     history store keeps every version whole inside one 4 MB budget shared by
-     the entire vault. Versioning notebooks here would mean one save of one
-     notebook evicting the history of every note in it. */
-  const isTextDocument = isMarkdown || isTex(abs) || isCode(abs) || isData(abs)
-  const whiteboard = isWhiteboard(abs)
-  /* The size of the file decides whether it gets a version, so it is asked for
-     before the old text is read rather than alongside it. A stat is cheap; the
-     read this can now skip is not. */
-  const oldStat = isTextDocument ? await fs.stat(abs).catch(() => null) : null
-  const versioned = isTextDocument &&
-    (oldStat?.size ?? 0) <= MAX_VERSIONED_BYTES &&
-    Buffer.byteLength(String(content), 'utf8') <= MAX_VERSIONED_BYTES
-  /* The note as it stood before this write, read first: the snapshot has to be
-     the same text the write is about to replace, and reading after would hand
-     the history store the text being written. Read even when the file is new,
-     so the note's first save is recorded as the thing it replaced — nothing. */
-  /* Except when the index is already holding that same text. Its entry carries
-     the mtime and size it was read at, and those matching the file this write
-     is about to replace is the same freshness test the index sync itself
-     trusts — so the read is of a note that is already in memory, on the path
-     that runs every few seconds for as long as anyone is typing. */
-  const held = versioned && isMarkdown ? index.get(rel(abs)) : null
-  const before = !versioned
-    ? null
-    : (held && oldStat && held.mtime === oldStat.mtimeMs && held.size === oldStat.size &&
-        typeof held.text === 'string' && held.size <= MAX_INDEX_BYTES)
-        ? held.text
-        : await fs.readFile(abs, 'utf8').catch(() => null)
-  /* Capture the old inode's birthtime before the atomic rename replaces it.
-     Info can then keep saying when the note was created rather than when its
-     newest crash-safe save landed. */
-  if (oldStat) trust?.creationTime(rel(abs), oldStat.birthtimeMs)
-  const stamp = await writeAtomic(abs, content, {
-    durable: readConfig().durability === 'full'
-  })
-  /* The bytes on disk have moved. Said here as well as in `touchIndex` below,
-     which only hears about Markdown: a TeX document saved from the editor is
-     deliberately outside the index and outside the vault snapshot's own
-     generation, so this is the only place its save is announced. */
-  documentsChanged()
-  /* A copy of what the save replaced, so any version of the note can be put
-     back from History. Only notes: the store is for writing, and a website
-     file holds an address rather than prose. */
-  if (versioned && String(before ?? '') !== String(content)) {
-    trust?.record({ source: 'save', changes: [{ path: rel(abs), before, after: String(content) }] })
-  }
-  /* The text is already here, so the next sync can skip re-reading it. Without
-     this, every autosave would cost the index a read of the note being typed.
-
-     Notes only. The index is what vault search and the link tables are built
-     from, and a website file put into it would answer a search for the site's
-     own name with a row that is not a note — until the next walk of the vault
-     quietly dropped it again, which is the worse half of the bug. */
-  if (isMarkdown) touchIndex(abs, content, stamp)
-  if (whiteboard) touchWhiteboardIndex(abs, content, stamp, metadata?.whiteboardText)
-  if (isLanguageTable(abs)) {
-    await languageHistory.sync(rel(abs), content).catch((err) => {
-      console.error('language history sync failed', err)
-    })
-  }
-  return true
-})
-
-ipcMain.handle('file:create', async (_e, dir, name) => {
-  /* Same rules as a rename — a name that cannot be created is better refused
-     here than turned into a file nobody can open. An empty ask is not a
-     failure though: "new note" with nothing typed is how most of them start. */
-  const asked = safeFileName(name || 'Untitled', { strip: [NOTE_EXT] })
-  if (!asked.ok) throw new Error(asked.error)
-  const target = freeName(
-    await realSafePath(dir || ''),
-    asked.name,
-    '.md'
-  )
-  await fs.mkdir(path.dirname(target), { recursive: true })
-  noteSelfWrite(target)
-  await fs.writeFile(target, '', 'utf8')
-  trust?.creationTime(rel(target), Date.now())
-  indexDirty = true
-  invalidateVaultSnapshot()
-  return rel(target)
-})
-
-const EMPTY_TEX_DOCUMENT = `\\documentclass{article}
-
-\\begin{document}
-
-\\end{document}
-`
-
-ipcMain.handle('tex:create', async (_e, dir, name) => {
-  const target = freeName(await realSafePath(dir || ''), name || 'Untitled', TEX_EXT)
-  await fs.mkdir(path.dirname(target), { recursive: true })
-  noteSelfWrite(target)
-  await fs.writeFile(target, EMPTY_TEX_DOCUMENT, 'utf8')
-  trust?.creationTime(rel(target), Date.now())
-  invalidateVaultSnapshot()
-  return rel(target)
-})
-
-/* A website file, empty. Created without an address rather than asking for one
-   first: the tab it opens into has an address bar, and typing into that is a
-   better way to say where it points than a modal that has to be answered
-   before anything exists. */
-ipcMain.handle('site:create', async (_e, dir, name) => {
-  const target = freeName(await realSafePath(dir || ''), name || 'Untitled', SITE_EXT)
-  await fs.mkdir(path.dirname(target), { recursive: true })
-  noteSelfWrite(target)
-  await fs.writeFile(target, '', 'utf8')
-  invalidateVaultSnapshot()
-  return rel(target)
-})
-
-ipcMain.handle('whiteboard:create', async (_e, dir, name) => {
-  const target = freeName(
-    await realSafePath(dir || ''),
-    name || 'Untitled',
-    WHITEBOARD_EXT
-  )
-  await fs.mkdir(path.dirname(target), { recursive: true })
-  noteSelfWrite(target)
-  await fs.writeFile(target, emptyWhiteboard(), 'utf8')
-  invalidateVaultSnapshot()
-  return rel(target)
-})
-
-/* A language is one portable Markdown table of words the reader has learned.
-   Nothing else is created with it: an alphabet, a table of sounds or a page of
-   grammar are all the reader's own content, and seeding them would be guessing
-   at what this language needs said about it. */
-ipcMain.handle('language:create', async (_e, dir, name) => {
-  const folder = freeName(await realSafePath(dir || ''), name || 'New language')
-  noteSelfWrite(folder)
-  await fs.mkdir(folder, { recursive: true })
-
-  const vocabulary = path.join(folder, `Words${LANGUAGE_TABLE_SUFFIX}`)
-  noteSelfWrite(vocabulary)
-  await fs.writeFile(vocabulary, LANGUAGE_TABLE_TEMPLATE, 'utf8')
-  trust?.creationTime(rel(vocabulary), Date.now())
-
-  indexDirty = true
-  invalidateVaultSnapshot()
-  return { folder: rel(folder), vocabulary: rel(vocabulary) }
-})
-
-/* A new table uses the same focused, table-only document and file icon as
-   Vocabulary, but starts neutral: editable COL1/COL2/COL3 headings and enough
-   blank rows for its row add/delete controls to be useful immediately. */
-ipcMain.handle('table:create', async (_e, dir, name) => {
-  const target = freeName(
-    await realSafePath(dir || ''),
-    name || 'Untitled',
-    LANGUAGE_TABLE_SUFFIX
-  )
-  await fs.mkdir(path.dirname(target), { recursive: true })
-  noteSelfWrite(target)
-  await fs.writeFile(target, CUSTOM_TABLE_TEMPLATE, 'utf8')
-  trust?.creationTime(rel(target), Date.now())
-  indexDirty = true
-  invalidateVaultSnapshot()
-  return rel(target)
-})
-
-/* A source or data file, empty apart from whatever the format needs to be
-   openable at all.
- *
- * One handler for both, because the only thing that differs between them is
- * the extension — which the caller names, and which is checked against the
- * contract's own lists rather than trusted. Without that check this would be
- * "write a file of any extension anywhere in the vault", which is a wider door
- * than the feature needs. */
-ipcMain.handle('source:create', async (_e, dir, name, ext) => {
-  const wanted = String(ext || '').toLowerCase()
-  if (!CODE_EXT.has(wanted) && !DATA_EXT.has(wanted) &&
-    wanted !== NOTEBOOK_EXT && wanted !== DOCX_EXT) {
-    throw new Error('That is not a file type Tulip creates.')
-  }
-
-  /* A Word document is the one kind here that is not text at all, so it is
-     written as bytes rather than seeded with a string. What it starts as is the
-     smallest package Word opens without offering to repair it — including a
-     stylesheet, so that a heading applied in Tulip is a heading when the file
-     is opened in Word. See electron/docx.js. */
-  if (wanted === DOCX_EXT) {
-    const { blankDocxBuffer } = require('./docx')
-    const made = freeName(await realSafePath(dir || ''), name || 'Untitled', wanted)
-    await fs.mkdir(path.dirname(made), { recursive: true })
-    noteSelfWrite(made)
-    await fs.writeFile(made, blankDocxBuffer())
-    trust?.creationTime(rel(made), Date.now())
-    invalidateVaultSnapshot()
-    return rel(made)
-  }
-  const target = freeName(await realSafePath(dir || ''), name || 'Untitled', wanted)
-  await fs.mkdir(path.dirname(target), { recursive: true })
-  noteSelfWrite(target)
-  /* A CSV with no header row opens as a grid with nothing to label its one
-     column, and the first thing anyone does is name the columns — so it starts
-     with a row to name them in. A source file starts genuinely empty: there is
-     no line that belongs in every Python file. */
-  /* A notebook has no empty form: nbformat requires the version fields, and a
-     file without them is one every other Jupyter tool refuses to open. It
-     starts with a single empty code cell for the same reason the CSV starts
-     with a header row — that is the first thing anyone types into. The
-     language is Python because that is what an unqualified "notebook" means;
-     the file says so in metadata and any kernel can be named there later. */
-  const seed = DATA_EXT.has(wanted)
-    ? `column 1${VAULT_CONTRACT.dataExtensions[wanted]}column 2\n`
-    : wanted === NOTEBOOK_EXT
-      ? `${JSON.stringify({
-          cells: [{
-            cell_type: 'code',
-            execution_count: null,
-            metadata: {},
-            outputs: [],
-            source: []
-          }],
-          metadata: {
-            kernelspec: { display_name: 'Python 3', language: 'python', name: 'python3' },
-            language_info: { name: 'python' }
-          },
-          nbformat: 4,
-          nbformat_minor: 5
-        }, null, 1)}\n`
-      : ''
-  await fs.writeFile(target, seed, 'utf8')
-  trust?.creationTime(rel(target), Date.now())
-  invalidateVaultSnapshot()
-  return rel(target)
-})
-
-ipcMain.handle('folder:create', async (_e, dir, name) => {
-  const target = freeName(await realSafePath(dir || ''), name || 'New folder')
-  noteSelfWrite(target)
-  await fs.mkdir(target, { recursive: true })
-  invalidateVaultSnapshot()
-  return rel(target)
-})
-
-/* Both of these answer with `{ path, links }` — where the thing ended up, and
-   how many *other* notes had to be edited to keep pointing at it. Copilot uses
-   this function too: its request must take the same route as a title or tree
-   rename so links, study state and history follow the file. */
-async function renameDocument (p, nextName) {
-  const abs = await realSafeTargetPath(p)
-  const language = isLanguageTable(abs)
-  /* The extension is the file's, not the name's: the tree shows a document
-     without one, so a name typed back with `.pdf` or `.md` on it would other-
-     wise be filed as `Paper.pdf.pdf`. */
-  let ext = fsSync.statSync(abs).isDirectory()
-    ? ''
-    : path.extname(abs)
-  /* Source and data files are the exception, because they are the one kind the
-     tree labels *with* the extension. Someone renaming `notes.txt` to
-     `notes.py` in a box that was prefilled `notes.txt` means the change, and
-     keeping `.txt` would quietly ignore the only part they edited. Another
-     kind's extension is still not honoured — this cannot turn a script into a
-     PDF — so the answer is always a source file either way. */
-  if (isCode(abs) || isData(abs)) {
-    const typed = path.extname(String(nextName || '')).toLowerCase()
-    if (CODE_EXT.has(typed) || DATA_EXT.has(typed)) ext = typed
-  }
-  /* Every rule about what a filename may be lives in safe-name.js — including
-     the Windows ones, which a vault written here still has to keep to if it is
-     ever going to open there. */
-  const safe = safeFileName(nextName, { strip: [NOTE_EXT, DOCUMENT_EXT] })
-  if (!safe.ok) throw new Error(safe.error)
-  let clean = safe.name
-  if (language) {
-    const current = languageName(languageTableStem(abs))
-    const asked = languageName(clean).name
-    clean = current.flag ? `${current.flag} ${asked}` : asked
-  }
-  const target = await realSafeTargetPath(path.join(path.dirname(rel(abs)), clean + ext))
-  if (target === abs) return { path: rel(abs), links: 0 }
-  // Unlike the other routes into the vault, a rename says what it wants to be
-  // called — silently landing on "${clean} 2" would ignore that.
-  if (fsSync.existsSync(target)) {
-    /* On a case-insensitive volume, `Languages` and `languages` both find the
-       source entry. That is a valid rename, not a collision. Compare directory
-       entries rather than spellings so case-only (and Unicode-normalisation-
-       only) renames pass while a genuinely different sibling is still refused.
-       `lstat` matters for links: two distinct links to one target are still two
-       occupied names. */
-    const sourceEntry = fsSync.lstatSync(abs)
-    const targetEntry = fsSync.lstatSync(target)
-    const sameEntry = sourceEntry.dev === targetEntry.dev &&
-      sourceEntry.ino === targetEntry.ino
-    if (!sameEntry) throw new Error(`"${clean}" already exists here.`)
-  }
-
-  const result = await relocate(abs, target)
-  indexDirty = true
-  invalidateVaultSnapshot()
-  return result
-}
-
-ipcMain.handle('file:rename', (_e, p, nextName) => renameDocument(p, nextName))
-
-ipcMain.handle('file:move', async (_e, from, destDir) => {
-  const src = await realSafeTargetPath(from)
-  const dir = destDir ? await realSafePath(destDir) : path.resolve(vaultPath)
-
-  if (!fsSync.existsSync(dir) || !fsSync.statSync(dir).isDirectory()) {
-    throw new Error('That destination is not a folder.')
-  }
-  // Moving a folder inside itself would detach the subtree from the vault.
-  if (src === dir || dir.startsWith(src + path.sep)) {
-    throw new Error('A folder cannot be moved into itself.')
-  }
-  if (path.dirname(src) === dir) return { path: rel(src), links: 0 }
-
-  const ext = path.extname(src)
-  const result = await relocate(src, freeName(dir, path.basename(src, ext), ext))
-  indexDirty = true
-  invalidateVaultSnapshot()
-  return result
-})
-
-ipcMain.handle('file:delete', async (_e, p) => {
-  const abs = await realSafeTargetPath(p)
-  const deletingDirectory = fsSync.statSync(abs).isDirectory()
-  /* Read while the notes are still there to be found: after the trash, the
-     index no longer answers for what was under a deleted folder. */
-  await ensureIndex()
-  const losingEnvs = notesUnder(rel(abs), deletingDirectory)
-  // Goes to the system Trash, not an unlink — deletes should be recoverable.
-  noteSelfWrite(abs)
-  await shell.trashItem(abs)
-  await forgetAll(rel(abs), deletingDirectory)
-  /* The note is gone, so the environment its blocks ran in is nobody's. Not
-     recoverable the way the note is — but it holds no work of the reader's,
-     only packages, and a restored note builds a new one on its next run. */
-  await Promise.all(losingEnvs.map((note) => pythonEnvs.forget(note)))
-  trust?.forgetCreations(rel(abs))
-  /* Attachment removal is followed immediately by a renderer refresh. The
-     watcher invalidates these caches too, but only after its debounce; without
-     doing it here that immediate refresh reads the old asset list and redraws
-     the image Tulip just moved away. */
-  indexDirty = true
-  invalidateVaultSnapshot()
-
-  /* A PDF's highlights follow it into the Trash, so restoring the document
-     brings back what was marked on it — and its extracted text goes too, which
-     otherwise would be a copy of a deleted paper left where the copilot reads.
-     Anything else has no sidecar and this finds nothing. */
-  const stem = annotationFile(p).slice(0, -5)
-  for (const sidecar of [annotationFile(p), stem + PDF_TEXT_SUFFIX, stem]) {
-    if (!fsSync.existsSync(sidecar)) continue
-    try {
-      /* Where the path really leads, before anything is thrown away. Both the
-         test above and `shell.trashItem` follow symlinks, so a linked
-         `.annotations` folder in a synced vault turned "delete this PDF" into
-         "move that file, wherever it is, to the Trash". */
-      await assertReal(sidecar)
-      noteSelfWrite(sidecar)
-      await shell.trashItem(sidecar)
-    } catch { /* not worth a dialog */ }
-  }
-
-  /* And the review history of anything that was a language table. Deliberate
-     and unguarded, unlike `prune`: this is somebody saying the note is gone,
-     not a scan concluding it. */
-  await review.remove(p).catch(() => {})
-  await languageHistory.remove(p).catch(() => {})
-  return true
-})
-
-ipcMain.handle('file-tags:get', async (_e, p) => {
-  const abs = await realSafePath(p)
-  // Always a list: "no tags" is no entry in the store, and the renderer draws
-  // a row of them either way.
-  return (await fileTags.get(rel(abs))) || []
-})
-
-ipcMain.handle('file-tags:set', async (_e, p, values) => {
-  const abs = await realSafePath(p)
-  return (await fileTags.set(rel(abs), values)) || []
-})
-
-/* The whole map at once, because the tree draws every row it has: asking per
-   row would be one round trip per note in the vault. */
-ipcMain.handle('file-marks:all', async () => (vaultPath ? await fileMarks.all() : {}))
-
-ipcMain.handle('file-marks:set', async (_e, p, mark) => {
-  const abs = await realSafePath(p)
-  // Always a string: the empty one is "no mark", which is no entry at all.
-  return (await fileMarks.set(rel(abs), mark)) || ''
-})
-
-/**
- * The column widths a table was left at, and where they are put back.
- *
- * A `.csv` is its data and nothing else — there is no line in it that could
- * say how wide a column should be — so this is the only place the answer can
- * live. Bounded by the store's own cleaning: a layout for a file that has
- * since gained or lost columns is simply not applied, which csv.js decides,
- * because a width list of the wrong length says nothing about this file.
- */
-ipcMain.handle('table-widths:get', async (_e, p) => {
-  const abs = await realSafePath(p)
-  return (await tableWidths.get(rel(abs))) || null
-})
-
-ipcMain.handle('table-widths:set', async (_e, p, widths) => {
-  const abs = await realSafePath(p)
-  return (await tableWidths.set(rel(abs), widths)) || null
-})
-
-/**
- * Copies notes, PDFs and whiteboards dragged in from Finder into the vault.
- *
- * Copies rather than moves: what was dropped is somebody else's file until the
- * user says otherwise, and a drag that silently emptied a Finder window would
- * be a bad surprise. A dropped folder comes in with its shape intact, carrying
- * only the notes inside it — the extension filter is what stops this from
- * being a way to read arbitrary files into the vault.
- */
-ipcMain.handle('file:import', async (_e, destDir, sources) => {
-  const root = await realSafePath(destDir || '')
-  await fs.mkdir(root, { recursive: true })
-
-  let imported = 0
-  let skipped = 0
-  let first = null
-
-  const copyInto = async (source, dir) => {
-    let stat
-    try { stat = await fs.lstat(source) } catch { skipped++; return }
-    // Symlinks are skipped outright: following one could walk out of what was
-    // dropped — or around a `ln -s ..` loop forever.
-    if (stat.isSymbolicLink()) { skipped++; return }
-
-    if (stat.isDirectory()) {
-      const name = path.basename(source)
-      if (name.startsWith('.') || IGNORED_DIRS.has(name)) return
-      const target = freeName(dir, name)
-      await fs.mkdir(target, { recursive: true })
-      let entries = []
-      try { entries = await fs.readdir(source) } catch { /* unreadable */ }
-      for (const entry of entries) await copyInto(path.join(source, entry), target)
-      return
-    }
-
-    /* Notes, PDFs, whiteboards, and now source and data files: the documents
-       the vault can validate by extension and then actually open. The filter
-       is the point — a drag is a copy *into* the vault, and one that accepted
-       anything would make the tree a place unopenable files accumulate.
-
-       Source and data files earn their place here by the same test as the
-       rest: the app opens them, edits them and versions them, so a dragged-in
-       `.py` is a document and not a stowaway. Anything outside these lists is
-       still skipped and still counted, which is what the "n skipped" in the
-       import's report is for. */
-    if (!MD_EXT.has(path.extname(source).toLowerCase()) && !isTex(source) &&
-        !isPdf(source) && !isWhiteboard(source) && !isNotebook(source) &&
-        !isCode(source) && !isData(source)) { skipped++; return }
-    const ext = path.extname(source)
-    const target = freeName(dir, path.basename(source, ext), ext)
-    noteSelfWrite(target)
-    await fs.copyFile(source, target)
-    /* The creation date is kept for the kinds whose history the trust store
-       holds — which is now the same set that `file:write` versions, source and
-       data files included. */
-    if (MD_EXT.has(path.extname(target).toLowerCase()) || isTex(target) ||
-        isCode(target) || isData(target)) {
-      trust?.creationTime(rel(target), Date.now())
-    }
-    imported++
-    if (!first) first = rel(target)
-  }
-
-  for (const source of sources || []) {
-    if (typeof source !== 'string' || !source) { skipped++; continue }
-    // Dragging a note out of the vault and back in would otherwise duplicate
-    // it against itself.
-    if (path.resolve(source) === path.resolve(vaultPath)) { skipped++; continue }
-    await copyInto(path.resolve(source), root)
-  }
-
-  indexDirty = true
-  invalidateVaultSnapshot()
-  return { imported, skipped, first }
-})
-
-ipcMain.handle('file:reveal', async (_e, p) => {
-  shell.showItemInFolder(await realSafePath(p))
-})
-
-/* ----------------------------------------------------------- TeX preview */
-
-const TEX_PREVIEW_DIR = () => path.join(app.getPath('userData'), 'tex-preview')
-let texCompiler = null
-let texCompilerVault = ''
-
-ipcMain.handle('tex:compile', async (_e, p) => {
-  if (!vaultPath) return { ok: false, error: 'Open a vault first.' }
-  let abs
-  try { abs = await realSafePath(p) } catch (err) {
-    return { ok: false, error: err.message || 'That TeX file is not available.' }
-  }
-  if (!isTex(abs)) return { ok: false, error: 'Only TeX files can be compiled.' }
-
-  if (!texCompiler || texCompilerVault !== vaultPath) {
-    texCompiler?.stop()
-    texCompilerVault = vaultPath
-    const { createTexCompiler } = require('./tex-compile')
-    texCompiler = createTexCompiler({
-      vault: vaultPath,
-      cacheRoot: TEX_PREVIEW_DIR(),
-      // Read per compile, not captured here: the compiler outlives a trip to
-      // the settings pane, and the engine chosen there has to take effect on
-      // the next compile rather than the next vault.
-      engine: () => readConfig().texEngine || 'pdflatex'
-    })
-  }
-  try {
-    const result = await texCompiler.compile(abs)
-    return {
-      ok: true,
-      url: `tulip-file://tex-preview/${result.artifact}?v=${Date.now()}`,
-      root: result.root,
-      compiler: result.compiler,
-      log: result.log
-    }
-  } catch (err) {
-    return { ok: false, error: err.message || 'LaTeX could not compile this document.', log: err.log || '' }
-  }
-})
 
 ipcMain.handle('shell:open', async (_e, url) => {
   if (/^(?:https?|mailto):/i.test(url)) await shell.openExternal(url)
 })
+
+/* Where the TeX preview's compiled PDFs are cached, under userData. Served by
+   the protocol handler below and written by the render domain's compiler. */
+const TEX_PREVIEW_DIR = () => path.join(app.getPath('userData'), 'tex-preview')
 
 /* Electron's clipboard rather than the page's. `navigator.clipboard.writeText`
    refuses outright — "Document is not focused" — whenever the window is not the
@@ -4321,185 +4311,19 @@ ipcMain.handle('clipboard:write', (_e, text) => {
   return true
 })
 
-/* The words the spellchecker has been told to leave alone. They usually go in
-   from the context menu over a red underline (see the context-menu handler in
-   createWindow); Settings is where the list can be read, added to by hand, and
-   pruned — removing a word puts it back under the checker's eye. */
-ipcMain.handle('dictionary:words', async () => {
-  const words = await session.defaultSession.listWordsInSpellCheckerDictionary()
-  return words.sort((a, b) => a.localeCompare(b))
+/* ------------------------------------------------------------ spelling
+
+   The checkers, the verdict memo and their handlers live in
+   electron/ipc-spell.js, with the reasoning for the memo and the chunked
+   pass. Main keeps the one hook that is main's own: the native context menu
+   over an underlined word teaches it through the same `teachWord`. */
+const spellDomain = makeSpellDomain({
+  broadcast,
+  appAsset,
+  readConfig
 })
-/**
- * Teach the checkers a word, wherever the asking came from — this handler, or
- * the native context menu over an underlined word.
- *
- * Both checkers, or the note keeps its underline under a word the app has been
- * told to accept: Chromium's list is the one Settings shows and the one that
- * survives a restart, and the Hunspell copy is the one the underlines and the
- * pane are actually drawn from.
- */
-function teachWord (word) {
-  const w = String(word ?? '').trim()
-  if (!w) return false
-  speller?.add(w)
-  forgetSpellVerdicts()
-  const done = session.defaultSession.addWordToSpellCheckerDictionary(w)
-  // The renderer is holding a pass that is now out of date by one word.
-  broadcast('dictionary:changed')
-  return done
-}
-
-ipcMain.handle('dictionary:add', (_e, word) => teachWord(word))
-ipcMain.handle('dictionary:remove', (_e, word) => {
-  const w = String(word ?? '').trim()
-  if (!w) return false
-  // nspell has no way to take a word back out, so the checker is thrown away
-  // and rebuilt without it on the next question.
-  speller = null
-  forgetSpellVerdicts()
-  const done = session.defaultSession.removeWordFromSpellCheckerDictionary(w)
-  broadcast('dictionary:changed')
-  return done
-})
-
-/* ---------------------------------------------------------- spelling
-
-   Chromium underlines misspellings in the editor and tells no one which words
-   they were: there is no API for reading them back, and the panel in the
-   sidebar needs a list. So the app keeps a Hunspell dictionary of its own (see
-   src/spellcheck.js) and asks it here — the same side as the custom
-   dictionary, which only exists in this process.
-
-   Nothing is loaded until the first question. The dictionaries are a megabyte
-   of word list to parse, and most sessions never open the pane. */
-let speller = null
-let spellerLoading = null
-
-/* One extra language's Hunspell pair, from the gzipped files the build put in
-   dist/dict (see build.mjs). The id has been through the config's validator
-   and appAsset refuses to leave dist, but the shape check keeps a stray value
-   to a missing-file miss rather than a path error. A pair that is not there —
-   an id from a newer config under an older build — returns null, and the
-   checker simply goes without that language. */
-function loadSpellDictionary (id) {
-  if (!/^[a-z]{2,3}(-[a-z0-9]{2,8})?$/.test(String(id || ''))) return null
-  try {
-    const { gunzipSync } = require('node:zlib')
-    return {
-      aff: gunzipSync(fsSync.readFileSync(appAsset(`dict/${id}.aff.gz`))),
-      dic: gunzipSync(fsSync.readFileSync(appAsset(`dict/${id}.dic.gz`)))
-    }
-  } catch {
-    return null
-  }
-}
-
-function spellerNow () {
-  if (speller) return Promise.resolve(speller)
-  if (spellerLoading) return spellerLoading
-  spellerLoading = (async () => {
-    const { createSpeller, variantForLocale } = require(appAsset('spellcheck.cjs'))
-    /* The words taught from the context menu are the app's answer for "this is
-       not a mistake", and the panel has to honour it the same way the
-       underlines do. */
-    const taught = await session.defaultSession.listWordsInSpellCheckerDictionary().catch(() => [])
-    const languages = readConfig().spellLanguages
-    speller = createSpeller(variantForLocale(app.getLocale()), taught, {
-      languages: Array.isArray(languages) ? languages : [],
-      loadDictionary: loadSpellDictionary
-    })
-    return speller
-  })()
-  spellerLoading.finally(() => { spellerLoading = null })
-  return spellerLoading
-}
-
-/* A ceiling on one question. A note is a few thousand distinct words at the
-   very outside; a number far past that is a bug or a paste of something that
-   is not prose, and neither is worth blocking this process over. */
-const MAX_SPELL_WORDS = 8000
-
-/* One verdict per word, kept between passes.
-   The panel asks again on every pause in typing, and it asks about the whole
-   note each time — so a three-thousand-word note was three thousand Hunspell
-   lookups every half second, on the event loop that also serves file reads and
-   the app's own assets. A word's spelling does not change; only the dictionary
-   can change the answer, and both the ways it can do that clear this map (they
-   are the two places `dictionary:changed` is announced).
-
-   Bounded, and cleared whole rather than evicted one at a time: this only ever
-   saves repeated work, so the rare session that overflows it pays for one cold
-   pass rather than growing without end. */
-const spellVerdicts = new Map()
-const MAX_SPELL_MEMO = 40000
-/* Moved by a dictionary change and by nothing else — not by the memo simply
-   filling up, which is this process tidying after itself rather than the
-   answers changing. A pass in flight compares it against what it captured to
-   find out whether the checker it is holding has been superseded. */
-let spellGeneration = 0
-function forgetSpellVerdicts () { spellVerdicts.clear(); spellGeneration++ }
-
-/* How many unknown words are looked up before yielding. The very first pass
-   over a long note has nothing memoised and is the one that can block; broken
-   up, an IPC call that arrives in the middle of it waits for a chunk instead of
-   the note. */
-const SPELL_CHUNK = 500
-
-/* One walk of the unknown words, into a map of this pass's own.
- *
- * Kept out of the memo until the walk is over because of what the yields
- * between chunks let in: a word removed from the dictionary mid-pass sets
- * `speller` aside and clears the memo, and the loop — holding the checker it
- * captured before its first await — used to resume and write that discarded
- * checker's verdicts into the freshly cleared map. The removed word was
- * recorded as correctly spelt and stayed that way until the next dictionary
- * change. `stable` is how the caller learns its answers are of the dictionary
- * that is still in force.
- */
-async function spellPass (fresh) {
-  const mine = spellGeneration
-  const checker = await spellerNow()
-  const out = new Map()
-  for (let i = 0; i < fresh.length; i += SPELL_CHUNK) {
-    const chunk = fresh.slice(i, i + SPELL_CHUNK)
-    const bad = new Set(checker.check(chunk))
-    for (const word of chunk) out.set(word, bad.has(word))
-    if (i + SPELL_CHUNK < fresh.length) await new Promise((done) => setImmediate(done))
-  }
-  return { out, stable: spellGeneration === mine }
-}
-
-ipcMain.handle('spell:check', async (_e, words) => {
-  if (!Array.isArray(words) || !words.length) return []
-  const asked = words.slice(0, MAX_SPELL_WORDS).map((word) => String(word || '')).filter(Boolean)
-
-  const fresh = [...new Set(asked.filter((word) => !spellVerdicts.has(word)))]
-  if (!fresh.length) return asked.filter((word) => spellVerdicts.get(word))
-
-  /* A dictionary change during the walk means the answers are of a dictionary
-     nobody is using any more, so it is walked again against the new one. Twice
-     over is a bound rather than a belief: the pane re-asks on
-     `dictionary:changed` anyway, so a reader holding down Remove costs one
-     stale-looking pass and not an unbounded run of retries. */
-  let answer = await spellPass(fresh)
-  for (let tries = 0; !answer.stable && tries < 2; tries++) answer = await spellPass(fresh)
-
-  if (answer.stable) {
-    // The memo's own cap, which is not a change of answer — hence the plain
-    // clear rather than `forgetSpellVerdicts`.
-    if (spellVerdicts.size + fresh.length > MAX_SPELL_MEMO) spellVerdicts.clear()
-    for (const [word, bad] of answer.out) spellVerdicts.set(word, bad)
-  }
-
-  // This pass's own answers first: a clear may have emptied the memo under it.
-  return asked.filter((word) => answer.out.get(word) ?? spellVerdicts.get(word))
-})
-
-ipcMain.handle('spell:suggest', async (_e, word) => {
-  const w = String(word ?? '').trim()
-  if (!w) return []
-  return (await spellerNow()).suggest(w)
-})
+const { teachWord } = spellDomain
+spellDomain.register()
 
 /* ------------------------------------------------------------- searching
 
@@ -4645,82 +4469,14 @@ function compileQuery (raw, opts = {}) {
   return { terms, words, filters, usable: filtered || words.some((w) => w.length >= 2) }
 }
 
-/* `#tag`, matched the way both views match it — see the hashtag rule in
-   renderer.js. `tag:book` answers for `#book/fiction` too, so a filter names a
-   branch of the tag tree rather than one leaf of it. */
-const HASHTAG = /(^|\s)#([\p{L}\p{N}][\p{L}\p{N}/_-]*)/gu
+/* The per-note tests and the per-vault loop both live in electron/vault-scan.js
+   — pure, measurable, and the one place that decides what a search sees.
 
-function hasTag (text, wanted) {
-  HASHTAG.lastIndex = 0
-  for (let m = HASHTAG.exec(text); m; m = HASHTAG.exec(text)) {
-    const tag = m[2].toLowerCase()
-    if (tag === wanted || tag.startsWith(`${wanted}/`)) return true
-  }
-  return false
-}
-
-/**
- * A note's properties, parsed once and held against the entry. The object is
- * replaced wholesale by `syncIndex`/`touchIndex` when the note changes, so
- * caching on it cannot hand back stale values.
- */
-function entryProps (entry) {
-  if (entry.props === undefined) {
-    entry.props = propsOf(parseFrontmatter(entry.text))
-  }
-  return entry.props
-}
-
-/**
- * Whether a note survives the query's filters, answered before it is read.
- *
- * Each test is skipped when nothing asked for it. Most queries carry no filter
- * at all, and lowercasing a path and a name per note per keystroke is two
- * allocations for every note in the vault to answer a question nobody asked.
- * Ordered cheapest first: the tag and property tests are the only ones that
- * walk the text, and the property one walks only its head.
- */
-/**
- * `facts` is what this *query* knows about the entry — its kind, and the tags
- * assigned to its path — as opposed to what the index holds about the note.
- *
- * Passed in rather than read off the entry because the two used to be the same
- * object: the search loop wrote `kind` and `fileTags` onto every entry in the
- * index, for every note in the vault, on every keystroke. That is a vault's
- * worth of writes into a long-lived cache to carry one query's worth of state
- * — and the state leaked, far enough that `index-cache.js` has to strip both
- * fields back out before it is allowed to write the cache to disk.
- */
-function passesFilters (key, entry, filters, facts = entry) {
-  if (filters.type.length && !filters.type.every((kind) => kind === facts.kind)) return false
-  if (filters.path.length) {
-    const where = key.toLowerCase()
-    if (!filters.path.every((p) => where.includes(p))) return false
-  }
-  if (filters.file.length) {
-    const named = entry.name.toLowerCase()
-    if (!filters.file.every((f) => named.includes(f))) return false
-  }
-  if (filters.tag.length) {
-    const assigned = facts.fileTags || []
-    if (!filters.tag.every((wanted) =>
-      assigned.some((tag) => tag === wanted || tag.startsWith(`${wanted}/`)) ||
-      hasTag(entry.text, wanted))) return false
-  }
-  if (filters.prop.length) {
-    const props = entryProps(entry)
-    for (const { key: wantKey, value: wantValue } of filters.prop) {
-      const prop = props.find((p) => p.key.toLowerCase() === wantKey)
-      if (!prop) return false
-      /* No value asked: existence. With one: equality against any of the
-         property's values — one for a scalar, one per item for a list, all
-         compared lowercase, so `prop:status=Reading` finds `status: reading`. */
-      if (wantValue === null || wantValue === '') continue
-      if (!propValues(prop).includes(wantValue)) return false
-    }
-  }
-  return true
-}
+   The tag inventory and the unlinked-mentions scan (electron/ipc-vault-info.js)
+   walk notes with the same `HASHTAG` expression, imported there — one
+   expression for "this is a tag" is the only way the three can agree.
+   `tag:book` answers for `#book/fiction` too, so a filter names a branch of
+   the tag tree rather than one leaf of it. */
 
 /* What the search pass already knows about a PDF: whether its extracted text
    is current, and the highlights it carries.
@@ -4902,12 +4658,57 @@ async function searchPdfDocuments (q, only = null) {
 /** @type {any} */
 let lastSearch = null
 
+/* Bumped by every search the box asks for, per window. A scan compares the
+   number it took on the way in against the one standing now, and stops the
+   moment they differ.
+
+   Per window because two windows on one vault each have a search box, and one
+   counter between them would let a reader typing in the second empty the panel
+   in the first — the scan there would stand aside for a query that was never
+   going to be painted into it. Keyed by the webContents id; a window that has
+   gone leaves one number behind, which is the whole of what it costs. */
+const searchGenerations = new Map()
+
+const nextSearchGeneration = (channel) => {
+  const next = (searchGenerations.get(channel) || 0) + 1
+  searchGenerations.set(channel, next)
+  return next
+}
+
 /* A named function rather than an inline handler because the search now has
    two callers: the overlay, and the Copilot's request file — see
    `consumeAiSearch`. */
-async function searchVault (raw, opts = {}) {
+async function searchVault (raw, opts = {}, { channel = null } = {}) {
+  /* Which search this is, claimed before anything else can happen.
+   *
+   * A reader typing a seven-letter word asks seven times, and only the last of
+   * them is an answer anybody will see — so the six before it stand aside as
+   * soon as the next one starts, rather than scanning the vault to the end for
+   * a result that is already stale. The renderer keeps a token of its own and
+   * ignores an old reply; this is the other half of that, and the half that
+   * saves the work.
+   *
+   * Taken synchronously, on the first line, for the same reason the renderer's
+   * is: it decides *which search is newer*, and that has to be settled by the
+   * order the calls arrived in. Claimed after an await, two searches racing
+   * through `ensureIndex` could take their numbers in either order, and the
+   * one that stood aside would be whichever the event loop happened to resume
+   * second.
+   *
+   * Only the search box works this way, and only against itself: `channel` is
+   * the window that asked. The copilot asks for one search whose answer it is
+   * waiting for, and it must neither cancel a reader's typing nor be cancelled
+   * by it — it passes no channel, takes no number, and never stands aside. */
+  const mine = channel === null ? -1 : nextSearchGeneration(channel)
+  const stop = () => channel !== null && mine !== searchGenerations.get(channel)
+
   // One shape, whichever way this answers.
   const nothing = { results: [], truncated: false, unsearched: 0, unsearchedPaths: [] }
+  /* One shape for an abandoned search. Never recorded and never painted: the
+     renderer's own token has already moved on, and `lastSearch` must not learn
+     anything from a scan that did not see the whole vault. */
+  const abandoned = { ...nothing, cancelled: true }
+
   if (!vaultPath) return nothing
   const q = compileQuery(raw, opts)
   if (q.error) return { ...nothing, error: q.error }
@@ -4928,6 +4729,11 @@ async function searchVault (raw, opts = {}) {
   let unsearched = 0
   const unsearchedPaths = []
 
+  /* The index may have been built by the await above, during which a newer
+     query arrived — the whole point of standing aside is to do it before the
+     expensive part, not after. */
+  if (stop()) return abandoned
+
   /* Where to look. The previous answer when this query is a narrowing of the
      one that produced it — see narrowsFrom — and the whole index otherwise.
      The filters do not have to be re-applied to a narrowed set: they are the
@@ -4944,111 +4750,84 @@ async function searchVault (raw, opts = {}) {
     ? (lastSearch.docxKeys || [])
         .map((key) => [key, docxIndex.get(key)]).filter(([, entry]) => entry)
     : docxIndex
+  const documentsLooking = narrowed
+    ? (lastSearch.documentKeys || [])
+        .map((key) => [key, documentIndex.get(key)]).filter(([, entry]) => entry)
+    : documentIndex
 
   // What this answer will be narrowed from next, gathered as it is built.
   const keys = []
   const whiteboardKeys = []
   const docxKeys = []
+  const documentKeys = []
 
-  for (const [key, entry] of looking) {
-    const facts = { kind: 'note', fileTags: assignedTags[key] || [] }
-    if (!narrowed && !passesFilters(key, entry, q.filters, facts)) continue
-
-    /* A filter on its own is a query: `tag:book` asks for the notes carrying
-       it, and the note's opening line is the only context there is to show. */
-    if (!q.terms.length) {
-      keys.push(key)
-      results.push({ path: key, name: entry.name, kind: 'note', hits: hitLines(entry.text, [0], 1), total: 0, score: 0 })
-      continue
+  /* The four kinds, one after another rather than all at once: they share the
+     one result list and the one budget of time, and a scan that stood aside
+     halfway through the third has still done nothing wrong — the caller
+     discards the whole answer. */
+  const scans = [
+    {
+      entries: looking,
+      into: keys,
+      limit: MAX_INDEX_BYTES,
+      rankHeadings: true,
+      kindOf: () => 'note',
+      factsFor: (key) => ({ kind: 'note', fileTags: assignedTags[key] || [] })
+    },
+    /* Whiteboards are indexed from text elements only. Their JSON may contain
+       megabytes of pasted-image data, which is neither useful search text nor a
+       string the search path should scan on every keystroke. */
+    {
+      entries: whiteboardsLooking,
+      into: whiteboardKeys,
+      limit: MAX_WHITEBOARD_INDEX_BYTES,
+      kindOf: () => 'whiteboard',
+      factsFor: (key, entry) => ({ kind: entry.kind, fileTags: assignedTags[key] || [] })
+    },
+    /* Word documents, indexed from the text electron/docx.js reads out of the
+       zip — never the zip itself, which is compressed bytes and a stylesheet.
+       Everything else is a note's rules: the same filters, the same scoring,
+       the same report when one was too large to read. */
+    {
+      entries: docxLooking,
+      into: docxKeys,
+      limit: MAX_DOCX_INDEX_BYTES,
+      kindOf: () => 'docx',
+      factsFor: (key, entry) => ({ kind: entry.kind, fileTags: assignedTags[key] || [] })
+    },
+    /* Source files, data files and notebooks — the vault's own text that is not
+       prose, held in `documentIndex` on the same terms as the tables above. The
+       name keeps its extension because the tree shows it that way, and a term in
+       it scores the way a title does: `solve.py` typed into search almost always
+       means the file called that. */
+    {
+      entries: documentsLooking,
+      into: documentKeys,
+      limit: MAX_INDEX_BYTES,
+      kindOf: (entry) => entry.kind,
+      factsFor: (key, entry) => ({ kind: entry.kind, fileTags: assignedTags[key] || [] })
     }
+  ]
 
-    if (entry.size > MAX_INDEX_BYTES) {
+  for (const scan of scans) {
+    const found = await scanKind({
+      entries: scan.entries,
+      query: q,
+      narrowed,
+      kindOf: scan.kindOf,
+      factsFor: scan.factsFor,
+      limit: scan.limit,
+      rankHeadings: scan.rankHeadings,
+      stop
+    })
+    if (found.stopped) return abandoned
+    scan.into.push(...found.keys)
+    results.push(...found.results)
+    for (const skipped of found.unsearched) {
       unsearched++
       // Twenty is all a reader will open; the count keeps the whole truth.
-      if (unsearchedPaths.length < 20) unsearchedPaths.push(key)
-      /* Carried forward even though it matched nothing: it passed the filters,
-         and the narrower query still has to be able to report that this note
-         went unread rather than quietly dropping the caveat. */
-      keys.push(key)
-      continue
+      if (unsearchedPaths.length < 20) unsearchedPaths.push(skipped)
     }
-
-    const found = findSpots(entry.text, q.terms)
-    if (!found) continue
-    const hits = hitLines(entry.text, found.spots)
-
-    /* What a note is worth, rather than how often it repeats itself. A term in
-       the title is the strongest signal a vault offers — it is what someone
-       typing two words is usually reaching for — and a term in a heading says
-       the note has a section about it rather than a passing mention. */
-    const named = q.terms.filter((term) => term.has.test(entry.name)).length
-    const score = found.total + named * 8 + hits.filter((h) => h.heading).length * 3
-
-    keys.push(key)
-    results.push({ path: key, name: entry.name, kind: 'note', hits, total: found.total, score })
-  }
-
-  /* Whiteboards are indexed from text elements only. Their JSON may contain
-     megabytes of pasted-image data, which is neither useful search text nor a
-     string the search path should scan on every keystroke. */
-  for (const [key, entry] of whiteboardsLooking) {
-    const facts = { kind: entry.kind, fileTags: assignedTags[key] || [] }
-    if (!narrowed && !passesFilters(key, entry, q.filters, facts)) continue
-    if (!q.terms.length) {
-      whiteboardKeys.push(key)
-      results.push({
-        path: key, name: entry.name, kind: 'whiteboard',
-        hits: hitLines(entry.text, [0], 1), total: 0, score: 0
-      })
-      continue
-    }
-    if (entry.size > MAX_WHITEBOARD_INDEX_BYTES) {
-      unsearched++
-      if (unsearchedPaths.length < 20) unsearchedPaths.push(key)
-      whiteboardKeys.push(key)
-      continue
-    }
-    const found = findSpots(entry.text, q.terms)
-    if (!found) continue
-    const hits = hitLines(entry.text, found.spots)
-    const named = q.terms.filter((term) => term.has.test(entry.name)).length
-    whiteboardKeys.push(key)
-    results.push({
-      path: key, name: entry.name, kind: 'whiteboard', hits,
-      total: found.total, score: found.total + named * 8
-    })
-  }
-
-  /* Word documents, indexed from the text electron/docx.js reads out of the
-     zip — never the zip itself, which is compressed bytes and a stylesheet.
-     Everything else is a note's rules: the same filters, the same scoring, the
-     same report when one was too large to read. */
-  for (const [key, entry] of docxLooking) {
-    const facts = { kind: entry.kind, fileTags: assignedTags[key] || [] }
-    if (!narrowed && !passesFilters(key, entry, q.filters, facts)) continue
-    if (!q.terms.length) {
-      docxKeys.push(key)
-      results.push({
-        path: key, name: entry.name, kind: 'docx',
-        hits: hitLines(entry.text, [0], 1), total: 0, score: 0
-      })
-      continue
-    }
-    if (entry.size > MAX_DOCX_INDEX_BYTES) {
-      unsearched++
-      if (unsearchedPaths.length < 20) unsearchedPaths.push(key)
-      docxKeys.push(key)
-      continue
-    }
-    const found = findSpots(entry.text, q.terms)
-    if (!found) continue
-    const hits = hitLines(entry.text, found.spots)
-    const named = q.terms.filter((term) => term.has.test(entry.name)).length
-    docxKeys.push(key)
-    results.push({
-      path: key, name: entry.name, kind: 'docx', hits,
-      total: found.total, score: found.total + named * 8
-    })
   }
 
   /* PDFs are narrowed on one more condition than notes are. `narrowsFrom` asks
@@ -5074,7 +4853,7 @@ async function searchVault (raw, opts = {}) {
   const already = new Set(results.map((result) => result.path))
   for (const [taggedPath, tags] of Object.entries(assignedTags)) {
     if (already.has(taggedPath)) continue
-    const normalized = cleanFileTags(tags)
+    const normalized = cleanFileTags(tags) || []
     if (q.filters.tag.length && !q.filters.tag.every((wanted) =>
       normalized.some((tag) => tag === wanted || tag.startsWith(`${wanted}/`)))) continue
     if (q.filters.path.length && !q.filters.path.every((part) => taggedPath.toLowerCase().includes(part))) continue
@@ -5100,6 +4879,7 @@ async function searchVault (raw, opts = {}) {
     keys,
     whiteboardKeys,
     docxKeys,
+    documentKeys,
     pdfKeys: pdfAnswer.keys,
     /* The state of the vault the PDF pass was run against, not the state it
        finished in: a PDF that changed while it ran is one this list may already
@@ -5128,58 +4908,15 @@ async function searchVault (raw, opts = {}) {
   return { results: truncated ? results.slice(0, 200) : results, truncated, unsearched, unsearchedPaths }
 }
 
-ipcMain.handle('search:vault', (_e, raw, opts = {}) => searchVault(raw, opts))
+/* The window that asked is what a scan stands aside for — see
+   `searchGenerations`. Without one (nothing in the app, but the IPC harness
+   calls handlers directly) the search simply runs to the end, which is the
+   safe direction: an answer nobody cancelled is still a correct answer. */
+ipcMain.handle('search:vault', (event, raw, opts = {}) =>
+  searchVault(raw, opts, { channel: event?.sender?.id ?? null }))
 
-/**
- * Every tag in the vault and how many notes carry it — the inventory the
- * editor's `#` completion offers and the search overlay lists. One count per
- * note rather than per occurrence: a note that says `#book` five times is one
- * book-note, not five.
- *
- * Held against `indexGeneration`, exactly as `aliasTable` is: the scan is the
- * HASHTAG expression over the full text of every note in the vault, and the
- * completion asks for it on a keystroke. It cannot go stale, because the
- * generation moves whenever anything the count is made of does — including the
- * assigned file tags, whose store bumps it on save.
- */
-let tagCountsCache = null
-let tagCountsAt = -1
-
-ipcMain.handle('tags:vault', async () => {
-  if (!vaultPath) return []
-  await ensureIndex()
-  if (tagCountsCache && tagCountsAt === indexGeneration) return tagCountsCache
-
-  const taken = indexGeneration
-  const counts = new Map()
-  const assigned = await fileTags.all()
-  for (const tags of Object.values(assigned)) {
-    for (const tag of cleanFileTags(tags) || []) counts.set(tag, (counts.get(tag) || 0) + 1)
-  }
-  for (const [key, entry] of index) {
-    if (!entry.text) continue
-    const seenHere = new Set(cleanFileTags(assigned[key]))
-    HASHTAG.lastIndex = 0
-    for (let m = HASHTAG.exec(entry.text); m; m = HASHTAG.exec(entry.text)) {
-      const tag = m[2].toLowerCase()
-      if (seenHere.has(tag)) continue
-      seenHere.add(tag)
-      counts.set(tag, (counts.get(tag) || 0) + 1)
-    }
-  }
-
-  const table = [...counts]
-    .map(([tag, notes]) => ({ tag, notes }))
-    .sort((a, b) => b.notes - a.notes || a.tag.localeCompare(b.tag))
-  /* Only if nothing moved across the await above: a count taken partly before
-     an edit and partly after describes a vault that never existed, and holding
-     it would keep saying so. */
-  if (indexGeneration === taken) {
-    tagCountsCache = table
-    tagCountsAt = taken
-  }
-  return table
-})
+/* The tag inventory lives in electron/ipc-vault-info.js, beside the
+   backlinks answer — both are cached against the index generation. */
 
 /* One line of what a replace would do, for the preview: the first line the two
    texts disagree on, before and after. A line is the right unit because it is
@@ -5328,44 +5065,25 @@ ipcMain.handle('search:replace', async (_e, raw, replacement, opts = {}) => {
   return { notes: rewritten.length, hits, rewritten }
 })
 
-/* ------------------------------------------------------------- backlinks
-
-   Which notes point here, and which ones say the name without pointing.
-
-   Both answers come off the same index the search and the link rewriter read,
-   and both are scanned with `CODE_OR_LINK` — the one pass in this file that
-   knows a `[[Note]]` written inside backticks is writing *about* a link rather
-   than making one. A backlink panel that counted those would disagree with
-   both views, which already refuse to render them.
-   ================================================================== */
-
-/**
- * Every note's basename and full path, for resolving what a link names.
- *
- * Held between asks. This is asked for on every note switch, and it depends on
- * which notes exist rather than on what is in them — so it survives every edit
- * and is dropped only when the index gains or loses a key. Building it walks
- * every path in the vault through `stripExt`, `basename` and `toLowerCase`,
- * which is not work to repeat for a click that changed nothing.
- */
-let linkTableCache = null
-
-const forgetLinkTables = () => { linkTableCache = null }
-
-function linkTables () {
-  if (linkTableCache) return linkTableCache
-  const byBase = new Map()
-  const byPath = new Map()
-  for (const key of index.keys()) {
-    const bare = stripExt(key)
-    byPath.set(bare.toLowerCase(), key)
-    const base = path.basename(bare).toLowerCase()
-    if (!byBase.has(base)) byBase.set(base, [])
-    byBase.get(base).push(key)
-  }
-  linkTableCache = { byBase, byPath }
-  return linkTableCache
-}
+/* The link-resolution table (every note's basename and full path) and the
+   backlinks answer live in electron/ipc-vault-info.js, which main asks to
+   forget wherever the index gains or loses a key. The alias table below
+   stays: it is main's, read on the rename path. */
+const vaultInfoDomain = makeVaultInfoDomain({
+  getVaultPath: () => vaultPath,
+  ensureIndex,
+  getIndex: () => index,
+  getIndexGeneration: () => indexGeneration,
+  fileTags,
+  cleanFileTags,
+  stripExt,
+  linkTarget,
+  mergeSpans,
+  wordBefore: WORD_BEFORE,
+  wordAfter: WORD_AFTER,
+  codeOrLink: CODE_OR_LINK
+})
+vaultInfoDomain.register()
 
 /**
  * The other names a note answers to: its frontmatter `aliases`.
@@ -5478,178 +5196,9 @@ function mergeSpans (spans) {
   return out
 }
 
-/** Whether `at` falls inside one of a set of sorted, non-overlapping spans. */
-function inside (spans, at) {
-  let lo = 0
-  let hi = spans.length - 1
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1
-    if (at < spans[mid][0]) hi = mid - 1
-    else if (at >= spans[mid][1]) lo = mid + 1
-    else return true
-  }
-  return false
-}
 
-/** One note's row in either list, with the first few places it is shown. */
-function mentionRow (key, entry, spots) {
-  return {
-    path: key,
-    name: entry.name,
-    hits: hitLines(entry.text, spots, 6),
-    total: spots.length
-  }
-}
+/* The backlinks answer and its caches live in electron/ipc-vault-info.js. */
 
-/* The last few answers, each good for as long as the index it was read from.
-   Nothing here was cached before: the whole vault was scanned again for the
-   backlinks of a note on every switch to it — A, B, back to A — and again on
-   every `vault:changed`, for a pane that mostly shows the same rows. The index
-   generation moves on every write to the index, the reader's own autosave
-   included, so an answer can never outlive the text it was built from. */
-const linksToMemo = new Map()
-const LINKS_TO_MEMO_KEPT = 8
-
-ipcMain.handle('links:to', async (_e, notePath) => {
-  const none = { linked: [], unlinked: [], outgoing: [] }
-  if (!vaultPath || !notePath) return none
-  await ensureIndex()
-  const held = linksToMemo.get(notePath)
-  if (held && held.generation === indexGeneration && held.vault === vaultPath) return held.answer
-  const answer = computeLinksTo(notePath)
-  linksToMemo.delete(notePath)
-  linksToMemo.set(notePath, { generation: indexGeneration, vault: vaultPath, answer })
-  while (linksToMemo.size > LINKS_TO_MEMO_KEPT) linksToMemo.delete(linksToMemo.keys().next().value)
-  return answer
-})
-
-function computeLinksTo (notePath) {
-  const none = { linked: [], unlinked: [], outgoing: [] }
-
-  const self = index.get(notePath)
-  if (!self) return none
-
-  const tables = linkTables()
-  const name = self.name
-
-  /* Which notes this one links to — the other direction of the same question.
-     One row per distinct target, first occurrence's line. A link that names
-     nothing in the vault is kept and marked missing: it is a promise of a note
-     rather than a reference to one, and the pane offers to create it. Self
-     links (`[[#Heading]]`) name this note and are nobody's outgoing, so they
-     are left out. */
-  const outgoing = []
-  {
-    const scanner = new RegExp(CODE_OR_LINK.source, CODE_OR_LINK.flags)
-    const seen = new Map()   // identity → index into outgoing
-    const spots = []         // positions of first occurrences, in document order
-    for (let m = scanner.exec(self.text); m; m = scanner.exec(self.text)) {
-      const { link, target } = m.groups
-      if (!link) continue
-      if (target.trim().startsWith('#')) continue   // `[[#Heading]]`: this note itself
-      const resolved = linkTarget(target, notePath, tables)
-      if (resolved === notePath) continue
-      const identity = (resolved || link.toLowerCase())
-      if (seen.has(identity)) continue
-      seen.set(identity, outgoing.length)
-      spots.push({ order: outgoing.length, at: m.index })
-      /* What to call it: the note's own name when it resolved, the target as
-         written when it did not — "Fundamentals" rather than
-         "fundamentales 2" is the point of resolving. */
-      const bare = target.split('#')[0].split('|')[0].trim()
-      outgoing.push({
-        target,
-        path: resolved,
-        name: resolved ? index.get(resolved)?.name || path.basename(stripExt(resolved)) : bare,
-        missing: !resolved
-      })
-    }
-    /* First occurrence per target — the place a click lands on. Counted here
-       rather than through `hitLines`, which would collapse two links sharing a
-       line into one row and misnumber every target after them. */
-    let lineAt = 1
-    let scanned = 0
-    for (const spot of spots) {
-      for (let i = self.text.indexOf('\n', scanned); i !== -1 && i < spot.at; i = self.text.indexOf('\n', i + 1)) lineAt++
-      scanned = spot.at
-      outgoing[spot.order].line = lineAt
-    }
-  }
-
-
-  /* The name in prose. Whole-word, so a note called "Set" is not found inside
-     every "Settings" in the vault — the same lookarounds the search's
-     whole-word switch uses, and for the same reason.
-
-     `present` is the same pattern without `g`, for rejecting a note outright.
-     It has to be a regex and not `text.toLowerCase().includes(name)`: that
-     lowercases a copy of every note in the vault on every note switch, which
-     is megabytes of garbage per click. A case-insensitive regex scans the
-     string where it lies. */
-  let mention
-  let present
-  try {
-    const body = `${WORD_BEFORE}${escapeRe(name)}${WORD_AFTER}`
-    mention = new RegExp(body, 'giu')
-    present = new RegExp(body, 'iu')
-  } catch {
-    return none
-  }
-
-  /* A copy per ask. The shared one is global, and `rewriteLinks` drives it
-     through `String.replace` — borrowing it here would mean two readers of one
-     `lastIndex`. */
-  const scanner = new RegExp(CODE_OR_LINK.source, CODE_OR_LINK.flags)
-
-  const linked = []
-  const unlinked = []
-
-  for (const [key, entry] of index) {
-    if (key === notePath) continue
-    /* The cheap rejection first, and it rejects nearly everything: a note that
-       never says the name can hold neither a link to it nor a mention of it,
-       and answering that costs one scan rather than three. */
-    if (!entry.text || !present.test(entry.text)) continue
-
-    const aimed = []
-    /* Code spans, fenced blocks, and every wikilink — whether or not it points
-       here. All of them are places where the name is already spoken for, so
-       none of them can also be an unlinked mention. */
-    const claimed = []
-
-    scanner.lastIndex = 0
-    for (let m = scanner.exec(entry.text); m; m = scanner.exec(entry.text)) {
-      claimed.push([m.index, m.index + m[0].length])
-      const groups = m.groups
-      if (!groups.link) continue
-      if (linkTarget(groups.target, key, tables) === notePath) aimed.push(m.index)
-    }
-    if (aimed.length) linked.push(mentionRow(key, entry, aimed))
-
-    /* Tags are spoken for too. `#project/tulip` names the note as surely as
-       the prose does, but it is already a piece of structure — offering it as
-       a link waiting to be made would be asking to turn a tag into something
-       it was deliberately not. */
-    HASHTAG.lastIndex = 0
-    for (let m = HASHTAG.exec(entry.text); m; m = HASHTAG.exec(entry.text)) {
-      claimed.push([m.index, m.index + m[0].length])
-    }
-
-    const spans = mergeSpans(claimed)
-    const bare = []
-    mention.lastIndex = 0
-    for (let m = mention.exec(entry.text); m; m = mention.exec(entry.text)) {
-      if (!inside(spans, m.index)) bare.push(m.index)
-    }
-    if (bare.length) unlinked.push(mentionRow(key, entry, bare))
-  }
-
-  const rank = (a, b) => b.total - a.total || a.name.localeCompare(b.name)
-  linked.sort(rank)
-  unlinked.sort(rank)
-
-  return { linked: linked.slice(0, 200), unlinked: unlinked.slice(0, 200), outgoing: outgoing.slice(0, 200) }
-}
 
 /**
  * Files a pasted or dropped attachment. The layout is decided here rather than
@@ -5774,94 +5323,20 @@ ipcMain.handle('ai:pick-attachments', async () => {
 
 const annotationFile = (relPath) => safePath(path.join(ANNOTATION_DIR, `${relPath}.json`))
 
-ipcMain.handle('pdf:marks:load', async (_e, p) => {
-  if (!isPdf(String(p || ''))) return []
-  try {
-    const abs = annotationFile(p)
-    /* `safePath` is lexical: it settles that the path spells somewhere inside
-       the vault, not that following it stays there. A vault synced from
-       elsewhere can carry `.annotations/Papers` as a symlink to any folder on
-       the machine, and this reads and parses whatever is at the other end.
-       Saving already checks; reading did not. */
-    await assertReal(abs)
-    const text = await fs.readFile(abs, 'utf8')
-    const parsed = JSON.parse(text)
-    return Array.isArray(parsed?.highlights) ? parsed.highlights : []
-  } catch {
-    // No sidecar yet, or one that will not parse. Either way the document has
-    // no highlights we can show, and saving over it is the right next move.
-    return []
-  }
-})
-
-ipcMain.handle('pdf:marks:save', async (_e, p, highlights) => {
-  if (!isPdf(String(p || ''))) throw new Error('Only PDFs carry highlights.')
-  const abs = annotationFile(p)
-  await assertReal(abs)
-  await fs.mkdir(path.dirname(abs), { recursive: true })
-  const body = JSON.stringify({ version: 1, pdf: p, highlights: highlights || [] }, null, 2)
-  await writeAtomic(abs, body)
-  // `.annotations/` is outside what the watcher reports, so the search pass is
-  // told here or not at all.
-  forgetPdfSearchFacts(p)
-  return true
-})
-
-/* --------------------------------------------------------- pdf export
-
-   The open note as a PDF file. All the deciding happened in the renderer,
-   which re-rendered the note in the paper palette before invoking; this side
-   asks where the file goes, prints the window, and writes the bytes.
-
-   `to` skips the save dialog: the scripted probes cannot click it, and a
-   probe is how an export is verified. Nobody else hands a path. */
-
-ipcMain.handle('pdf:export', async (event, name, to) => {
-  /* The window that asked, not whichever one is frontmost: an export is a
-     picture of a particular note, and the ask came from the window showing it
-     — which the save dialog it opens is about to take the focus away from. */
-  const win = windowOf(event)
-  if (!win) return { ok: false, error: 'There is no window to print from.' }
-
-  const safe = String(name || 'note').replace(/[\\/:*?"<>|]/g, '-').trim().slice(0, 120) || 'note'
-  let filePath = typeof to === 'string' && to.endsWith('.pdf') ? to : null
-  if (!filePath) {
-    const chosen = await dialog.showSaveDialog(win, {
-      title: 'Export as PDF',
-      defaultPath: path.join(app.getPath('documents'), `${safe}.pdf`),
-      filters: [{ name: 'PDF', extensions: ['pdf'] }]
-    })
-    if (chosen.canceled || !chosen.filePath) return { ok: false, canceled: true }
-    filePath = chosen.filePath
-  }
-
-  try {
-    const bytes = await win.webContents.printToPDF({
-      printBackground: true,
-      pageSize: 'Letter',
-      preferCSSPageSize: true
-    })
-    await fs.writeFile(filePath, bytes)
-    return { ok: true, path: filePath, bytes: bytes.length }
-  } catch (err) {
-    return { ok: false, error: err.message }
-  }
-})
-
-/* The same page as `pdf:export`, sent to a real printer through the system's
-   own dialog instead of to a file. The renderer has already done the deciding
-   — light palette, reading view, everything settled — before it invokes. */
-ipcMain.handle('pdf:print', async (event) => {
-  const win = windowOf(event)
-  if (!win) return { ok: false, error: 'There is no window to print from.' }
-  return await new Promise((resolve) => {
-    win.webContents.print({ printBackground: true }, (success, reason) => {
-      if (success) resolve({ ok: true })
-      else if (String(reason || '').includes('cancel')) resolve({ ok: false, canceled: true })
-      else resolve({ ok: false, error: reason || 'Printing did not finish.' })
-    })
-  })
-})
+/* The sidecar path above is shared with the index machinery (a deletion
+   removes the sidecar; the pdf text facts read it), so it stays here and the
+   handlers below take it through the context. */
+makePdfDomain({
+  realSafePath,
+  rel,
+  isPdf,
+  assertReal,
+  writeAtomic,
+  annotationFile,
+  forgetPdfSearchFacts,
+  ensurePdfText,
+  windowOf
+}).register()
 
 /* ------------------------------------------------------- html export
 
@@ -6021,6 +5496,100 @@ ipcMain.handle('note:export-markdown', async (event, name, text, files, to) => {
   }
 })
 
+/* ------------------------------------------------------- vault export/import
+
+   Whole-vault Markdown export: every `.md` note copied to a chosen folder,
+   preserving relative paths. Derived state (`.tulip`, `.trash`, `.git`) does
+   not travel. Import is the reverse: `.md` files from a folder copied into
+   the vault without overwriting. */
+
+ipcMain.handle('vault:export-all', async (event, to) => {
+  const win = windowOf(event)
+  if (!vaultPath) return { ok: false, error: 'Open a vault first.' }
+  let dir = typeof to === 'string' && to ? to : null
+  if (!dir) {
+    if (!win) return { ok: false, error: 'There is no window to export from.' }
+    const chosen = await dialog.showOpenDialog(win, {
+      title: 'Export vault as Markdown',
+      defaultPath: app.getPath('documents'),
+      properties: ['openDirectory', 'createDirectory']
+    })
+    if (chosen.canceled || !chosen.filePaths?.[0]) return { ok: false, canceled: true }
+    dir = chosen.filePaths[0]
+  }
+  try {
+    const SKIP = new Set(['.git', '.obsidian', '.tulip', 'node_modules', '__pycache__', '.trash'])
+    let copied = 0
+    const walk = async (from, prefix = '') => {
+      const entries = await fs.readdir(from, { withFileTypes: true })
+      for (const entry of entries) {
+        if (entry.isSymbolicLink()) continue
+        if (SKIP.has(entry.name)) continue
+        const abs = path.join(from, entry.name)
+        const rel = prefix ? `${prefix}/${entry.name}` : entry.name
+        if (entry.isDirectory()) {
+          await walk(abs, rel)
+        } else if (entry.isFile() && /\.md$/i.test(entry.name)) {
+          const target = path.join(dir, ...rel.split('/'))
+          if (!target.startsWith(path.resolve(dir) + path.sep)) continue
+          await fs.mkdir(path.dirname(target), { recursive: true })
+          await fs.copyFile(abs, target)
+          copied++
+        }
+      }
+    }
+    await walk(vaultPath)
+    return { ok: true, path: dir, copied }
+  } catch (err) {
+    return { ok: false, error: err.message }
+  }
+})
+
+ipcMain.handle('vault:import-folder', async (event, from) => {
+  const win = windowOf(event)
+  if (!vaultPath) return { ok: false, error: 'Open a vault first.' }
+  let dir = typeof from === 'string' && from ? from : null
+  if (!dir) {
+    if (!win) return { ok: false, error: 'There is no window to import from.' }
+    const chosen = await dialog.showOpenDialog(win, {
+      title: 'Import Markdown folder',
+      properties: ['openDirectory']
+    })
+    if (chosen.canceled || !chosen.filePaths?.[0]) return { ok: false, canceled: true }
+    dir = chosen.filePaths[0]
+  }
+  try {
+    let copied = 0
+    let skipped = 0
+    const walk = async (srcDir, prefix = '') => {
+      const entries = await fs.readdir(srcDir, { withFileTypes: true })
+      for (const entry of entries) {
+        if (entry.isSymbolicLink()) continue
+        const abs = path.join(srcDir, entry.name)
+        const rel = prefix ? `${prefix}/${entry.name}` : entry.name
+        if (entry.isDirectory()) {
+          await walk(abs, rel)
+        } else if (entry.isFile() && /\.md$/i.test(entry.name)) {
+          const target = path.join(vaultPath, ...rel.split('/'))
+          if (!target.startsWith(path.resolve(vaultPath) + path.sep)) { skipped++; continue }
+          try {
+            await fs.stat(target)
+            skipped++ // never overwrite
+          } catch {
+            await fs.mkdir(path.dirname(target), { recursive: true })
+            await fs.copyFile(abs, target)
+            copied++
+          }
+        }
+      }
+    }
+    await walk(path.resolve(dir))
+    return { ok: true, copied, skipped }
+  } catch (err) {
+    return { ok: false, error: err.message }
+  }
+})
+
 /* A rendered whiteboard leaves the canvas as PNG or SVG bytes. The renderer
    owns rendering because that is where Excalidraw and its fonts live; main
    owns the native destination picker and the filesystem write. */
@@ -6063,7 +5632,6 @@ ipcMain.handle('whiteboard:export', async (event, name, ext, bytes, to) => {
    it — it gets a directory and its own tools, and a file either is there when
    it looks or is not. */
 
-const PDF_TEXT_SUFFIX = VAULT_CONTRACT.pdfTextSuffix
 const PDF_TEXT_MARKER = `Tulip-PDF-Text: ${PDF_TEXT_FORMAT}`
 
 const pdfTextFile = (relPath) => safePath(path.join(ANNOTATION_DIR, `${relPath}${PDF_TEXT_SUFFIX}`))
@@ -6402,11 +5970,10 @@ function turnPdfs (context) {
  */
 const INLINE_ATTACHMENT_BYTES = 4096
 const INLINE_ATTACHMENT_EXT = new Set([
-  ...MD_EXT, TEX_EXT, '.txt', '.csv', '.tsv', '.json', '.yaml', '.yml', '.bib',
-  '.py', '.js', '.mjs', '.cjs', '.ts', '.sh', '.css', '.html', '.xml', '.toml', '.ini'
+  ...MD_EXT, TEX_EXT, SITE_EXT, ...CODE_EXT, ...DATA_EXT
 ])
 
-async function inlineAttachments (context) {
+async function inlineAttachments (context, totalBytes = INLINE_ATTACHMENT_BYTES * 8) {
   const paths = (context?.attachments || [])
     .map((file) => String(file || ''))
     .filter((file) => INLINE_ATTACHMENT_EXT.has(path.extname(file).toLowerCase()))
@@ -6417,15 +5984,25 @@ async function inlineAttachments (context) {
       const abs = await realSafeTargetPath(file)
       const stat = await fs.stat(abs)
       if (!stat.isFile() || stat.size > INLINE_ATTACHMENT_BYTES) return null
-      return { path: file, text: await fs.readFile(abs, 'utf8') }
+      return { path: file, text: await fs.readFile(abs, 'utf8'), bytes: stat.size }
     } catch { return null }
   }))
-  return read.filter(Boolean)
+  let used = 0
+  const selected = []
+  for (const entry of read) {
+    if (!entry || used + entry.bytes > totalBytes) continue
+    used += entry.bytes
+    selected.push({ path: entry.path, text: entry.text })
+  }
+  return selected
 }
 
 async function preparePdfTurn (question, context, turnId = null) {
-  const inlined = await inlineAttachments(context)
-  if (inlined.length) context = { ...(context || {}), attachmentTexts: inlined }
+  const budget = context?.contextBudget || {}
+  const inlined = await inlineAttachments(context, Number(budget.attachments) || undefined)
+  context = { ...(context || {}) }
+  delete context.contextBudget
+  if (inlined.length) context.attachmentTexts = inlined
 
   const paths = turnPdfs(context)
   if (!paths.length) return { context: context || null, failures: [] }
@@ -6445,13 +6022,14 @@ async function preparePdfTurn (question, context, turnId = null) {
     if (!result?.ok) return { path: pdfPath, error: result?.error || 'PDF extraction failed.' }
     try {
       // The sidecar path arrives validated from the job that wrote it.
-      const { pages, ocrPages } = await pdfPagesOf(result.sidecar)
+      const { pages, ocrPages, mtimeMs, size } = await pdfPagesOf(result.sidecar)
       return {
         path: pdfPath,
         textPath: result.textPath,
         pages,
         openPage: context?.kind === 'pdf' && context.note === pdfPath ? context.page : 0,
-        ocrPages: result.ocrPages || ocrPages
+        ocrPages: result.ocrPages || ocrPages,
+        revision: `${mtimeMs}:${size}`
       }
     } catch (err) {
       return { path: pdfPath, error: err.message }
@@ -6468,8 +6046,15 @@ async function preparePdfTurn (question, context, turnId = null) {
          path to the file they came out of — which it can read for itself. The
          page count stays: a model that knows a book has 400 pages reads one
          page at a time instead of dumping the whole sidecar into context. */
-      pdfDocuments: documents.map(({ pages, ...document }) => ({ ...document, pages: pages.length })),
-      pdfContext: relevantPdfContext(question, documents)
+      pdfDocuments: documents.map((document) => ({
+        path: document.path,
+        textPath: document.textPath,
+        pages: document.pages.length,
+        ocrPages: document.ocrPages
+      })),
+      pdfContext: relevantPdfContext(question, documents, {
+        maxChars: Number(budget.pdf) || undefined
+      })
     }
   }
 }
@@ -6480,6 +6065,99 @@ async function preparePdfTurn (question, context, turnId = null) {
  * check is cheaper than deciding which of the two moved, and a folder move
  * carries a whole mirrored subtree in one rename either way.
  */
+/**
+ * The folder a file's pasted attachments live in.
+ *
+ * `asset:write` files them under `.attachments/<the name the tree shows>/`, and
+ * the tree shows a note, a paper or a Word document by its stem while showing
+ * a script by its full filename. That rule is `stripLinkExt`, which is stated
+ * once and read here so the two cannot drift — a folder computed by a different
+ * rule is a folder nothing ever finds again.
+ */
+const attachmentFolderName = (relPath) =>
+  path.basename(stripLinkExt(String(relPath || ''))).replace(/[/\\]/g, '-')
+
+const attachmentFolderFor = (relPath) => {
+  const name = attachmentFolderName(relPath)
+  return name ? path.join(vaultPath, ATTACHMENT_DIR, name) : ''
+}
+
+/** Whether anything else in the vault would file its attachments in the same
+ *  folder. Two notes called "Trip" in different folders share one, which is a
+ *  limitation of naming them by name — but it means the folder belongs to
+ *  neither of them alone, and neither may take it away. */
+async function attachmentFolderShared (relPath, folderName) {
+  const snapshot = await getVaultSnapshot()
+  const mine = String(relPath || '').toLowerCase()
+  const wanted = folderName.toLowerCase()
+  return (snapshot.files || []).some((key) =>
+    key.toLowerCase() !== mine && attachmentFolderName(key).toLowerCase() === wanted)
+}
+
+/**
+ * A file's pasted pictures, following it to its new name.
+ *
+ * The folder is keyed by name, so only a change of *name* moves it — a note
+ * dragged into another folder keeps both its name and its pictures where they
+ * were. What is inside is not renamed with it: a note writes `![[Trip-0.png]]`,
+ * a bare name that `assetIndex` resolves anywhere in the vault, so the pictures
+ * go on resolving from wherever they now sit. Renaming them as well would edit
+ * the note's text for no gain and every chance of getting it wrong.
+ *
+ * Refused rather than merged when the destination already exists: two notes'
+ * pictures in one folder cannot be told apart again, and the reader is far
+ * better served by a rename that left the old folder alone than by one that
+ * quietly mixed two sets of images together.
+ */
+async function carryAttachments (fromRel, toRel) {
+  if (!vaultPath) return
+  const oldName = attachmentFolderName(fromRel)
+  const newName = attachmentFolderName(toRel)
+  if (!oldName || !newName || oldName === newName) return
+
+  const from = attachmentFolderFor(fromRel)
+  const to = attachmentFolderFor(toRel)
+  if (!from || !to) return
+  if (!fsSync.existsSync(from)) return
+  if (fsSync.existsSync(to)) return
+  if (await attachmentFolderShared(fromRel, oldName)) return
+
+  try {
+    /* Both ends, before either is touched — the same guard `carryAnnotations`
+       takes, and for the same reason: a symlinked `.attachments` in a synced
+       vault would otherwise let a rename inside the vault move a directory that
+       lives outside it. */
+    await assertReal(from)
+    await assertReal(to)
+    noteSelfWrite(from)
+    noteSelfWrite(to)
+    await fs.mkdir(path.dirname(to), { recursive: true })
+    await fs.rename(from, to)
+  } catch { /* pictures are not worth failing the rename over */ }
+}
+
+/**
+ * And into the Trash with the file, when nothing else claims them.
+ *
+ * A deleted note used to leave its pictures behind for good: hidden, unnamed
+ * by anything, and counted by the orphan sweep as clutter the reader had to be
+ * nagged about. They go to the system Trash rather than being unlinked, so a
+ * note restored from there can have its images restored beside it.
+ */
+async function trashAttachments (relPath) {
+  if (!vaultPath) return
+  const name = attachmentFolderName(relPath)
+  if (!name) return
+  const folder = attachmentFolderFor(relPath)
+  if (!folder || !fsSync.existsSync(folder)) return
+  if (await attachmentFolderShared(relPath, name)) return
+  try {
+    await assertReal(folder)
+    noteSelfWrite(folder)
+    await shell.trashItem(folder)
+  } catch { /* not worth a dialog */ }
+}
+
 async function carryAnnotations (fromRel, toRel) {
   let from
   let to
@@ -6667,9 +6345,9 @@ const pythonEnvs = makePythonEnvs({
   installerOverride: () => readConfig().pythonInstaller || null
 })
 
-/** Off only if the reader turns it off: installing is what makes a block that
- *  imports something work at all, and the alternative is a traceback. */
-const mayInstallPython = () => readConfig().autoInstallPythonDeps !== false
+/** Opt-in: a pasted note can name any PyPI package, so installing on a
+ *  traceback is off until the reader turns it on in Settings. */
+const mayInstallPython = () => readConfig().autoInstallPythonDeps === true
 
 /* stdout is a pipe, so Python otherwise block-buffers it and a long-running
    block can look silent until it exits. `-u` makes each print available to the
@@ -7016,6 +6694,10 @@ const STDERR_TAIL_BYTES = 8192
 const runs = new Map()   // id -> { child, timer, dir, done }
 let nextRunId = 0
 
+/** The temp directory a render or a run worked in, gone whether it worked or
+ *  not. The run system owns the shape; the render domain borrows it. */
+const discard = (dir) => fs.rm(dir, { recursive: true, force: true }).catch(() => {})
+
 /* Which window asked for each run, so its output goes back to the block that
    is waiting for it and to no other. Kept beside `runs` rather than inside it
    because a run is only in `runs` while a step of it is actually running, and
@@ -7311,13 +6993,47 @@ function warmRunner (lang) {
    since, is the whole of "this run had the directory to itself". */
 let runsInFlight = 0
 let runsEverStarted = 0
+/* A Run button per block with no ceiling is a fork bomb: each spawns its own
+   interpreter. Cap concurrent runs; extras fail fast with a clear message. */
+const MAX_PARALLEL_RUNS = 4
 
 ipcMain.handle('run:warm', (_e, lang) => warmRunner(lang))
+
+ipcMain.handle('run:trusted', () => executionTrusted())
+ipcMain.handle('run:trust', async () => {
+  /* Defense-in-depth: the renderer already asks via `mayRunCode`, but a
+     compromised renderer could call `run.trust` directly. Main confirms with
+     a native dialog that renderer JS cannot dismiss. */
+  if (executionTrusted()) return true
+  if (!vaultPath) return false
+  const win = BrowserWindow.getFocusedWindow() || null
+  const { response } = await dialog.showMessageBox(win, {
+    type: 'warning',
+    buttons: ['Trust this vault', 'Cancel'],
+    defaultId: 1,
+    cancelId: 1,
+    title: 'Allow code to run?',
+    message: `Allow code to run in “${path.basename(vaultPath)}”?`,
+    detail: 'Notes in this vault may run programs with access to the vault and your network. Only trust files you wrote or reviewed.'
+  }).catch(() => ({ response: 1 }))
+  if (response !== 0) return false
+  return trustExecutionForVault()
+})
 
 ipcMain.handle('run:start', async (event, lang, code, noteRel) => {
   const spec = runnerFor(lang)
   if (!spec) throw new Error(`Tulip cannot run "${lang}" blocks.`)
   if (typeof code !== 'string') throw new Error('Nothing to run.')
+  if (!executionTrusted()) {
+    const error = new Error('This vault is not trusted for code execution.')
+    error.code = 'TULIP_UNTRUSTED_VAULT'
+    throw error
+  }
+  if (runsInFlight >= MAX_PARALLEL_RUNS) {
+    const error = new Error(`Too many runs at once (max ${MAX_PARALLEL_RUNS}). Stop one and try again.`)
+    error.code = 'TULIP_TOO_MANY_RUNS'
+    throw error
+  }
 
   /* If its control already started a compiler warmup, let that finish before
      compiling a new block. A cache hit skips the wait: it has no need for a
@@ -7495,9 +7211,12 @@ const cancelled = new Set()
 
 /** SIGTERM first so a program can tidy up, SIGKILL if it will not go. */
 function stopRun (id) {
-  cancelled.add(id)
   const run = runs.get(id)
+  /* Only a run that is going: `cancelled` is emptied by the run that reads
+     it, and a Stop pressed after the run had finished left an entry nothing
+     would ever take away. */
   if (!run || run.done) return false
+  cancelled.add(id)
 
   /* The tree, not the process: a run block's interpreter is free to have
      started something of its own, and on Windows what we hold is often a shim
@@ -7512,132 +7231,11 @@ ipcMain.handle('run:kill', (_e, id) => stopRun(Number(id)))
 
 /* ------------------------------------------------------------ notebooks
 
-   A notebook's cells run in a kernel rather than as programs, because they are
-   meant to share one namespace — see electron/kernel.js for why that is
-   borrowed from Jupyter rather than built here. */
-function kernelHost () {
-  if (kernels) return kernels
-  const { KernelHost } = require('./kernel')
-  kernels = new KernelHost({
-    pathFor: runnerPath,
-    onEvent: (event) => {
-      const win = kernelOwners.get(event.path)
-      if (win) sendTo(win, 'kernel:event', event)
-    }
-  })
-  if (vaultPath) kernels.setRoot(vaultPath)
-  return kernels
-}
-
-/* Which window is showing each notebook, so a kernel's output goes to the pane
-   that asked for it. Keyed by notebook path because that is what a kernel
-   belongs to — two windows on the same notebook would share one namespace,
-   which is what opening the same notebook twice in Jupyter does too. */
-const kernelOwners = new Map()   // notebook path -> BrowserWindow
-
-function ownKernel (notebookPath, event) {
-  const win = BrowserWindow.fromWebContents(event.sender)
-  if (win) kernelOwners.set(notebookPath, win)
-  return win
-}
-
-/** Shut down what a window started, when that window goes. A kernel is a
- *  Python process; leaving it running for a pane nobody can see is a leak
- *  measured in hundreds of megabytes. */
-function stopKernelsOwnedBy (win) {
-  for (const [notebookPath, owner] of [...kernelOwners]) {
-    if (owner !== win) continue
-    kernelOwners.delete(notebookPath)
-    kernels?.shutdown(notebookPath).catch(() => {})
-  }
-}
-
-ipcMain.handle('kernel:start', async (event, notebookPath, wanted) => {
-  if (typeof notebookPath !== 'string' || !notebookPath) throw new Error('No notebook.')
-  ownKernel(notebookPath, event)
-  // The Jupyter server is spawned with `pathFor`, which is `runnerPath`.
-  await ensureLoginPath()
-  const kernel = await kernelHost().kernelFor(notebookPath, wanted)
-  return { kernel: kernel.displayName, name: kernel.name, state: kernel.state }
-})
-
-ipcMain.handle('kernel:execute', async (event, notebookPath, code) => {
-  const kernel = kernels?.get(notebookPath)
-  if (!kernel) throw new Error('This notebook has no kernel running.')
-  const win = ownKernel(notebookPath, event)
-
-  /* The id goes back at once and the verdict follows as an event. The viewer
-     cannot attribute a line of output to a cell until it knows which request
-     produced it, and output starts arriving the moment the kernel begins. */
-  const { msgId, done } = kernel.execute(code)
-  const finish = (payload) =>
-    sendTo(win, 'kernel:event', { path: notebookPath, kind: 'done', msgId, ...payload })
-  done.then(
-    (result) => finish({ status: result.status, executionCount: result.executionCount }),
-    // A rejected `done` is the kernel dying, restarting or being shut down
-    // under a running cell — all of which the cell has to be told about, or it
-    // says "Running…" for the rest of the session.
-    (err) => finish({ status: 'aborted', error: err?.message || 'The run stopped.' })
-  )
-  return { msgId }
-})
-
-ipcMain.handle('kernel:interrupt', async (_e, notebookPath) => {
-  const kernel = kernels?.get(notebookPath)
-  return kernel ? kernel.interrupt() : false
-})
-
-/* The answer to an `input()` the kernel is blocked on. Nothing is returned but
-   whether there was a question to answer: what the kernel does with it comes
-   back as ordinary output, the way it does when you type into a terminal. */
-ipcMain.handle('kernel:input', async (_e, notebookPath, value) => {
-  const kernel = kernels?.get(notebookPath)
-  return kernel ? kernel.respondInput(value) : false
-})
-
-/* Completion and inspection answer straight back rather than as events: unlike
-   a cell, nothing is drawn until the whole reply is in hand. A kernel that is
-   not running is not an error worth raising here — the caller is a Tab key. */
-ipcMain.handle('kernel:complete', async (_e, notebookPath, code, cursorPos) => {
-  const kernel = kernels?.get(notebookPath)
-  if (!kernel) return null
-  return kernel.complete(code, cursorPos).catch(() => null)
-})
-
-ipcMain.handle('kernel:inspect', async (_e, notebookPath, code, cursorPos) => {
-  const kernel = kernels?.get(notebookPath)
-  if (!kernel) return null
-  return kernel.inspect(code, cursorPos).catch(() => null)
-})
-
-ipcMain.handle('kernel:restart', async (_e, notebookPath) => {
-  const kernel = kernels?.get(notebookPath)
-  return kernel ? kernel.restart() : false
-})
-
-ipcMain.handle('kernel:shutdown', async (_e, notebookPath) => {
-  kernelOwners.delete(notebookPath)
-  return kernels ? kernels.shutdown(notebookPath) : false
-})
-
-/* The notebook was renamed or moved. Its kernel is filed under the path it had
-   — as is the window that owns it — so both are re-keyed here rather than left
-   naming a file that is gone. Answered even when nothing was running: the
-   renderer calls this for every rename of an `.ipynb`, and "there was no
-   kernel" is the ordinary case. */
-ipcMain.handle('kernel:rename', async (_e, from, to) => {
-  const owner = kernelOwners.get(from)
-  if (owner) {
-    kernelOwners.delete(from)
-    kernelOwners.set(to, owner)
-  }
-  return kernels ? kernels.rename(from, to) : false
-})
-
-ipcMain.handle('kernel:specs', async () => {
-  await ensureLoginPath()
-  return kernelHost().kernelSpecs()
-})
+   The kernel handlers live in electron/ipc-kernel.js — host, handlers and the
+   window-ownership map are one state machine, so they moved together, and
+   they register here at the point their handlers were written, leaving the
+   IPC surface untouched. */
+kernelDomain.register()
 
 /* For quitting, where there is no later: the SIGKILL escalation timer in
    `stopRun` would never fire, so the groups go outright. */
@@ -7646,167 +7244,9 @@ function killAllRuns () {
 }
 
 /* --------------------------------------------------------------- manim
-   A ```manim block is a scene, and what a scene is *for* is the video. So it
-   renders to a real file in the vault and the reading view shows that instead
-   of the code.
-
-   The video is named after a hash of the code, which is the whole caching
-   story: the same block always asks for the same file, so a note that has been
-   rendered once opens with its videos already there and nothing re-runs. Edit
-   the block and it asks for a name that does not exist yet, which is exactly
-   when a re-render is wanted. Nothing is written into the .md — the note keeps
-   saying what you wrote, and the video sits beside it as an attachment. */
-
-/* Manim and TikZ both render a block to a real file beside the note, and both
-   name that file after a hash of what produced it — which is the whole caching
-   story, so the three steps it takes are here rather than in each of them. */
-
-/**
- * Where a note's rendered artefacts live, and what one is called.
- *
- * The digest is 10 characters rather than sha1's usual 16 here, and has to
- * stay so: it is baked into every file already rendered into a vault, and
- * lengthening it would silently orphan all of them.
- */
-async function artefactTarget (noteName, kind, seed, ext) {
-  const folder = path.join(ATTACHMENT_DIR, String(noteName || 'Untitled').replace(/[/\\]/g, '-'))
-  const target = safePath(path.join(folder, `${kind}-${sha1(seed, 10)}.${ext}`))
-  await assertReal(target)
-  return target
-}
-
-/** Is this block already rendered? Answered without running anything, so the
- *  reading view can show the result the moment the note opens. */
-async function artefactAt (target) {
-  if (!vaultPath) return null
-  try {
-    await fs.access(target)
-    return rel(target)
-  } catch {
-    return null
-  }
-}
-
-/** The temp directory a render worked in, gone whether it worked or not. */
-const discard = (dir) => fs.rm(dir, { recursive: true, force: true }).catch(() => {})
-
-/** A finished render, moved into the vault. Copied rather than renamed: the
- *  temp dir is often on a different volume, where rename fails outright. */
-async function keepArtefact (produced, target) {
-  await fs.mkdir(path.dirname(target), { recursive: true })
-  /* The app's own write, so the watcher does not report it back as an outside
-     change and set off a full vault walk plus a backlink scan for a picture
-     Tulip drew itself. Stamped on both sides of the copy: the window has to be
-     open when the event is actually generated. */
-  noteSelfWrite(target)
-  await fs.copyFile(produced, target)
-  noteSelfWrite(target)
-  // A new file in the vault; the note embeds it as soon as this returns.
-  invalidateVaultSnapshot()
-}
-
-const MANIM_TIMEOUT_MS = 5 * 60 * 1000
-
-/** Manim CE's quality flags, smallest first. Medium is 720p30. */
-const MANIM_QUALITIES = new Set(['l', 'm', 'h', 'p', 'k'])
-
-const manimTarget = (noteName, code, quality) =>
-  artefactTarget(noteName, 'manim', `${quality}\n${code}`, 'mp4')
-
-/**
- * The scene to render. Manim asks interactively when a file holds several and
- * none was named, which would hang a run forever with nobody to answer — so one
- * is always chosen here. The fence may name it (```manim MyScene); otherwise
- * the last class in the block wins, which is the one people write last and mean.
- */
-function sceneName (code, requested) {
-  if (requested && /^[A-Za-z_]\w*$/.test(requested)) return requested
-  const found = [...code.matchAll(/^\s*class\s+([A-Za-z_]\w*)\s*\(([^)]*)\)\s*:/gm)]
-    .filter((m) => /Scene\b/.test(m[2]))
-    .map((m) => m[1])
-  return found.length ? found[found.length - 1] : null
-}
-
-/** The newest .mp4 anywhere under `dir` — manim's own layout is a deep tree
- *  whose shape has changed between releases, so the file is found, not guessed. */
-async function newestVideo (dir) {
-  let best = null
-  const walk = async (at) => {
-    let entries
-    try { entries = await fs.readdir(at, { withFileTypes: true }) } catch { return }
-    for (const entry of entries) {
-      const abs = path.join(at, entry.name)
-      if (entry.isDirectory()) { await walk(abs); continue }
-      if (path.extname(entry.name).toLowerCase() !== '.mp4') continue
-      // Manim writes partial clips into a `partial_movie_files` folder and
-      // stitches them; the assembled scene is the one outside it.
-      if (abs.includes('partial_movie_files')) continue
-      const stat = await fs.stat(abs).catch(() => null)
-      if (stat && (!best || stat.mtimeMs > best.mtime)) best = { abs, mtime: stat.mtimeMs }
-    }
-  }
-  await walk(dir)
-  return best?.abs || null
-}
-
-/** Manim on the PATH, else the module under python3 — both are normal installs. */
-/** Is manim on the PATH a render will use? */
-function systemManim () {
-  return new Promise((resolve) => {
-    // The same PATH a run gets, so the probe and the render cannot disagree
-    // about which manim is installed.
-    const probe = spawn('manim', ['--version'], {
-      stdio: 'ignore',
-      env: { ...process.env, PATH: runnerPath() }
-    })
-    probe.on('error', () => resolve(false))
-    probe.on('close', (code) => resolve(code === 0))
-  })
-}
-
-/**
- * What to invoke to render a scene.
- *
- * A manim installed on the machine is preferred over one Tulip installed: it
- * is the one the reader chose, and on this machine it is commonly a `uv tool`
- * that works perfectly while `python3 -m manim` — the old fallback — cannot
- * see it at all. Tulip's own copy is for the machine that has no manim, where
- * the alternative is a block that can never render.
- *
- * @param {{id?: number}} [reporting]  a run to stream an install into
- */
-async function manimCommand (reporting = {}) {
-  const configured = readConfig().manimCommand
-  if (configured) return String(configured).split(/\s+/)
-  // The probe is the first thing a render does, so it is also where the login
-  // shell's PATH has to have arrived.
-  await ensureLoginPath()
-
-  const shared = pythonEnvs.sharedDir()
-  const mine = await pythonEnvs.tool(shared, 'manim')
-  if (mine) return [mine]
-
-  if (await systemManim()) return ['manim']
-
-  if (mayInstallPython()) {
-    const { id } = reporting
-    if (id) toRun('run:out', { id, stream: 'stdout', text: '\nInstalling manim…\n' })
-    const done = await pythonEnvs.install(shared, 'manim', {
-      onOutput: (text) => { if (id) toRun('run:out', { id, stream: 'stdout', text }) }
-    })
-    if (!done.ok && id && done.reason) {
-      toRun('run:out', { id, stream: 'stderr', text: `Could not install manim. ${done.reason}\n` })
-    }
-    const installed = done.ok && await pythonEnvs.tool(shared, 'manim')
-    if (installed) return [installed]
-  }
-
-  /* Nothing found and nothing installed. The old fallback stands, because on a
-     machine where manim is a library in the system interpreter it is right —
-     and where it is not, its failure names manim, which is the useful thing to
-     put in front of the reader. */
-  return ['python3', '-m', 'manim']
-}
+   A ```manim block is a scene, and what a scene is *for* is the video. The
+   render domain — manim, tikz and the TeX preview, which share the artefact
+   cache and the run machinery — lives in electron/ipc-render.js. */
 
 /* ------------------------------------------------- managing environments
 
@@ -7845,257 +7285,32 @@ ipcMain.handle('python:env-prune', async () => {
   return gone
 })
 
-ipcMain.handle('manim:lookup', async (_e, noteName, code, scene) => {
-  const found = await artefactAt(await manimTarget(noteName, code, manimQuality()))
-  return found ? { path: found, scene: sceneName(code, scene) } : null
+/* The render handlers register here, where the run ids they borrow live
+   beside them; main keeps the run machinery itself. */
+const renderDomain = makeRenderDomain({
+  safePath,
+  realSafePath,
+  sha1,
+  assertReal,
+  rel,
+  noteSelfWrite,
+  invalidateVaultSnapshot,
+  getVaultPath: () => vaultPath,
+  readConfig,
+  ensureLoginPath,
+  runnerPath,
+  pythonEnvs,
+  mayInstallPython,
+  toRun,
+  ownRun,
+  startRun,
+  runTimeoutMs,
+  nextRunId: () => ++nextRunId,
+  cancelled,
+  discard,
+  texPreviewDir: TEX_PREVIEW_DIR
 })
-
-function manimQuality () {
-  const q = String(readConfig().manimQuality || 'm').toLowerCase()
-  return MANIM_QUALITIES.has(q) ? q : 'm'
-}
-
-ipcMain.handle('manim:render', async (event, noteName, code, scene) => {
-  if (!vaultPath) throw new Error('Open a vault first — the video is saved into it.')
-  if (typeof code !== 'string' || !code.trim()) throw new Error('Nothing to render.')
-
-  const name = sceneName(code, scene)
-  if (!name) throw new Error('No Scene class found in this block.')
-
-  const quality = manimQuality()
-  const target = await manimTarget(noteName, code, quality)
-  const id = ownRun(++nextRunId, event)
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tulip-manim-'))
-
-  // Started before the work so the page can show progress and offer a Stop.
-  queueMicrotask(() => toRun('run:out', {
-    id, stream: 'stdout', text: `Rendering ${name}…\n`
-  }))
-
-  const finish = async () => {
-    const file = path.join(dir, 'scene.py')
-    await fs.writeFile(file, code, 'utf8')
-
-    const [cmd, ...lead] = await manimCommand({ id })
-    const result = await startRun(
-      id,
-      cmd,
-      [...lead, 'render', '--media_dir', path.join(dir, 'media'),
-        '--format', 'mp4', '--quality', quality, file, name],
-      { cwd: dir, timeoutMs: runTimeoutMs('manimTimeout', MANIM_TIMEOUT_MS) }
-    )
-    // A render is one command, so nothing reads this flag afterwards — but a
-    // stopped render would otherwise leave its id in the set for good.
-    cancelled.delete(id)
-
-    if (result.error || result.code !== 0) {
-      await discard(dir)
-      return { ...result, path: null }
-    }
-
-    const produced = await newestVideo(path.join(dir, 'media'))
-    if (!produced) {
-      await discard(dir)
-      return { ...result, path: null, error: 'Manim finished but produced no video.' }
-    }
-
-    await keepArtefact(produced, target)
-    await discard(dir)
-    return { ...result, path: rel(target) }
-  }
-
-  finish()
-    .catch((err) => ({ code: null, ms: 0, error: err.message, path: null }))
-    .then((result) => toRun('run:done', { id, ...result }))
-
-  return { id, scene: name, quality }
-})
-
-/* ---------------------------------------------------------------- tikz
-   A ```tikz block is a picture, and what a picture is *for* is the drawing —
-   so it renders to a real file in the vault and both views show that instead
-   of the source. The same bargain manim strikes above, with the same caching:
-   the file is named after a hash of the code, so a rendered block opens with
-   its drawing already there and an edited one asks for a name nothing has
-   written yet.
-
-   Cheaper than a scene — a second or two rather than minutes — but far too slow
-   to redraw on every keystroke the way mermaid does, and it needs a TeX
-   installation, which is exactly why the result is kept. */
-
-const TIKZ_TIMEOUT_MS = 90 * 1000
-
-const tikzTarget = (noteName, code) => artefactTarget(noteName, 'tikz', code, 'svg')
-
-/* Commands LaTeX will only accept before \begin{document}. A block is written
-   as a picture, not as a document, so anything of this kind found in one is
-   meant for the preamble the block never sees — and is lifted into it below.
-   \usetikzlibrary and friends are legal in both places, but they are listed
-   here anyway so that a block's libraries load in the order it wrote them,
-   alongside the packages they may belong to. */
-const PREAMBLE_ONLY =
-  /^\s*\\(usepackage|RequirePackage|usetikzlibrary|usepgflibrary|usepgfplotslibrary|pgfplotsset)\b/
-
-/**
- * Splits a block into the lines that belong in the preamble and the lines that
- * are the drawing, keeping the order within each.
- *
- * Line-based on purpose: `\usepackage[options]{name}` is written on one line by
- * everyone, and a scanner that balanced braces across lines would have to
- * understand comments and verbatim to be right rather than nearly right.
- */
-function liftPreamble (code) {
-  const head = []
-  const body = []
-  for (const line of code.split('\n')) {
-    (PREAMBLE_ONLY.test(line) ? head : body).push(line)
-  }
-  return { head, body }
-}
-
-/**
- * The block, as a document LaTeX will accept.
- *
- * A block that brings its own \documentclass is left alone — someone doing that
- * has a reason. Everything else is a picture, and gets the standard wrapper for
- * one: `standalone` crops the page to the drawing, and pgf is pointed at its
- * dvisvgm backend before TikZ loads, which is what makes the DVI convertible.
- * A handful of the most-used libraries come along.
- *
- * Anything the block asks for arrives *after* those, so `\usepackage{pgfplots}`
- * in a block behaves as it would at the top of a real document: the block can
- * load whatever the TeX installation has, and can configure it, without having
- * to write out a whole document to do it.
- */
-function tikzDocument (code) {
-  if (/\\documentclass/.test(code)) return code
-  const { head, body } = liftPreamble(code)
-  return [
-    '\\documentclass[border=4pt]{standalone}',
-    '\\def\\pgfsysdriver{pgfsys-dvisvgm.def}',
-    '\\usepackage{tikz}',
-    '\\usetikzlibrary{arrows.meta,positioning,calc,shapes,patterns,decorations.pathreplacing}',
-    ...head,
-    '\\begin{document}',
-    ...body,
-    '\\end{document}'
-  ].join('\n')
-}
-
-/** The two commands a drawing goes through, either as configured or as found. */
-function tikzCommands () {
-  const configured = readConfig().tikzCommand
-  const latex = configured ? String(configured).split(/\s+/) : ['latex']
-  return { latex, dvisvgm: ['dvisvgm'] }
-}
-
-/**
- * TeX with the doors that can be shut, shut.
- *
- * A picture draws itself when the note is read, which means TeX runs on
- * whatever a note contains before anyone has looked at it — and a note is not
- * always something the reader wrote. Vaults are synced, shared, cloned from a
- * repository, handed over as a folder of somebody's lecture notes. TeX is a
- * full macro language with file and process access, so opening a note was
- * enough to run a command outright on the many installations where
- * `shell_escape` is enabled in `texmf.cnf`.
- *
- * `shell_escape=f`, with `-no-shell-escape` on the command line beside it,
- * closes that: `\write18` is refused, and the flag also overrides a
- * `-shell-escape` that a configured `tikzCommand` carries. Both were tested
- * against a block that tries it; neither lets it through.
- *
- * `openin_any`/`openout_any` are set for the installations that honour them,
- * but they are **not** load-bearing and must not be relied on: measured
- * against MacTeX's `latex`, `openin_any=p` did not prevent `\openin` from
- * reading an absolute path, or a path inside a dot-directory — all three of
- * `a`, `r` and `p` behaved identically. kpathsea reports the value correctly
- * (`kpsewhich --var-value=openin_any` answers `p`), so the setting arrives and
- * the engine simply does not enforce it for reads.
- *
- * What guards reading is therefore in the renderer, not here: a block that
- * asks to open files is not drawn on sight — see `READS_FILES` in src/tikz.js.
- * Pressing Draw still runs it, because at that point a person has asked.
- */
-const TEX_SANDBOX_ENV = { openin_any: 'p', openout_any: 'p', shell_escape: 'f' }
-
-/* LaTeX says what went wrong in the middle of a great deal of noise. The lines
-   worth showing are the error itself and the line of the document it stopped
-   on, which is what a reader needs to find it in the block. */
-function texTrouble (log) {
-  const lines = log.split('\n')
-  const kept = []
-  for (let i = 0; i < lines.length && kept.length < 12; i++) {
-    if (!/^(!|l\.\d+|<recently read>)/.test(lines[i])) continue
-    kept.push(lines[i].trimEnd())
-  }
-  return kept.join('\n')
-}
-
-ipcMain.handle('tikz:lookup', async (_e, noteName, code) => {
-  const found = await artefactAt(await tikzTarget(noteName, code))
-  return found ? { path: found } : null
-})
-
-ipcMain.handle('tikz:render', async (event, noteName, code) => {
-  if (!vaultPath) throw new Error('Open a vault first — the drawing is saved into it.')
-  if (typeof code !== 'string' || !code.trim()) throw new Error('Nothing to draw.')
-
-  const target = await tikzTarget(noteName, code)
-  const id = ownRun(++nextRunId, event)
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tulip-tikz-'))
-  const timeoutMs = runTimeoutMs('tikzTimeout', TIKZ_TIMEOUT_MS)
-
-  queueMicrotask(() => toRun('run:out', { id, stream: 'stdout', text: 'Drawing…\n' }))
-
-  const finish = async () => {
-    await ensureLoginPath()
-    await fs.writeFile(path.join(dir, 'figure.tex'), tikzDocument(code), 'utf8')
-    const { latex, dvisvgm } = tikzCommands()
-
-    /* Two commands, one run: TeX turns the block into a DVI and dvisvgm turns
-       the DVI into the picture. They share an id so that Stop stops whichever
-       is going, and so the page sees one piece of work rather than two. */
-    const typeset = await startRun(
-      id, latex[0],
-      [...latex.slice(1), '-no-shell-escape', '-interaction=nonstopmode', '-halt-on-error', 'figure.tex'],
-      { cwd: dir, timeoutMs, env: TEX_SANDBOX_ENV }
-    )
-    if (typeset.error || typeset.code !== 0) {
-      const log = await fs.readFile(path.join(dir, 'figure.log'), 'utf8').catch(() => '')
-      await discard(dir)
-      cancelled.delete(id)
-      return { ...typeset, path: null, error: typeset.error || texTrouble(log) || null }
-    }
-
-    const convert = await startRun(
-      id, dvisvgm[0],
-      [...dvisvgm.slice(1), '--no-fonts', '--exact-bbox', '--output=figure.svg', 'figure.dvi'],
-      { cwd: dir, timeoutMs }
-    )
-    cancelled.delete(id)
-    if (convert.error || convert.code !== 0) {
-      await discard(dir)
-      return { ...convert, path: null }
-    }
-
-    const produced = path.join(dir, 'figure.svg')
-    if (!fsSync.existsSync(produced)) {
-      await discard(dir)
-      return { ...convert, path: null, error: 'TeX finished but produced no drawing.' }
-    }
-
-    await keepArtefact(produced, target)
-    await discard(dir)
-    return { ...convert, path: rel(target) }
-  }
-
-  finish()
-    .catch((err) => ({ code: null, ms: 0, error: err.message, path: null }))
-    .then((result) => toRun('run:done', { id, ...result }))
-
-  return { id }
-})
+renderDomain.register()
 
 /* --------------------------------------------------------- the copilot */
 
@@ -8173,7 +7388,7 @@ async function consumeAiRename (event) {
         isNotebook(source))) {
       throw new Error('Copilot can rename Tulip documents, not folders or app state.')
     }
-    const result = await renameDocument(request.path, request.name)
+    const result = await vaultWriteDomain.renameDocument(request.path, request.name)
     toCopilot('ai:event', {
       k: 'renamed', id: event.id, name: 'Rename', from: request.path,
       ...result, turnId: event.turnId
@@ -8291,6 +7506,7 @@ function aiService () {
   if (aiInstance) return aiInstance
   const service = require('./ai')
   aiInstance = service
+  service.setTrusted(() => executionTrusted())
   service.attach(
     (event) => {
     /* The hidden request is an implementation detail, not a note the reader
@@ -8642,49 +7858,10 @@ ipcMain.handle('ai:history:save', async (event, history) => {
    the wipe that `prune`'s guard exists to prevent.
    ================================================================== */
 
-ipcMain.handle('review:all', async () => {
-  if (!vaultPath) return {}
-  return review.all()
-})
-
-ipcMain.handle('review:record', async (_e, entries) => {
-  if (!vaultPath) return { ok: false }
-  return review.record(entries)
-})
-
-/* A deck to import, picked and read but deliberately not parsed: the CSV
-   dialect logic lives in the renderer (src/csv.js) beside the table the rows
-   are joining. */
-ipcMain.handle('review:pick-csv', async () => {
-  if (!vaultPath) throw new Error('Open a vault first.')
-  const picked = await dialog.showOpenDialog(focusedWindow(), {
-    title: 'Import cards',
-    properties: ['openFile'],
-    buttonLabel: 'Import',
-    filters: [{ name: 'Comma or tab separated', extensions: ['csv', 'tsv', 'txt'] }]
-  })
-  if (picked.canceled || !picked.filePaths[0]) return null
-  const source = picked.filePaths[0]
-  const stat = await fs.lstat(source)
-  if (!stat.isFile()) throw new Error('That is not a file.')
-  if (stat.size > 8 * 1024 * 1024) throw new Error('That file is too large to be a deck.')
-  return { name: path.basename(source), text: await fs.readFile(source, 'utf8') }
-})
-
-ipcMain.handle('review:unrecord', async (_e, entry) => {
-  if (!vaultPath) return { ok: false }
-  return review.unrecord(entry)
-})
-
-ipcMain.handle('review:prune', async (_e, knownIds) => {
-  if (!vaultPath) return { pruned: 0, refused: false }
-  return review.prune(knownIds)
-})
-
-ipcMain.handle('review:history', async () => {
-  if (!vaultPath) return []
-  return review.history()
-})
+/* The handlers live in electron/ipc-review.js, beside the store itself —
+   main's other callers of the store (a rename's relocate, a delete's remove)
+   take the same instance from the same module. */
+reviewDomain.register()
 
 /* The dates shown when a language row is focused or hovered. Synchronisation
    happens on file read/write; this call returns no Markdown, only the metadata
@@ -8723,83 +7900,17 @@ ipcMain.handle('language:decks', async () => {
   return out
 })
 
-/* ------------------------------------------------------------- drafts
+/* ---------------------------------------------------------------- drafts
 
-   What was typed but not yet saved, kept somewhere a crash cannot take with it.
-
-   The autosave is quick — 600 ms by default — but "quick" is not "always", and
-   the gap is real: a renderer crash, a GPU process kill, a force quit, a power
-   cut all land on a note whose last few seconds exist only in the editor's
-   memory. Nothing on disk records them, so nothing can offer them back.
-
-   A draft is that record. It is written on its own timer, beside the app's
-   state rather than in the vault — an unfinished paragraph is not something to
-   sync to other machines, and a stray file next to the note would be picked up
-   by the tree, the index and the backlink scan as though it were one. It is
-   removed the moment the real save succeeds, so the ordinary state of this
-   folder is empty and anything in it at launch is by definition a note whose
-   edits never reached disk.
-   ================================================================== */
-
-const DRAFT_DIR = () => path.join(app.getPath('userData'), 'drafts', sha1(vaultPath || ''))
-const draftFile = (rel) => path.join(DRAFT_DIR(), `${sha1(rel)}.json`)
-
-ipcMain.handle('draft:save', async (_e, rel, text) => {
-  if (!vaultPath || typeof rel !== 'string' || typeof text !== 'string') return { ok: false }
-  try {
-    await fs.mkdir(DRAFT_DIR(), { recursive: true })
-    /* Not durable, and deliberately so: this races the very crash it exists
-       for, and an fsync per keystroke-pause would cost more than it buys. The
-       rename still makes each draft whole-or-absent, which is the guarantee
-       that matters — a half-written draft offered back as recovery would be
-       worse than none. */
-    await writeAtomic(draftFile(rel), JSON.stringify({ path: rel, text, at: Date.now() }), { durable: false })
-    return { ok: true }
-  } catch (err) {
-    console.error('draft write failed', err)
-    return { ok: false }
-  }
-})
-
-ipcMain.handle('draft:clear', async (_e, rel) => {
-  if (!vaultPath || typeof rel !== 'string') return { ok: false }
-  await fs.unlink(draftFile(rel)).catch(() => {})
-  return { ok: true }
-})
-
-/**
- * Every draft this vault has, with the file's current text beside it.
- *
- * The comparison is made here rather than in the renderer because it is the
- * whole question: a draft that matches the note on disk is one whose save did
- * land, and offering it back would be asking about nothing. Those are dropped
- * — and deleted — so the renderer only ever hears about real losses.
- */
-ipcMain.handle('draft:list', async () => {
-  if (!vaultPath) return []
-  let names
-  try { names = await fs.readdir(DRAFT_DIR()) } catch { return [] }
-
-  const out = []
-  for (const name of names) {
-    if (!name.endsWith('.json')) continue
-    const file = path.join(DRAFT_DIR(), name)
-    let draft
-    try { draft = JSON.parse(await fs.readFile(file, 'utf8')) } catch { draft = null }
-    if (!draft || typeof draft.path !== 'string' || typeof draft.text !== 'string') {
-      await fs.unlink(file).catch(() => {})
-      continue
-    }
-    /* The note may have been renamed, deleted or moved out of the vault since.
-       `safePath` throws on anything that is not inside it, which is also the
-       check that keeps a hand-edited draft from naming a file elsewhere. */
-    let disk = null
-    try { disk = await fs.readFile(safePath(draft.path), 'utf8') } catch { disk = null }
-    if (disk === draft.text) { await fs.unlink(file).catch(() => {}); continue }
-    out.push({ path: draft.path, text: draft.text, at: draft.at || 0, disk })
-  }
-  return out
-})
+   The draft store and its handlers live in electron/ipc-drafts.js; main holds
+   none of the state — the drafts directory is a function of the vault and of
+   userData, both of which the module reaches through the context below. */
+makeDraftDomain({
+  getVaultPath: () => vaultPath,
+  sha1,
+  writeAtomic,
+  safePath
+}).register()
 
 /**
  * Temp files no rename ever claimed.
@@ -8819,9 +7930,23 @@ const TEMP_SUFFIX = '.tulip-tmp'
 const STALE_TEMP_MS = 60000
 
 async function sweepTemporaryFiles (dir, { suffix = TEMP_SUFFIX, recursive = false } = {}) {
-  const names = await fs.readdir(dir, { recursive }).catch(() => [])
+  /* A walk of its own rather than `readdir({ recursive })`, which cannot be
+     told to stay out of anything: a vault's `node_modules` or `.git` is most
+     of the vault by file count and never holds a write of ours. */
+  const names = []
+  const walk = async (at) => {
+    const entries = await fs.readdir(path.join(dir, at), { withFileTypes: true }).catch(() => [])
+    for (const entry of entries) {
+      const name = at ? path.join(at, entry.name) : entry.name
+      if (entry.isDirectory()) {
+        if (recursive && !IGNORED_DIRS.has(entry.name)) await walk(name)
+      } else if (entry.name.endsWith(suffix)) {
+        names.push(name)
+      }
+    }
+  }
+  await walk('')
   await Promise.all(names
-    .filter((name) => name.endsWith(suffix))
     .map(async (name) => {
       const abs = path.join(dir, name)
       /* A write still in flight is not litter. The pid in the name says which
@@ -8842,6 +7967,13 @@ ipcMain.handle('zoom:claim', (event, on) => {
   const key = event.sender.id
   if (on) documentZoomClaims.add(key)
   else documentZoomClaims.delete(key)
+})
+ipcMain.on('menu:context', (event, kind) => {
+  const key = event.sender.id
+  const next = String(kind || '')
+  if (menuDocumentKinds.get(key) === next) return
+  menuDocumentKinds.set(key, next)
+  if (windowOf(event) === focusedWindow()) buildMenu()
 })
 /* The browser's own undo, for the plain text fields — the message box, the
    rename field, a search query. What the `undo` role used to do, asked for
@@ -8874,8 +8006,7 @@ ipcMain.handle('config:set', (_e, patch) => {
      event as a word taught or removed: the checker is rebuilt on the next
      question and every held verdict is stale. */
   if (Object.prototype.hasOwnProperty.call(accepted, 'spellLanguages')) {
-    speller = null
-    forgetSpellVerdicts()
+    spellDomain.forgetChecker()
     broadcast('dictionary:changed')
   }
   return next
@@ -8988,6 +8119,78 @@ function fenceWebviewAttach (win) {
   })
 }
 
+/* Where a page's downloads land: a folder in the vault, made when the first
+   one arrives.
+
+   Clicking a PDF or a `.zip` inside a website tab used to do nothing at all —
+   nothing was listening for `will-download`, so Chromium started a download
+   into a session with no destination and dropped it. Silently, which reads as
+   a broken page rather than as a missing feature.
+
+   Into the vault rather than the desktop's Downloads folder, because that is
+   what makes it Tulip's version of the gesture: the paper you just downloaded
+   is in the tree beside the notes about it, findable by the same search, a
+   moment after it arrives. And into one known folder rather than beside the
+   `.website` file, because a download is not always something you meant to
+   keep — one predictable place is one place to tidy. */
+const DOWNLOAD_DIR = 'Downloads'
+
+/** A download's progress, said to every window: the tab that started it may
+ *  not be the tab in front by the time it finishes. */
+function watchDownloads (partition) {
+  session.fromPartition(partition).on('will-download', (event, item) => {
+    if (!vaultPath) {
+      // Nowhere to put it. Cancelled rather than left to fail deep inside
+      // Chromium with nothing said.
+      item.cancel()
+      return
+    }
+    const dir = path.join(vaultPath, DOWNLOAD_DIR)
+    try { fsSync.mkdirSync(dir, { recursive: true }) } catch { item.cancel(); return }
+
+    const asked = item.getFilename() || 'download'
+    const ext = path.extname(asked)
+    const target = freeName(dir, path.basename(asked, ext), ext)
+    // No dialog: a download the reader asked for by clicking a link is not a
+    // question, and the answer to "where" is already decided.
+    item.setSavePath(target)
+
+    const name = path.basename(target)
+    const total = item.getTotalBytes()
+    broadcast('web:download', { state: 'started', name, received: 0, total })
+
+    /* Chromium fires `updated` on every chunk. A window redrawing its status
+       line at that rate is the one way to make a download feel slower than it
+       is, so what goes over the wire is at most one message every quarter
+       second. */
+    let said = 0
+    item.on('updated', (_e, state) => {
+      if (state !== 'progressing') return
+      const now = Date.now()
+      if (now - said < 250) return
+      said = now
+      broadcast('web:download', {
+        state: 'progress', name, received: item.getReceivedBytes(), total: item.getTotalBytes()
+      })
+    })
+
+    item.once('done', (_e, state) => {
+      if (state === 'completed') {
+        // The tree has a new row in it, and the index a new document.
+        invalidateVaultSnapshot()
+        indexDirty = true
+        broadcast('web:download', {
+          state: 'done', name, path: rel(target), received: item.getReceivedBytes(), total
+        })
+        return
+      }
+      broadcast('web:download', {
+        state: state === 'cancelled' ? 'cancelled' : 'failed', name
+      })
+    })
+  })
+}
+
 function guardGuests () {
   /* Guests carry the User-Agent of the Chrome they in fact are. Sites vary
      what they serve on the Electron token — YouTube's player among them — and
@@ -8995,6 +8198,8 @@ function guardGuests () {
   const ua = app.userAgentFallback.replace(/ (Electron|Tulip)\/[\d.]+/g, '')
   for (const partition of [YOUTUBE_PARTITION, WEB_PARTITION]) {
     session.fromPartition(partition).setUserAgent(ua)
+    // A real page may offer a file, and a file offered has to land somewhere.
+    watchDownloads(partition)
   }
 
   /* An ```html block runs when the note is read, like a picture draws itself —
@@ -9091,20 +8296,29 @@ function guardGuests () {
        Allowing it is therefore the feature, not a loosening of it — the popup
        lands in the same fence as the guest, which is the one place the
        credential is any use. */
-    contents.setWindowOpenHandler(({ url }) => {
+    contents.setWindowOpenHandler(({ url, disposition }) => {
       if (!allowedGuestUrl(url, partition)) {
         if (/^https?:/.test(url)) shell.openExternal(url)
         return { action: 'deny' }
       }
+      /* Two different gestures arrive here, and they used to get one answer.
+         `new-window` is `window.open` with a feature string — the sign-in
+         protocol above, a small chromeless window the page will talk to and
+         then close. Everything else is a link the reader clicked that happens
+         to carry `target=_blank`: a footnote, a reference, a docs page. Sizing
+         *that* like a sign-in popup gave every ordinary link on the web a
+         520-pixel window that could not be minimised, which is not what any
+         page meant by "open this somewhere else". */
+      const signIn = disposition === 'new-window'
       return {
         action: 'allow',
         // It belongs to the page that opened it; nothing should outlast a note.
         outlivesOpener: false,
         overrideBrowserWindowOptions: {
-          width: 520,
-          height: 680,
-          minimizable: false,
-          fullscreenable: false,
+          width: signIn ? 520 : 1000,
+          height: signIn ? 680 : 760,
+          minimizable: !signIn,
+          fullscreenable: !signIn,
           webPreferences: {
             // Named rather than left to inheritance: the whole point is which
             // cookie jar this writes to.
@@ -9142,6 +8356,59 @@ function guardGuests () {
         if (/^https?:/.test(next)) shell.openExternal(next)
         return { action: 'deny' }
       })
+    })
+
+    /* Right-clicking inside a page.
+     *
+     * The window's own context menu (see the `context-menu` handler beside
+     * createWindow) is on the *window's* webContents, and a guest is not that
+     * — so a right-click on a real web page reached nothing at all: no copy,
+     * no back, no way to take a link out to a real browser. Chromium's default
+     * menu is not available to an embedder, so the menu is built here, from
+     * the same `params` the page's own menu would have been built from.
+     *
+     * A run block's preview is left out: it has no history to walk, no links
+     * that mean anything outside the note, and it is not a page the reader is
+     * reading. */
+    if (partition !== HTML_RUN_PARTITION) contents.on('context-menu', (_event, params) => {
+      const items = []
+      const add = (label, click, enabled = true) => items.push({ label, click, enabled })
+
+      if (params.linkURL && /^https?:/.test(params.linkURL)) {
+        add('Copy Link', () => clipboard.writeText(params.linkURL))
+        add('Open Link in Browser', () => shell.openExternal(params.linkURL))
+        items.push({ type: 'separator' })
+      }
+      if (params.mediaType === 'image' && /^https?:/.test(params.srcURL || '')) {
+        add('Copy Image Address', () => clipboard.writeText(params.srcURL))
+        items.push({ type: 'separator' })
+      }
+      if (params.selectionText) {
+        add('Copy', () => contents.copy())
+        items.push({ type: 'separator' })
+      }
+      /* Editable fields get the three a text field needs. Cut and paste are
+         withheld where the field will not take them, rather than offered and
+         then ignored. */
+      if (params.isEditable) {
+        add('Cut', () => contents.cut(), params.editFlags.canCut)
+        add('Paste', () => contents.paste(), params.editFlags.canPaste)
+        add('Select All', () => contents.selectAll())
+        items.push({ type: 'separator' })
+      }
+
+      add('Back', () => contents.navigationHistory.goBack(), contents.navigationHistory.canGoBack())
+      add('Forward', () => contents.navigationHistory.goForward(), contents.navigationHistory.canGoForward())
+      add('Reload', () => contents.reload())
+      items.push({ type: 'separator' })
+      add('Copy Page Address', () => clipboard.writeText(contents.getURL()))
+      add('Open Page in Browser', () => shell.openExternal(contents.getURL()),
+        /^https?:/.test(contents.getURL()))
+
+      /* No window named: a guest's contents do not belong to a window as far as
+         `fromWebContents` is concerned, and Electron pops the menu over the
+         focused window — which is the window the right-click was in. */
+      Menu.buildFromTemplate(items).popup()
     })
 
     // A note cannot ask for the camera, the microphone or the reader's place.
@@ -9339,6 +8606,7 @@ app.whenReady().then(async () => {
   })
 
   const cfg = readConfig()
+  const launchOpen = launchFinderDocument()
   /* One vault, under one key: the folder last connected is the folder Tulip
      opens. `defaultVaultPath` was a second name for it while the settings pane
      offered a separately chosen default; a config still carrying that key is
@@ -9346,20 +8614,16 @@ app.whenReady().then(async () => {
      createWindow: the renderer asks for the current vault as soon as it loads,
      and a window created first can briefly receive `null` and paint the
      landing page over a vault that is in fact open. */
-  const savedVault = cfg.vaultPath || cfg.defaultVaultPath
+  const savedVault = launchOpen ? path.dirname(launchOpen) : (cfg.vaultPath || cfg.defaultVaultPath)
   if (savedVault && fsSync.existsSync(savedVault)) {
     vaultPath = savedVault
     if (cfg.vaultPath !== savedVault || cfg.defaultVaultPath !== undefined) {
       writeConfig({ vaultPath: savedVault, defaultVaultPath: undefined })
     }
     trust.setVault(vaultPath, cfg.historyInVault === true)
-    /* And the folder a notebook's kernel is allowed to see, which `openVault`
-       sets and this path did not. Without it the Jupyter server takes whatever
-       directory the app happened to be launched from — `/`, from the Finder —
-       so `read_csv("data.csv")` beside a notebook read someone else's root
-       until the reader switched vaults, which on the ordinary launch is never.
-       See electron/kernel.js. */
-    kernels?.setRoot(vaultPath)
+    /* The folder a notebook's kernel is allowed to see is read from `vaultPath`
+       when the kernel host is first made — see `kernelHost` — so nothing here
+       has to tell it. */
     // Present in the list from the first launch, not only once it is left.
     rememberVault(vaultPath)
     /* And the index this vault was left holding. The launch that most needs it
@@ -9370,10 +8634,19 @@ app.whenReady().then(async () => {
        open from last time — which is how the app is started nearly always, and
        so the path the migration actually runs on. */
     migrateAttachments(vaultPath).catch(() => {})
+    /* Not awaited, and deliberately: after its first run there is nothing left
+       to move, so every launch but one would be paying a whole-vault pass at
+       the moment the window is being asked for. */
+    migrateNoteTags().catch(() => {})
+    /* And the litter a killed write left beside a note — swept on a switch of
+       vault below, and until now never on the launch that simply reopens the
+       one from last time, which is the launch after the force-quit that made
+       the litter. */
+    sweepTemporaryFiles(vaultPath, { recursive: true }).catch(() => {})
     watchVault()
   }
 
-  const first = createWindow()
+  const first = createWindow({ open: launchOpen ? path.basename(launchOpen) : null })
   /* After the window is asked for, not before. Building the menu is a
      two-hundred-line template and an accelerator table, and none of it is on
      screen until the reader reaches for it — while `createWindow` is what
@@ -9382,6 +8655,8 @@ app.whenReady().then(async () => {
      it belongs to has painted. */
   buildMenu()
   guardGuests()
+  finderOpensReady = true
+  drainFinderOpens()
   if (vaultPath) first.setTitle(path.basename(vaultPath))
 
   app.on('activate', () => {
@@ -9402,7 +8677,7 @@ app.on('before-quit', () => {
   const cache = /** @type {any} */ (indexCache)
   cache?.flush()
   killAllRuns()
-  kernels?.disposeSync()
+  kernelDomain.disposeSync()
   pythonEnvs?.disposeSync()
   aiInstance?.stopAll('SIGKILL')
   trust?.flushSync()

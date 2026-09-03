@@ -50,6 +50,19 @@ const OPENCODE_TOOLS = {
 const wrote = (name) => name === 'Edit' || name === 'Write'
 
 /**
+ * Whether a failure is the resumed thread being gone, rather than the turn.
+ *
+ * A thread id is handed back on every turn of a conversation, and the CLI
+ * keeps the thread it names in its own storage — which can be pruned, moved
+ * or wiped underneath us. When it is, `--session` fails, and used to fail
+ * again on every later message of that conversation, because the id was still
+ * on file and nothing here read the error as being about it. The panel drops
+ * the id when this says so, and the next message starts the thread afresh.
+ */
+const LOST_THREAD = /session[^.\n]{0,40}(not found|unknown|does not exist|no such|missing|invalid)|(not found|unknown|no such)[^.\n]{0,40}session/i
+const lostThread = (self, message) => !!self?.thread && LOST_THREAD.test(String(message || ''))
+
+/**
  * What the agent may reach for, as a fact about the process.
  *
  * `--agent plan` makes read-only read-only, and that was once the whole of the
@@ -130,11 +143,7 @@ const DETAIL_LIMIT = 2000
  * tool that stopped early.
  */
 function detailOf (value) {
-  const parts = typeof value === 'string'
-    ? [value]
-    : Array.isArray(value)
-      ? value.map((block) => (typeof block === 'string' ? block : block?.text || ''))
-      : [String(value?.text ?? value?.output ?? '')]
+  const parts = [...blocksOf(value)]
 
   /* Joined only as far as the limit. A Read of a long note arrives here whole,
      and building the whole string to then throw all but the first two thousand
@@ -157,6 +166,22 @@ function detailOf (value) {
 
 let emit = () => {}
 let vault = null
+/* Main sets this to its `executionTrusted()` check. Ask/auto modes can run
+   shell and edit files, so they require the same vault trust as run blocks;
+   read mode stays available without trust. */
+let isTrusted = () => false
+function setTrusted (fn) { if (typeof fn === 'function') isTrusted = fn }
+
+/* File names the copilot must never be handed, even if the vault holds them.
+   Checked in `send` against attachment/context paths before a turn starts. */
+const SECRET_BASENAMES = new Set(['.env', '.env.local', 'id_rsa', 'id_ed25519', 'credentials.json', 'secrets.json'])
+const SECRET_RE = /(^|\/)\.env(\.|$)|(^|\/)(id_rsa|id_ed25519)(_|$|\.)|(^|\/)(credentials|secrets?|.*_rsa|.*\.pem|.*\.key)$/i
+const isSecretPath = (p) => {
+  const base = String(p || '').split('/').pop()
+  if (!base) return false
+  if (SECRET_BASENAMES.has(base)) return true
+  return SECRET_RE.test(String(p || ''))
+}
 
 /**
  * One copilot per conversation, kept by the key the panel files it under.
@@ -312,17 +337,26 @@ function tokensIn (text) {
   return Math.round(wide + (source.length - wide) / 3)
 }
 
-/** The same weighting over the three shapes a tool reports in — see `measure`.
+/** The text of a tool's report, block by block, whichever of the three shapes
+ *  it came in — a string, a list of blocks, or an object with the output on a
+ *  field of its own. `detailOf` shows it and `tokensOf` weighs it. */
+function * blocksOf (value) {
+  if (typeof value === 'string') {
+    yield value
+  } else if (Array.isArray(value)) {
+    for (const block of value) yield typeof block === 'string' ? block : block?.text || ''
+  } else {
+    yield String(value?.text ?? value?.output ?? '')
+  }
+}
+
+/** The same weighting over the three shapes a tool reports in — see `tokensIn`.
  *  Summed per block rather than over a join, for the same reason `detailOf`
  *  does not build the whole string either. */
 function tokensOf (value) {
-  if (typeof value === 'string') return tokensIn(value)
-  if (Array.isArray(value)) {
-    let total = 0
-    for (const block of value) total += tokensIn(typeof block === 'string' ? block : block?.text || '')
-    return total
-  }
-  return tokensIn(String(value?.text ?? value?.output ?? ''))
+  let total = 0
+  for (const block of blocksOf(value)) total += tokensIn(block)
+  return total
 }
 
 /* A count, or nothing. Every figure a CLI reports about its own usage arrives
@@ -343,15 +377,15 @@ function usageOf (tokens) {
      ours. Only when it is missing are the parts added up — and they are added
      up rather than picked from, because a component left out is a conversation
      reported as emptier than it is, which is the direction that surprises. */
-  const direct = positive(tokens.total ?? tokens.totalTokens)
+  const direct = positive(tokens.total)
   if (direct) return { used: Math.round(direct) }
 
   const cache = tokens.cache || {}
-  const used = positive(tokens.input ?? tokens.inputTokens) +
-    positive(cache.read ?? tokens.cachedReadTokens) +
-    positive(cache.write ?? tokens.cachedWriteTokens) +
-    positive(tokens.output ?? tokens.outputTokens) +
-    positive(tokens.reasoning ?? tokens.thoughtTokens)
+  const used = positive(tokens.input) +
+    positive(cache.read) +
+    positive(cache.write) +
+    positive(tokens.output) +
+    positive(tokens.reasoning)
   return used > 0 ? { used: Math.round(used) } : null
 }
 
@@ -544,7 +578,8 @@ function launch (provider, args, onMessage, { self, prompt = null, isRetry = fal
       k: 'turn-end',
       used: self.used || estimated(self),
       // Said, so the panel can show a count nobody vouched for as one.
-      estimated: !self.used
+      estimated: !self.used,
+      cost: self.cost || 0
     }, self)
   }
 
@@ -618,6 +653,11 @@ function launch (provider, args, onMessage, { self, prompt = null, isRetry = fal
       self.proc = launch(provider, args, onMessage, { self, prompt, isRetry: true })
       return
     }
+    /* The exit handler is the only place a process that never spoke can be
+       read: a resumed thread the CLI refuses tends to die on stderr before it
+       says a line of JSON. Decided before `endTurn` lets go of the process. */
+    const resumedAndSilent = !proc.ending && !!code && !spoke && !!self.thread
+    const said = stderr.trim().slice(-400)
     endTurn()
     // A kill we asked for is not a failure. Without this the stop button
     // answers itself with "The copilot exited (143)" — 143 being the SIGTERM
@@ -625,7 +665,15 @@ function launch (provider, args, onMessage, { self, prompt = null, isRetry = fal
     // process. Worse than the wrong words: the renderer takes an `error` as the
     // process being gone and forgets a session that had only just started.
     if (proc.ending || !code) return
-    publish({ k: 'error', message: stderr.trim().slice(-400) || `The copilot exited (${code}).` }, self)
+    /* Twice dead without a word, with a thread to resume, is the thread —
+       the retry above has already ruled out a transient crash. The error's
+       own words decide it too, for a CLI that says why before it goes. */
+    const lost = lostThread(self, said) || (resumedAndSilent && isRetry)
+    publish({
+      k: 'error',
+      message: said || `The copilot exited (${code}).`,
+      ...(lost ? { lostThread: true } : {})
+    }, self)
   })
 
   return proc
@@ -700,7 +748,7 @@ function onOpencodeMessage (msg, self) {
         const failed = state.status === 'error'
         /* Counted whole, before `detailOf` cuts it to what the panel shows: the
            whole of it is what the model's context is carrying. Every shape a
-           tool reports in, not only the string one — see `measure`. */
+           tool reports in, not only the string one — see `tokensOf`. */
         accountOutput(self, state.output)
         publish({
           k: wrote(name) && !failed ? 'edited' : 'tool-done',
@@ -719,16 +767,29 @@ function onOpencodeMessage (msg, self) {
     case 'step_finish': {
       const usage = usageOf(part.tokens)
       if (usage) self.used = usage.used
+      /* Two figures the CLI publishes and nothing here used to read. The
+         cost is per step and adds up over the turn; the panel shows the
+         running total beside the context ring. The reasoning count is what
+         turns "Thought" into "Thought for 1,204 tokens" — sent with no text,
+         which the panel reads as a figure for the thinking row it already
+         has rather than a row of its own. */
+      const cost = positive(part.cost)
+      if (cost) self.cost = (self.cost || 0) + cost
+      const reasoning = positive(part.tokens?.reasoning)
+      if (reasoning) publish({ k: 'thinking', text: '', tokens: Math.round(reasoning) }, self)
       break
     }
 
     case 'error': {
       self.busy = false
+      const message = msg.error?.data?.message || msg.error?.name || 'The turn failed.'
       publish({
         k: 'turn-end',
         used: self.used || estimated(self),
         estimated: !self.used,
-        error: msg.error?.data?.message || msg.error?.name || 'The turn failed.'
+        cost: self.cost || 0,
+        error: message,
+        ...(lostThread(self, message) ? { lostThread: true } : {})
       }, self)
       /* The CLI has said the turn failed; it is not also trusted to exit. Left
          alone, one that lingered kept running behind the next turn's process —
@@ -780,9 +841,42 @@ function readLines (stream, onMessage) {
 
 /* -------------------------------------------------------------------- API */
 
+/* The Copilot's hidden protocol files — the rename/search requests it writes
+   into the vault and the answers Tulip writes back — are turn-scoped, and the
+   turns that end normally sweep their own (the turn-end path unlinks the
+   results file; the request is consumed the moment it is seen). A crash, a
+   force quit or a killed renderer leaves them behind, and a leftover request
+   in the vault is worse than litter: it is a question that looks like it is
+   still waiting for an answer.
+
+   Swept whenever the vault is attached, which is the one moment no request in
+   it can belong to a turn of this process — none has been sent yet. A turn
+   already running against the same vault (a vault re-opened mid-session) may
+   own one, so while a turn is busy only files older than SWEEP_AGE_MS go:
+   past the turn watchdog's window with room to spare, nothing live wrote
+   them, and nothing that reads the answer is coming. */
+const SWEEP_AGE_MS = 30 * 60 * 1000
+
+function sweepProtocolFiles () {
+  if (!vault) return
+  let names
+  try { names = fs.readdirSync(vault) } catch { return }
+  const floor = Date.now() - SWEEP_AGE_MS
+  const someTurnBusy = [...sessions.values()].some((self) => self.busy)
+  for (const name of names) {
+    if (!name.startsWith('.tulip-copilot-') || !name.endsWith('.json')) continue
+    const file = path.join(vault, name)
+    if (someTurnBusy) {
+      try { if (fs.statSync(file).mtimeMs > floor) continue } catch { continue }
+    }
+    try { fs.unlinkSync(file) } catch { /* already gone */ }
+  }
+}
+
 function setVault (dir) {
   if (dir !== vault) stopAll()
   vault = dir
+  sweepProtocolFiles()
 }
 
 function attach (fn, pathFn, cacheFile = '') {
@@ -871,16 +965,6 @@ function parseOpencode (stdout) {
     } catch { /* a block we cannot read is a model without variants */ }
   }
   return models
-}
-
-/** A context window as a CLI writes it — `1M`, `272K`, `128,000` — as a
- *  number. Zero for anything unreadable, which the panel takes as "nobody
- *  said" and leaves the ring away. */
-function contextSize (text) {
-  const m = /^(\d+(?:\.\d+)?)\s*([KM])?$/i.exec(String(text || '').replace(/,/g, ''))
-  if (!m) return 0
-  const n = Number(m[1])
-  return m[2] ? (m[2].toUpperCase() === 'M' ? Math.round(n * 1000000) : Math.round(n * 1000)) : Math.round(n)
 }
 
 /**
@@ -1057,6 +1141,11 @@ function start ({
   const selectedMode = PERMISSION_MODES.has(mode)
     ? mode
     : write === true ? 'ask' : 'read'
+  /* Ask/auto can execute and edit: same trust as run blocks. Read mode is
+     fenced to deny shell/edits so it stays usable untrusted. */
+  if (selectedMode !== 'read' && !isTrusted()) {
+    return { ok: false, error: 'Trust this vault before using a copilot mode that can run or edit.' }
+  }
   const canWrite = selectedMode !== 'read'
   const session = {
     key: id,
@@ -1105,7 +1194,30 @@ function send (key, text, context, turnId = null) {
   // effort and which write mode the user picked, so an implicit start would
   // quietly answer as somebody else.
   const session = sessionFor(key)
-  if (!session) return { ok: false, error: 'The copilot is not running.' }
+  /* `gone` is for the panel: a session this side let go of — evicted to make
+     room, or a vault switch — is one the panel still believes is started, and
+     the flag is what lets it start another and resend rather than show the
+     reader a failure for a conversation nothing was wrong with. */
+  if (!session) return { ok: false, gone: true, error: 'The copilot is not running.' }
+  if (session.mode !== 'read' && !isTrusted()) {
+    return { ok: false, error: 'Trust this vault before using a copilot mode that can run or edit.' }
+  }
+  /* Never hand secret files to the model, even if the note attached them. */
+  try {
+    const paths = []
+    const pushPaths = (value) => {
+      if (!value) return
+      if (typeof value === 'string') { paths.push(value); return }
+      if (Array.isArray(value)) { for (const item of value) pushPaths(item); return }
+      if (typeof value === 'object') {
+        for (const k of ['path', 'rel', 'file', 'name']) if (typeof value[k] === 'string') paths.push(value[k])
+        if (Array.isArray(value.attachments)) pushPaths(value.attachments)
+        if (Array.isArray(value.files)) pushPaths(value.files)
+      }
+    }
+    pushPaths(context)
+    if (paths.some(isSecretPath)) return { ok: false, error: 'That attachment looks like a secret and was not sent.' }
+  } catch { /* a context we cannot read is one we do not filter */ }
   /* Per conversation, which is the whole of the rule: two notes may be answered
      at once, one note may not be asked twice at once — the second question is a
      follow-up, and the panel queues it. */
@@ -1117,9 +1229,11 @@ function send (key, text, context, turnId = null) {
      it. */
   session.turnId = String(turnId || '') || session.turnId
 
-  const prompt = promptFor(text, context, session.sent)
+  const prompt = promptFor(text, context, session.sent, { mode: session.mode })
 
   session.busy = true
+  // The bill is per turn; the panel keeps the conversation's running total.
+  session.cost = 0
 
   /* Reset in place rather than replaced: the record is shared with the memo
      kept for this thread, and swapping this session's reference for a fresh
@@ -1187,6 +1301,8 @@ function stopAll (signal = 'SIGTERM') {
    `scripts/test-ai.mjs` is what they are exported for. */
 module.exports = {
   setVault,
+  setTrusted,
+  sweepProtocolFiles,
   attach,
   models,
   doctor,
@@ -1195,11 +1311,9 @@ module.exports = {
   stop,
   stopAll,
   canWrite,
-  /** Whether this conversation's copilot is mid-turn. Main asks so a stop for
-   *  one chat cannot be read as the app having gone quiet. */
-  isBusy: (key) => !!sessionFor(key)?.busy,
   parsers: {
-    detailOf, tokensIn, tokensOf, usageOf, readLines, parseOpencode, contextSize,
-    policyEnv, commandCandidates, escapeForCmd, invocation
+    detailOf, tokensIn, tokensOf, usageOf, readLines, parseOpencode,
+    policyEnv, commandCandidates, escapeForCmd, invocation, lostThread,
+    isSecretPath
   }
 }

@@ -19,7 +19,6 @@ import {
 } from '../src/table.js'
 
 const ROWS = 400
-const COLUMNS = 4
 
 const HEADER = '| Word | Meaning | Example | Notes |'
 const DELIMITER = '| --- | --- | --- | --- |'
@@ -72,8 +71,7 @@ function time (runs, run, settle = () => {}) {
 /* Chromium does the work lazily and would otherwise hand back a number that
    says only how long it took to schedule it. Reading a geometric property is
    what makes it happen now. */
-let sink = 0
-const layout = () => { sink += document.body.offsetHeight }
+const layout = () => void document.body.offsetHeight
 
 async function main () {
   const parent = document.createElement('div')

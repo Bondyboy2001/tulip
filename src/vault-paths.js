@@ -11,7 +11,8 @@
 
 import VAULT_CONTRACT from '../electron/vault-contract.json'
 
-const escapeRe = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+/** `text`, safe to put inside a regular expression as itself. */
+export const escapeRe = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 /** `.md`, `.markdown`… as an alternation, without the leading dots. */
 const noteExtAlternation = VAULT_CONTRACT.noteExtensions
@@ -31,12 +32,12 @@ export const NOTE_EXT =
    file actually named `cpp` does not. */
 const extAlternation = (list) => list.map(escapeRe).join('|')
 
-export const CODE_EXT =
+const CODE_EXT =
   new RegExp(`(${extAlternation(VAULT_CONTRACT.codeExtensions)})$`, 'i')
 
 /* The delimiter is the value, so the matcher is built from the keys. */
 const DATA_DELIMITERS = VAULT_CONTRACT.dataExtensions
-export const DATA_EXT =
+const DATA_EXT =
   new RegExp(`(${extAlternation(Object.keys(DATA_DELIMITERS))})$`, 'i')
 
 export const TEX_EXT = new RegExp(`${escapeRe(VAULT_CONTRACT.texExtension)}$`, 'i')
@@ -54,6 +55,7 @@ export const NOTEBOOK_EXT = new RegExp(`${escapeRe(VAULT_CONTRACT.notebookExtens
    own kind rather than one of the files below, because Tulip does have a view
    of it — which is the whole difference between the two lists. */
 export const DOCX_EXT = new RegExp(`${escapeRe(VAULT_CONTRACT.docxExtension)}$`, 'i')
+const FLASHCARD_EXT = new RegExp(`${escapeRe(VAULT_CONTRACT.flashcardExtension)}$`, 'i')
 
 /* Regional-indicator pairs — the two codepoints a flag emoji is made of, and
    the prefix a language folder carries its country in. A source string in the
@@ -86,14 +88,9 @@ export const isSitePath = (path) => SITE_EXT.test(path || '')
 export const isWhiteboardPath = (path) => WHITEBOARD_EXT.test(path || '')
 export const isNotebookPath = (path) => NOTEBOOK_EXT.test(path || '')
 export const isDocxPath = (path) => DOCX_EXT.test(path || '')
+export const isFlashcardBankPath = (path) => FLASHCARD_EXT.test(path || '')
 export const isLanguageTablePath = (path) =>
   String(path || '').toLowerCase().endsWith(VAULT_CONTRACT.languageTableSuffix)
-
-/** Whether the last segment carries an extension at all. A wikilink names a
- *  note without one — `[[Reading list]]` — and that is the difference between
- *  "a file of a kind nothing here handles" and "a note that may not exist
- *  yet". */
-const HAS_EXT = /\.[^./]+$/
 
 /**
  * A file the vault holds but has no view of its own for: a photograph, a
@@ -106,10 +103,18 @@ const HAS_EXT = /\.[^./]+$/
  * means is decided at the door in renderer.js: text is text whatever it is
  * called, a picture gets a picture viewer, and what is left is described rather
  * than pretended at.
+ *
+ * A name with no extension at all is in this set, not an exception to it. Both
+ * callers hand this real vault paths — never bare link names, which resolve
+ * through the note index before any path exists — and an extension says
+ * nothing a probe cannot say better: a `Makefile` is text and opens in the
+ * editor, while a binary that happens to have no suffix used to skip the probe
+ * entirely, land in CodeMirror as mojibake, and be one autosave away from
+ * being written back re-encoded.
  */
 export const isViewedFilePath = (path) => {
   const name = String(path || '').split('/').pop() || ''
-  if (!HAS_EXT.test(name)) return false
+  if (!name) return false
   return !NOTE_EXT.test(name) && !isTexPath(name) && !isPdfPath(name) &&
     !isSitePath(name) && !isWhiteboardPath(name) && !isDataPath(name) &&
     !isNotebookPath(name) && !isDocxPath(name) && !isCodePath(name)

@@ -329,5 +329,5 @@ class FindPanel {
  */
 export const findConfig = {
   createPanel: (view) => new FindPanel(view),
-  scrollToMatch: (range) => scrollTo(range)
+  scrollToMatch: scrollTo
 }

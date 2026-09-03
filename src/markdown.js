@@ -13,6 +13,7 @@
 import MarkdownIt from 'markdown-it'
 import footnotePlugin from 'markdown-it-footnote'
 import { escapeHtml } from './dom.js'
+import { isBookmarkLine, bookmarkMarkup } from './bookmark.js'
 import { mathPlugin } from './math.js'
 import { moneyPlugin } from './money.js'
 import { citationPlugin } from './citations.js'
@@ -36,7 +37,7 @@ export function createMarkdown ({ resolveEmbedSrc }) {
      the allowlist there. It also settles a smaller nuisance: with html off, an
      attribute was prose as far as typographer was concerned, so `align="center"`
      came back curly-quoted. Raw HTML is its own token now and is left alone. */
-  const md = new MarkdownIt({ html: true, linkify: true, breaks: false, typographer: true })
+  const md = new MarkdownIt({ html: true, linkify: true, breaks: true, typographer: true })
 
   md.use(mathPlugin)
   md.use(moneyPlugin)
@@ -100,6 +101,22 @@ export function createMarkdown ({ resolveEmbedSrc }) {
      still this rule's job: unclaimed, markdown-it reads it as a thematic break
      under a setext heading, which is what a `---` pair is anywhere else. */
   md.renderer.rules.frontmatter = () => ''
+
+  /* The bookmark — see src/bookmark.js. Claimed ahead of html_block, which is
+     what a comment on a line of its own would otherwise be, and drawn as the
+     ribbon the editing view draws for it. The row carries its line so the
+     reopened note can be scrolled to the ribbon itself. */
+  md.block.ruler.before('html_block', 'bookmark', (mdState, startLine, _endLine, silent) => {
+    const line = mdState.src.slice(mdState.bMarks[startLine], mdState.eMarks[startLine])
+    if (!isBookmarkLine(line)) return false
+    if (silent) return true
+    const token = mdState.push('bookmark', '', 0)
+    token.map = [startLine, startLine + 1]
+    mdState.line = startLine + 1
+    return true
+  })
+  md.renderer.rules.bookmark = (tokens, i) =>
+    `<div class="bookmark-mark" data-line="${tokens[i].map?.[0] ?? 0}" role="separator" aria-label="Bookmark">${bookmarkMarkup()}</div>\n`
 
   /**
    * `[[target|suffix]]` at `pos`, optionally behind a `!`. Both bracket rules

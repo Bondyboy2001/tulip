@@ -30,6 +30,7 @@ const string = (v) => typeof v === 'string'
 const boolean = (v) => typeof v === 'boolean'
 const number = (v) => typeof v === 'number' && Number.isFinite(v)
 const stringList = (v) => Array.isArray(v) && v.every(string)
+const nullableStringList = (v) => Array.isArray(v) && v.every((item) => item === null || string(item))
 const numberList = (v) => Array.isArray(v) && v.every(number)
 const booleanList = (v) => Array.isArray(v) && v.every(boolean)
 /* A plain object of JSON scalars — the model catalogue and the saved searches.
@@ -39,13 +40,18 @@ const record = (v) => !!v && typeof v === 'object' && !Array.isArray(v)
    accelerator. The strings are validated again where they are spent (see
    `usableAccelerator` in main.js); this only pins the shape. */
 const recordOfStrings = (v) => record(v) && Object.values(v).every(string)
+const recordOfNumbers = (v) => record(v) && Object.values(v).every(number)
 /* `undefined` clears a key. The renderer sends it for "forget the last note". */
 const orCleared = (check) => (v) => v === undefined || check(v)
+
+const MEASURE_NAMES = ['narrow', 'normal', 'wide']
 
 const CONFIG_KEYS = {
   /* Read by main, and so the ones where a wrong type reaches real logic. */
   durability: string,
   historyInVault: boolean,
+  /* Written only after the integrity-checked backup call has completed. */
+  lastBackupAt: number,
   manimQuality: string,
   pdfText: boolean,
   /* Whether a python block that fails on a missing import may install it — see
@@ -55,6 +61,10 @@ const CONFIG_KEYS = {
   autoInstallPythonDeps: boolean,
   texEngine: string,
   zoom: number,
+  /* How large the reader reads web pages, which is a preference of theirs and
+     not a property of any one site — see `setZoom` in src/site.js. Held apart
+     from `zoom`, which is the whole window's. */
+  siteZoom: number,
 
   /* The window and its panels. */
   ai: string,
@@ -66,6 +76,7 @@ const CONFIG_KEYS = {
   /* The optional second sidebar panel, and how much of the height it takes. */
   paneBelow: orCleared(string),
   paneBelowHeight: number,
+  paneBelowHeights: recordOfNumbers,
   sideDoc: orCleared(string),
   /* The size the run output popup was left at, in pixels — see `legalRunSize`
      in src/runcode.js, which clamps both to the stage on the way in, so a
@@ -80,7 +91,10 @@ const CONFIG_KEYS = {
   /* What was open, for restoring the session. */
   view: string,
   lastNote: orCleared(string),
-  tabs: stringList,
+  /* A blank tab is deliberately stored as null. Refusing the whole list when
+     one was blank left the previous session on disk, including paths that had
+     since disappeared. */
+  tabs: nullableStringList,
   /* Where each tab was left, as a source line, one per entry of `tabs`. */
   tabPlaces: numberList,
   /* Which of them are pinned, again one per entry of `tabs`. */
@@ -110,7 +124,9 @@ const CONFIG_KEYS = {
   /* Line numbers down the side of a source file — `.py`, `.cpp`, `.tex`. Not
      notes: see `setLineNumbers` in editor.js for why prose is never numbered. */
   sourceNumbers: boolean,
-  measure: orCleared(number),
+  /* The writing column, by name — `MEASURES` in renderer.js maps the three
+     to widths. (It was allowlisted as a number, which refused every write.) */
+  measure: orCleared((v) => MEASURE_NAMES.includes(v)),
   outline: boolean,
   readableWidth: boolean,
   spellcheck: boolean,
@@ -128,10 +144,14 @@ const CONFIG_KEYS = {
   aiMode: string,
   aiModel: string,
   aiEffort: string,
-  aiModels: record,
+  /* The keys of the models the picker offers, as the settings pane writes
+     them — a list, so an install that has narrowed the catalogue keeps its
+     choice. (It was allowlisted as a record, which refused every write.) */
+  aiModels: stringList,
 
-  /* Study. */
-  studyNewPerDay: number,
+  /* Study. Cleared when the number field is emptied, which is how the pane
+     says "back to the default". */
+  studyNewPerDay: orCleared(number),
   studyRetention: number,
   studySpeaking: boolean,
 

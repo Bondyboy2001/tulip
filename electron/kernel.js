@@ -37,7 +37,9 @@
 const { spawn } = require('child_process')
 const { killTree } = require('./kill-tree')
 const crypto = require('crypto')
+const fs = require('fs')
 const net = require('net')
+const os = require('os')
 const path = require('path')
 
 /* The server gets this long to answer /api/status before we give up on it. A
@@ -104,6 +106,35 @@ function freePort () {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 /**
+ * An empty directory for the server to read its configuration out of.
+ *
+ * The comment on the spawn below has always claimed that none of the reader's
+ * own Jupyter configuration applies here, and nothing enforced it: a server
+ * started from this process inherits `JUPYTER_CONFIG_DIR`, and failing that
+ * finds the same `~/.jupyter` their real Jupyter uses. Which means their
+ * `jupyter_server_config.py` was read — a `root_dir` of their choosing beating
+ * the vault, a token of their choosing beating ours — and every extension
+ * dropped into `jupyter_server_config.d` was loaded: JupyterLab, the
+ * collaboration server, terminals, all of it started for an app that wants one
+ * thing from this process and will never open a browser at it.
+ *
+ * A directory we make and nothing writes to is the whole fix. `JUPYTER_NO_CONFIG`
+ * is jupyter_core's own switch for exactly this and takes the system-wide
+ * directories out too, so both are set: the switch where it is understood, and
+ * an empty directory as the answer where it is not.
+ */
+function emptyConfigDir () {
+  try {
+    return fs.mkdtempSync(path.join(os.tmpdir(), 'tulip-jupyter-'))
+  } catch {
+    /* Nowhere to write is not a reason to refuse to run cells. Without a
+       directory of ours the switch above is still set, which is the larger
+       half of this. */
+    return ''
+  }
+}
+
+/**
  * The one server, started on demand.
  *
  * `options.pathFor` supplies the PATH to spawn with — main.js has already done
@@ -113,6 +144,13 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
  * which is the same compromise Jupyter itself makes.
  */
 class KernelHost {
+  /**
+   * @param {{
+   *   pathFor?: () => string,
+   *   rootDir?: string | null,
+   *   onEvent?: (event: { path: string, kind: string, [key: string]: any }) => void
+   * }} [options]
+   */
   constructor ({ pathFor = () => process.env.PATH, rootDir = null, onEvent = () => {} } = {}) {
     this.pathFor = pathFor
     this.rootDir = rootDir
@@ -124,6 +162,9 @@ class KernelHost {
        a `jupyter server` running for as long as the machine was up, because
        the only handle on it was a `.then` that the process exit beat. */
     this.serverChild = null
+    /* The empty directory the running server reads its configuration from, so
+       that quitting can take it away again. */
+    this.configDir = ''
     this.kernels = new Map()    // notebook path -> Kernel
     this.starting = new Map()   // notebook path -> the in-flight start
   }
@@ -186,7 +227,6 @@ class KernelHost {
       `--ServerApp.port=${port}`,
       '--ServerApp.port_retries=0',
       '--ServerApp.ip=127.0.0.1',
-      `--IdentityProvider.token=${token}`,
       /* Bound to loopback and gated on a secret token, so the cross-site
          defence has nothing left to defend: there is no browser origin here
          at all, only this process. */
@@ -194,17 +234,35 @@ class KernelHost {
       '--ServerApp.open_browser=False',
       /* No `jupyter_server_config.py` of the reader's, no extensions: this
          server exists to run one app's cells, and a config written for their
-         real Jupyter has no business changing how it behaves. */
+         real Jupyter has no business changing how it behaves. The empty
+         config directory below is what makes the first half true; this is the
+         second, because an extension can also be enabled by the package that
+         installed it. JupyterLab, the collaboration server and the terminal
+         service are each a second or two of import time and a surface this
+         app never asks anything of. */
+      '--ServerApp.jpserver_extensions={}',
       '--ServerApp.answer_yes=True'
     ]
     if (this.rootDir) args.push(`--ServerApp.root_dir=${this.rootDir}`)
 
+    /* The token in the environment rather than on the command line. An
+       argument vector is world-readable — `ps` shows every process's, to every
+       user on the machine — so the secret that is the only thing between a
+       local process and this server was being published to all of them. It is
+       still the same secret; it is now somewhere only this process and its
+       children can read. `JUPYTER_TOKEN` is jupyter_server's own spelling for
+       it, and is what `IdentityProvider.token` defaults to. */
+    const configDir = emptyConfigDir()
+    this.configDir = configDir
     const env = {
       ...process.env,
       PATH: this.pathFor(),
+      JUPYTER_TOKEN: token,
+      JUPYTER_NO_CONFIG: '1',
       JUPYTER_PLATFORM_DIRS: '1',
       JUPYTER_PATH: kernelSearchPath()
     }
+    if (configDir) env.JUPYTER_CONFIG_DIR = configDir
     const child = await this.#spawnFirstThatStarts(args, env)
     /* Named the moment it exists, and not when it is ready: the sixty seconds
        this may spend polling below are sixty seconds in which ⌘Q would
@@ -351,7 +409,22 @@ class KernelHost {
       rootDir: this.rootDir,
       substituted: !!asked && !known ? asked : '',
       displayName: (known || specs.find((s) => s.name === name))?.displayName || name,
-      onEvent: (event) => this.onEvent({ path: notebookPath, ...event })
+      onEvent: (event) => {
+        /* A kernel that has died is one this map must let go of, and the map
+           is the only reason anything would use it again: `kernelFor` hands
+           back whatever is filed under the path, so a dead entry meant every
+           later run reported "this notebook has no kernel running" — the
+           process was gone, the record of it was not, and nothing short of
+           restarting Tulip could clear it. Forgetting it here is what makes
+           the next run start a new one. */
+        if (event.kind === 'state' && event.state === 'dead') {
+          this.#forget(kernel.notebookPath, kernel)
+        }
+        /* The kernel's own path, not the one it was started under: `rename`
+           moves the kernel to the notebook's new name, and an event stamped
+           with the old one is filed under a window nothing owns any more. */
+        this.onEvent({ path: kernel.notebookPath, ...event })
+      }
     })
     this.kernels.set(notebookPath, kernel)
     try {
@@ -374,6 +447,17 @@ class KernelHost {
     return this.kernels.get(notebookPath) || null
   }
 
+  /** Drop a kernel that has stopped being one, and tell the server so — a
+   *  restart that failed leaves a record on the server side too, and the id we
+   *  are throwing away here is the only handle anything has on it. Only if it
+   *  is still the kernel filed under that path: a replacement may already have
+   *  taken the name. */
+  #forget (notebookPath, kernel) {
+    if (this.kernels.get(notebookPath) !== kernel) return
+    this.kernels.delete(notebookPath)
+    kernel.dispose().catch(() => {})
+  }
+
   /**
    * The notebook moved. A kernel is filed under the path of the notebook it
    * belongs to, so a rename left the running process filed under a name that
@@ -391,6 +475,11 @@ class KernelHost {
       if (held === undefined) continue
       map.delete(from)
       map.set(to, held)
+      /* The kernel stamps its events with its own path, so it has to learn
+         the new one too — a `starting` entry is a promise of a kernel, and
+         is told once it resolves. */
+      if (held instanceof Kernel) held.notebookPath = to
+      else held.then((kernel) => { if (kernel) kernel.notebookPath = to }, () => {})
       moved = true
     }
     return moved
@@ -430,6 +519,18 @@ class KernelHost {
     await Promise.all(all.map((kernel) => kernel.dispose().catch(() => {})))
     const host = mine ? await mine.catch(() => null) : null
     if (host?.child) killTree(host.child, 'SIGTERM')
+    this.#dropConfigDir()
+  }
+
+  /** The empty configuration directory this host made, taken away again. Ours
+   *  alone and never written to, so there is nothing in it to lose — but it is
+   *  a directory per server per run of the app, and leaving them is a tmpdir
+   *  that fills up over a machine's uptime. */
+  #dropConfigDir () {
+    const dir = this.configDir
+    this.configDir = ''
+    if (!dir) return
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* it can stay */ }
   }
 
   /** Synchronous and best-effort, for `before-quit`, which does not wait. */
@@ -445,6 +546,7 @@ class KernelHost {
     this.server = null
     this.serverChild = null
     if (child) killTree(child, 'SIGKILL')
+    this.#dropConfigDir()
   }
 }
 
@@ -464,6 +566,59 @@ class KernelHost {
 const OUTPUT_TYPES = new Set([
   'stream', 'display_data', 'update_display_data', 'execute_result', 'error', 'clear_output'
 ])
+
+/* How many parts one binary frame is allowed to claim. A frame is trusted —
+   it came from a server this process started on loopback — but the count is
+   read out of the first four bytes of it, so a corrupt frame must be refused
+   rather than turned into a loop over four billion offsets. */
+const MAX_FRAME_PARTS = 1024
+
+/**
+ * A message that arrived as bytes rather than as text.
+ *
+ * Not every kernel message is JSON on the wire. jupyter_server sends a frame
+ * as binary the moment the message carries `buffers` — which is comm traffic,
+ * which is every widget — and `JSON.parse` on the result threw and returned,
+ * so those messages were dropped in silence. A kernel doing something
+ * perfectly ordinary looked like a kernel that had stopped answering.
+ *
+ * The framing is jupyter_server's own `serialize_binary_message`: a big-endian
+ * `uint32` count, that many big-endian `uint32` offsets, and then the parts
+ * they point at. The first part is the JSON message; the rest are its buffers,
+ * which nothing here draws yet — what matters is that the message itself now
+ * arrives.
+ *
+ * This is deliberately not the `v1.kernel.websocket.jupyter.org` framing, which
+ * is a different layout with 64-bit offsets and the channel packed in. The
+ * server speaks that one only to a client that asked for it in the handshake,
+ * and this one does not ask.
+ *
+ * @returns the message, or null for anything that is not one.
+ */
+function decodeBinaryMessage (data) {
+  const view = data instanceof ArrayBuffer
+    ? new DataView(data)
+    : ArrayBuffer.isView(data)
+      ? new DataView(data.buffer, data.byteOffset, data.byteLength)
+      : null
+  if (!view || view.byteLength < 8) return null
+
+  const parts = view.getUint32(0)
+  if (!parts || parts > MAX_FRAME_PARTS || view.byteLength < 4 * (parts + 1)) return null
+  const first = view.getUint32(4)
+  // Where the JSON ends is where the next part begins, or the end of the frame
+  // when the message brought no buffers with it.
+  const last = parts > 1 ? view.getUint32(8) : view.byteLength
+  if (first < 4 * (parts + 1) || last < first || last > view.byteLength) return null
+
+  const bytes = new Uint8Array(view.buffer, view.byteOffset + first, last - first)
+  try {
+    const message = JSON.parse(new TextDecoder().decode(bytes))
+    return (message && typeof message === 'object') ? message : null
+  } catch {
+    return null
+  }
+}
 
 class Kernel {
   constructor ({ host, name, displayName, notebookPath, rootDir, substituted, onEvent }) {
@@ -535,6 +690,10 @@ class Kernel {
     this.id = (await reply.json()).id
     await this.#connect()
     this.#setState('idle')
+    /* Asked, not awaited. The answer is for the file rather than for this
+       start — see `#askLanguage` — and a kernel that is slow to answer it must
+       not be a kernel that is slow to run the cell somebody just pressed. */
+    this.#askLanguage()
     if (this.substituted) {
       this.onEvent({
         kind: 'notice',
@@ -562,12 +721,74 @@ class Kernel {
         this.#failEverything(new Error('The kernel stopped.'))
         this.#setState('dead')
       }
+      /* Bytes rather than a `Blob`, so a binary frame can be read the moment
+         it lands. A `Blob` is only readable through a promise, and a promise
+         is how a message overtakes the one before it. */
+      try { socket.binaryType = 'arraybuffer' } catch { /* whatever it does */ }
+      /* Set only if a `Blob` ever does turn up, and then everything after it
+         queues behind it: a kernel's messages mean nothing out of order — the
+         `idle` that ends a cell would land before the line it printed. */
+      let ordered = null
       socket.onmessage = (event) => {
-        let message
-        try { message = JSON.parse(event.data) } catch { return }
-        this.#receive(message)
+        const data = event.data
+        if (typeof Blob === 'function' && data instanceof Blob) {
+          ordered = (ordered || Promise.resolve())
+            .then(() => data.arrayBuffer())
+            .then((buffer) => this.#frame(buffer))
+            .catch(() => {})
+          return
+        }
+        if (ordered) ordered = ordered.then(() => this.#frame(data))
+        else this.#frame(data)
       }
     })
+  }
+
+  /** One frame off the socket, whichever way it was sent. */
+  #frame (data) {
+    let message = null
+    if (typeof data === 'string') {
+      try { message = JSON.parse(data) } catch { return }
+    } else {
+      message = decodeBinaryMessage(data)
+    }
+    if (message && typeof message === 'object') this.#receive(message)
+  }
+
+  /**
+   * The kernel process went, and the server said so.
+   *
+   * Not the same event as the socket closing: the socket is the server's and
+   * stays up, so nothing here noticed. jupyter_server restarts a kernel that
+   * dies — that is what a `restarting` status is — and says `dead` when the
+   * restart itself failed. Both used to be read as `idle`, which is the one
+   * reading that cannot be true: whatever was running is not running, and the
+   * `idle` that ends a cell is one that names the request it ends.
+   *
+   * So every cell waiting on this kernel was waiting on an answer that had
+   * already stopped being possible. `done` never came, the queue behind it
+   * never moved, and Run all was wedged for the rest of the session. Saying so
+   * is what lets all of that unwind.
+   */
+  #kernelDied (state) {
+    const gone = state === 'dead'
+    this.#failEverything(new Error(gone
+      ? 'The kernel died.'
+      : 'The kernel died and is being started again.'))
+    this.onEvent({
+      kind: 'notice',
+      text: gone
+        ? `The ${this.displayName} kernel died and could not be started again. ` +
+          'Run a cell to start a new one.'
+        : `The ${this.displayName} kernel died and Jupyter is starting it again. ` +
+          'Everything it held has gone, and the cells that were running were stopped.'
+    })
+    /* A dead kernel's socket is a socket to nothing. Closed here rather than
+       left open, so the next `execute` refuses at once instead of sending a
+       message into a process that is not there — and so `state` is the last
+       word on this kernel rather than something a later frame can revise. */
+    if (gone) this.closeSocket()
+    this.#setState(gone ? 'dead' : 'restarting')
   }
 
   #receive (message) {
@@ -576,16 +797,28 @@ class Kernel {
     const content = message.content || {}
 
     if (type === 'status') {
+      const state = String(content.execution_state || '')
+      /* The kernel, rather than the request: `restarting` and `dead` are the
+         server talking about the process itself, and neither can be answered
+         by carrying on. See `#kernelDied`. */
+      if (state === 'restarting' || state === 'autorestarting' || state === 'dead') {
+        this.#kernelDied(state === 'dead' ? 'dead' : 'restarting')
+        return
+      }
       /* Busy and idle describe the kernel, not the request — but an `idle`
          whose parent is our request is the protocol's own statement that
          everything for it has been sent. That, not the reply on the shell
          channel, is when a cell is finished. */
-      if (content.execution_state === 'idle' && this.pending.has(parent)) {
+      if (state === 'idle' && this.pending.has(parent)) {
         const waiter = this.pending.get(parent)
         this.pending.delete(parent)
         waiter.resolve({ status: waiter.status, executionCount: waiter.executionCount })
       }
-      this.#setState(content.execution_state === 'busy' ? 'busy' : 'idle')
+      /* Anything else the protocol grows is not silently reported as idle: a
+         state this file has never heard of is one it has nothing true to say
+         about, and saying "idle" about a kernel that is not is how a run gets
+         lost. */
+      if (state === 'busy' || state === 'idle' || state === 'starting') this.#setState(state)
       return
     }
 
@@ -745,6 +978,33 @@ class Kernel {
     })
   }
 
+  /**
+   * What the kernel says it speaks, for the notebook to write down.
+   *
+   * `language_info` is nbformat's record of the language a notebook's cells are
+   * in — its name, its version, and the file extension an export needs — and it
+   * is written by the kernel that ran the file. Nothing here ever asked for it,
+   * so a notebook whose kernel was changed lost the field for good: the cells
+   * were coloured as nothing, and `nbconvert` and Tulip's own export had no
+   * extension to name a script with.
+   *
+   * Retried once, and quietly. A kernel that has just started is often still
+   * importing when this arrives, and one that never answers costs the notebook
+   * only the colouring it already lacked.
+   */
+  async #askLanguage () {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const reply = await this.#askShell('kernel_info_request', {}, 15_000).catch(() => null)
+      if (!this.socket) return
+      const info = reply?.language_info
+      if (info && typeof info === 'object' && !Array.isArray(info)) {
+        this.onEvent({ kind: 'language', languageInfo: info })
+        return
+      }
+      if (!reply) await sleep(500)
+    }
+  }
+
   complete (code, cursorPos) {
     return this.#askShell('complete_request', {
       code: String(code ?? ''),
@@ -812,4 +1072,4 @@ class Kernel {
   }
 }
 
-module.exports = { KernelHost }
+module.exports = { KernelHost, decodeBinaryMessage }

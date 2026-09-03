@@ -210,7 +210,7 @@ export function mountPanels ({
   /* Opening a panel takes room from the ones already out, so the fit is redone
      whenever one of them opens or closes — wherever in the app that happened. */
   new MutationObserver(refitPanels).observe(el.app, {
-    attributeFilter: ['data-sidebar', 'data-outline', 'data-side', 'data-ai']
+    attributeFilter: ['data-sidebar', 'data-side', 'data-ai']
   })
 
   /** Widths as they were left, and kept legal when the window is smaller than

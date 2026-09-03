@@ -206,12 +206,12 @@
    because the sidebar is as tall as the window and a panel fixed at 240px is
    most of a short one and a strip of a tall one. */
 
-.sidebar { --pane-below: 0.4; }
+.sidebar { --pane-below: 40%; }
 
 .pane-split {
   display: flex;
-  flex: none;
   flex-direction: column;
+  flex: none;
 }
 
 /* The divider is a hairline with a comfortable grab area around it: a 1px
@@ -241,14 +241,16 @@
 /* The sidebar's only strip, sitting under the divider and naming what is in
    the panel below it. It was shrunk when there was a second strip above the
    tree for it to defer to; there is not one now. */
-.pane-tabs.is-lower { padding-top: 0; }
+.pane-tabs.is-lower {
+  padding-top: 0;
+}
 .pane-tabs.is-lower .pane-tab { padding-top: 4px; padding-bottom: 6px; }
 
 /* The lower body: a fixed share of the height, scrolling within itself, so the
    panel above keeps its own scroll position rather than the two sharing one. */
 .sidebar > .pane-split ~ .pane {
   flex: none;
-  height: calc(var(--pane-below) * 100%);
+  height: var(--pane-below);
   min-height: 0;
   overflow-y: auto;
 }

@@ -28,8 +28,10 @@ lock-in.
   Jupyter kernel when one is installed, and the file's saved outputs, plots and
   tracebacks render either way.
 - Search the whole vault and work with an optional AI copilot.
-- Build language-learning tables and review them with spaced repetition.
+- Build language-learning tables and review due words across the vault with spaced repetition.
+- Study portable multiple-choice flashcards from ordinary Markdown callouts.
 - Start notes from a `templates/` folder, and click any `#tag` to find its notes.
+- Open an optional Getting Started note, and back up or restore a vault with integrity checks.
 - Split the sidebar to keep the file tree and the outline on screen together.
 - Open a second window on the same vault, and pin the tabs worth keeping.
 - See what studying adds up to under **Review statistics…** in the palette.
@@ -174,6 +176,14 @@ folders already on that list can be opened from it; anything new goes through
 the system's own folder dialog.
 
 ## When something goes wrong
+
+### Backups
+
+**Back up vault…** and **Restore vault…** are available in the command palette and
+the File menu. A backup is a readable folder containing the vault's notes,
+attachments, annotations, review data, and vault-local history. Tulip verifies every file with
+SHA-256 before completing a backup or restore, and restores into a new vault rather
+than overwriting the current one.
 
 If Tulip ever says something went wrong, the palette has the two things worth
 doing about it. **Reveal crash log** opens the folder holding `crash.log`, which

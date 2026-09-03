@@ -247,9 +247,27 @@ try {
   }
   console.log(JSON.stringify(report, null, 2))
   if (CHECK) {
+    /* The ceilings, tight locally and roomy under CI — the same arrangement
+       bench/table-bench.mjs uses, and for the same reason: a shared runner is
+       not an idle laptop, and a gate set for the runner catches nothing on the
+       machine where the regression is actually written.
+     *
+     * Warm boot measures around 200ms locally on the two-note vault this bench
+     * builds. The old ceilings were 1800/900 for both machines, which is far
+     * enough above that a fourfold regression would have passed the gate
+     * silently. These are roughly double what it costs, which is what a
+     * ceiling is for: to catch a change in kind, not to argue about a
+     * millisecond. */
+    const ceilings = process.env.CI
+      ? { first: 1800, warm: 900 }
+      : { first: 700, warm: 450 }
     const failures = []
-    if (report.firstRunMs.domContentLoaded > 1800) failures.push('first launch over 1800ms')
-    if (report.warmMedianMs.domContentLoaded > 900) failures.push('warm median over 900ms')
+    if (report.firstRunMs.domContentLoaded > ceilings.first) {
+      failures.push(`first launch over ${ceilings.first}ms`)
+    }
+    if (report.warmMedianMs.domContentLoaded > ceilings.warm) {
+      failures.push(`warm median over ${ceilings.warm}ms`)
+    }
     if (failures.length) {
       console.error(`boot performance gate failed: ${failures.join(', ')}`)
       exitCode = 1

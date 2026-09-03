@@ -192,7 +192,9 @@ const chipTemplates = new Map()
    Simple Icons does not carry. When the module lands, those chips are given
    their mark and the template cache is dropped, so nothing keeps a monogram it
    should not have. */
+/** @type {typeof import('./logos.js')|null} */
 let logos = null
+/** @type {Promise<typeof import('./logos.js')|null>|null} */
 let logosLoading = null
 const awaitingLogo = []
 

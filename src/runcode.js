@@ -57,6 +57,15 @@ export function isLanguage (lang, id) {
    that is the same for every block in the note. */
 let noteOfRun = () => null
 
+/* Installed by the renderer so every executable surface shares the same
+   vault-consent prompt. Tests and embedders that do not provide one remain
+   permissive, which keeps this module usable on its own. */
+let mayRun = async () => true
+
+export function resolveRunPermission (resolver) {
+  mayRun = typeof resolver === 'function' ? resolver : async () => true
+}
+
 /** Said once at boot: how to ask what note the reader is looking at. */
 export function resolveRunNote (resolver) {
   noteOfRun = typeof resolver === 'function' ? resolver : () => null
@@ -380,11 +389,17 @@ function stateFor (lang, code) {
      note — so every panel showing it registers its own painter. */
   state = runState()
   if (results.size >= MAX_RESULTS) {
-    /* Oldest first, but never a run still going: evicted mid-run, the next
-       widget rebuild would mint a fresh idle state for the same code while
-       the live one streamed into panels nothing points at any more. */
+    /* Oldest first, but never a run still going, and never one a panel is
+       still showing. Evicted mid-run, the next widget rebuild would mint a
+       fresh idle state for the same code while the live one streamed into
+       panels nothing points at any more. Evicted while on screen — a note
+       with more runnable blocks than the cap has every one of them here at
+       once — the block's button and its panel end up holding different
+       states, and Run then paints its output into the state nothing on the
+       page is watching: the block looks like it did nothing. */
     for (const old of results.keys()) {
-      if (results.get(old).status !== 'running') { results.delete(old); break }
+      const state = results.get(old)
+      if (state.status !== 'running' && !onScreen(state)) { results.delete(old); break }
     }
   }
   results.set(key, state)
@@ -404,6 +419,10 @@ function stateFor (lang, code) {
  * @returns {Promise<object|null>}  what start() said, or null if it threw
  */
 async function launch (state, start) {
+  let allowed = false
+  try { allowed = await mayRun() } catch { allowed = false }
+  if (!allowed) return null
+
   Object.assign(state, blankRun('running'))
   state.render()
 
@@ -442,10 +461,10 @@ async function launch (state, start) {
  *
  * @param {{lang: string, code: string}[]} blocks
  * @param {(done: number, total: number) => void} [onProgress]
- * @returns {Promise<{ran: number, failed: number, stopped: boolean}>}
+ * @returns {Promise<{ran: number, failed: number, stopped: boolean, denied: boolean}>}
  */
 export async function runBlocksInOrder (blocks, onProgress) {
-  const summary = { ran: 0, failed: 0, stopped: false }
+  const summary = { ran: 0, failed: 0, stopped: false, denied: false }
 
   for (const [index, block] of blocks.entries()) {
     onProgress?.(index, blocks.length)
@@ -455,7 +474,11 @@ export async function runBlocksInOrder (blocks, onProgress) {
        restarted: killing a run somebody started by hand to start the identical
        run again is work for nothing. */
     if (state.status !== 'running') {
-      await launch(state, () => api.run.start(block.lang, block.code, runNote()))
+      const started = await launch(state, () => api.run.start(block.lang, block.code, runNote()))
+      if (!started && state.status === 'idle') {
+        summary.denied = true
+        break
+      }
     }
     await whenSettled(state)
     summary.ran++
@@ -785,8 +808,12 @@ function queueAuto (begin) {
  * @param {string} spec.kind   the figure's class; its stage and status follow it
  * @param {(path: string) => Element} spec.make  the artefact, as something to show
  * @param {boolean} [spec.auto]  render it when the note is read, not when asked
- * @param {(started: object|null) => void} [spec.onStarted]
- * @param {(hit: object) => void} [spec.onFound]
+ * @param {Record<string, any>} spec.words
+ * @param {Record<string, string>} spec.titles
+ * @param {() => Promise<any>} spec.start
+ * @param {() => Promise<any>} spec.lookup
+ * @param {(started: any) => void} [spec.onStarted]
+ * @param {(hit: any) => void} [spec.onFound]
  * @returns {{view: object, run: object}}
  */
 export function attachArtefactBlock (wrap, head, {
@@ -964,6 +991,11 @@ function drawOutput (panel, state, lang, code) {
     bar.append(el('span', `run-out-verdict is-${said.tone}`, said.text))
     panel.classList.toggle('is-bad', said.tone === 'bad')
   }
+  /* The transcript, to take away — the same control the source file's popup
+     has. On every panel, running or done, and read at the click rather than
+     when the button is drawn: what is copied is what is on screen then, which
+     for a run still going is more than there was when the bar was built. */
+  bar.append(copyButton(() => state.stdout + state.stderr, 'Copy output'))
   panel.append(bar)
 
   const out = state.stdout
@@ -1053,6 +1085,12 @@ async function startOrStop (state, lang, code) {
  * A painter drops itself the first time it is asked to draw into an element
  * that has left the page — the only tear-down a running block ever needs.
  */
+/** Is any panel or button still on the page for this run? See `stateFor`. */
+function onScreen (state) {
+  for (const paint of state.painters) if (paint.node?.isConnected) return true
+  return false
+}
+
 export function painter (state, node, draw) {
   const paint = () => {
     if (!node.isConnected && node.dataset.drawn) {
@@ -1062,6 +1100,9 @@ export function painter (state, node, draw) {
     node.dataset.drawn = '1'
     draw()
   }
+  // Named on the painter so `onScreen` can ask after the element without
+  // keeping a second list of them in step with this one.
+  paint.node = node
   state.painters.add(paint)
   /* Dropping itself on the next draw only reaches a block that is running —
      nothing asks an idle block's painters to draw. So the retire handle is left

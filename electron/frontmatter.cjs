@@ -140,7 +140,22 @@ function parseFrontmatter (text) {
     const bare = inline.trim()
 
     if (bare === '') {
-      // `key:` alone is either an empty value or the head of a block list.
+      /* `key:` alone is one of three things, and only two of them are a
+         property this grammar can hand to an editor.
+
+         The head of a block *mapping* — `nested:` above an indented
+         `deep: 1` — is not: its value is the lines under it, which nothing
+         here models. Reported as a property it would read as one with an
+         empty value, and a writer told to fill that value in would leave the
+         indented lines behind it orphaned under a scalar. So it is verbatim,
+         like every other line the grammar has no answer for: shown by
+         nothing, carried through every write exactly where it was. */
+      if (i + 1 < lines.length &&
+          /^[ \t]+\S/.test(lines[i + 1]) && !/^[ \t]+-[ \t]/.test(lines[i + 1])) {
+        entries.push({ raw: line })
+        continue
+      }
+      // Either an empty value or the head of a block list.
       if (i + 1 < lines.length && /^[ \t]+-[ \t]+\S/.test(lines[i + 1])) {
         const items = []
         const raw = [line]
@@ -183,6 +198,43 @@ function propValues (prop) {
   return list.map((v) => scalarText(v).toLowerCase()).filter(Boolean)
 }
 
+/* The head's own name for the tag list. Obsidian writes `tags` and accepts the
+   singular, and a vault that arrives from it may hold either. */
+const TAGS_KEY = /^tags?$/i
+
+/**
+ * The tags a note carries in its own head, lowercased and deduplicated.
+ *
+ * Takes the parsed properties rather than the text, because every caller
+ * already holds them — the search filter memoises them against the index entry
+ * and the Info pane parses once for the whole panel.
+ *
+ * Three spellings, all of them real in vaults written elsewhere: the flow list
+ * `tags: [a, b]`, the block list under `tags:`, and the bare scalar
+ * `tags: a b` or `tags: a, b`. A scalar is split on commas and whitespace
+ * because a tag cannot contain either, so the split cannot cut one in half. A
+ * leading `#` is stripped: `#book` and `book` are the same tag written twice.
+ */
+function tagsFromProps (props) {
+  const out = new Set()
+  for (const prop of props || []) {
+    if (prop.key === undefined || !TAGS_KEY.test(prop.key)) continue
+    const list = Array.isArray(prop.value) ? prop.value : [prop.value]
+    for (const one of list) {
+      for (const piece of scalarText(one).split(/[,\s]+/)) {
+        const tag = piece.trim().replace(/^#+/, '').toLowerCase()
+        if (tag) out.add(tag)
+      }
+    }
+  }
+  return [...out]
+}
+
+/** The same, from a note's text — for the callers that hold no parse. */
+function frontmatterTags (text) {
+  return tagsFromProps(propsOf(parseFrontmatter(text)))
+}
+
 /** A value as a flow-list item: bare when YAML would read it back as itself,
  *  quoted when it would not. JSON quoting is valid YAML double-quoting. */
 function quoteScalar (value) {
@@ -202,13 +254,63 @@ function quoteScalar (value) {
  * than from a data structure of its own.
  */
 function writeListProp (text, key, values) {
-  const src = String(text || '')
   const clean = (values || []).map((v) => String(v).trim()).filter(Boolean)
-  const line = `${key}: [${clean.map(quoteScalar).join(', ')}]`
+  return putProp(text, key, clean.length ? `${key}: [${clean.map(quoteScalar).join(', ')}]` : null)
+}
 
+/**
+ * The same, for a property that is not a list.
+ *
+ * `null` and `undefined` remove the property; the empty string keeps it as a
+ * bare `key:`, because a reader who cleared a value has emptied it rather than
+ * deleted it, and a property that vanished when its last character did would
+ * be impossible to type a new value into.
+ */
+function writeScalarProp (text, key, value) {
+  if (value === null || value === undefined) return putProp(text, key, null)
+  const written = scalarText(value)
+  return putProp(text, key, written === '' ? `${key}:` : `${key}: ${quoteScalar(value)}`)
+}
+
+/**
+ * A property under a new name, keeping its value and its place.
+ *
+ * Rebuilt from the value rather than by editing the line, so a block list
+ * arrives as the flow form the writer emits everywhere else — the same
+ * normalisation `writeListProp` has always done to a list it rewrites.
+ */
+function renameProp (text, from, to) {
+  const src = String(text || '')
+  const name = String(to || '').trim()
+  if (!name || name.toLowerCase() === String(from || '').toLowerCase()) return src
+  const prop = propsOf(parseFrontmatter(src))
+    .find((entry) => entry.key.toLowerCase() === String(from).toLowerCase())
+  if (!prop) return src
+  /* Out under the old name first: writing the new one into a head that still
+     holds the old would leave both, and the order matters only because
+     `putProp` replaces the first match in place. */
+  const without = putProp(src, from, null)
+  return Array.isArray(prop.value)
+    ? writeListProp(without, name, prop.value)
+    : writeScalarProp(without, name, prop.value)
+}
+
+/**
+ * The head with one property's line replaced, added or removed — the single
+ * rewrite every writer above goes through.
+ *
+ * `line` is the finished YAML, or null to take the property out. A property
+ * already present is replaced where it stands; a new one lands at the end;
+ * duplicates of a replaced key are dropped. Every entry the grammar did not
+ * understand is carried verbatim in its place, which is the whole reason this
+ * rebuilds from `parseFrontmatter`'s entries rather than from a data structure
+ * of its own.
+ */
+function putProp (text, key, line) {
+  const src = String(text || '')
   const parsed = parseFrontmatter(src)
   if (!parsed.range) {
-    if (!clean.length) return src
+    if (!line) return src
     return `---\n${line}\n---\n${src}`
   }
 
@@ -222,14 +324,12 @@ function writeListProp (text, key, values) {
   if (last && last.key === undefined && last.raw === '') entries.pop()
   for (const entry of entries) {
     if (entry.key !== undefined && entry.key.toLowerCase() === lower) {
-      // In place the first time, dropped for duplicates — and dropped
-      // entirely when the new list is empty.
-      if (!replaced && clean.length) { kept.push(line); replaced = true }
+      if (!replaced && line) { kept.push(line); replaced = true }
       continue
     }
     kept.push(entry.raw)
   }
-  if (!replaced && clean.length) kept.push(line)
+  if (!replaced && line) kept.push(line)
 
   if (!kept.some((one) => one.trim() !== '')) return src.slice(parsed.range.end)
   const body = kept.length ? `${kept.join('\n')}\n` : ''
@@ -241,5 +341,10 @@ module.exports = {
   parseFrontmatter,
   propsOf,
   propValues,
-  writeListProp
+  tagsFromProps,
+  frontmatterTags,
+  scalarText,
+  writeListProp,
+  writeScalarProp,
+  renameProp
 }

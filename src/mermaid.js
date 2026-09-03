@@ -46,12 +46,15 @@ export const themeName = () => document.documentElement.dataset.theme || 'light'
    go a long time without a diagram in it — so it is fetched when the first one
    is drawn rather than bundled into what every launch waits on. Loaded inside
    the render queue below, which is already the one place that serialises this. */
+/** @type {import('mermaid').Mermaid|null} */
 let mermaid = null
 const loadMermaid = async () => (mermaid ??= (await import('mermaid')).default)
 
+/** @type {string|null} */
 let configuredFor = null
 
 function configure () {
+  if (!mermaid) return
   const key = themeName()
   if (configuredFor === key) return
   configuredFor = key
@@ -114,6 +117,7 @@ const settled = (key) => cache.get(key) || errors.get(key)
 
 /* Mermaid measures by parking a copy in the document, so two renders running
    at once can read each other's node. They are queued instead. */
+/** @type {Promise<any>} */
 let queue = Promise.resolve()
 let serial = 0
 
@@ -144,9 +148,9 @@ function renderDiagram (code) {
 
     let result
     try {
-      await loadMermaid()
+      const engine = await loadMermaid()
       configure()
-      const { svg } = await mermaid.render(`tulip-mermaid-${++serial}`, code)
+      const { svg } = await engine.render(`tulip-mermaid-${++serial}`, code)
       result = { svg }
     } catch (err) {
       result = { error: String(err?.message || err).split('\n').slice(0, 6).join('\n') }
@@ -196,6 +200,7 @@ export async function drawInto (host, code) {
   // a range keeps the <svg> a real element with its viewBox intact.
   const range = document.createRange()
   range.selectNodeContents(host)
+  if (!svg) return false
   host.append(range.createContextualFragment(svg))
   return true
 }

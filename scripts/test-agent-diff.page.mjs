@@ -75,6 +75,15 @@ export async function run () {
   view.setDoc(BEFORE)
   view.patch(AFTER, { agent: true, before: BEFORE })
 
+  /* At a large Electron zoom, resizing can briefly invalidate CodeMirror's
+     layout tiles. Remembering the viewport is bookkeeping and must survive
+     that frame rather than aborting the document transition that asked. */
+  const measuredTopLine = view.topLine()
+  const posAtCoords = view.posAtCoords
+  view.posAtCoords = () => { throw new TypeError('no layout tiles during resize') }
+  const resizeTopLine = view.topLine()
+  view.posAtCoords = posAtCoords
+
   const stateMarks = agentMarks(view)
   // Other widgets share the document (the inline title, picture blocks…); the
   // deleted half of the diff is the one carrying removed rows — one block per
@@ -116,6 +125,23 @@ export async function run () {
     addedPaint: paintStyle(host.querySelector('.cm-agent-added-line'))
   }
 
+  /* Reject dismisses its presentation as soon as it is confirmed. The file
+     restore arrives afterwards, and must not bring those decorations back. */
+  view.clearAgentDiff()
+  const clearedMarks = agentMarks(view)
+  view.patch(BEFORE)
+  await paint()
+  const rejected = {
+    text: view.state.doc.toString(),
+    linesBeforeRestore: clearedMarks.lines.length,
+    wordsBeforeRestore: clearedMarks.words.length,
+    widgetsBeforeRestore: clearedMarks.widgets.filter((widget) => Array.isArray(widget?.rows)).length,
+    lines: agentMarks(view).lines.length,
+    words: agentMarks(view).words.length,
+    widgets: agentMarks(view).widgets.filter((widget) => Array.isArray(widget?.rows)).length,
+    painted: host.querySelectorAll('.cm-agent-added-line, .cm-agent-deleted').length
+  }
+
   view.destroy()
   host.remove()
 
@@ -154,12 +180,15 @@ export async function run () {
   codeHost.remove()
 
   return {
+    measuredTopLine,
+    resizeTopLine,
     lines: stateMarks.lines,
     wordTexts: stateMarks.words,
     widgetCount: deleted.length,
     removedRows,
     rawLines: rawMarks.lines,
     rawWords: rawMarks.words.length,
+    rejected,
     inEditView,
     inRawView,
     codeStyle

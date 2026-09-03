@@ -49,14 +49,35 @@ const template = () => {
   const TURN_RULES_MATCH = /<!-- turn-rules:start -->([\s\S]*?)<!-- turn-rules:end -->/.exec(PROMPT_TEMPLATE)
   if (!TURN_RULES_MATCH) throw new Error('Tulip Copilot prompt.md has no turn-rules block.')
 
+  /* The rules come in three parts: the ones every mode gets, the ones that
+     only make sense when the agent may write (the rename and search requests
+     are *files it writes*, and a read-only agent that is told to write them
+     fails the attempt and falls back to grep every turn), and the line that
+     stands in for those when it may not. */
+  const rules = TURN_RULES_MATCH[1]
+  const section = (name) => {
+    const found = new RegExp(`<!-- ${name}:start -->([\\s\\S]*?)<!-- ${name}:end -->`).exec(rules)
+    return found ? found[1].trim() : ''
+  }
+  const writeRules = section('write-rules')
+  const readRules = section('read-rules')
+  const shared = rules
+    .replace(/<!-- write-rules:start -->[\s\S]*?<!-- write-rules:end -->\n?/, '')
+    .replace(/<!-- read-rules:start -->[\s\S]*?<!-- read-rules:end -->\n?/, '')
+    .trim()
+
   loaded = {
-    turnRules: TURN_RULES_MATCH[1].trim(),
+    turnRules: [shared, writeRules].filter(Boolean).join('\n'),
+    readTurnRules: [shared, readRules].filter(Boolean).join('\n'),
     systemTemplate: fillContract(PROMPT_TEMPLATE
-      .replace('<!-- turn-rules:start -->', '')
-      .replace('<!-- turn-rules:end -->', ''))
+      .replace(/<!-- (?:turn|write|read)-rules:(?:start|end) -->\n?/g, ''))
   }
   return loaded
 }
+
+/** The standing rules for a mode: `read` gets the read-only set, everything
+ *  else — `ask`, `auto`, or a caller that does not say — the full one. */
+const turnRulesFor = (mode) => mode === 'read' ? template().readTurnRules : template().turnRules
 
 const fillContract = (source) => replace(
   source,
@@ -66,6 +87,8 @@ const fillContract = (source) => replace(
     calloutKinds: CALLOUT_KINDS.join(', '),
     runnableLanguages: RUNNABLE_LANGUAGES.join(', '),
     drawnLanguages: DRAWN_LANGUAGES.join(', '),
+    flashcardExtension: VAULT_CONTRACT.flashcardExtension,
+    codeExtensionCount: VAULT_CONTRACT.codeExtensions.length,
     languageTableSuffix: VAULT_CONTRACT.languageTableSuffix,
     vocabularyColumns: VOCABULARY_COLUMNS.join(', '),
     firstVocabularyColumn: VOCABULARY_COLUMNS[0],
@@ -76,6 +99,7 @@ const fillContract = (source) => replace(
     pdfTextSuffix: VAULT_CONTRACT.pdfTextSuffix,
     whiteboardExtension: VAULT_CONTRACT.whiteboardExtension,
     notebookExtension: VAULT_CONTRACT.notebookExtension,
+    docxExtension: VAULT_CONTRACT.docxExtension,
     dataExtensions: Object.keys(VAULT_CONTRACT.dataExtensions).join(', '),
     siteExtension: VAULT_CONTRACT.siteExtension,
     attachmentDirectory: VAULT_CONTRACT.attachmentDirectory
@@ -105,12 +129,37 @@ function opened (context) {
   if (context.kind === 'language') {
     return `<open-language-table>${context.note}${selection}</open-language-table>`
   }
+  if (context.kind === 'flashcards') {
+    return `<open-flashcard-bank>${context.note}${selection}</open-flashcard-bank>`
+  }
   if (context.kind === 'tex') {
     return `<open-tex-document>${context.note}${caret}${selection}</open-tex-document>`
   }
+  /* Unlike a text note, a Word file is a zip container. The renderer has
+     already extracted the readable text, so keep it with the document shape
+     instead of dropping it into an empty, misleading <open-note>. */
+  if (context.kind === 'docx') {
+    const title = context.title ? `\n\nThe document is titled “${context.title}”.` : ''
+    const words = `\n\nIt has ${Number(context.words || 0).toLocaleString('en-US')} words.`
+    const position = context.at
+      ? `\n\nThe reader is at paragraph ${context.at}${context.paragraphs ? ` of ${context.paragraphs}` : ''}.`
+      : ''
+    const text = context.text
+      ? `\n\nDocument text around that paragraph${context.truncated ? ' (cut short — use Tulip’s document tools for the rest)' : ''}:\n${context.text}`
+      : ''
+    return `<open-word-document>${context.note}${title}${words}${position}${selection}${text}</open-word-document>`
+  }
   if (context.kind === 'site') {
     const title = context.title ? `\n\nThe page is titled “${context.title}”.` : ''
-    return `<open-website>${context.note}\n\nThe reader is looking at ${context.url || 'no page yet'}.${title}</open-website>`
+    /* The page's own words, when the viewer could read them out of the guest.
+       Without this the model was told an address and nothing else, and had to
+       answer questions about a page it could not see — which it did, from
+       whatever it remembered of the site, with no way for the reader to tell
+       the difference. */
+    const text = context.text
+      ? `\n\nWhat the page says${context.truncated ? ' (cut short)' : ''}:\n${context.text}`
+      : ''
+    return `<open-website>${context.note}\n\nThe reader is looking at ${context.url || 'no page yet'}.${title}${text}</open-website>`
   }
   if (context.kind === 'whiteboard') {
     const text = context.text ? `\n\nBoard text:\n${context.text}` : ''
@@ -130,10 +179,19 @@ function opened (context) {
   if (context.kind === 'data') {
     const shape = `\n\nThe grid shows ${Number(context.rows || 0).toLocaleString('en-US')} rows` +
       ` in ${Number(context.columns || 0).toLocaleString('en-US')} columns.`
-    const preview = context.text
-      ? `\n\nIts headings and first rows${context.truncated ? ' (cut short — read the file for the rest)' : ''}:\n${context.text}`
+    const cell = context.atRow
+      ? `\n\nThe active cell is row ${context.atRow}, ${context.column ? `column “${context.column}”` : `column ${context.atColumn}`}` +
+        `${context.value ? `, with value “${context.value}”` : ''}.`
       : ''
-    return `<open-data-file>${context.note}${shape}${preview}</open-data-file>`
+    const state = context.shownRows && context.shownRows !== context.rows
+      ? `\n\nThe current view shows ${context.shownRows} of ${context.rows} rows.`
+      : ''
+    const order = context.sortedBy?.length ? ` Sorted by ${context.sortedBy.join(', ')}.` : ''
+    const filters = context.filteredBy?.length ? ` Filtered by ${context.filteredBy.join(', ')}.` : ''
+    const preview = context.text
+      ? `\n\nIts headings and rows around the active cell${context.truncated ? ' (cut short — read the file for the rest)' : ''}:\n${context.text}`
+      : ''
+    return `<open-data-file>${context.note}${shape}${cell}${state}${order}${filters}${preview}</open-data-file>`
   }
   /* A notebook's one expensive fact: the cells as source, without the base64
      the outputs are stored as. An agent that reads the raw .ipynb instead
@@ -141,10 +199,14 @@ function opened (context) {
   if (context.kind === 'notebook') {
     const shape = `\n\nIt has ${Number(context.cells || 0).toLocaleString('en-US')} cells` +
       `${context.language ? `, in ${context.language}` : ''}.`
+    const active = context.at ? `\n\nThe reader is in cell ${context.at}.` : ''
     const sources = context.text
-      ? `\n\nCell sources${context.truncated ? ' (cut short — read the file for the rest, selectively)' : ''}:\n${context.text}`
+      ? `\n\nCell sources around it${context.truncated ? ' (cut short — read the file for the rest, selectively)' : ''}:\n${context.text}`
       : ''
-    return `<open-notebook>${context.note}${shape}${sources}</open-notebook>`
+    return `<open-notebook>${context.note}${shape}${active}${sources}</open-notebook>`
+  }
+  if (context.sourceContext) {
+    return `<open-source-file>${context.note}\n\nLanguage: ${context.kind}.${caret}${selection}</open-source-file>`
   }
   if (context.kind !== 'pdf') return `<open-note>${context.note}${caret}${selection}</open-note>`
 
@@ -153,7 +215,8 @@ function opened (context) {
   return `<open-pdf>${context.note}${where}${words}${selection}</open-pdf>`
 }
 
-const isPdfAttachment = (file) => path.extname(String(file || '')).toLowerCase() === '.pdf'
+const isPdfAttachment = (file) =>
+  path.extname(String(file || '')).toLowerCase() === VAULT_CONTRACT.pdfExtension
 
 /**
  * The open note's text, as its own block.
@@ -286,7 +349,7 @@ function quoted (context, sent) {
  * twice. One of these per session — see `send` in ai.js.
  */
 const nothingSent = () => ({
-  opened: '', body: '', bodyOf: '', pdfs: '', pageKeys: null, rules: false, turns: 0
+  opened: '', body: '', bodyOf: '', pdfs: '', pageKeys: null, rules: false, rulesMode: null, turns: 0
 })
 
 /* The fixed lines `relevantPdfContext` (electron/pdf-context.js) builds its
@@ -295,6 +358,7 @@ const nothingSent = () => ({
    the marker lines and the closing instruction's own words, never a split on
    whitespace. */
 const PAGE_MARK = /^--- (.+) page (\d+) of \d+ ---$/gm
+const PAGE_REVISION = /^<!-- tulip-pdf-revision:([^>]+) -->\s*$/m
 const PAGES_CODA = 'Use these pages first.'
 
 /**
@@ -309,7 +373,9 @@ const PAGES_CODA = 'Use these pages first.'
  * memo tracks is the page's presence in the thread, not the excerpt's edges.
  */
 function freshPages (block, sent) {
-  if (!block || !sent) return block
+  if (!block) return block
+  const withoutRevisions = (text) => text.replace(/^<!-- tulip-pdf-revision:[^>]+ -->\s*\n?/gm, '')
+  if (!sent) return withoutRevisions(block)
   if (!(sent.pageKeys instanceof Set)) sent.pageKeys = new Set()
   const marks = [...block.matchAll(PAGE_MARK)]
   if (!marks.length) return block
@@ -323,13 +389,15 @@ function freshPages (block, sent) {
   const skipped = []
   marks.forEach((mark, at) => {
     const to = at + 1 < marks.length ? marks[at + 1].index : end
-    const key = `${mark[1]}\u0000${mark[2]}`
+    const pageBlock = block.slice(mark.index, to).trim()
+    const revision = pageBlock.match(PAGE_REVISION)?.[1] || ''
+    const key = `${mark[1]}\u0000${mark[2]}\u0000${revision}`
     if (sent.pageKeys.has(key)) {
       skipped.push(`${mark[1]} page ${mark[2]}`)
       return
     }
     sent.pageKeys.add(key)
-    kept.push(block.slice(mark.index, to).trim())
+    kept.push(withoutRevisions(pageBlock))
   })
 
   if (!kept.length) {
@@ -347,18 +415,16 @@ function freshPages (block, sent) {
  *
  * Sending them every turn was pure waste and is why they are remembered at all.
  * But a standing instruction stated once, forty turns and a hundred thousand
- * tokens of tool output ago, is not standing in any useful sense — it is buried,
- * and the behaviour it was holding in place drifts. So the full block goes once
- * and a one-line reminder of where to find it goes every so often, which costs
- * a few tokens against the several hundred the block itself would.
+ * tokens of tool output ago, is not standing in any useful sense — it is
+ * buried, and the behaviour it was holding in place drifts. Worse, the CLI
+ * compacts its own thread when it fills, and a summary of "the rules" is not
+ * the rules: the quiz-callout shape and the citation forms are exactly the
+ * details a summary drops. So the block goes whole, every so often — it is a
+ * few hundred tokens against a turn that re-sends the whole thread anyway,
+ * and a one-line "the rules still apply" that pointed at a block compaction
+ * had already thrown away was a reminder of nothing.
  */
 const RULES_REMINDER_TURNS = 10
-
-/* Short enough to be worth repeating, and it names the block rather than
-   restating it — the rules are still in the thread, and pointing at them is
-   what brings them back to the top of the model's attention. */
-const RULES_REMINDER =
-  'Reminder: the Tulip turn rules given at the start of this conversation still apply to this turn.'
 
 /**
  * The turn, as the CLI will read it.
@@ -376,7 +442,7 @@ const RULES_REMINDER =
  * With no memory passed — the tests, and the first turn of any thread — the
  * whole thing goes, which is what makes the naming below true afterwards.
  */
-function promptFor (text, context, sent = null) {
+function promptFor (text, context, sent = null, { mode = null } = {}) {
   const ordinaryAttachments = Array.isArray(context?.attachments)
     ? context.attachments.filter((file) => !isPdfAttachment(file))
     : []
@@ -433,16 +499,28 @@ function promptFor (text, context, sent = null) {
      time — but never repeating them at all lets them sink out of sight in a
      long conversation, so a line pointing back at them surfaces every so
      often. See `RULES_REMINDER_TURNS`. */
-  let rules = template().turnRules
+  let rules = turnRulesFor(mode)
   if (sent) {
     sent.turns = (sent.turns || 0) + 1
-    if (!sent.rules) rules = template().turnRules
-    else rules = sent.turns % RULES_REMINDER_TURNS === 0 ? RULES_REMINDER : ''
+    /* Said whole again when the mode changed under a resumed thread — the
+       rules the thread holds are the other mode's — and every so often
+       regardless. */
+    if (sent.rules && sent.rulesMode === mode) {
+      rules = sent.turns % RULES_REMINDER_TURNS === 0 ? rules : ''
+    }
     sent.rules = true
+    sent.rulesMode = mode
   }
 
   return [open, body, attachments, ready, pages, rules, text]
     .filter(Boolean).join('\n\n')
 }
 
-module.exports = { systemPrompt, get turnRules () { return template().turnRules }, promptFor, nothingSent }
+module.exports = {
+  systemPrompt,
+  get turnRules () { return template().turnRules },
+  turnRulesFor,
+  RULES_REMINDER_TURNS,
+  promptFor,
+  nothingSent
+}

@@ -78,7 +78,6 @@ export function columnWidthPlugin (md) {
     const widths = tokens[i].meta?.widths
     if (!widths?.some(Boolean)) return renderOpen(tokens, i, options, env, self)
     tokens[i].attrJoin('class', 'has-column-widths')
-    if (widths.some((width) => !width)) tokens[i].attrJoin('class', 'has-flexible-column')
     const cols = widths
       .map((w) => (w ? `<col style="width:${columnWidth(w)}">` : '<col>'))
       .join('')

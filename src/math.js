@@ -14,6 +14,8 @@
  * still renders stretchy delimiters and spacing worse than KaTeX's own boxes.
  */
 
+import { escapeHtml } from './dom.js'
+
 
 /* ---------------------------------------------------------------- render */
 
@@ -73,9 +75,6 @@ export async function prepareMath (text) {
   return true
 }
 
-const escapeMath = (text) => String(text)
-  .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
-
 const LABEL = /\\label\s*\{([^{}]+)\}/
 const TAG = /\\tag\*?\s*\{([^{}]+)\}/
 const equationId = (label) => `eq-${encodeURIComponent(label).replaceAll('%', '_')}`
@@ -111,7 +110,6 @@ export function equationSource (tex, equations = null) {
   let source = String(tex || '').replace(/\\label\s*\{[^{}]+\}/g, '').trim()
   const tag = label ? equations?.get(label)?.tag || TAG.exec(source)?.[1]?.trim() || '' : ''
   if (label && tag && !TAG.test(source)) source += ` \\tag{${tag}}`
-  TAG.lastIndex = 0
   return { source, label, tag }
 }
 
@@ -175,7 +173,7 @@ function typeset (tex, displayMode) {
 function renderMath (tex, displayMode = false) {
   if (!katex) {
     loadKatex().catch(() => {})
-    return `<span class="math-pending">${escapeMath(tex)}</span>`
+    return `<span class="math-pending">${escapeHtml(tex)}</span>`
   }
   return typeset(tex, displayMode)
 }

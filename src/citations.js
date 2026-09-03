@@ -16,7 +16,6 @@ function citationAt (source, pos) {
   if (end === -1 || source.slice(pos + 1, end).includes('\n')) return null
   const content = source.slice(pos + 1, end)
   if (!CITE_KEY.test(content)) return null
-  CITE_KEY.lastIndex = 0
   return { content, end: end + 1 }
 }
 
@@ -42,7 +41,6 @@ function citationKeys (content) {
   const out = []
   for (const part of String(content || '').split(';')) {
     const match = CITE_KEY.exec(part)
-    CITE_KEY.lastIndex = 0
     if (match && !out.includes(match[1])) out.push(match[1])
   }
   return out
@@ -180,7 +178,6 @@ function citationLabel (entry, key) {
 function formatCluster (content, entries) {
   const parts = String(content).split(';').map((part) => {
     const found = CITE_KEY.exec(part)
-    CITE_KEY.lastIndex = 0
     if (!found) return part.trim()
     const before = part.slice(0, found.index).trim()
     const after = part.slice(found.index + found[0].length).trim()

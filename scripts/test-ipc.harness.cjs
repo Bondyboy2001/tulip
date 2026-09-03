@@ -267,6 +267,34 @@ async function checks () {
     assert.equal((found.results || found).length, 0)
   })
 
+  /* A reader typing asks once per keystroke, and only the last answer is ever
+     painted — so the scans behind it stand aside rather than reading the whole
+     vault for a result already stale. The contract that matters is what an
+     abandoned search *says*: `cancelled`, and no results. If it came back
+     looking like an ordinary empty answer, the panel would read it as "nothing
+     matches" and the narrowing cache would record a set of keys with notes
+     missing from it — an answer that looks complete and is not. */
+  await check('a search overtaken by a newer one from the same window says so', async () => {
+    const older = from(7, 'search:vault', 'pomegranate', {})
+    const newer = from(7, 'search:vault', 'pomegranate', {})
+    const [first, second] = await Promise.all([older, newer])
+    assert.equal(first.cancelled, true, 'the overtaken search should say it was')
+    assert.equal((first.results || []).length, 0, 'an abandoned search has no results')
+    assert.ok(!second.cancelled, 'the newest search should answer')
+    assert.ok((second.results || []).length, 'and should find the seeded note')
+  })
+
+  /* Two windows on one vault each have a search box. One counter between them
+     would let typing in the second empty the panel in the first. */
+  await check('a search in one window does not cancel one in another', async () => {
+    const [a, b] = await Promise.all([
+      from(11, 'search:vault', 'pomegranate', {}),
+      from(12, 'search:vault', 'pomegranate', {})
+    ])
+    assert.ok(!a.cancelled && !b.cancelled, 'neither window should cancel the other')
+    assert.ok((a.results || []).length && (b.results || []).length)
+  })
+
   /* ---- the recent-vault channels ---- */
 
   await check('vault:recent does not offer the vault already open', async () => {
@@ -429,6 +457,157 @@ async function checks () {
     assert.deepEqual(Object.keys(sidecar('table-widths.json')), [])
   })
 
+  await check('a write that says which version it read is refused a stale one', async () => {
+    fs.writeFileSync(path.join(VAULT, 'Guarded.md'), 'first\n')
+    const got = await call('file:read', 'Guarded.md', { stamp: true })
+    assert.equal(got.text, 'first\n')
+    assert.ok(got.stamp && typeof got.stamp.mtimeMs === 'number', 'a read asked for its stamp')
+
+    // Somebody else writes between the read and the save.
+    fs.writeFileSync(path.join(VAULT, 'Guarded.md'), 'second, from outside\n')
+    const refused = await call('file:write', 'Guarded.md', 'mine\n', { expect: got.stamp })
+    assert.equal(refused.ok, false)
+    assert.equal(refused.stale, true)
+    assert.equal(fs.readFileSync(path.join(VAULT, 'Guarded.md'), 'utf8'), 'second, from outside\n',
+      'the stale write must not have landed')
+
+    // Read again, and the same write goes through — and reports its new stamp.
+    const again = await call('file:read', 'Guarded.md', { stamp: true })
+    const wrote = await call('file:write', 'Guarded.md', 'mine\n', { expect: again.stamp })
+    assert.equal(wrote.ok, true)
+    assert.ok(wrote.stamp, 'a successful write hands back the stamp it landed with')
+    assert.equal(fs.readFileSync(path.join(VAULT, 'Guarded.md'), 'utf8'), 'mine\n')
+  })
+
+  await check('a write with no expectation behaves as it always has', async () => {
+    fs.writeFileSync(path.join(VAULT, 'Unguarded.md'), 'old\n')
+    const reply = await call('file:write', 'Unguarded.md', 'new\n')
+    assert.ok(reply, 'the reply stays truthy for callers that never looked at it')
+    assert.equal(fs.readFileSync(path.join(VAULT, 'Unguarded.md'), 'utf8'), 'new\n')
+  })
+
+  await check('an Excel export is read in its own encoding and written back in it', async () => {
+    // `Café,1` in windows-1252 — the é is one byte, which is not valid UTF-8.
+    fs.writeFileSync(path.join(VAULT, 'Export.csv'), Buffer.from([0x43, 0x61, 0x66, 0xE9, 0x2C, 0x31, 0x0D, 0x0A]))
+    const read = await call('file:read-encoded', 'Export.csv')
+    assert.equal(read.ok, true)
+    assert.equal(read.text, 'Café,1\r\n')
+    assert.equal(read.encoding, 'windows-1252')
+    assert.equal(read.newline, '\r\n')
+    assert.equal(read.clean, true)
+
+    const wrote = await call('file:write', 'Export.csv', 'Café,2\r\n', { encoding: read.encoding, bom: read.bom })
+    assert.equal(wrote.ok, true)
+    assert.deepEqual([...fs.readFileSync(path.join(VAULT, 'Export.csv'))],
+      [0x43, 0x61, 0x66, 0xE9, 0x2C, 0x32, 0x0D, 0x0A],
+      'the bytes went back in the encoding they came in')
+  })
+
+  await check('a character the encoding cannot spell refuses rather than substitutes', async () => {
+    const refused = await call('file:write', 'Export.csv', 'Ω,3\r\n', { encoding: 'windows-1252' })
+    assert.equal(refused.ok, false)
+    assert.equal(refused.unencodable, true)
+    assert.equal(refused.character, 'Ω')
+  })
+
+  await check('a byte-order mark survives the round trip', async () => {
+    fs.writeFileSync(path.join(VAULT, 'Marked.csv'),
+      Buffer.concat([Buffer.from([0xEF, 0xBB, 0xBF]), Buffer.from('a,b\n', 'utf8')]))
+    const read = await call('file:read-encoded', 'Marked.csv')
+    assert.equal(read.bom, true)
+    assert.equal(read.encoding, 'utf8')
+    const wrote = await call('file:write', 'Marked.csv', 'a,c\n', { encoding: read.encoding, bom: read.bom })
+    assert.equal(wrote.ok, true)
+    const bytes = fs.readFileSync(path.join(VAULT, 'Marked.csv'))
+    assert.deepEqual([...bytes.subarray(0, 3)], [0xEF, 0xBB, 0xBF], 'Excel finds its mark where it left it')
+  })
+
+  await check('renaming a document that is not a note chases the links to it', async () => {
+    fs.mkdirSync(path.join(VAULT, 'Papers'), { recursive: true })
+    fs.writeFileSync(path.join(VAULT, 'Papers', 'thesis.pdf'), '%PDF-1.4 stub')
+    const reading = await call('file:create', '', 'Reading')
+    await call('file:write', reading, 'Worth rereading: [[thesis]] and [[thesis.pdf|the appendix]].\n')
+    /* The PDF went in behind the app's back, and the ambiguity rule counts
+       names over the snapshot — give the watcher its debounce to notice before
+       the rename asks. */
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    await call('search:vault', 'rereading')
+
+    const done = await call('file:rename', 'Papers/thesis.pdf', 'dissertation')
+    assert.equal(done.path, 'Papers/dissertation.pdf')
+    const text = fs.readFileSync(path.join(VAULT, 'Reading.md'), 'utf8')
+    assert.ok(text.includes('[[dissertation]]'), `the bare link followed: ${text}`)
+    assert.ok(text.includes('[[dissertation.pdf|the appendix]]'),
+      `the spelt-out link kept its extension and alias: ${text}`)
+    assert.ok(done.links >= 1, 'and the rename reported the notes it edited')
+  })
+
+  await check('an import accepts every kind the vault itself holds', async () => {
+    const outside = path.join(OUTSIDE, 'incoming')
+    fs.mkdirSync(outside, { recursive: true })
+    fs.writeFileSync(path.join(outside, 'photo.png'), Buffer.from([0x89, 0x50, 0x4E, 0x47]))
+    fs.writeFileSync(path.join(outside, 'notes.md'), '# hello\n')
+    fs.writeFileSync(path.join(outside, 'mystery.xyz'), 'nobody knows')
+    const done = await call('file:import', '', [
+      path.join(outside, 'photo.png'),
+      path.join(outside, 'notes.md'),
+      path.join(outside, 'mystery.xyz')
+    ])
+    assert.equal(done.imported, 2, 'the picture and the note both came in')
+    assert.equal(done.skipped, 1, 'and the kind nothing handles was counted, not lost silently')
+    assert.ok(fs.existsSync(path.join(VAULT, 'photo.png')))
+  })
+
+  await check('a note\u2019s pasted pictures follow it through a rename', async () => {
+    fs.writeFileSync(path.join(VAULT, 'Trip.md'), 'What a week. ![[Trip-0.png]]\n')
+    await call('asset:write', 'Trip', '.png', new Uint8Array([1, 2, 3]))
+    assert.ok(fs.existsSync(path.join(VAULT, '.attachments', 'Trip', 'Trip-0.png')))
+
+    await call('file:rename', 'Trip.md', 'Holiday')
+    assert.ok(fs.existsSync(path.join(VAULT, '.attachments', 'Holiday', 'Trip-0.png')),
+      'the folder was carried under the new name')
+    assert.ok(!fs.existsSync(path.join(VAULT, '.attachments', 'Trip')),
+      'and nothing was left behind under the old one')
+  })
+
+  await check('search finds a word inside a source file and a notebook', async () => {
+    /* Through the app's own doors — create, then save — the way a reader's
+       edit arrives, so the index hears about both without waiting on the
+       watcher. */
+    const py = await call('source:create', '', 'solve', '.py')
+    await call('file:write', py, 'def pelicans():\n    return 42\n')
+    const nb = await call('source:create', '', 'analysis', '.ipynb')
+    await call('file:write', nb, JSON.stringify({
+      cells: [
+        { cell_type: 'markdown', metadata: {}, source: ['# flamingo census\n'] },
+        {
+          cell_type: 'code',
+          execution_count: null,
+          metadata: {},
+          outputs: [{ output_type: 'stream', name: 'stdout', text: ['albatross albatross\n'] }],
+          source: ['count_flamingos()\n']
+        }
+      ],
+      metadata: {},
+      nbformat: 4,
+      nbformat_minor: 5
+    }))
+
+    const foundPy = await call('search:vault', 'pelicans')
+    assert.ok(foundPy.results.some((r) => r.path === py && r.kind === 'code'),
+      `the function was found in the file: ${JSON.stringify(foundPy.results.map((r) => r.path))}`)
+
+    const foundNb = await call('search:vault', 'flamingo')
+    assert.ok(foundNb.results.some((r) => r.path === nb && r.kind === 'notebook'),
+      'the cell source was found in the notebook')
+
+    /* The outputs are deliberately not indexed — one plot is a megabyte of
+       base64 — so a word that appears only in an output is not found. */
+    const out = await call('search:vault', 'albatross')
+    assert.ok(!out.results.some((r) => r.path === nb),
+      'a word only an output says is not a hit')
+  })
+
   /* What a reader is handed when they are told something went wrong. The toast
      that sends them here is the only account they get of a failure, so the two
      things behind it have to be true: the log is reachable only when there is
@@ -466,19 +645,9 @@ async function checks () {
   const A = 101
   const B = 202
 
-  await check('a strip is not told about its own drag', async () => {
-    from(A, 'tab:drag-start', 'Note.md')
-    assert.equal(await from(A, 'tab:dragging'), null,
-      'the window that picked the tab up would treat a reorder as a handoff')
-    const seen = await from(B, 'tab:dragging')
-    assert.equal(seen && seen.path, 'Note.md', 'the other window cannot see what is in flight')
-    from(A, 'tab:drag-end')
-  })
-
   await check('a drag that ends nowhere leaves no claim behind', async () => {
     from(A, 'tab:drag-start', 'Note.md')
     from(A, 'tab:drag-end')
-    assert.equal(await from(B, 'tab:dragging'), null)
     assert.equal(await from(B, 'tab:claim'), null, 'a stale claim can still be taken')
   })
 
@@ -486,9 +655,8 @@ async function checks () {
     from(A, 'tab:drag-start', 'Note.md')
     // B never started this drag; its end must not cancel A's.
     from(B, 'tab:drag-end')
-    const seen = await from(B, 'tab:dragging')
+    const seen = await from(B, 'tab:claim')
     assert.equal(seen && seen.path, 'Note.md')
-    from(A, 'tab:drag-end')
   })
 
   await check('a tab is claimed once, and the second drop gets nothing', async () => {
@@ -499,7 +667,6 @@ async function checks () {
        consumed before the handler awaits anything, so a second drop landing in
        the same frame finds nothing. */
     assert.equal(await from(B, 'tab:claim'), null)
-    assert.equal(await from(A, 'tab:dragging'), null, 'the claim outlived being taken')
   })
 
   await check('a strip cannot claim its own drag', async () => {
@@ -511,7 +678,7 @@ async function checks () {
   await check('a path that is not one is not carried', async () => {
     for (const bad of [null, 42, '', 'x'.repeat(1025)]) {
       from(A, 'tab:drag-start', bad)
-      assert.equal(await from(B, 'tab:dragging'), null, `it accepted ${JSON.stringify(bad)}`)
+      assert.equal(await from(B, 'tab:claim'), null, `it accepted ${JSON.stringify(bad)}`)
     }
   })
 

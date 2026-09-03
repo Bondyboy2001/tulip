@@ -60,10 +60,32 @@ ok('a non-finite number is refused', () => {
   assert.deepEqual(sanitizeConfigPatch({ zoom: Infinity }).accepted, {})
 })
 
+ok('the verified-backup timestamp is a finite number', () => {
+  assert.deepEqual(
+    sanitizeConfigPatch({ lastBackupAt: 1770000000000 }).accepted,
+    { lastBackupAt: 1770000000000 })
+  assert.deepEqual(sanitizeConfigPatch({ lastBackupAt: 'yesterday' }).accepted, {})
+  assert.deepEqual(sanitizeConfigPatch({ lastBackupAt: Infinity }).accepted, {})
+})
+
 ok('a list of paths must be a list of strings', () => {
   assert.deepEqual(sanitizeConfigPatch({ tabs: ['a.md', 'b.md'] }).accepted, { tabs: ['a.md', 'b.md'] })
   assert.deepEqual(sanitizeConfigPatch({ tabs: 'a.md' }).accepted, {})
   assert.deepEqual(sanitizeConfigPatch({ tabs: ['a.md', 3] }).accepted, {})
+})
+
+ok('the restored tab strip may include a blank tab', () => {
+  assert.deepEqual(
+    sanitizeConfigPatch({ tabs: ['Notes/One.md', null] }).accepted,
+    { tabs: ['Notes/One.md', null] })
+  assert.deepEqual(sanitizeConfigPatch({ tabs: ['Notes/One.md', 3] }).accepted, {})
+})
+
+ok('lower-panel heights are remembered by pane as finite numbers', () => {
+  assert.deepEqual(
+    sanitizeConfigPatch({ paneBelowHeights: { outline: 0.4, links: 0.6 } }).accepted,
+    { paneBelowHeights: { outline: 0.4, links: 0.6 } })
+  assert.deepEqual(sanitizeConfigPatch({ paneBelowHeights: { outline: '40%' } }).accepted, {})
 })
 
 ok('the locked files are a list of paths, and the CSV lattice a boolean', () => {
@@ -144,5 +166,26 @@ ok('hotkeys accept only a flat record of strings', () => {
   assert.deepEqual(sanitizeConfigPatch({ hotkeys: undefined }).accepted, { hotkeys: undefined })
 })
 
-console.log(`\nconfig keys: ${passed}/${passed}`)
+/* The two settings whose writes the allow-list used to refuse — a string
+   filed as a number and a list filed as a record — so that they worked until
+   relaunch and silently reverted after it. */
+ok('the writing column is one of the three named widths', () => {
+  assert.deepEqual(sanitizeConfigPatch({ measure: 'wide' }).accepted, { measure: 'wide' })
+  assert.deepEqual(sanitizeConfigPatch({ measure: undefined }).accepted, { measure: undefined })
+  assert.deepEqual(sanitizeConfigPatch({ measure: 34 }).accepted, {})
+  assert.deepEqual(sanitizeConfigPatch({ measure: 'huge' }).accepted, {})
+})
 
+ok('the models offered are a list of keys', () => {
+  assert.deepEqual(sanitizeConfigPatch({ aiModels: ['a', 'b'] }).accepted, { aiModels: ['a', 'b'] })
+  assert.deepEqual(sanitizeConfigPatch({ aiModels: [] }).accepted, { aiModels: [] })
+  assert.deepEqual(sanitizeConfigPatch({ aiModels: { a: true } }).accepted, {})
+})
+
+ok('an emptied number field clears the study quota', () => {
+  assert.deepEqual(sanitizeConfigPatch({ studyNewPerDay: 20 }).accepted, { studyNewPerDay: 20 })
+  assert.deepEqual(sanitizeConfigPatch({ studyNewPerDay: undefined }).accepted, { studyNewPerDay: undefined })
+  assert.deepEqual(sanitizeConfigPatch({ studyNewPerDay: '' }).accepted, {})
+})
+
+console.log(`\nconfig keys: ${passed}/${passed}`)

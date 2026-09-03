@@ -51,8 +51,19 @@ const TRAILING_BLANK = /(?:\r?\n[ \t]*)+$/
 
 /* ------------------------------------------------------------ fragments */
 
-/** The word from the reading view: a picture alone in its block is a figure. */
-const standsAlone = (slot) => {
+/**
+ * Whether a picture is the whole of the block it was written in — a figure,
+ * which stands on its own line — or one thing among others, like a row of
+ * badges or an icon in the middle of a sentence.
+ *
+ * Asked here rather than in the stylesheet because CSS cannot ask it:
+ * `:only-child` counts elements and ignores text, so `Build status: ![](…)`
+ * would come out looking alone. The editing view answers the same question
+ * about a line, in src/editor.js, so that both views agree on which pictures
+ * are figures. Shared with the reading view in renderer.js, which asks it of
+ * every embed it places.
+ */
+export const standsAlone = (slot) => {
   const host = slot.parentElement?.closest('p, li')
   return !!host && host.textContent.trim() === '' &&
          host.querySelectorAll('.embed-slot').length === 1

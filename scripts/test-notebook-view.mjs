@@ -59,6 +59,11 @@ await writeFile('node_modules/.cache/notebook-page.html', `<!doctype html>
 </style>
 <div id="host"></div>
 <script type="module">
+  /* The synthetic window is not the operating system's active application in
+     CI, even after Electron focuses it. CodeMirror deliberately includes
+     document.hasFocus() in view.hasFocus; make the harness's already-focused
+     content behave like an active app so asynchronous kernel hints can paint. */
+  Object.defineProperty(document, 'hasFocus', { value: () => true })
   window.__done = import('./notebook-page.js').then((mod) => mod.run())
 </script>`)
 
@@ -84,6 +89,9 @@ app.whenReady().then(async () => {
   win.webContents.on('did-fail-load', (_e, code, desc) => said.push('load failed: ' + code + ' ' + desc))
   try {
     await win.loadFile(${JSON.stringify(path.resolve('node_modules/.cache/notebook-page.html'))})
+    app.focus({ steal: true })
+    win.focus()
+    win.webContents.focus()
     for (let wait = 0; wait < 200; wait++) {
       const probe = await win.webContents.executeJavaScript(\`
         (async () => {
@@ -152,6 +160,11 @@ ok('a notebook just opened is one the keyboard can already drive', () => {
 ok('the arrows walk down the cells', () => {
   assert.equal(r.afterFirstDown, 1)
   assert.equal(r.afterSecondDown, 2)
+})
+ok('the copilot context identifies and focuses the active cell', () => {
+  assert.equal(r.context.at, r.afterSecondDown)
+  assert.ok(r.context.focus > 0)
+  assert.match(r.context.text, /← the cell in view/)
 })
 
 ok('Run cell runs the chosen cell, with no caret anywhere', () => {

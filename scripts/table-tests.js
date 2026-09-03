@@ -9,7 +9,7 @@
    is the first body row, and the delimiter line is not a row at all. So a
    four-line table is three rows, and its last body row is row 2. */
 
-import { EditorView, keymap } from '@codemirror/view'
+import { EditorView, keymap, tooltips } from '@codemirror/view'
 import { history, historyKeymap, defaultKeymap } from '@codemirror/commands'
 import { search, openSearchPanel, setSearchQuery, SearchQuery } from '@codemirror/search'
 import {
@@ -19,7 +19,8 @@ import {
 } from '../src/table.js'
 import { propertiesPreview } from '../src/properties.js'
 import { slashEmbed, slashCommands, embedChoices as embedChoicesFacet } from '../src/slash.js'
-import { CompletionContext } from '@codemirror/autocomplete'
+import { CompletionContext, autocompletion } from '@codemirror/autocomplete'
+import { completionTooltipSize } from '../src/completion-tooltip.js'
 import { markdown } from '@codemirror/lang-markdown'
 
 const results = []
@@ -743,7 +744,6 @@ async function run () {
 
     const wrap = view.dom.querySelector('.tk-table-wrap')
     const grid = wrap.querySelector('table.tk-table')
-    assert(grid.classList.contains('has-flexible-column'), 'the auto column is marked as such')
     const slack = wrap.clientWidth - grid.getBoundingClientRect().width
     assert(Math.abs(slack) < 2, `the grid reaches the frame (${slack}px short)`)
 
@@ -778,7 +778,6 @@ async function run () {
 
     const wrap = view.dom.querySelector('.tk-table-wrap')
     const grid = wrap.querySelector('table.tk-table')
-    assert(!grid.classList.contains('has-flexible-column'), 'every column has a width')
     const slack = wrap.clientWidth - grid.getBoundingClientRect().width
     assert(Math.abs(slack) < 2, `the grid reaches the frame (${slack}px of band)`)
 
@@ -981,6 +980,30 @@ async function run () {
     for (const char of '/tab') typeChar(view, char)
     await frame()
     equal(slashMenu(view), ['Table'], 'the query left only the command it names')
+
+    const flashcard = slashMount(parent, '')
+    for (const char of '/f') typeChar(flashcard, char)
+    equal(slashMenu(flashcard), ['Flashcard'],
+      'a short query prefers the visible command label over a hidden alias')
+
+    const bookmark = slashMount(parent, '')
+    for (const char of '/book') typeChar(bookmark, char)
+    equal(slashMenu(bookmark), ['Bookmark'], '/book finds the Bookmark command')
+  })
+
+  await test('choosing Bookmark clears the slash and asks the app to bookmark', async (parent) => {
+    const view = slashMount(parent, 'above\n')
+    view.dispatch({ selection: { anchor: view.state.doc.length } })
+    for (const char of '/bookmark') typeChar(view, char)
+    let asked = 0
+    parent.addEventListener('tulip:bookmark', () => { asked++ })
+    const result = slashCommands(
+      new CompletionContext(view.state, view.state.selection.main.head, false))
+    const option = result.options.find((o) => o.label === 'Bookmark')
+    option.apply(view, option, result.from, view.state.doc.length)
+    await frame()
+    equal(view.state.doc.toString(), 'above\n', 'the slash text was cleared before the bookmark was asked for')
+    equal(asked, 1, 'the request reached the renderer once')
   })
 
   await test('the menu answers to a command’s aliases', async (parent) => {
@@ -990,6 +1013,52 @@ async function run () {
     const warn = slashMount(parent, '/warn')
     warn.dispatch({ selection: { anchor: warn.state.doc.length } })
     equal(slashMenu(warn), ['Callout'], 'a callout kind found the Callout command')
+    const fence = slashMount(parent, '/fence')
+    fence.dispatch({ selection: { anchor: fence.state.doc.length } })
+    equal(slashMenu(fence), ['Code block'], 'a longer alias still finds its command')
+  })
+
+  await test('a filtered slash menu is only as tall as its rows', async (parent) => {
+    /* The caret sits a little way above the bottom of the window, so the full
+       menu does not fit below it and CodeMirror squeezes the tooltip to the
+       space there. Narrowing the list must let the box shrink with it. */
+    const low = document.createElement('div')
+    low.style.cssText = 'position:fixed;left:0;right:0;top:200px;height:300px'
+    parent.append(low)
+    /* Told the room it has directly, rather than left to the window: 50px
+       above the caret's line and 120px below, so the menu neither fits nor
+       has a roomier side to flip to. */
+    const room = tooltips({ tooltipSpace: (view) => {
+      const caret = view.coordsAtPos(view.state.selection.main.head) || { top: 250, bottom: 270 }
+      return { top: caret.top - 50, bottom: caret.bottom + 120, left: 0, right: window.innerWidth }
+    } })
+    const tooltipOf = (view) => view.dom.querySelector('.cm-tooltip-autocomplete')
+    const settle = async () => { for (let i = 0; i < 6; i++) await frame() }
+
+    const mount = (extra) => {
+      const view = slashMount(low, '', [], [
+        room, autocompletion({ override: [slashCommands], icons: false, activateOnTypingDelay: 0 }), ...extra])
+      view.focus()
+      return view
+    }
+    const plain = mount([])
+    for (const char of '/call') { typeChar(plain, char); await settle() }
+    assert(tooltipOf(plain)?.style.height,
+      `the control was not squeezed, so the test proves nothing: ${tooltipOf(plain)?.getAttribute('style') ?? 'no tooltip'}`)
+    plain.destroy()
+
+    const sized = mount([completionTooltipSize])
+    for (const char of '/call') { typeChar(sized, char); await settle() }
+    const tooltip = tooltipOf(sized)
+    assert(tooltip, 'the menu did not open')
+    equal(tooltip.style.height, '', 'the tooltip was still held at its squeezed height')
+    const rows = tooltip.querySelectorAll('li').length
+    equal(rows, 1, 'the filter left more than the Callout row')
+    const height = tooltip.getBoundingClientRect().height
+    const row = tooltip.querySelector('li').getBoundingClientRect().height
+    assert(height < row * 3, `one row sits in a box ${Math.round(height)}px tall`)
+    sized.destroy()
+    low.remove()
   })
 
   await test('choosing a command replaces the slash and its query', async (parent) => {

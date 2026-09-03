@@ -244,14 +244,12 @@ export const providerLabel = (provider) => PROVIDER[provider]?.label || provider
  * and Auto is the tier whose commands may leave it. Three grants, then, and the
  * words are the catalogue's, beside the command they describe.
  *
- * A boolean still works, and still means the conservative of the two write
- * modes: an old caller asking "may it write?" is not asking for the shell.
+ * A mode the catalogue has no words for reads as the conservative one.
  */
 export const providerGrant = (provider, mode) => {
   const grants = PROVIDER[provider]?.grants
   if (!grants) return ''
-  const key = mode === true ? 'write' : (mode === false ? 'read' : mode)
-  return grants[key] || grants[key === 'auto' ? 'write' : 'read'] || ''
+  return grants[mode] || grants.read || ''
 }
 
 /* Permission is a UI choice with three provider capabilities underneath it:

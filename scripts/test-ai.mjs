@@ -24,16 +24,17 @@ import ai from '../electron/ai.js'
 import prompt from '../electron/prompt.js'
 import VAULT_CONTRACT from '../electron/vault-contract.json'
 import { citePlugin } from '../src/cite.js'
+import { boundedText, contextBudget, noteExcerpt, textContextKind } from '../src/copilot-context.js'
 import {
   DEFAULT_CATALOGUE, modelFromConfig, offeredModels,
   COPILOT_MODES, copilotModeFromConfig
 } from '../src/models.js'
 
 const {
-  detailOf, tokensIn, tokensOf, usageOf, readLines, parseOpencode, contextSize,
-  policyEnv, commandCandidates, escapeForCmd, invocation
+  detailOf, tokensIn, tokensOf, usageOf, readLines, parseOpencode,
+  policyEnv, commandCandidates, escapeForCmd, invocation, lostThread
 } = ai.parsers
-const { systemPrompt, turnRules, promptFor, nothingSent } = prompt
+const { systemPrompt, turnRules, turnRulesFor, RULES_REMINDER_TURNS, promptFor, nothingSent } = prompt
 
 let failures = 0
 const check = (name, ok, detail = '') => {
@@ -44,6 +45,17 @@ const check = (name, ok, detail = '') => {
 const same = (name, got, want) =>
   check(name, JSON.stringify(got) === JSON.stringify(want),
         `got ${JSON.stringify(got)}, wanted ${JSON.stringify(want)}`)
+
+const roomyBudget = contextBudget({ window: 128000, used: 1000 })
+const crowdedBudget = contextBudget({ window: 128000, used: 110000 })
+check('turn context shrinks as a conversation fills', crowdedBudget.total < roomyBudget.total)
+check('each context source stays inside the turn allowance',
+      roomyBudget.document + roomyBudget.attachments + roomyBudget.pdf <= roomyBudget.total)
+check('focused excerpts keep the requested middle instead of only the beginning',
+      boundedText(`first\n${'x'.repeat(100)}\nfocused\nlast`, 30, 110).text.includes('focused'))
+check('large notes use a focused window under an explicit allowance',
+      noteExcerpt(`top\n${'x'.repeat(200)}\nbottom`, 205, { maxChars: 40 }).text.includes('bottom'))
+same('text context kinds are centralized', textContextKind({ flashcards: true }), 'flashcards')
 
 /* A provider can have no built-in fallback while its real catalogue is being
    fetched. The saved default must survive that first paint instead of being
@@ -84,15 +96,16 @@ const briefing = systemPrompt('/tmp/example-vault')
 const promptMarkdown = readFileSync('electron/prompt.md', 'utf8')
 check('the Copilot prompt lives in Markdown',
       promptMarkdown.startsWith('# Tulip Copilot'))
-check('the system prompt stays compact', briefing.length < 4000,
+check('the system prompt stays compact', briefing.length < 6000,
       `${briefing.length.toLocaleString()} characters`)
 check('the vault boundary is explicit',
       briefing.includes('inside the vault at /tmp/example-vault'))
 check('Tulip-owned annotations stay read-only',
       briefing.includes('.annotations/ is Tulip-managed, read-only context'))
 check('capabilities are grouped by file type',
-      ['Markdown notes', 'Language tables', 'LaTeX documents', 'PDF documents',
-        'Whiteboards', 'Websites', 'Attachments']
+      ['Markdown notes', 'Flashcards', 'Language tables', 'Source files',
+        'LaTeX documents', 'Word documents', 'PDF documents', 'Notebooks',
+        'Data files', 'Whiteboards', 'Websites', 'Attachments']
         .every((heading) => briefing.includes(`${heading} (`) || briefing.includes(`${heading}:`)))
 check('the prompt describes available file actions',
       briefing.includes('read, search, create and edit files'))
@@ -108,6 +121,22 @@ check('PDF and bibliography citation forms survive',
 check('TeX documents are part of the Copilot vault contract',
       briefing.includes('LaTeX documents (.tex):') &&
       briefing.includes('Create and edit complete LaTeX source documents'))
+check('flashcard banks and portable note cards are documented',
+      briefing.includes(`Flashcards (${VAULT_CONTRACT.flashcardExtension} banks and Markdown notes):`) &&
+      briefing.includes('> [!quiz] Question') &&
+      briefing.includes('exactly one checked correct answer') &&
+      briefing.includes('> Explanation:'))
+check('flashcard invariants survive resumed turns',
+      turnRules.includes('at least two choices') &&
+      turnRules.includes('exactly one `[x]` answer') &&
+      turnRules.includes('an `Explanation:` line'))
+check('Word documents and their binary boundary are documented',
+      briefing.includes(`Word documents (${VAULT_CONTRACT.docxExtension}):`) &&
+      briefing.includes('not plain text') && briefing.includes('document-aware tools'))
+check('metadata, templates and workspace surfaces are documented',
+      briefing.includes('Preserve YAML frontmatter') &&
+      briefing.includes('Templates can expand title, date and time placeholders') &&
+      briefing.includes('outline, backlinks and file info'))
 
 const texTurn = promptFor('Tighten the introduction.', {
   note: 'Paper/main.tex', kind: 'tex', line: 24, selection: '\\section{Introduction}'
@@ -115,6 +144,21 @@ const texTurn = promptFor('Tighten the introduction.', {
 check('the open TeX document reaches Copilot as TeX',
       texTurn.includes('<open-tex-document>Paper/main.tex') &&
       texTurn.includes('\\section{Introduction}'))
+
+const docxTurn = promptFor('Tighten the summary.', {
+  note: 'Reports/Quarterly.docx', kind: 'docx', title: 'Quarterly review',
+  words: 1384, selection: 'This quarter began strongly.',
+  text: 'Earlier paragraph.\nThis quarter began strongly.\nLater paragraph.',
+  paragraphs: 18, at: 9, truncated: true
+})
+check('the open Word document keeps its extracted context',
+      docxTurn.includes('<open-word-document>Reports/Quarterly.docx') &&
+      docxTurn.includes('The document is titled “Quarterly review”.') &&
+      docxTurn.includes('1,384 words') &&
+      docxTurn.includes('paragraph 9 of 18') &&
+      docxTurn.includes('This quarter began strongly.') &&
+      docxTurn.includes('cut short') &&
+      !docxTurn.includes('<open-note>'))
 
 const boardTurn = promptFor('Summarise this board.', {
   note: 'Ideas.excalidraw', kind: 'whiteboard', selection: 'Chosen card',
@@ -130,21 +174,27 @@ check('the open whiteboard reaches Copilot as structured context',
    dropped it on the floor. */
 const dataTurn = promptFor('Which column drifts?', {
   note: 'Data/readings.csv', kind: 'data', selection: '',
-  text: 'when,volts\n2026-01-01,3.31', rows: 1200, columns: 2, truncated: true
+  text: 'when,volts\n2026-01-01,3.31', rows: 1200, columns: 2, truncated: true,
+  atRow: 731, atColumn: 2, column: 'volts', value: '3.31', shownRows: 850,
+  sortedBy: ['volts desc'], filteredBy: ['when']
 })
 check('the open data file reaches Copilot with its shape and headings',
       dataTurn.includes('<open-data-file>Data/readings.csv') &&
       dataTurn.includes('1,200 rows in 2 columns') &&
+      dataTurn.includes('active cell is row 731, column “volts”') &&
+      dataTurn.includes('shows 850 of 1200 rows') &&
+      dataTurn.includes('Sorted by volts desc') &&
       dataTurn.includes('when,volts') &&
       dataTurn.includes('cut short'))
 
 const notebookTurn = promptFor('Why does cell 3 fail?', {
   note: 'Lab/analysis.ipynb', kind: 'notebook', selection: '',
-  text: '# Cell 1\nimport numpy as np', cells: 4, language: 'python', truncated: false
+  text: '# Cell 3\nimport numpy as np', cells: 4, language: 'python', at: 3, truncated: false
 })
 check('the open notebook reaches Copilot as cells, not as an empty note',
       notebookTurn.includes('<open-notebook>Lab/analysis.ipynb') &&
       notebookTurn.includes('It has 4 cells, in python.') &&
+      notebookTurn.includes('reader is in cell 3') &&
       notebookTurn.includes('import numpy as np') &&
       !notebookTurn.includes('<open-note>'))
 /* Spelled from the contract, not by hand: the prompt renders these lists from
@@ -247,6 +297,9 @@ const sourceContext = {
   note: 'src/main.cpp', kind: 'c++', line: 8, sourceContext: true,
   excerpt: 'int main() { return 0; }', excerptCut: false, noteChars: 25
 }
+check('an open source file is identified as source and names its language',
+      promptFor('Explain this.', sourceContext).includes(
+        '<open-source-file>src/main.cpp\n\nLanguage: c++.'))
 promptFor('Explain this.', sourceContext, sourceMemo)
 const movedSource = promptFor('And this?', {
   ...sourceContext, line: 80, excerpt: 'std::vector<int> values;'
@@ -291,7 +344,15 @@ const codeTask = promptFor('Edit this block.', {
 })
 check('a focused code task omits the open source excerpt',
       !codeTask.includes('int main() { return 0; }') &&
-      codeTask.includes('<open-note>src/main.cpp'))
+      codeTask.includes('<open-source-file>src/main.cpp'))
+
+const flashcardTurn = promptFor('Add another card.', {
+  note: 'Revision/Rust.fc', kind: 'flashcards', line: 0,
+  excerpt: '> [!quiz] Ownership', excerptCut: false, noteChars: 19
+})
+check('a flashcard bank is identified separately from a prose note',
+      flashcardTurn.includes('<open-flashcard-bank>Revision/Rust.fc') &&
+      !flashcardTurn.includes('<open-note>'))
 
 /* The text is its own block, so a selection can travel with the note rather
    than in place of it: three highlighted lines do not say what they contradict
@@ -415,6 +476,14 @@ check('only the pages new to the thread are quoted',
 check('a re-ranked slice of a sent page does not smuggle the page back in',
       !followUp.includes('sliced differently'))
 
+const revisedMemo = nothingSent()
+const revisionOne = { pdfContext: '--- book.pdf page 7 of 90 ---\n<!-- tulip-pdf-revision:100:20 -->\nold extraction' }
+const revisionTwo = { pdfContext: '--- book.pdf page 7 of 90 ---\n<!-- tulip-pdf-revision:200:24 -->\nnew extraction' }
+promptFor('First?', revisionOne, revisedMemo)
+const revised = promptFor('After the PDF changed?', revisionTwo, revisedMemo)
+check('a newly extracted revision can resend the same PDF page', revised.includes('new extraction'))
+check('internal PDF revision markers never reach the model', !revised.includes('tulip-pdf-revision'))
+
 /* The patch path now covers notes of any size: the reader editing the note
    they are asking about is the ordinary case, and requoting thirty thousand
    characters for one retyped line was most of what such a chat spent. */
@@ -511,10 +580,6 @@ same('a runaway line is dropped rather than held',
      lines(['x'.repeat(8 * 1024 * 1024 + 1), 'tail\n{"a":1}\n']), [{ a: 1 }])
 
 /* ------------------------------------------------------------- catalogues */
-
-check('a context size is read in either unit',
-      contextSize('1M') === 1000000 && contextSize('272K') === 272000 &&
-      contextSize('128,000') === 128000 && contextSize('') === 0)
 
 /* Shaped as `opencode models --verbose` answers: an id line, then that model's
    JSON pretty-printed one token per line. Copied from the real output — the
@@ -735,6 +800,7 @@ check('unix spawns the name as given',
    (a process is per turn), so this is safe to run anywhere. */
 ai.setVault('/tmp/tulip-test-vault')
 ai.attach(() => {})
+ai.setTrusted(() => true)
 const startedA = ai.start({ key: 'chat-a', provider: 'opencode', model: 'm', mode: 'auto', turnId: 't-a' })
 const startedB = ai.start({ key: 'chat-b', provider: 'opencode', model: 'm', mode: 'read', turnId: 't-b' })
 check('each conversation starts its own copilot', startedA.ok && startedB.ok)
@@ -749,6 +815,65 @@ check('stopping the same one twice is not an error, only a no-op',
       ai.stop('chat-b').ok === false)
 ai.stopAll()
 check('stopAll takes every copilot', ai.canWrite('chat-a') === false)
+
+/* The rules a read-only agent gets. The rename and the search are requests it
+   makes by *writing a file*, and a plan agent that is told to write one fails
+   the attempt and falls back to grep — on every turn, for as long as the rule
+   is in front of it. So in read mode those two go, and a line saying what to
+   do instead takes their place. */
+const readRules = turnRulesFor('read')
+check('read mode is not told to write its search request',
+      !readRules.includes('.tulip-copilot-search.json') &&
+      !readRules.includes('.tulip-copilot-rename.json'))
+check('read mode is told what to do instead',
+      readRules.includes('Writing is off in this mode') && readRules.includes('grep and glob'))
+check('the shared rules survive in both modes',
+      readRules.includes('Backticks are for code') && turnRulesFor('ask').includes('Backticks are for code'))
+check('write modes keep the search and rename requests',
+      turnRulesFor('ask').includes('.tulip-copilot-search.json') && turnRulesFor('auto') === turnRules)
+check('the system prompt carries no section markers',
+      !/<!--/.test(systemPrompt('/tmp/v')))
+check('the read-mode line never reaches a writing agent',
+      !turnRulesFor('auto').includes('Writing is off'))
+
+/* The rules restated whole, every so often — the CLI compacts its own thread
+   when it fills, and a one-line "the rules still apply" pointed at a block the
+   compaction had already summarised away. */
+const rulesChat = { note: 'notes/a.md', kind: 'note', excerpt: 'x', excerptCut: false, noteChars: 1 }
+const rulesMemo = nothingSent()
+const opener = promptFor('One.', rulesChat, rulesMemo, { mode: 'read' })
+check('the first turn carries the mode’s own rules', opener.includes('Writing is off in this mode'))
+let restated = 0
+for (let turn = 2; turn <= RULES_REMINDER_TURNS; turn++) {
+  if (promptFor('Again.', rulesChat, rulesMemo, { mode: 'read' }).includes('## Tulip defaults')) restated++
+}
+check('the whole block is said again at the reminder turn, and only then', restated === 1)
+check('a mode change under a resumed thread restates the other mode’s rules',
+      promptFor('Now edit it.', rulesChat, rulesMemo, { mode: 'ask' }).includes('.tulip-copilot-search.json'))
+
+/* A resumed thread the CLI no longer has is a failure about the id, not the
+   turn, and the id has to go or every later message fails the same way. */
+check('a missing session is read as a lost thread',
+      lostThread({ thread: 'ses_1' }, 'Error: session ses_1 not found') &&
+      lostThread({ thread: 'ses_1' }, 'No such session: ses_1'))
+check('an ordinary failure is not', !lostThread({ thread: 'ses_1' }, 'rate limit exceeded'))
+check('and a thread never resumed cannot be lost', !lostThread({ thread: null }, 'session not found'))
+check('a session main has let go of says so',
+      ai.send('never-started', 'hello', null, 't-x').gone === true)
+
+/* Trust gate: ask/auto need vault trust, read does not. Secret attachments
+   never go to the model. */
+ai.setTrusted(() => false)
+ai.stopAll()
+const untrustedAsk = ai.start({ key: 'chat-u', provider: 'opencode', model: 'm', mode: 'ask', turnId: 't-u' })
+check('ask mode needs vault trust', untrustedAsk.ok === false)
+const untrustedRead = ai.start({ key: 'chat-r', provider: 'opencode', model: 'm', mode: 'read', turnId: 't-r' })
+check('read mode works untrusted', untrustedRead.ok === true)
+ai.setTrusted(() => true)
+const { isSecretPath } = ai.parsers
+check('secret basenames are caught', isSecretPath('.env') && isSecretPath('notes/id_rsa'))
+check('ordinary notes pass', !isSecretPath('notes/tulip.md') && !isSecretPath('.attachments/photo.png'))
+ai.stopAll()
 
 /* ----------------------------------------------------------------- report */
 

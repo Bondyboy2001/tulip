@@ -189,6 +189,10 @@ export function mountPdfFind ({ host, pdf, onClose }) {
     clearTimeout(timer)
     timer = null
     generation++          // nothing in flight belongs to a search nobody made
+    /* And the viewer's own walk of the pages, which the generation does not
+       reach: shutting the bar a page into a long book otherwise left it
+       pulling the text of every page that remained, for nobody. */
+    pdf.stopFind?.()
     land([], -1)
   }
 

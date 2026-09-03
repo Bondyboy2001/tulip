@@ -22,6 +22,10 @@
 
 import { el, svgIcon } from './dom.js'
 
+// Resolved at the click rather than module evaluation: the DOM benchmark
+// imports the reading stack before it creates a browser-like global.
+const bridge = () => /** @type {any} */ (globalThis).window.tulip
+
 /**
  * The control that puts a block's source on the clipboard, for both views'
  * code headers. One face for the ask and one brief tick for the answer — the
@@ -51,15 +55,16 @@ export function copyButton (text, label = 'Copy code') {
   say(label)
   button.append(face())
 
-  let undo = 0
+  /** @type {ReturnType<typeof setTimeout>|null} */
+  let undo = null
   button.addEventListener('click', () => {
     // Electron's clipboard, via the bridge: the page's own
     // navigator.clipboard needs a permission the sandbox does not grant.
-    window.tulip.copy(typeof text === 'function' ? text() : text)
+    bridge().copy(typeof text === 'function' ? text() : text)
     button.classList.add('is-copied')
     button.replaceChildren(tick())
     say('Copied')
-    clearTimeout(undo)
+    if (undo) clearTimeout(undo)
     undo = setTimeout(() => {
       button.classList.remove('is-copied')
       button.replaceChildren(face())
@@ -186,7 +191,7 @@ export function pictureBlock (wrap, kind) {
   const block = renderedBlock(wrap, kind)
 
   return {
-    stage: block.stage,
+    stage: /** @type {HTMLElement} */ (block.stage),
     settle (ok) {
       // A parse failure sits under the still-visible source; unlike a missing
       // cached artifact, it has a useful diagnostic to show.

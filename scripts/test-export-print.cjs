@@ -52,9 +52,12 @@ const preload = read('electron/preload.js')
 check('the bridge exposes exportPdf', preload.includes('exportPdf'))
 
 const main = read('electron/main.js')
-check("main answers 'pdf:export'", main.includes("ipcMain.handle('pdf:export'"))
+/* The pdf handlers live in electron/ipc-pdf.js, beside the sidecar and the
+   guarded source URL; the File menu that reaches them stays in main.js. */
+const pdfIpc = read('electron/ipc-pdf.js')
+check("main answers 'pdf:export'", pdfIpc.includes("ipcMain.handle('pdf:export'"))
 check('the File menu offers Export as PDF', main.includes("'Export as PDF…'"))
-check('the print keeps backgrounds (callouts, marks)', main.includes('printBackground: true'))
+check('the print keeps backgrounds (callouts, marks)', pdfIpc.includes('printBackground: true'))
 
 if (failures) { console.error(`${failures} check(s) failed`); process.exit(1) }
 console.log('export print contract intact')

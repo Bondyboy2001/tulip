@@ -141,6 +141,8 @@ export async function run () {
     }
   })
   let fragile = []
+  const conflicts = []
+  let keepsBuffer = true
 
   const docx = mountDocx({
     host,
@@ -152,6 +154,10 @@ export async function run () {
     },
     openExternal: (url) => opened.push(['external', url]),
     ask: async (question) => { asked.push(question); return asked.length < 2 },
+    /* The document changed on disk under unsaved edits. The host's real answer
+       is to put the disk's version aside as a conflict copy and say yes; here
+       it is recorded, and `keepsBuffer` decides. */
+    onConflict: async (path) => { conflicts.push(path); return keepsBuffer },
     onDirty: (isDirty) => { dirty = isDirty },
     onSaved: () => { saved++ },
     onStatus: (text) => { status = text },
@@ -198,6 +204,7 @@ export async function run () {
   result.tableSpan = table.querySelector('tbody td:last-child')?.colSpan || 0
   result.tableScrolls = !!table.closest('.docx-table-frame')
   result.text = docx.text().split('\n').slice(0, 3)
+  result.context = docx.context()
 
   /* ------------------------------------------------------------ editing */
 
@@ -518,6 +525,82 @@ export async function run () {
   result.refusedEditing = page().contentEditable
   result.askedTwice = asked.length
 
+  /* ------------------------------------------- the document moved under us
+
+     A `.docx` cannot be merged. When the file on disk is no longer the one the
+     page was read from, the page's edits cannot be spliced into a stranger and
+     reopening would throw them away — so the host is asked, puts the disk's
+     version aside as a conflict copy, and the write goes again against the
+     bytes the page was read from.
+
+     Driven here rather than unit-tested because the failure is in the wiring:
+     `docx:write` returning `{stale}` and `keepBufferOverDisk` making a copy
+     were both already tested on their own, and neither of them can tell you
+     that a reader who typed a sentence into a document that a sync client
+     touched still has their sentence. */
+
+  window.__stage = 'the document moved under us'
+  /* Nothing fragile, and so nothing to ask about: the `ask` stub above says no
+     to everything after the second question, and a document that asked here
+     would be refused editing before a single character was typed. */
+  fragile = []
+  await docx.open('Notes/Field notes.docx')
+  docx.setReadonly(false)
+
+  const ordinary = answerWith
+  let refusedOnce = false
+  answerWith = (edit) => {
+    // Stale exactly once, and only for a write that is not forcing.
+    if (!edit.force && !refusedOnce) {
+      refusedOnce = true
+      return { ok: false, stale: true, error: 'That file has changed on disk since it was read.' }
+    }
+    return ordinary(edit)
+  }
+
+  const beforeWrites = writes.length
+  caret(host.querySelector('.docx-p'), 1)
+  document.execCommand('insertText', false, 'Z')
+  await settle()
+  /* The save the reader would get from the 900ms autosave, asked for now — the
+     clock is not what is being tested. */
+  await docx.save({ flush: true })
+  await settle()
+
+  const attempts = writes.slice(beforeWrites)
+  result.conflictAsked = conflicts.length
+  result.conflictPath = conflicts[0] || ''
+  result.conflictAttempts = attempts.length
+  result.conflictForced = attempts.map((one) => !!one.edit.force)
+  /* The retry must carry the same edit — the stamp the page was read at
+     included. Forcing a *different* body would write something nobody typed. */
+  result.conflictSameStamp = attempts.length > 1 &&
+    attempts[0].edit.stamp === attempts[1].edit.stamp
+  result.conflictTyped = host.querySelector('.docx-p').textContent.slice(0, 6)
+  result.conflictClean = dirty === false
+  result.conflictSaved = saved
+
+  /* And the reader who says no. Nothing is forced and the save fails loudly —
+     what must not happen is a silent success that leaves the page believing it
+     is on disk when the document there is somebody else's. (The 900ms autosave
+     turns this throw into `onWarn`; called directly, it throws, which is the
+     same fact one layer down.) */
+  window.__stage = 'the reader declines the copy'
+  keepsBuffer = false
+  refusedOnce = false
+  const askedBefore = conflicts.length
+  caret(host.querySelector('.docx-p'), 1)
+  document.execCommand('insertText', false, 'Y')
+  await settle()
+  let declinedError = ''
+  try { await docx.save({ flush: true }) } catch (err) { declinedError = String(err.message) }
+  await settle()
+  result.declinedError = declinedError
+  result.declinedAsked = conflicts.length - askedBefore
+  result.declinedDirty = dirty
+  answerWith = ordinary
+  keepsBuffer = true
+
   /* --------------------------------------------------------- and closing */
 
   window.__stage = 'a second document'
@@ -525,6 +608,107 @@ export async function run () {
   await docx.open('Notes/Field notes.docx')
   host.scrollTop = 40
   result.place = docx.place()?.top
+
+  /* ------------------------------------------------- lists inside lists
+
+     The document's sub-list is where every one of these lives: an item that
+     holds a list is the one shape a paragraph command can lose a whole list
+     through, and each of these once did. */
+
+  const fresh = async () => { await docx.open('Notes/Field notes.docx'); docx.setReadonly(false) }
+  const notList = (node) => node.tagName !== 'UL' && node.tagName !== 'OL'
+  const own = (node) => [...node.childNodes].filter(notList).map((n) => n.textContent).join('')
+  /* The page from its first list on, one line per block: a list as its
+     items' own words. */
+  const shape = () => {
+    const blocks = [...page().children]
+    const from = blocks.findIndex((node) => !notList(node))
+    return blocks.slice(from, from + 5).map((node) =>
+      `${node.tagName}:${notList(node) ? node.textContent : [...node.children].map(own).join('|')}`)
+  }
+  const itemOf = (text) => [...host.querySelectorAll('#host .docx-li')].find((li) => own(li).startsWith(text))
+  const paragraphOf = (text) => [...host.querySelectorAll('#host .docx-p')].find((p) => p.textContent === text)
+  const pressEnter = async () => {
+    host.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await settle(); await settle()
+  }
+  const textIn = (node) => document.createTreeWalker(node, NodeFilter.SHOW_TEXT).nextNode()
+  const select = (startNode, startAt, endNode, endAt) => {
+    const range = document.createRange()
+    range.setStart(startNode, startAt)
+    range.setEnd(endNode, endAt)
+    const selection = window.getSelection()
+    selection.removeAllRanges()
+    selection.addRange(range)
+  }
+
+  window.__stage = 'leaving a sub-list'
+  await fresh()
+  caretAcross(itemOf('inner one'), itemOf('inner two'))
+  await docx.setList('ordered')
+  result.leftSubList = shape()
+
+  window.__stage = 'Return climbing out of a sub-list'
+  await fresh()
+  caret(itemOf('inner two'), 9)
+  await pressEnter()
+  result.enterMadeItem = shape()
+  await pressEnter()
+  result.enterClimbed = shape()
+  await pressEnter()
+  result.enterLeft = shape()
+
+  window.__stage = 'bold typing beside a sub-list'
+  await fresh()
+  const holder = itemOf('outer one')
+  caret(holder, 9)
+  /* What ⌘B with nothing selected and then a letter leaves in the page. */
+  const pending = document.createElement('b')
+  pending.textContent = 'x'
+  holder.insertBefore(pending, holder.querySelector('ol'))
+  host.dispatchEvent(new InputEvent('input', { inputType: 'insertText', bubbles: true }))
+  await settle()
+  result.boldBesideSubList = {
+    text: own(holder),
+    bold: !!holder.querySelector('.is-bold'),
+    subItems: holder.querySelectorAll(':scope > ol > li').length
+  }
+
+  window.__stage = 'emptying a paragraph'
+  await fresh()
+  const drained = paragraphOf('after the list')
+  caret(drained, 0, 14)
+  result.emptiedByBrowser = document.execCommand('delete')
+  await settle()
+  result.emptiedHtml = drained.innerHTML
+  await docx.save({ flush: true })
+  const emptiedItem = writes.at(-1)?.edit.items.find((it) => it.at?.[0] === 90)
+  result.emptiedRuns = emptiedItem?.p?.runs ?? 'kept'
+
+  window.__stage = 'a selection that only touches the next paragraph'
+  await fresh()
+  const touchedFrom = paragraphOf('quoted')
+  select(textIn(touchedFrom), 0, itemOf('outer one'), 0)
+  const warnedBefore = warned.length
+  chord(host, '3', { altKey: true })
+  await settle(); await settle()
+  result.touchedNext = {
+    warned: warned.length - warnedBefore,
+    heading: host.querySelector('#host h3')?.textContent || '',
+    itemStill: itemOf('outer one')?.tagName || ''
+  }
+
+  window.__stage = 'Return over a selection from an empty bullet'
+  await fresh()
+  caret(itemOf('outer two'), 9)
+  await pressEnter()
+  const hollow = [...host.querySelectorAll('#host .docx-li')].find((li) => !own(li))
+  select(hollow, 0, textIn(paragraphOf('after the list')), 5)
+  await pressEnter()
+  result.enterOverSelection = shape()
+
+  await fresh()
+  host.scrollTop = 40
 
   let refused = ''
   try {

@@ -140,9 +140,12 @@ export async function run () {
   const search = host.querySelector('.nb-find')
 
   const sections = () => [...column.querySelectorAll('.nb-cell')]
-  const sourceOf = (index) =>
-    sections()[index]?.querySelector('.nb-input')?.value ??
-    sections()[index]?.querySelector('.nb-ink')?.textContent?.replace(/\n$/, '')
+  const sourceOf = (index) => {
+    const section = sections()[index]
+    return section?.querySelector('.nb-input')?.value ??
+      section?.querySelector('.cm-content')?.textContent?.replace(/\n$/, '') ??
+      section?.querySelector('.nb-ink')?.textContent?.replace(/\n$/, '')
+  }
   const typeOf = (index) =>
     [...(sections()[index]?.classList || [])].find((c) => c.startsWith('is-'))
   const chosen = () => sections().findIndex((s) => s.classList.contains('is-at'))
@@ -210,6 +213,7 @@ export async function run () {
   result.afterFirstDown = chosen()
   await commandKey('ArrowDown')
   result.afterSecondDown = chosen()
+  result.context = book.context()
 
   /* Run cell, with nothing focused and no textarea to read a caret from. This
      is the case that did nothing at all before there was a selection. */
@@ -463,10 +467,10 @@ export async function run () {
   scroller.focus()
   await commandKey('Home')
   await commandKey('ArrowDown')               // the first code cell
-  const input = sections()[1].querySelector('.nb-input')
+  const input = sections()[1].querySelector('.cm-content')
   input.focus()
-  input.value = 'df'
-  input.setSelectionRange(2, 2)
+  document.execCommand('selectAll')
+  document.execCommand('insertText', false, 'df')
   input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }))
   await wait(50)
   const rows = [...host.querySelectorAll('.nb-hint-row')].map((r) => r.textContent)
@@ -476,16 +480,16 @@ export async function run () {
       .dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
     await settled()
   }
-  result.completed = sections()[1].querySelector('.nb-input')?.value
+  result.completed = sourceOf(1)
 
   /* Tab at the start of a line is still indentation, and always was. */
-  const plain = sections()[1].querySelector('.nb-input')
+  const plain = sections()[1].querySelector('.cm-content')
   plain.focus()
-  plain.value = ''
-  plain.setSelectionRange(0, 0)
+  document.execCommand('selectAll')
+  document.execCommand('delete')
   plain.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }))
   await settled()
-  result.tabIndents = sections()[1].querySelector('.nb-input')?.value
+  result.tabIndents = sourceOf(1)
 
   /* ---------------------------------------------------- what got written */
 

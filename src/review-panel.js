@@ -78,11 +78,13 @@ function bars (series, { label, empty }) {
 }
 
 /**
- * @param deps.toast     the app's transient message
- * @param deps.openNote  to follow a leech back to the row it came from
- * @param deps.api       the preload bridge
+ * @param {object} deps
+ * @param {(message: string) => void} deps.toast  the app's transient message
+ * @param {(path: string) => void} deps.openNote  follow a leech to its row
+ * @param {any} deps.api                         the preload bridge
  */
 export function mountReviewStats ({ toast, openNote, api }) {
+  /** @type {HTMLElement|null} */
   let backdrop = null
 
   function close () {
@@ -207,7 +209,7 @@ export function mountReviewStats ({ toast, openNote, api }) {
     ])
     const stats = summarize({ cards, history, now: Date.now() })
 
-    backdrop = node('div', 'stats-backdrop')
+    backdrop = /** @type {HTMLElement} */ (node('div', 'stats-backdrop'))
     const { panel, focus } = draw(stats)
     backdrop.append(panel)
     backdrop.addEventListener('click', (event) => {

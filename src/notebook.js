@@ -51,8 +51,34 @@
 import { el, svgIcon } from './dom.js'
 import { dropdown } from './dropdown.js'
 import { languageChip } from './languages.js'
-import { highlightInto } from './highlight.js'
+import { codeTokens, highlightInto, languageFor, languageSupportFor, primeLanguageDescription } from './highlight.js'
 import { sanitizeHtml } from './rawhtml.js'
+/* A code cell's editing surface is a CodeMirror view — the same editor the
+   rest of the app types into, with the same token classes, so a line of Python
+   is coloured identically in a note's fence, in `solve.py` and in a cell. The
+   textarea-over-a-`<pre>` arrangement it replaces could not indent after a
+   `:`, match a bracket or keep its undo history across a repaint; what it was
+   good at — costing nothing for the hundred cells you are not in — is kept by
+   mounting each view only when its cell scrolls near, through the same
+   observer that defers the colouring. */
+import { EditorView, keymap, lineNumbers, placeholder as cmPlaceholder } from '@codemirror/view'
+import { EditorState, Compartment, Prec } from '@codemirror/state'
+import { defaultKeymap, history as cmHistory, historyKeymap } from '@codemirror/commands'
+import {
+  HighlightStyle, syntaxHighlighting, indentOnInput, bracketMatching, indentUnit,
+  LanguageDescription
+} from '@codemirror/language'
+import { closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete'
+
+/* highlight.js cannot import this class without pulling the editing stack into
+   the reading view, so whoever holds it hands it over — the editor does the
+   same as it loads. Without it `languageFor` has no way to describe a language
+   it has not met. */
+primeLanguageDescription(LanguageDescription)
+
+/* The one highlight style every cell shares: the app's token classes, so the
+   stylesheet that colours a fenced block colours a cell. */
+const cellHighlight = HighlightStyle.define(codeTokens)
 
 /* ------------------------------------------------------------- the format
 
@@ -84,7 +110,7 @@ export function sourceLines (text) {
   const lines = value.split('\n')
   const last = lines.pop()
   const out = lines.map((line) => `${line}\n`)
-  if (last !== '') out.push(last)
+  if (last != null && last !== '') out.push(last)
   return out
 }
 
@@ -135,9 +161,25 @@ export function readNotebook (text) {
     throw new Error('This file is not a Jupyter notebook.')
   }
 
+  /* nbformat 4.5 made a cell's id required and unique within the file, and
+     files that predate it — or that a script wrote — arrive without them or
+     with two cells claiming one. `nbformat` itself mints the missing ones when
+     it reads such a file; doing the same here is what stops this app from
+     writing back a notebook its own reader would call invalid, and what gives
+     `open` something stable to follow a running cell by when the file is
+     rewritten underneath it. Only where the file already works that way: a
+     notebook older than 4.5 has no such field, and adding one would be Tulip
+     writing something the reader's own Jupyter may be too old to open. */
+  const wantIds = idFrom(shell)
+  const taken = new Set()
+
   const cells = shell.cells.map((raw) => {
     const cell = (raw && typeof raw === 'object' && !Array.isArray(raw)) ? raw : {}
     const type = CELL_TYPES.has(cell.cell_type) ? cell.cell_type : 'raw'
+    if (wantIds) {
+      if (!usableId(cell.id) || taken.has(cell.id)) cell.id = newCellId()
+      taken.add(cell.id)
+    }
     return {
       key: nextKey(),
       raw: cell,
@@ -167,6 +209,54 @@ function sortKeys (value) {
   return out
 }
 
+/* An id nbformat 4.5 would accept: letters, digits, dashes and underscores,
+   and short enough to be a name rather than a payload. Anything else is
+   replaced on the way in, which is what `nbformat` does with it too. */
+const usableId = (id) =>
+  typeof id === 'string' && id.length > 0 && id.length <= 64 && /^[a-zA-Z0-9_-]+$/.test(id)
+
+/**
+ * One output, in the spelling nbformat writes it in.
+ *
+ * A file writes a stream's text and each `text/*` rendering as the list of
+ * lines it is made of, exactly as it writes a cell's source. What arrives from
+ * a live kernel is one string, and storing that was a file that validated and
+ * then diffed against itself: the next save from the reader's real Jupyter
+ * rewrote every one of those lines into the list form, so a notebook run here
+ * and saved there was a diff over everything it had ever printed.
+ *
+ * `application/json` is left alone, because nbformat leaves it alone: that
+ * value is a tree rather than a text, and splitting it into lines would mean
+ * reading back a different object than was written.
+ *
+ * The output object is returned unchanged when there is nothing to change,
+ * which is every output that came from a file: the bytes that were read are
+ * the bytes that go back, and nothing is copied to find that out.
+ */
+function writtenOutput (output) {
+  if (!output || typeof output !== 'object') return output
+
+  if (output.output_type === 'stream') {
+    return typeof output.text === 'string'
+      ? { ...output, text: sourceLines(output.text) }
+      : output
+  }
+  if (output.output_type !== 'display_data' && output.output_type !== 'execute_result') {
+    return output
+  }
+  const data = output.data
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return output
+
+  /** @type {Record<string, any>|null} */
+  let split = null
+  for (const [mime, value] of Object.entries(data)) {
+    if (mime === 'application/json' || typeof value !== 'string') continue
+    split = split || { ...data }
+    split[mime] = sourceLines(value)
+  }
+  return split ? { ...output, data: split } : output
+}
+
 /**
  * The model back as the file's text.
  *
@@ -183,7 +273,7 @@ export function writeNotebook (shell, cells) {
     out.source = sourceLines(cell.source)
     if (!out.metadata || typeof out.metadata !== 'object') out.metadata = {}
     if (cell.type === 'code') {
-      out.outputs = Array.isArray(cell.outputs) ? cell.outputs : []
+      out.outputs = Array.isArray(cell.outputs) ? cell.outputs.map(writtenOutput) : []
       out.execution_count = cell.executionCount ?? null
     } else {
       delete out.outputs
@@ -204,6 +294,43 @@ const idFrom = (shell) =>
 let idCounter = 0
 const newCellId = () =>
   `${Date.now().toString(36)}${(idCounter++).toString(36)}${Math.random().toString(36).slice(2, 6)}`
+
+/**
+ * A cell list as the undo stack should hold it.
+ *
+ * A snapshot used to be `{ ...cell }`, which copies the four fields this app
+ * owns and shares the `raw` object underneath them — and `raw.metadata` is not
+ * read-only: folding a cell, tagging one and recording how long a run took all
+ * reach in and change it in place. So the snapshot changed at the same moment
+ * the cell did, and ⌘Z after a fold or a tag edit found nothing to put back. It
+ * burned a history entry and left the screen exactly as it was, which reads as
+ * an undo that is broken rather than one that has nothing to say.
+ *
+ * `metadata` is deep-copied and nothing else is. It is the only part of `raw`
+ * anything here mutates, and it is small — where `outputs` is every recorded
+ * plot in the file, which sixty history entries of must not be sixty copies of.
+ */
+function snapshotCells (cells) {
+  return cells.map((cell) => {
+    const raw = (cell.raw && typeof cell.raw === 'object') ? cell.raw : {}
+    const copy = { ...cell, raw: { ...raw } }
+    if (raw.metadata && typeof raw.metadata === 'object') {
+      copy.raw.metadata = cloneMeta(raw.metadata)
+    }
+    return copy
+  })
+}
+
+/* Deep, and by the fastest route the engine offers. Metadata is JSON — it came
+   out of the file or out of this app's own writes — so the fallback is exact
+   wherever `structuredClone` is not there to be had. */
+function cloneMeta (meta) {
+  try {
+    return structuredClone(meta)
+  } catch {
+    try { return JSON.parse(JSON.stringify(meta)) } catch { return { ...meta } }
+  }
+}
 
 /** An empty cell of `type`, in the shape the notebook it is joining uses. */
 export function newCell (type, shell = null) {
@@ -443,7 +570,6 @@ export function withAttachments (text, attachments) {
    ================================================================== */
 
 /** A `data` value: a string, or the lines it was split into. */
-const bundleText = (value) => cellText(value)
 
 /* One output is allowed this much text on screen. A cell that printed a
    hundred megabytes is a real thing to be handed, and building it as DOM would
@@ -484,6 +610,13 @@ function headOf (output, text) {
    before the images because a DataFrame ships both an HTML table and a text
    drawing of one, and the table is the answer; the images before text because
    a plot ships a PNG and the string `<Figure size 640x480>`. */
+/* The MIME types a live ipywidget arrives under. Neither is drawable from a
+   file — see `outputParts` for what is shown instead. */
+const WIDGET_MIMES = [
+  'application/vnd.jupyter.widget-view+json',
+  'application/vnd.jupyter.widget-state+json'
+]
+
 const MIME_ORDER = [
   'text/html',
   'image/svg+xml',
@@ -509,7 +642,7 @@ export function outputParts (output) {
   if (!output || typeof output !== 'object') return []
 
   if (output.output_type === 'stream') {
-    const text = bundleText(output.text)
+    const text = cellText(output.text)
     if (!text) return []
     return [{
       kind: 'stream',
@@ -530,18 +663,32 @@ export function outputParts (output) {
   }
 
   const data = (output.data && typeof output.data === 'object') ? output.data : {}
+
+  /* A widget is not a rendering, it is a live object on a kernel — state this
+     file does not hold and a protocol this viewer does not speak. What the
+     bundle usually carries beside it is a `text/plain` like
+     `HBox(children=…)`, and showing only that read as the notebook being
+     broken rather than the widget being beyond it. So the truth is said
+     first, plainly, and the fallback follows. */
+  if (WIDGET_MIMES.some((type) => data[type] !== undefined)) {
+    const parts = [{ kind: 'widget' }]
+    const fallback = data['text/plain']
+    if (fallback !== undefined) parts.push({ kind: 'text', text: cellText(fallback) })
+    return parts
+  }
+
   const mime = MIME_ORDER.find((type) => data[type] !== undefined)
   if (!mime) return []
   const value = data[mime]
 
-  if (mime === 'image/svg+xml') return [{ kind: 'svg', markup: bundleText(value) }]
+  if (mime === 'image/svg+xml') return [{ kind: 'svg', markup: cellText(value) }]
   if (mime.startsWith('image/')) {
     /* Base64 arrives wrapped at whatever width the writer chose, and the
        newlines inside it are not part of the payload. */
-    return [{ kind: 'image', mime, data: bundleText(value).replace(/\s+/g, '') }]
+    return [{ kind: 'image', mime, data: cellText(value).replace(/\s+/g, '') }]
   }
-  if (mime === 'text/html') return [{ kind: 'html', markup: bundleText(value) }]
-  if (mime === 'text/markdown') return [{ kind: 'markdown', text: bundleText(value) }]
+  if (mime === 'text/html') return [{ kind: 'html', markup: cellText(value) }]
+  if (mime === 'text/markdown') return [{ kind: 'markdown', text: cellText(value) }]
   if (mime === 'application/json') {
     /* The value itself, not a rendering of it. A response body is a tree with
        one interesting branch and forty dull ones, and forty dull ones spelled
@@ -557,9 +704,9 @@ export function outputParts (output) {
        formula in a note. Shown as its own source was the honest answer only
        while there was nothing here to render it with, and `display(Eq(...))`
        is the most common thing sympy does. */
-    return [{ kind: 'latex', text: bundleText(value) }]
+    return [{ kind: 'latex', text: cellText(value) }]
   }
-  return [{ kind: 'text', text: bundleText(value) }]
+  return [{ kind: 'text', text: cellText(value) }]
 }
 
 /**
@@ -686,8 +833,8 @@ export function kernelOutput (msgType, content) {
  *   dropped, which is what happened before, it left the first frame on screen
  *   for ever and the reader believing it.
  *
- * @param {{outputs: object[], clearWhenNext: boolean}} state
- * @param {object} output  an output from `kernelOutput`
+ * @param {{outputs: any[], clearWhenNext: boolean}} state
+ * @param {any} output  an output from `kernelOutput`
  */
 export function applyOutput (state, output) {
   const outputs = Array.isArray(state?.outputs) ? state.outputs : []
@@ -707,7 +854,12 @@ export function applyOutput (state, output) {
        An update for an id nothing here drew is dropped rather than appended —
        which is what Jupyter does, and the alternative is a frame arriving with
        no context in the middle of a cell's output. */
-    const at = id ? outputs.findLastIndex((each) => each[DISPLAY_ID] === id) : -1
+    let at = -1
+    if (id) {
+      for (let index = outputs.length - 1; index >= 0; index--) {
+        if (outputs[index][DISPLAY_ID] === id) { at = index; break }
+      }
+    }
     if (at < 0) return { outputs, clearWhenNext }
     const next = outputs.slice()
     next[at] = output
@@ -1082,16 +1234,18 @@ const OUTPUT_COUNT_LIMIT = 200
  * @param notify      a line for the status bar: where an export landed, and
  *                    why one did not
  * @param onDirty     told when there are unsaved edits, and when there are not
- * @param onSaved     told when a save landed
- * @param onStatus    told that what the status bar says about this notebook
- *                    has changed — it reads `summary()` for itself
- */
+   * @param onSaved     told when a save landed
+   * @param onStatus    told that what the status bar says about this notebook
+   *                    has changed — it reads `summary()` for itself
+   * @param beforeRun   resolves whether this vault may execute notebook code
+   */
 export function mountNotebook ({
   host,
   file,
   markdown = null,
   kernel = null,
   ask = null,
+  beforeRun = async () => true,
   notify = () => {},
   onDirty = () => {},
   onSaved = () => {},
@@ -1128,6 +1282,10 @@ export function mountNotebook ({
      and so did nothing at all in Reading view, where there are no textareas to
      have focused. */
   let selected = -1
+  /* Where a ⇧-selection began, or -1 while only one cell is meant. The
+     selection is always the contiguous run between this and `selected`, the
+     way it is in Jupyter — ⇧↓ grows it, any plain choice collapses it. */
+  let pickAnchor = -1
   /* Snapshots of the cell list, for the structural changes. Text edits are the
      textarea's own undo and are deliberately not in here — a stack that
      swallowed both would step over a whole paragraph you typed to get back to
@@ -1144,6 +1302,7 @@ export function mountNotebook ({
      would then point at somebody else's output. */
   let kernelInfo = null        // { kernel, name, state } once started
   let kernelStarting = null    // the in-flight start, so two clicks start one
+  let permissionCheck = null
   let kernelNotice = ''        // something the kernel wants said, e.g. a substitution
   /* Every kernel this machine can offer, asked for once and kept. Asking spawns
      the Jupyter server, which is the same cost as running a cell — so it is not
@@ -1152,10 +1311,9 @@ export function mountNotebook ({
   let specsAsked = null        // the in-flight ask, so an impatient click is one
   const SPECS_FAILED = 'Could not list the kernels on this machine:'
   const runs = new Map()       // cell -> { msgId, state: {outputs, clearWhenNext} }
-  let queue = []               // cells still to run, for Run all
-  /* The same cells, asked a different question. Every cell drawn asks whether
-     it is waiting, so searching the queue for it makes painting a Run all cost
-     the square of the notebook — a set answers in one step. */
+  /* The cells a Run all has submitted and not yet heard back from. Every cell
+     drawn asks whether it is waiting, so a set answers in one step where a
+     list would make painting a Run all cost the square of the notebook. */
   const queued = new Set()
   let queueStop = false
   /* How far through a Run all is. Two numbers rather than one, so the bar can
@@ -1165,7 +1323,7 @@ export function mountNotebook ({
   let queueDone = 0
 
   const isRunning = (cell) => runs.has(cell)
-  const anyRunning = () => runs.size > 0 || queue.length > 0
+  const anyRunning = () => runs.size > 0 || queued.size > 0
 
   host.classList.add('nb')
 
@@ -1253,8 +1411,9 @@ export function mountNotebook ({
    * `read_csv`", and the first was not answerable here at all — the text was
    * on screen and the search could not see it.
    *
-   * @param {number} advance  0 to stay, ±1 to step
-   * @param {boolean} move    whether to take the reader to the hit. False when
+   * @param {{advance?: number, move?: boolean}} [options]
+   *   `advance` is 0 to stay or ±1 to step. `move` says whether to take the
+   *   reader to the hit; false when
    *                          the search is merely being kept honest after a
    *                          repaint: a page that scrolls itself every time a
    *                          cell is added is a page you have lost your place
@@ -1301,6 +1460,15 @@ export function mountNotebook ({
       /* Focus put the caret in the cell, which is not what ⌘F is for: the next
          Return must step to the next hit, not add a newline. */
       search.focus()
+      return
+    }
+    /* A code cell's text lives in its editor. The selection is the editor's
+       own; focus stays on the find field for the same reason as above. */
+    const target = cells[index]
+    const view = target ? editors.get(target.key) : null
+    const matchAt = view ? view.state.doc.toString().toLowerCase().indexOf(query) : -1
+    if (view && matchAt >= 0) {
+      view.dispatch({ selection: { anchor: matchAt, head: matchAt + query.length } })
     }
   }
 
@@ -1361,6 +1529,18 @@ export function mountNotebook ({
     return 0
   }
 
+  /** Every cell the keyboard means: the ⇧-selection when there is one, and
+   *  the cell the notebook is at otherwise. `copyCells` and friends already
+   *  take a list, which is what makes the selection cheap to act on. */
+  const selectionIndexes = () => {
+    if (pickAnchor < 0 || selected < 0) return [atCell()]
+    const from = Math.min(pickAnchor, selected)
+    const to = Math.max(pickAnchor, selected)
+    const list = []
+    for (let index = from; index <= to; index++) list.push(index)
+    return list
+  }
+
   /**
    * Where a cell is now.
    *
@@ -1382,12 +1562,34 @@ export function mountNotebook ({
    *  the one wearing it, and `paint` — which draws the ring itself — hands this
    *  the section it drew it on. */
   let atNode = null
+  /* The sections wearing the multi-select tint, remembered so growing or
+     collapsing the pick touches the rows that changed and not every cell. */
+  let pickedNodes = []
   function paintSelection () {
     const next = selected >= 0 ? column.children[selected] : null
-    if (next === atNode) return
-    atNode?.classList?.remove('is-at')
-    next?.classList?.add('is-at')
-    atNode = next
+    if (next !== atNode) {
+      atNode?.classList?.remove('is-at')
+      next?.classList?.add('is-at')
+      atNode = next
+    }
+    paintPick()
+  }
+
+  function paintPick () {
+    const wanted = []
+    if (pickAnchor >= 0 && selected >= 0) {
+      const from = Math.min(pickAnchor, selected)
+      const to = Math.max(pickAnchor, selected)
+      for (let index = from; index <= to; index++) {
+        const node = column.children[index]
+        if (node) wanted.push(node)
+      }
+    }
+    for (const node of pickedNodes) {
+      if (!wanted.includes(node)) node.classList?.remove('is-picked')
+    }
+    for (const node of wanted) node.classList?.add('is-picked')
+    pickedNodes = wanted
   }
 
   /**
@@ -1397,9 +1599,12 @@ export function mountNotebook ({
    * where the reader is looking, and scrolling under a click that landed
    * where it meant to is the page moving for no reason.
    */
-  function select (index, { scroll = false } = {}) {
+  function select (index, { scroll = false, keepPick = false } = {}) {
+    // A plain choice collapses a ⇧-selection; only growing one keeps it.
+    if (!keepPick) pickAnchor = -1
     const next = Math.max(-1, Math.min(index, cells.length - 1))
     if (next === selected) {
+      paintSelection()
       if (scroll) column.children[next]?.scrollIntoView({ block: 'nearest' })
       return
     }
@@ -1504,10 +1709,12 @@ export function mountNotebook ({
         ? (canRun() || editable())
         : !!current
     if (!allowed) return false
-    history.push(cells.map((cell) => ({ ...cell })))
+    history.push(snapshotCells(cells))
     if (history.length > HISTORY_LIMIT) history.shift()
     future = []
     run()
+    /* The indexes a ⇧-selection stood on have just moved under it. */
+    pickAnchor = -1
     setDirty(true)
     queueSave()
     if (repaint) paint()
@@ -1520,7 +1727,7 @@ export function mountNotebook ({
   /**
    * Point the running maps at the cells that are in the list now.
    *
-   * The history holds *copies* — `{ ...cell }` — so an undo replaces every cell
+   * The history holds *copies* — see `snapshotCells` — so an undo replaces every cell
    * object with one that was never in `runs`, `queued` or `byMsg`. Those are
    * keyed by object on purpose, so that a cell moved or deleted mid-run cannot
    * hand its output to whoever took its index; but nothing re-pointed them
@@ -1531,28 +1738,61 @@ export function mountNotebook ({
    */
   function refollowRuns () {
     const byKey = new Map(cells.map((cell) => [cell.key, cell]))
-    const swap = (cell) => byKey.get(cell.key) || cell
+    refollowBy((cell) => byKey.get(cell.key) || cell)
+  }
 
+  /**
+   * The same re-pointing, after the file was rewritten underneath a run.
+   *
+   * An external reload — Jupyter saving beside Tulip, a sync client — replaces
+   * every cell object while `runs` and `byMsg` still point at the old ones, so
+   * the rest of a running cell's output was written into objects nothing was
+   * showing any more. Here the session keys are no use: the new cells were
+   * parsed fresh and have new keys. What survives a rewrite is the cell's `id`
+   * in the file — nbformat 4.5 requires one and `readNotebook` mints the
+   * missing ones — so the run follows that, and falls back to the position the
+   * cell had for files old enough to have no ids at all.
+   */
+  function refollowReload (old) {
+    const byId = new Map()
+    for (const cell of cells) {
+      const id = cell.raw?.id
+      if (typeof id === 'string' && id && !byId.has(id)) byId.set(id, cell)
+    }
+    refollowBy((cell) => {
+      const id = cell?.raw?.id
+      if (typeof id === 'string' && byId.has(id)) return byId.get(id)
+      const at = old.indexOf(cell)
+      return (at >= 0 && at < cells.length) ? cells[at] : cell
+    })
+  }
+
+  /** Point every running map at what `swap` says each cell is now. A cell the
+   *  swap cannot place keeps its old object — the run is then orphaned, but
+   *  its `done` still settles, which is what keeps a queue from wedging. */
+  function refollowBy (swap) {
     for (const [cell, run] of [...runs]) {
       const now = swap(cell)
-      if (now === cell) continue
+      if (!now || now === cell) continue
       runs.delete(cell)
       runs.set(now, run)
       /* The output already collected belongs to the cell that comes back, not
          to the copy of it the history was holding. */
       now.outputs = run.state.outputs
     }
-    for (const [msgId, cell] of [...byMsg]) byMsg.set(msgId, swap(cell))
+    for (const [msgId, cell] of [...byMsg]) {
+      const now = swap(cell)
+      if (now) byMsg.set(msgId, now)
+    }
     for (const cell of [...queued]) {
       const now = swap(cell)
-      if (now === cell) continue
+      if (!now || now === cell) continue
       queued.delete(cell)
       queued.add(now)
     }
-    queue = queue.map(swap)
     for (const cell of [...dirtyCells]) {
       const now = swap(cell)
-      if (now === cell) continue
+      if (!now || now === cell) continue
       dirtyCells.delete(cell)
       dirtyCells.add(now)
     }
@@ -1563,7 +1803,7 @@ export function mountNotebook ({
     const from = redo ? future : history
     if (!from.length) return false
     const to = redo ? history : future
-    to.push(cells.map((cell) => ({ ...cell })))
+    to.push(snapshotCells(cells))
     cells = from.pop()
     refollowRuns()
     if (selected >= cells.length) selected = cells.length - 1
@@ -1937,8 +2177,22 @@ export function mountNotebook ({
     if (!current || event?.path !== current.path) return
 
     if (event.kind === 'state') {
-      if (kernelInfo) kernelInfo.state = event.state
+      /* A kernel that has died is not a kernel in a state, it is no kernel.
+         Holding on to the record — even one saying `dead` — meant
+         `ensureKernel` kept handing it back, `kernel:execute` kept throwing
+         "this notebook has no kernel running", and every run after a server
+         crash was an error output until Tulip was restarted. Forgetting it is
+         what lets the next run ask for a fresh one, which is what the reader
+         expected the first failure to do. */
+      if (event.state === 'dead') kernelInfo = null
+      else if (kernelInfo) kernelInfo.state = event.state
       paintBar()
+      return
+    }
+    /* The kernel said what it speaks. Written into the file — see
+       `adoptLanguageInfo` for why the file wants it. */
+    if (event.kind === 'language') {
+      adoptLanguageInfo(event.languageInfo)
       return
     }
     if (event.kind === 'notice') {
@@ -2023,6 +2277,9 @@ export function mountNotebook ({
       setDirty(true)
       queueSave()
       run.settle?.({ status: event.status || 'ok' })
+      /* The ⇧⏎ that landed while this ran, honoured now that the kernel is
+         free — and only for a cell that is still in the notebook. */
+      if (run.again && cells.includes(cell)) void runCell(cell)
       repaintNow(cell)
       paintBar()
       onStatus()
@@ -2063,7 +2320,15 @@ export function mountNotebook ({
 
     const wanted = shell?.metadata?.kernelspec?.name || ''
     const path = current?.path
-    kernelStarting = kernel.start(path, wanted)
+    if (!permissionCheck) {
+      permissionCheck = Promise.resolve().then(() => beforeRun()).finally(() => {
+        permissionCheck = null
+      })
+    }
+    kernelStarting = permissionCheck.then((allowed) => {
+      if (!allowed) throw new Error('Code execution was not approved for this vault.')
+      return kernel.start(path, wanted)
+    })
       .then((info) => {
         // The notebook was closed or swapped while Python was starting.
         if (current?.path !== path) return info
@@ -2084,7 +2349,15 @@ export function mountNotebook ({
    */
   async function runCell (cell) {
     if (!current || cell.type !== 'code' || !cell.source.trim()) return { status: 'skipped' }
-    if (isRunning(cell)) return { status: 'busy' }
+    if (isRunning(cell)) {
+      /* A second ⇧⏎ on a running cell is not a mistake to be swallowed — in
+         Jupyter it queues a re-run, and a reader who pressed it meant "and
+         again, after". Remembered on the run rather than sent now, because the
+         source to send is whatever the cell says when this run finishes. */
+      const running = runs.get(cell)
+      if (running) running.again = true
+      return { status: 'queued' }
+    }
 
     const run = {
       msgId: null,
@@ -2093,6 +2366,8 @@ export function mountNotebook ({
       /* Set when the kernel says it has begun, not here — see the `count`
          event. Null until then, and a run that never began records no time. */
       startedAt: 0,
+      /* Whether ⇧⏎ landed on this cell again while it ran — see above. */
+      again: false,
       asking: null
     }
     const finished = new Promise((resolve) => { run.settle = resolve })
@@ -2133,35 +2408,65 @@ export function mountNotebook ({
   /**
    * Run a list of cells in order, stopping at the first that fails.
    *
-   * Stopping is what `stop_on_error` means and what Jupyter does: the cells
-   * below one that raised would run against a state that never happened, and
-   * their output would describe a notebook nobody has.
+   * Submitted to the kernel together rather than one at a time. The requests
+   * queue on the kernel's own shell channel, which is what Jupyter's Run all
+   * does — and it is the kernel's `stop_on_error` that abandons the remainder
+   * when one raises, so the cells below a failure never run against a state
+   * that never happened. Feeding the queue from up here instead meant this
+   * window's own event loop stood between every pair of cells: a cell that
+   * blocked the UI blocked the queue behind it, and the `aborted` verdicts the
+   * kernel sends were something this code could never see.
+   *
+   * The view does not follow the queue. Run all is pressed to get the outputs,
+   * not to be taken on a tour of them — the cell being read when the button
+   * was pressed is the cell still on screen when the run is over, and
+   * `repaintCell` keeps it there as the outputs land.
    */
   async function runCells (list) {
     if (queueTotal) return                 // one queue at a time
-    queue = list.filter((cell) => cell.type === 'code' && cell.source.trim())
+    const wanted = list.filter((cell) =>
+      cell.type === 'code' && cell.source.trim() && !isRunning(cell))
+    if (!wanted.length) return
     queued.clear()
-    for (const cell of queue) queued.add(cell)
-    queueTotal = queue.length
+    for (const cell of wanted) queued.add(cell)
+    queueTotal = wanted.length
     queueDone = 0
     queueStop = false
     paintBar()
-    while (queue.length && !queueStop) {
-      const cell = queue.shift()
-      queued.delete(cell)
-      // It may have been deleted while the cell above it was running.
-      if (!cells.includes(cell)) { queueDone++; continue }
-      /* The view does not follow the queue. Run all is pressed to get the
-         outputs, not to be taken on a tour of them, and a page that scrolls
-         itself is a page you have lost your place in — the cell being read
-         when the button was pressed is the cell still on screen when the run
-         is over. `repaintCell` keeps it there as the outputs land. */
-      const result = await runCell(cell)
-      queueDone++
+
+    /* The kernel first, once. Every submission below would fail with the same
+       sentence if it cannot start, and forty copies of "jupyter is not
+       installed" — one per cell — is one piece of news shouted forty times.
+       The first cell alone carries it instead. */
+    try {
+      await ensureKernel()
+    } catch {
+      queued.clear()
+      queueTotal = 0
+      queueDone = 0
       paintBar()
-      if (result?.status === 'error' || result?.status === 'aborted') break
+      await runCell(wanted[0])
+      paintBar()
+      return
     }
-    queue = []
+
+    const settled = []
+    for (const cell of wanted) {
+      /* Interrupt empties what has not been submitted; a delete mid-queue
+         skips its cell. Anything already sent belongs to the kernel now. */
+      if (queueStop || !cells.includes(cell)) {
+        queued.delete(cell)
+        queueDone++
+        continue
+      }
+      settled.push(runCell(cell).then((result) => {
+        queueDone++
+        paintBar()
+        return result
+      }))
+      queued.delete(cell)
+    }
+    await Promise.all(settled)
     queued.clear()
     queueTotal = 0
     queueDone = 0
@@ -2180,7 +2485,6 @@ export function mountNotebook ({
 
   function stopQueue () {
     queueStop = true
-    queue = []
     queued.clear()
     queueTotal = 0
     queueDone = 0
@@ -2355,12 +2659,46 @@ export function mountNotebook ({
        language in the meantime. */
     delete shell.metadata.language_info
     language = notebookLanguage(shell)
+    loadCellLanguage()
     setDirty(true)
     queueSave()
     paint()
 
     // Started now rather than on the next run, so the bar can say it worked.
     if (canRun()) ensureKernel().catch(() => {})
+  }
+
+  /**
+   * What the kernel answered `kernel_info_request` with, written down.
+   *
+   * `language_info` is the notebook's record of the language its cells are in
+   * — the name that colours them, and the `file_extension` an export names a
+   * script with. It is written by the kernel that ran the file, and this app
+   * used to delete it on a kernel swap and never ask the new kernel to say it
+   * again: the field was simply gone, for good, from a file other tools read
+   * it out of. electron/kernel.js now asks on every start, and this is where
+   * the answer lands.
+   *
+   * Not routed through `change`: like a run's outputs it is the kernel's
+   * doing, not an edit of the reader's, and burning an undo step on it would
+   * put a metadata write between two things they actually did.
+   */
+  function adoptLanguageInfo (info) {
+    if (!shell || !info || typeof info !== 'object' || Array.isArray(info)) return
+    shell.metadata = shell.metadata || {}
+    const had = shell.metadata.language_info
+    try {
+      if (had && JSON.stringify(had) === JSON.stringify(info)) return
+    } catch { /* unstringifiable metadata still gets replaced below */ }
+    shell.metadata.language_info = info
+    setDirty(true)
+    queueSave()
+    const spoke = language
+    language = notebookLanguage(shell)
+    if (language !== spoke) {
+      loadCellLanguage()
+      paint()
+    }
   }
 
   /** Let go of this notebook's kernel. Called when it closes, so a Python
@@ -2457,31 +2795,12 @@ export function mountNotebook ({
      to the highlighter.
      ================================================================== */
 
-  /**
-   * Where the caret is on screen, measured on the `<pre>` under the textarea.
-   *
-   * The `<pre>` mirrors the text exactly — that is the arrangement the whole
-   * editor is built on — so a range at the caret's offset in it is a range at
-   * the caret. Which saves the usual trick of building a hidden clone of the
-   * textarea to measure in: there is already one, and it is visible.
-   */
-  function caretRect (pre, offset) {
-    const walker = document.createTreeWalker(pre, NodeFilter.SHOW_TEXT)
-    let seen = 0
-    let node
-    while ((node = walker.nextNode())) {
-      const length = node.nodeValue.length
-      if (seen + length >= offset) {
-        const range = document.createRange()
-        range.setStart(node, offset - seen)
-        range.collapse(true)
-        const rect = range.getBoundingClientRect()
-        if (rect.top || rect.left) return rect
-        break
-      }
-      seen += length
-    }
-    return pre.getBoundingClientRect()
+  /** Where a document position is on screen, for hanging the popup off. The
+   *  editor already measures its own text; a position it has not laid out yet
+   *  falls back to the editor's box, which is never far from the caret. */
+  function caretRect (view, pos) {
+    const at = Math.max(0, Math.min(Number(pos) || 0, view.state.doc.length))
+    return view.coordsAtPos(at) || view.dom.getBoundingClientRect()
   }
 
   /**
@@ -2500,7 +2819,7 @@ export function mountNotebook ({
     box.append(list, doc)
     host.append(box)
 
-    let open = null   // { input, matches, at, from, to } while completing
+    let open = null   // { view, matches, at, from, to } while completing
     let token = 0     // which ask is the current one, so a slow reply cannot win
 
     function close () {
@@ -2536,20 +2855,24 @@ export function mountNotebook ({
 
     function accept () {
       if (!open) return
-      const { input, matches, at, from, to } = open
+      const { view, matches, at, from, to } = open
       const chosen = matches[at]
       close()
       if (chosen == null) return
-      input.setRangeText(chosen, from, to, 'end')
-      input.dispatchEvent(new Event('input'))
+      view.dispatch({
+        changes: { from, to, insert: chosen },
+        selection: { anchor: from + chosen.length }
+      })
+      view.focus()
     }
 
-    async function complete (cell, input, pre) {
+    async function complete (view) {
       if (!kernel?.complete || !current) return
       const mine = ++token
-      const reply = await kernel.complete(current.path, input.value, input.selectionStart)
+      const pos = view.state.selection.main.head
+      const reply = await kernel.complete(current.path, view.state.doc.toString(), pos)
         .catch(() => null)
-      if (mine !== token || !reply || document.activeElement !== input) return
+      if (mine !== token || !reply || !view.hasFocus) return
 
       const matches = Array.isArray(reply.matches) ? reply.matches.slice(0, 200) : []
       if (!matches.length) { close(); return }
@@ -2557,21 +2880,23 @@ export function mountNotebook ({
       /* One answer is not a menu. Jupyter's own client takes the single match
          without asking, and so does every editor — a popup you dismiss by
          choosing its only row is a keystroke charged for nothing. */
-      const from = Number.isInteger(reply.cursor_start) ? reply.cursor_start : input.selectionStart
-      const to = Number.isInteger(reply.cursor_end) ? reply.cursor_end : input.selectionStart
+      const from = Number.isInteger(reply.cursor_start) ? reply.cursor_start : pos
+      const to = Number.isInteger(reply.cursor_end) ? reply.cursor_end : pos
       if (matches.length === 1) {
-        input.setRangeText(matches[0], from, to, 'end')
-        input.dispatchEvent(new Event('input'))
+        view.dispatch({
+          changes: { from, to, insert: matches[0] },
+          selection: { anchor: from + matches[0].length }
+        })
         return
       }
 
-      open = { input, matches, at: 0, from, to }
+      open = { view, matches, at: 0, from, to }
       doc.hidden = true
       doc.replaceChildren()
       list.replaceChildren(...matches.map((match, index) => {
         const row = el('div', 'nb-hint-row', match)
         row.setAttribute('role', 'option')
-        // `mousedown` rather than `click`: a click would blur the textarea
+        // `mousedown` rather than `click`: a click would blur the editor
         // first, and the blur closes this.
         row.addEventListener('mousedown', (event) => {
           event.preventDefault()
@@ -2581,15 +2906,16 @@ export function mountNotebook ({
         return row
       }))
       paintList()
-      place(caretRect(pre, from))
+      place(caretRect(view, from))
     }
 
-    async function inspect (cell, input, pre) {
+    async function inspect (view) {
       if (!kernel?.inspect || !current) return
       const mine = ++token
-      const at = input.selectionStart
-      const reply = await kernel.inspect(current.path, input.value, at).catch(() => null)
-      if (mine !== token || document.activeElement !== input) return
+      const at = view.state.selection.main.head
+      const reply = await kernel.inspect(current.path, view.state.doc.toString(), at)
+        .catch(() => null)
+      if (mine !== token || !view.hasFocus) return
       const text = reply?.found ? cellText(reply?.data?.['text/plain']) : ''
       if (!text) { close(); return }
 
@@ -2600,7 +2926,7 @@ export function mountNotebook ({
          argument names picked out is easier to read than the same text flat,
          and `ansiSpans` is already the thing that knows how. */
       doc.replaceChildren(textBlock(text, 'nb-hint-text'))
-      place(caretRect(pre, at))
+      place(caretRect(view, at))
     }
 
     /** @returns true when the popup took the key and the cell must not. */
@@ -2639,15 +2965,312 @@ export function mountNotebook ({
   // Scrolling moves the caret out from under it; nothing else has to be true.
   scroller.addEventListener('scroll', () => hint.close(), { passive: true })
 
+  /* ----------------------------------------------------------- the editors
+
+     One CodeMirror view per code cell. The view is made when its cell first
+     scrolls near — through the same observer that defers the colouring, so a
+     three-hundred-cell notebook still opens paying only for what is on screen
+     — and it is then kept for as long as the cell exists: `paint` re-adopts it
+     rather than rebuilding it, which is what lets the undo history, the caret
+     and the fold of a long line survive every structural change around them.
+
+     Everything an editor closes over is resolved through the cell's `key` at
+     the moment a key is pressed, never through the cell object it was built
+     with: undo replaces the objects, and a view holding one of the copies
+     would be typing into a cell the notebook no longer shows.
+     ================================================================== */
+
+  const editors = new Map()            // cell.key -> EditorView
+  /* Two compartments shared by every view — a compartment is only a name for
+     a reconfigurable slot, and each view carries its own value in it. */
+  const langComp = new Compartment()   // which parser colours the cell
+  const numComp = new Compartment()    // whether the cell shows line numbers
+
+  const cellByKey = (key) => cells.find((cell) => cell.key === key) || null
+
+  /* Line numbers, Jupyter's way: `l` flips the cell the notebook is at, `⇧L`
+     flips the default for the whole notebook and clears the exceptions. */
+  let numbersDefault = false
+  const numbersOverride = new Map()    // cell.key -> boolean
+  const numbersShown = (key) =>
+    numbersOverride.has(key) ? numbersOverride.get(key) : numbersDefault
+
+  function applyNumbers (key, view) {
+    view.dispatch({ effects: numComp.reconfigure(numbersShown(key) ? lineNumbers() : []) })
+  }
+
+  function toggleLineNumbers (cell) {
+    if (!cell || cell.type !== 'code') return
+    numbersOverride.set(cell.key, !numbersShown(cell.key))
+    const view = editors.get(cell.key)
+    if (view) applyNumbers(cell.key, view)
+  }
+
+  function toggleAllLineNumbers () {
+    numbersDefault = !numbersDefault
+    numbersOverride.clear()
+    for (const [key, view] of editors) applyNumbers(key, view)
+  }
+
+  /* The parser behind `langComp`, fetched once per language. A cell is opened
+     uncoloured for the moment that takes — the grammar is a dynamic import —
+     and every view is reconfigured when it lands. Held against the language it
+     was loaded for: a kernel swap mid-fetch must not colour Julia with the
+     Python parser that was still on its way. */
+  let cellLanguage = null
+  let cellLanguageFor = ''
+
+  function loadCellLanguage () {
+    const wanted = language
+    if (cellLanguageFor === wanted && (cellLanguage || !wanted)) return
+    if (!wanted) { reconfigureLanguage(null, ''); return }
+    let desc = null
+    try { desc = languageFor(wanted) } catch { desc = null }
+    if (!desc) { reconfigureLanguage(null, wanted); return }
+    Promise.resolve(languageSupportFor(desc)).then((support) => {
+      if (language !== wanted || !support) return
+      reconfigureLanguage(support, wanted)
+    }).catch(() => { reconfigureLanguage(null, wanted) })
+  }
+
+  function reconfigureLanguage (support, name) {
+    cellLanguage = support
+    cellLanguageFor = name
+    for (const view of editors.values()) {
+      view.dispatch({ effects: langComp.reconfigure(support || []) })
+    }
+  }
+
+  /* A doc write of ours, told apart from typing: syncing an editor to a source
+     that changed elsewhere — an undo, a split, an external reload — must not
+     be reported back as an edit, or every sync would mark the file dirty with
+     the text it already holds. */
+  let syncingEditor = false
+
+  function syncEditor (view, cell) {
+    const doc = view.state.doc.toString()
+    if (doc === cell.source) return
+    syncingEditor = true
+    try {
+      view.dispatch({ changes: { from: 0, to: doc.length, insert: cell.source } })
+    } finally { syncingEditor = false }
+  }
+
+  /** What the caret sits just after, if it is a name — the question that turns
+   *  Tab from indentation into a completion ask. The same rule the old
+   *  textarea used, asked of the editor's document. */
+  function wordAt (view) {
+    const { main } = view.state.selection
+    if (!main.empty) return ''
+    const before = view.state.doc.sliceString(Math.max(0, main.head - 200), main.head)
+    return /[\w.\])'"]$/.test(before) ? before.match(/[\w.]*$/)?.[0] ?? '' : ''
+  }
+
+  /** The keys that belong to the notebook rather than to the text. Highest
+   *  precedence, so the default keymap's own Mod-Enter never sees them. */
+  const cellKeys = (key) => [
+    { key: 'Shift-Enter', run: () => runEnter(key, { shiftKey: true }) },
+    { key: 'Mod-Enter', run: () => runEnter(key, { metaKey: true }) },
+    { key: 'Alt-Enter', run: () => runEnter(key, { altKey: true }) },
+    { key: 'Ctrl-Shift--', run: (view) => splitHere(key, view) },
+    { key: 'Mod-Shift--', run: (view) => splitHere(key, view) },
+    {
+      key: 'Escape',
+      run: () => {
+        hint.close()
+        scroller.focus({ preventScroll: true })
+        return true
+      }
+    },
+    {
+      /* Tab indents rather than leaving the cell — except after something
+         worth completing, where it asks the kernel what comes next. A Tab at
+         the start of a line, or after whitespace, is indentation and always
+         was; a Tab after `df.` is a question, and answering it needs the live
+         kernel that already knows what `df` is. ⇧Tab with something under the
+         caret is the way to what it is. */
+      key: 'Tab',
+      run: (view) => {
+        const cell = cellByKey(key)
+        if (cell && canRun() && wordAt(view)) { hint.complete(view); return true }
+        view.dispatch(view.state.replaceSelection('    '))
+        return true
+      },
+      shift: (view) => {
+        const cell = cellByKey(key)
+        if (cell && canRun() && wordAt(view)) { hint.inspect(view); return true }
+        // Otherwise ⇧Tab keeps meaning what it does everywhere: the way out.
+        return false
+      }
+    }
+  ]
+
+  function runEnter (key, flags) {
+    const cell = cellByKey(key)
+    if (!cell) return true
+    runFromCell(cell, indexOf(cell),
+      { shiftKey: false, metaKey: false, ctrlKey: false, altKey: false, ...flags },
+      { enter: true })
+    return true
+  }
+
+  function splitHere (key, view) {
+    const cell = cellByKey(key)
+    if (cell) splitCell(cell, view.state.selection.main.head)
+    return true
+  }
+
+  function cellExtensions (cell) {
+    const key = cell.key
+    return [
+      /* Before every keymap: while the completion list is up, the arrows,
+         Return, Tab and Escape are its. */
+      Prec.highest(EditorView.domEventHandlers({
+        keydown: (event) => hint.handleKey(event)
+      })),
+      Prec.highest(keymap.of(cellKeys(key))),
+      cmHistory(),
+      closeBrackets(),
+      bracketMatching(),
+      indentOnInput(),
+      indentUnit.of('    '),
+      numComp.of(numbersShown(key) ? lineNumbers() : []),
+      langComp.of(cellLanguage && cellLanguageFor === language ? cellLanguage : []),
+      cmPlaceholder(PLACEHOLDER.code),
+      syntaxHighlighting(cellHighlight),
+      EditorView.lineWrapping,
+      keymap.of([...closeBracketsKeymap, ...defaultKeymap, ...historyKeymap]),
+      EditorView.updateListener.of((update) => {
+        if (update.docChanged && !syncingEditor) {
+          /* Typing past a completion invalidates it; dismissing and letting
+             Tab ask again is cheaper than a round trip per letter. */
+          hint.close()
+          const now = cellByKey(key)
+          if (now) {
+            now.source = update.state.doc.toString()
+            setDirty(true)
+            queueSave()
+            onStatus()
+          }
+        }
+        if (update.focusChanged) {
+          const section = update.view.dom.closest('.nb-cell')
+          if (update.view.hasFocus) {
+            const now = cellByKey(key)
+            const at = now ? indexOf(now) : -1
+            if (at >= 0) { editingIndex = at; select(at) }
+            section?.classList.add('is-editing')
+          } else {
+            hint.close()
+            section?.classList.remove('is-editing')
+          }
+        }
+      })
+    ]
+  }
+
+  /** The editor for a cell, made on the first ask and re-adopted after — the
+   *  reuse is the whole point, see the section comment. */
+  function adoptEditor (cell) {
+    let view = editors.get(cell.key)
+    if (!view) {
+      view = new EditorView({
+        state: EditorState.create({ doc: cell.source, extensions: cellExtensions(cell) })
+      })
+      view.dom.classList.add('nb-editor')
+      editors.set(cell.key, view)
+      loadCellLanguage()
+    } else {
+      syncEditor(view, cell)
+    }
+    return view
+  }
+
+  /** The editor, mounted now rather than when the observer gets round to it —
+   *  for focus, which cannot wait on an intersection that may never fire for a
+   *  cell that was scrolled to programmatically. */
+  function ensureEditorMounted (cell) {
+    if (cell?.type !== 'code' || !editable()) return null
+    const section = sectionFor(cell)
+    const wrap = section?.querySelector('.nb-source')
+    if (!wrap) return null
+    if (wrap.querySelector('.cm-editor')) return editors.get(cell.key) || null
+    const view = adoptEditor(cell)
+    const pre = wrap.querySelector('.nb-ink')
+    if (pre) {
+      // Off the observer's books first — the same duty `forget` has.
+      if (waitingToColour.delete(pre)) viewport?.unobserve(pre)
+      pre.replaceWith(view.dom)
+    } else {
+      wrap.append(view.dom)
+    }
+    return view
+  }
+
+  /** Editors whose cells have gone. An EditorView holds observers and DOM of
+   *  its own, so one per deleted cell is a leak with a scroll bar. */
+  function pruneEditors () {
+    if (!editors.size) return
+    const alive = new Set(cells.map((cell) => cell.key))
+    for (const [key, view] of [...editors]) {
+      if (alive.has(key)) continue
+      view.destroy()
+      editors.delete(key)
+      numbersOverride.delete(key)
+    }
+  }
+
+  /** Everything, for `close` and `destroy`. */
+  function dropEditors () {
+    for (const view of editors.values()) view.destroy()
+    editors.clear()
+    numbersOverride.clear()
+    numbersDefault = false
+    cellLanguage = null
+    cellLanguageFor = ''
+  }
+
   /**
-   * The editable source of one cell: a `<pre>` that holds the text and does
-   * the layout, and a textarea over it with transparent ink. They must wrap
-   * identically or the caret drifts from the letter under it — which is why
-   * the `<pre>` is written synchronously on every keystroke and only its
-   * colouring is deferred.
+   * The source of one cell, in whichever surface fits what the cell is.
+   *
+   * A code cell in the editing view is a CodeMirror view — auto-indent after
+   * a `:`, matched brackets, an undo history that survives repaints — mounted
+   * when the cell scrolls near and re-adopted by every paint after; see the
+   * editors section above. Until it mounts, and everywhere else — Reading
+   * view, and the markdown and raw cells, whose text asks nothing of a code
+   * editor — the surface is the old pair: a `<pre>` that holds the text and
+   * does the layout, and for the editable prose a textarea over it with
+   * transparent ink. Those two must wrap identically or the caret drifts from
+   * the letter under it, which is why the `<pre>` is written synchronously on
+   * every keystroke and only its colouring is deferred.
    */
   function drawSource (cell) {
     const wrap = el('div', 'nb-source')
+
+    if (cell.type === 'code' && editable()) {
+      const view = editors.get(cell.key)
+      if (view) {
+        syncEditor(view, cell)
+        wrap.append(view.dom)
+        return wrap
+      }
+      /* The same highlighted `<pre>` every other view uses holds the editor's
+         place: identical text at identical size, so nothing moves when the
+         editor arrives. Mounting is deferred exactly as colouring is, and for
+         the same reason — an editor per cell is nothing for the six cells on
+         screen and a visible stall for the three hundred that are not. */
+      const pre = el('pre', 'nb-ink')
+      pre.textContent = `${cell.source}\n`
+      wrap.append(pre)
+      const key = cell.key
+      colourWhenSeen(pre, () => {
+        const now = cellByKey(key)
+        if (!now || !pre.isConnected) return
+        pre.replaceWith(adoptEditor(now).dom)
+      })
+      return wrap
+    }
+
     const pre = el('pre', 'nb-ink')
     pre.textContent = `${cell.source}\n`
     wrap.append(pre)
@@ -2688,9 +3311,6 @@ export function mountNotebook ({
     })
 
     input.addEventListener('keydown', (event) => {
-      // The popup takes the arrows, Return and Escape while it is up.
-      if (hint.handleKey(event)) return
-
       if (event.key === 'Enter' && (event.shiftKey || event.metaKey || event.ctrlKey || event.altKey)) {
         event.preventDefault()
         runFromCell(cell, cells.indexOf(cell), event, { enter: true })
@@ -2705,53 +3325,28 @@ export function mountNotebook ({
         scroller.focus({ preventScroll: true })
         return
       }
-      /* Tab indents rather than leaving the cell — except after something
-         worth completing, where it asks the kernel what comes next. That
-         distinction is the whole of it: a Tab at the start of a line, or after
-         whitespace, is indentation and always was; a Tab after `df.` is a
-         question, and answering it needs the live kernel that already knows
-         what `df` is. Shift-Tab is the way out of the cell, and — with
-         something under the caret — the way to what it is.
-
-         A code cell is the one place in this app where Tab means indentation,
-         and a notebook whose Tab key jumped to the next cell would be one
-         nobody could write Python in. */
+      /* Tab indents rather than leaving the cell. Completion is not asked
+         here any more: the kernel only ever completes code, and a code cell's
+         surface is the editor above — what types into a textarea now is prose
+         and raw text, whose Tab is indentation and nothing else. */
       if (event.key === 'Tab' && !event.shiftKey) {
-        if (cell.type === 'code' && canRun() && wordBefore(input)) {
-          event.preventDefault()
-          hint.complete(cell, input, pre)
-          return
-        }
         event.preventDefault()
         const { selectionStart: from, selectionEnd: to } = input
         input.setRangeText('    ', from, to, 'end')
         input.dispatchEvent(new Event('input'))
         return
       }
-      if (event.key === 'Tab' && event.shiftKey && cell.type === 'code' &&
-          canRun() && wordBefore(input)) {
+      /* The same split the code cells have, at the same key. `-` arrives as
+         `_` on layouts where ⇧ changes it, so both spellings are read. */
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey &&
+          (event.key === '-' || event.key === '_')) {
         event.preventDefault()
-        hint.inspect(cell, input, pre)
+        splitCell(cell, input.selectionStart)
       }
     })
 
-    /* Typing past a completion invalidates it. Rebuilding the list on every
-       keystroke would be a round trip to Python per letter; dismissing and
-       letting Tab ask again is both cheaper and less surprising. */
-    input.addEventListener('input', () => hint.close())
-    input.addEventListener('blur', () => hint.close())
-
     wrap.append(input)
     return wrap
-  }
-
-  /** What the caret is sitting just after, if it is a name. Empty for a caret
-   *  at the start of a line or after whitespace, which is what tells Tab that
-   *  it means indentation. */
-  function wordBefore (input) {
-    if (input.selectionStart !== input.selectionEnd) return ''
-    const before = input.value.slice(0, input.selectionStart)
-    return /[\w.\])'"]$/.test(before) ? before.match(/[\w.]*$/)?.[0] ?? '' : ''
   }
 
   /* ------------------------------------------------------------ the cells */
@@ -3134,14 +3729,24 @@ export function mountNotebook ({
   }
 
   function deleteCell (index) {
+    deleteCells([index])
+  }
+
+  /** Several at once, for the ⇧-selection — one history entry, one repaint,
+   *  and one `z` brings the lot back. */
+  function deleteCells (indexes) {
+    const list = [...new Set(indexes)]
+      .filter((index) => index >= 0 && index < cells.length)
+      .sort((a, b) => b - a)
+    if (!list.length) return
     change(() => {
-      cells.splice(index, 1)
+      for (const index of list) cells.splice(index, 1)
       /* Never nothing. A notebook with no cells is a valid file and an
          unusable screen — there is nowhere to click to start typing again. */
       if (!cells.length) cells.push(newCell('code', shell))
       editingIndex = -1
       // The cell that took its place, or the last one when it was the last one.
-      selected = Math.min(index, cells.length - 1)
+      selected = Math.min(list[list.length - 1], cells.length - 1)
     })
   }
 
@@ -3191,9 +3796,9 @@ export function mountNotebook ({
     return true
   }
 
-  function cutCell (index) {
-    if (!editable() || !copyCells([index])) return
-    deleteCell(index)
+  function cutCells (indexes) {
+    if (!editable() || !copyCells(indexes)) return
+    deleteCells(indexes)
   }
 
   /** Paste at `at`. The pasted cells are copied again on the way in, so the
@@ -3219,6 +3824,55 @@ export function mountNotebook ({
     })
   }
 
+  /**
+   * One cell into two, at an offset in its source — Jupyter's ⌃⇧-.
+   *
+   * The original keeps the head, its metadata and its outputs; the tail goes
+   * into a fresh cell of the same kind below it, where the caret follows. Two
+   * cells sharing the original's metadata would edit each other's tags, which
+   * is why the tail is a new cell rather than a copy.
+   */
+  function splitCell (cell, offset) {
+    if (!editable()) return
+    const index = indexOf(cell)
+    if (index < 0) return
+    const at = Math.max(0, Math.min(Number(offset) || 0, cell.source.length))
+    const below = newCell(cell.type, shell)
+    below.source = cell.source.slice(at)
+    change(() => {
+      cell.source = cell.source.slice(0, at)
+      cells.splice(index + 1, 0, below)
+      editingIndex = index + 1
+      selected = index + 1
+    })
+    focusCell(index + 1)
+  }
+
+  /**
+   * The selected cells into the first of them — Jupyter's ⇧M. One index alone
+   * means "with the cell below", which is the same key's other reading there.
+   *
+   * The first cell is the one that survives, keeping its type, its metadata
+   * and its outputs; the sources are joined with a blank line, which is what
+   * JupyterLab writes for the same gesture.
+   */
+  function mergeCells (indexes) {
+    if (!editable()) return
+    const list = [...new Set(indexes)]
+      .filter((index) => index >= 0 && index < cells.length)
+      .sort((a, b) => a - b)
+    if (list.length === 1 && list[0] + 1 < cells.length) list.push(list[0] + 1)
+    if (list.length < 2) return
+    const target = cells[list[0]]
+    const sources = list.map((index) => cells[index].source)
+    change(() => {
+      target.source = sources.join('\n\n')
+      for (const index of list.slice(1).reverse()) cells.splice(index, 1)
+      editingIndex = -1
+      selected = cells.indexOf(target)
+    })
+  }
+
   function setCellType (index, wanted) {
     const cell = cells[index]
     if (!cell || cell.type === wanted) return
@@ -3240,7 +3894,15 @@ export function mountNotebook ({
   /** Put the caret in a cell, once the paint that built it has happened. */
   function focusCell (index) {
     select(index)
+    const cell = cells[index]
     const section = column.children[index]
+    /* A code cell's caret lives in its editor, which may not have mounted yet
+       — focus cannot wait on the intersection observer, so it mounts now. */
+    if (cell?.type === 'code' && editable()) {
+      section?.scrollIntoView({ block: 'nearest' })
+      const view = ensureEditorMounted(cell)
+      if (view) { view.focus(); return }
+    }
     const input = section?.querySelector('.nb-input')
     if (input) input.focus()
     else section?.scrollIntoView({ block: 'nearest' })
@@ -3307,11 +3969,21 @@ export function mountNotebook ({
      already knowing how to drive.
      ================================================================== */
 
-  /* `d` twice deletes, and only when the two are close enough together to be
-     one gesture. A `d` on its own does nothing, which is the point: delete is
-     the one command here that throws work away, and it is worth two keys. */
-  let lastD = 0
+  /* Some commands are worth two presses: `dd` deletes, `ii` interrupts, `00`
+     restarts — Jupyter's own pairs, and each is a thing you should not do by
+     brushing a key. The two must be close enough together to be one gesture;
+     the first on its own does nothing. */
+  let lastKey = ''
+  let lastKeyAt = 0
   const DOUBLE_KEY_MS = 700
+
+  function doubled (key) {
+    const now = Date.now()
+    const hit = lastKey === key && now - lastKeyAt < DOUBLE_KEY_MS
+    lastKey = hit ? '' : key
+    lastKeyAt = now
+    return hit
+  }
 
   function commandKey (event) {
     if (!current) return
@@ -3335,10 +4007,36 @@ export function mountNotebook ({
        nothing has been clicked in answers ↓ by jumping to the second cell,
        having silently decided the first one was already where you were. */
     const step = (by) => { took(); select(selected < 0 ? at : at + by, { scroll: true }) }
-    if (key === 'ArrowDown' || key === 'j') { step(1); return }
-    if (key === 'ArrowUp' || key === 'k') { step(-1); return }
+    /* ⇧ grows a selection instead of moving the choice: the anchor is planted
+       where the growing began and stays there, exactly as it does in a text
+       field. `selectionIndexes` is what the growing is for. */
+    const grow = (by) => {
+      took()
+      if (pickAnchor < 0) pickAnchor = at
+      select(selected < 0 ? at : at + by, { scroll: true, keepPick: true })
+    }
+    if (key === 'ArrowDown') { (event.shiftKey ? grow : step)(1); return }
+    if (key === 'ArrowUp') { (event.shiftKey ? grow : step)(-1); return }
+    if (key === 'j') { step(1); return }
+    if (key === 'k') { step(-1); return }
+    if (key === 'J') { grow(1); return }
+    if (key === 'K') { grow(-1); return }
     if (key === 'Home' && !event.shiftKey) { took(); select(0, { scroll: true }); return }
     if (key === 'End' && !event.shiftKey) { took(); select(cells.length - 1, { scroll: true }); return }
+
+    /* The rest of Jupyter's command-mode letters that ask nothing of the
+       editing view, so Reading view keeps them too. */
+    if (key === 'i') { took(); if (doubled('i')) interruptKernel(); return }
+    if (key === '0') { took(); if (doubled('0')) restartKernel(); return }
+    if (key === 'f') { took(); search.focus(); search.select(); return }
+    if (key === 'l') { took(); toggleLineNumbers(cell); return }
+    if (key === 'L') { took(); toggleAllLineNumbers(); return }
+    /* Space pages, the way it does in every reader; ⇧Space pages back. */
+    if (key === ' ') {
+      took()
+      scroller.scrollBy({ top: (event.shiftKey ? -0.9 : 0.9) * scroller.clientHeight })
+      return
+    }
 
     if (key === 'Enter') {
       took()
@@ -3363,15 +4061,21 @@ export function mountNotebook ({
     if (key === 'm') { took(); setCellType(at, 'markdown'); return }
     if (key === 'y') { took(); setCellType(at, 'code'); return }
     if (key === 'r') { took(); setCellType(at, 'raw'); return }
-    if (key === 'c') { took(); copyCells([at]); return }
-    if (key === 'x') { took(); cutCell(at); return }
+    if (key === 'c') { took(); copyCells(selectionIndexes()); return }
+    if (key === 'x') { took(); cutCells(selectionIndexes()); return }
     if (key === 'v') { took(); pasteCells(at + 1); return }
     if (key === 'V') { took(); pasteCells(at); return }
     if (key === 'D') { took(); duplicateCell(at); return }
+    /* ⇧M merges the selection into its first cell — or, with nothing
+       selected, the cell you are on with the one below it, which is
+       Jupyter's reading of the same key. */
+    if (key === 'M') { took(); mergeCells(selectionIndexes()); return }
+    /* `z` puts back the last structural change — the deleted cell, which is
+       what Jupyter's own `z` exists for. */
+    if (key === 'z') { took(); stepHistory(false); return }
     if (key === 'd') {
       took()
-      const now = Date.now()
-      if (now - lastD < DOUBLE_KEY_MS) { lastD = 0; deleteCell(at) } else lastD = now
+      if (doubled('d')) deleteCells(selectionIndexes())
     }
   }
 
@@ -3720,6 +4424,7 @@ export function mountNotebook ({
     /* Whatever is left is a section this paint has no use for — a cell that has
        gone, or one drawn again from scratch. Neither is owed a colouring. */
     for (const { section } of was.values()) forget(section)
+    pruneEditors()
 
     /* The one place to start typing in a notebook whose last cell is full. It
        is a button rather than a bare click target so it is reachable by
@@ -3768,12 +4473,21 @@ export function mountNotebook ({
       /* The kernel that is running belongs to the notebook being replaced. Let
          it go before the model does, while `current` still says which one it
          was — after this point there is nothing left to name it by. */
-      if (current && current.path !== path) releaseKernel()
+      const samePath = !!current && current.path === path
+      if (current && !samePath) releaseKernel()
+      /* The cells being replaced, kept for a moment: a reload of the same path
+         while a cell is running must hand that run to the cell that comes
+         back, or the rest of its output lands in objects nothing shows. */
+      const had = samePath ? cells : null
       shell = read.shell
       cells = read.cells
       // Never nothing, for the same reason a delete never empties it.
       if (!cells.length) cells.push(newCell('code', shell))
+      if (had && (runs.size || byMsg.size || queued.size || dirtyCells.size)) {
+        refollowReload(had)
+      }
       language = notebookLanguage(shell)
+      loadCellLanguage()
       current = { path }
       editingIndex = -1
       /* The top of the file. Not -1: a notebook you have just opened is a
@@ -3830,6 +4544,7 @@ export function mountNotebook ({
       saveTimer = null
       releaseKernel()
       hint.close()
+      dropEditors()
       current = null
       shell = null
       cells = []
@@ -3892,11 +4607,15 @@ export function mountNotebook ({
          Asking the column for a `.nb-input` answers with cell one every time,
          so coming back to a notebook from anywhere else — a tab, the file
          tree, the copilot — put the caret at the top of the file rather than
-         where it was left. */
-      const input = editingIndex >= 0
+         where it was left. A code cell's caret lives in its CodeMirror view;
+         a markdown or raw cell's in its textarea. */
+      const cell = editingIndex >= 0 ? cells[editingIndex] : null
+      const view = cell ? editors.get(cell.key) : null
+      const input = cell && !view
         ? column.children[editingIndex]?.querySelector('.nb-input')
         : null
-      if (input) input.focus()
+      if (view) view.focus()
+      else if (input) input.focus()
       /* Otherwise the scroller, which is where the command keys listen — so a
          notebook that comes back without a caret in it is still one the
          keyboard can drive. */
@@ -3942,6 +4661,7 @@ export function mountNotebook ({
       stopListening?.()
       viewport?.disconnect()
       waitingToColour.clear()
+      dropEditors()
     },
 
     /**
@@ -3962,7 +4682,6 @@ export function mountNotebook ({
      *  it would otherwise have to read is mostly base64. */
     context () {
       if (!current) return { text: '', cells: 0 }
-      const shape = notebookShape(cells)
       const at = atCell()
       const text = cells.map((cell, index) => {
         /* Which cell the reader is on, and what each one is tagged. Both are
@@ -3976,7 +4695,13 @@ export function mountNotebook ({
         ].join('')
         return `${marks}\n${cell.source}`
       }).join('\n\n')
-      return { text, cells: shape.cells, code: shape.code, language, at }
+      return {
+        text,
+        cells: cells.length,
+        language,
+        at,
+        focus: Math.max(0, text.indexOf('← the cell in view'))
+      }
     }
   }
 }

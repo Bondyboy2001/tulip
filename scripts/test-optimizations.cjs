@@ -135,6 +135,9 @@ function vaultEvents () {
     pdfExtension: '.pdf',
     siteExtension: '.website',
     whiteboardExtension: '.excalidraw',
+    notebookExtension: '.ipynb',
+    docxExtension: '.docx',
+    documentExtensions: new Set(['.py', '.csv']),
     assetExtensions: new Set(['.png', '.jpg', '.mp4'])
   }
   assert.equal(classifyVaultEvent('.git/index', options).ignore, true)
@@ -153,6 +156,34 @@ function vaultEvents () {
     { ignore: false, index: true, snapshot: true, notify: true, pdf: null, path: 'Boards/Research.excalidraw' }
   )
   assert.equal(classifyVaultEvent('.attachments/Note/image.png', options).index, false)
+  /* Scratch beside a document — an atomic write's temp file, a download in
+     progress, an editor's swap file, a hidden leaf — is nobody's document and
+     used to reach the fallback: a re-index and a stat of every PDF, each. */
+  for (const scratch of ['Notes/.Changed.md.123.1.tmp', 'Papers/book.pdf.part', 'Notes/x.md.swp',
+    'Papers/.DS_Store', 'Notes/.#Changed.md', 'Downloads/paper.crdownload']) {
+    assert.deepEqual(classifyVaultEvent(scratch, options),
+      { ignore: true, index: false, snapshot: false, notify: false, pdf: null, path: scratch }, scratch)
+  }
+  // An unknown extension that is not scratch still gets the broad answer.
+  assert.equal(classifyVaultEvent('Data/readings.parquet', options).pdf, 'sweep')
+  /* A Word document reaches the renderer and the docx index, and — the point
+     of naming it at all — never the whole-vault PDF sweep the fallback asks
+     for. Word autosaves an open document repeatedly. */
+  assert.deepEqual(
+    classifyVaultEvent('Papers/Report.docx', options),
+    { ignore: false, index: true, snapshot: true, notify: true, pdf: null, path: 'Papers/Report.docx' }
+  )
+  /* And the owner file Word writes beside it is not a document at all. */
+  assert.equal(classifyVaultEvent('Papers/~$Report.docx', options).ignore, true)
+  assert.equal(classifyVaultEvent('~$Report.docx', options).ignore, true)
+  /* Notebooks and source files are in the document index now, so their events
+     ask for a (targeted) index sync — and still never for the PDF sweep. */
+  assert.deepEqual(
+    classifyVaultEvent('Work/analysis.ipynb', options),
+    { ignore: false, index: true, snapshot: true, notify: true, pdf: null, path: 'Work/analysis.ipynb' }
+  )
+  assert.equal(classifyVaultEvent('Work/solve.py', options).pdf, null)
+  assert.equal(classifyVaultEvent('Work/solve.py', options).index, true)
   assert.equal(classifyVaultEvent('Renamed folder', options).pdf, 'sweep')
   assert.equal(classifyVaultEvent(null, options).snapshot, true)
 }
@@ -189,8 +220,10 @@ async function rangeStreaming () {
 }
 
 async function lazyFeatureContracts () {
-  const [main, renderer, table, build] = await Promise.all([
+  const [main, kernelIpc, renderIpc, renderer, table, build] = await Promise.all([
     fs.readFile(path.join(__dirname, '..', 'electron', 'main.js'), 'utf8'),
+    fs.readFile(path.join(__dirname, '..', 'electron', 'ipc-kernel.js'), 'utf8'),
+    fs.readFile(path.join(__dirname, '..', 'electron', 'ipc-render.js'), 'utf8'),
     fs.readFile(path.join(__dirname, '..', 'src', 'renderer.js'), 'utf8'),
     fs.readFile(path.join(__dirname, '..', 'src', 'table.js'), 'utf8'),
     fs.readFile(path.join(__dirname, '..', 'build.mjs'), 'utf8')
@@ -200,8 +233,12 @@ async function lazyFeatureContracts () {
   assert.doesNotMatch(main, /^const \{ KernelHost \} = require\('\.\/kernel'\)/m)
   assert.doesNotMatch(main, /^const \{ createTexCompiler \} = require\('\.\/tex-compile'\)/m)
   assert.match(main, /function aiService \(\)[\s\S]{0,180}require\('\.\/ai'\)/)
-  assert.match(main, /function kernelHost \(\)[\s\S]{0,180}require\('\.\/kernel'\)/)
-  assert.match(main, /if \(!texCompiler \|\| texCompilerVault !== vaultPath\)[\s\S]{0,220}require\('\.\/tex-compile'\)/)
+  /* The kernel host and its handlers live in electron/ipc-kernel.js now; the
+     laziness moved with them — kernel.js still waits for the first notebook
+     rather than riding main's boot. Same for the TeX preview compiler, which
+     lives in electron/ipc-render.js beside the manim and tikz renderers. */
+  assert.match(kernelIpc, /function kernelHost \(\)[\s\S]{0,400}require\('\.\/kernel'\)/)
+  assert.match(renderIpc, /if \(!texCompiler \|\| texCompilerVault !== getVaultPath\(\)\)[\s\S]{0,220}require\('\.\/tex-compile'\)/)
 
   assert.doesNotMatch(renderer, /^import .* from ['"]\.\/pdf\.js['"]/m)
   assert.doesNotMatch(renderer, /^import .* from ['"]\.\/language-table\.js['"]/m)

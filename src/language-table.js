@@ -17,15 +17,11 @@ import {
   AGAIN, GOOD,
   grade as gradeCard, isLeech, isNew, isDue
 } from './srs.js'
-import { EXACT, judge, diff } from './study-match.js'
+import { EXACT, CLOSE, judge, diff, gradeFor } from './study-match.js'
 import { speechTag } from './speech.js'
 import { keyLabel } from './platform.js'
 
-const LANGUAGE_TABLE_SUFFIX = VAULT_CONTRACT.languageTableSuffix
 const LANGUAGE_TABLE_TEMPLATE = VAULT_CONTRACT.languageTableTemplates.vocabulary
-
-export const isLanguageTablePath = (path) =>
-  String(path || '').toLowerCase().endsWith(LANGUAGE_TABLE_SUFFIX)
 
 /**
  * Split one Markdown-table row without treating an escaped pipe as a column.
@@ -431,6 +427,16 @@ function stagesFrom (options) {
   return kinds
 }
 
+/** The stages a study session should use for this deck.
+ *
+ * Existing tables remain recognition-first. A deck opts into the richer cards
+ * by declaring `study-stages: all` or a list such as `f r c`. */
+export function studyKinds (markdown) {
+  const options = frontmatterOf(markdown)
+  const raw = String(options['study-stages'] || '').trim()
+  return raw ? (stagesFrom(options) || new Set([RECOGNISE])) : new Set([RECOGNISE])
+}
+
 /**
  * Every card a language note can offer, in every kind its rows support.
  *
@@ -625,13 +631,15 @@ export function dueCount (cards, states, now, options = {}) {
   return buildQueue(cards, states, now, options).length
 }
 
-/** The drill is binary: only an exact English answer leaves the session. */
-export const sessionGrade = (verdict) => verdict === EXACT ? GOOD : AGAIN
+/** Map the typed verdict onto the scheduler's four honest grades. */
+export const sessionGrade = (verdict) => gradeFor(verdict)
 
 /** The visible, accessible result of checking one typed answer. */
 export const studyFeedback = (verdict) => verdict === EXACT
   ? { result: 'correct', text: '✓ Correct' }
-  : { result: 'wrong', text: '✕ Incorrect' }
+  : verdict === CLOSE
+    ? { result: 'close', text: '~ Almost' }
+    : { result: 'wrong', text: '✕ Incorrect' }
 
 /** Count each card once, regardless of how many retries it later needs. */
 export function recordFirstTry (stats, id, correct) {
@@ -666,14 +674,12 @@ const blank = () => ({ typed: '', revealed: false, verdict: null, matched: '' })
  * @param {object} arg.el       the overlay's elements, from index.html
  * @param {() => string} arg.source    the open note's text
  * @param {() => string} arg.notePath  the open note's vault-relative path
- * @param {() => Promise<Array>} arg.decks  every language table in the vault,
- *   as `{path, text}` — what makes ⌃⌘S mean "everything due" rather than "this
- *   file, if it happens to be the one in front of you"
  * @param {object} arg.speech   from src/speech.js
  * @param {() => object} arg.settings  `{newPerDay, retention, speaking}`
+ * @param {() => Promise<object[]>} arg.decks  every language deck in the vault
  */
 export function mountLanguageStudy ({
-  el, source, notePath, decks, api, speech, settings = () => ({}), onEmpty, onDone
+  el, source, notePath, decks = null, api, speech, settings = () => ({}), onEmpty, onDone
 }) {
   const state = {
     queue: [], done: 0, states: {}, pending: [], open: false,
@@ -681,6 +687,7 @@ export function mountLanguageStudy ({
     lastAnswer: null,                    // what undo puts back — one step only
     undone: new Set(),                   // entries taken back; flush skips them
     tags: {},                            // deck path -> the voice to speak it in
+    scope: 'current',
     ...blank()
   }
 
@@ -985,24 +992,11 @@ export function mountLanguageStudy ({
     onDone?.()
   }
 
-  /**
-   * The decks a session is built from.
-   *
-   * `note` is the table in front of you; `vault` is everything, which is what
-   * makes a daily review one keystroke from anywhere rather than a thing you
-   * first have to navigate to.
-   */
-  async function gather (scope) {
-    if (scope === 'note') {
-      const path = notePath()
-      return path ? [{ path, text: source() }] : []
-    }
-    try {
-      return (await decks?.()) || []
-    } catch (err) {
-      console.error('reading the decks failed', err)
-      return []
-    }
+  /** The deck a session is built from: the current table or every table. */
+  async function gather (all) {
+    if (all && decks) return (await decks()) || []
+    const path = notePath()
+    return path ? [{ path, text: source() }] : []
   }
 
   /**
@@ -1020,21 +1014,19 @@ export function mountLanguageStudy ({
       const tag = options.lang || speechTag(deck.path.split('/').slice(-2, -1)[0] || '')
       state.tags[deck.path] = tag
       const speaks = speaking && !!tag && !!speech?.has(tag)
-      /* Study is one predictable Duolingo-companion drill: see the language's
-         word and type its English meaning. The richer card kinds remain
-         available to the parser, but do not enter this session. */
+      const kinds = studyKinds(deck.text)
       cards.push(...languageCards(deck.text, deck.path, { speaks })
-        .filter((card) => card.kind === RECOGNISE))
+        .filter((card) => kinds.has(card.kind)))
     }
     return cards
   }
 
   /* The note in front of you, and only that. Studying everything due across the
      vault was a second way in — a palette entry and a chord — and both are
-     gone, so the scope went with them. `gather('vault')` is still what `due`
-     counts with; it is only this door that no longer opens onto it. */
-  async function open () {
-    const found = await gather('note')
+     gone, so the scope went with them; the sidebar's count of what is due
+     across the vault is answered by the review panel from main's own list. */
+  async function open ({ all = false } = {}) {
+    const found = await gather(all).catch(() => [])
     const { speaking, newPerDay } = prefs()
     const cards = build(found, speaking)
     if (!cards.length) {
@@ -1055,39 +1047,15 @@ export function mountLanguageStudy ({
     state.firstTryWrong = 0
     state.lastAnswer = null
     state.undone = new Set()
+    state.scope = all ? 'vault' : 'current'
     Object.assign(state, blank())
     state.open = true
+    if (el.title) el.title.textContent = all ? 'Study all due words' : 'Study words'
     el.root.hidden = false
     paint()
     const first = current()
     if (first?.kind === DICTATE) say(first)
     focusInput()
-  }
-
-  /**
-   * How many decks there are, and how many cards are waiting across them.
-   *
-   * Both, because they are different answers: no decks means the Review row has
-   * no business being on screen at all, where no cards due means it should be
-   * there and quiet. Answered without opening anything.
-   *
-   * Dictation is left out of the speech check here — this runs on a timer and
-   * on every save, and the voice list is not worth walking that often; a card
-   * whose audio turns out to be missing is dropped when the session is built.
-   */
-  async function due () {
-    try {
-      const found = await gather('vault')
-      if (!found.length) return { decks: 0, due: 0 }
-      const cards = build(found, false)
-      const states = await api.review.all()
-      return {
-        decks: found.length,
-        due: dueCount(cards, states, Date.now(), { newPerDay: prefs().newPerDay })
-      }
-    } catch {
-      return { decks: 0, due: 0 }
-    }
   }
 
   /* ------------------------------------------------------------- events */
@@ -1144,5 +1112,5 @@ export function mountLanguageStudy ({
     if (event.key === 'Tab' && card?.say) { event.preventDefault(); say(card); return }
   })
 
-  return { open, close, flush, due, isOpen: () => state.open }
+  return { open, close, flush, isOpen: () => state.open }
 }

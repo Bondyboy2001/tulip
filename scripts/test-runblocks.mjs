@@ -45,6 +45,17 @@ class FakeNode {
   }
 
   setAttribute (name, value) { this.attributes[name] = String(value) }
+  /* The output panel's copy control is an icon, and icons are stamped from a
+     cached template — see svgIcon in src/dom.js. */
+  cloneNode () {
+    const copy = new FakeNode(this.tag)
+    copy._class = new Set(this._class)
+    copy.attributes = { ...this.attributes }
+    copy._text = this._text
+    copy.children = this.children.map((child) => child.cloneNode?.(true) ?? child)
+    return copy
+  }
+  addEventListener () {}
   append (...nodes) { this.children.push(...nodes) }
   replaceChildren (...nodes) { this.children = nodes }
   insertBefore (node, before) {
@@ -139,7 +150,7 @@ assert.equal(started[1].code, 'print(2)')
 settle(2)
 await tick()
 settle(3)
-assert.deepEqual(await sweep, { ran: 3, failed: 0, stopped: false })
+assert.deepEqual(await sweep, { ran: 3, failed: 0, stopped: false, denied: false })
 
 /* -------------------------------------------- a failure is not the end */
 
@@ -153,7 +164,7 @@ settle(4, { code: 1 })
 await tick()
 assert.equal(started.length, 5, 'a block that exits non-zero does not end the sweep')
 settle(5)
-assert.deepEqual(await afterFailure, { ran: 2, failed: 1, stopped: false })
+assert.deepEqual(await afterFailure, { ran: 2, failed: 1, stopped: false, denied: false })
 
 /* --------------------------------------- but a block stopped by hand is */
 
@@ -164,7 +175,7 @@ const stopping = [
 const stopped = runBlocksInOrder(stopping)
 await tick()
 settle(6, { code: null, signal: 'SIGTERM' })
-assert.deepEqual(await stopped, { ran: 1, failed: 0, stopped: true })
+assert.deepEqual(await stopped, { ran: 1, failed: 0, stopped: true, denied: false })
 await tick()
 assert.equal(started.length, 6, 'nothing was started after the stop')
 
@@ -172,7 +183,9 @@ assert.equal(started.length, 6, 'nothing was started after the stop')
 
 const refuse = { lang: 'py', code: 'print("refused")' }
 tulip.run.start = () => Promise.reject(new Error("Error: python isn't installed"))
-assert.deepEqual(await runBlocksInOrder([refuse]), { ran: 1, failed: 1, stopped: false })
+assert.deepEqual(await runBlocksInOrder([refuse]), {
+  ran: 1, failed: 1, stopped: false, denied: false
+})
 tulip.run.start = startRun
 
 /* ------------------------------------------------------------ clearing */
@@ -212,7 +225,7 @@ await tick()
 const rerun = started[started.length - 1]
 assert.equal(rerun.code, 'print(1)', 'clearing did not lose the block')
 settle(rerun.id)
-assert.deepEqual(await again, { ran: 1, failed: 0, stopped: false })
+assert.deepEqual(await again, { ran: 1, failed: 0, stopped: false, denied: false })
 assert.equal(panel.hidden, false, 'the old panel is drawing the new run')
 
 console.log('runblocks: ok')

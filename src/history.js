@@ -120,7 +120,9 @@ const TAGS = {
   rename: 'renamed'
 }
 
-export function mountHistory ({ el, api, confirm, beforeRestore, onError }) {
+export function mountHistory ({
+  el, api, confirm, beforeRestore, restoreStarted, restoreFailed, afterRestore, onError
+}) {
   /** @type {{ path: string | null,
    *           operations: { id: string, at: number, source: string,
    *                         changes: { path: string, added?: number, removed?: number }[] }[] }} */
@@ -136,8 +138,15 @@ export function mountHistory ({ el, api, confirm, beforeRestore, onError }) {
       go: rejecting ? 'Reject' : 'Restore'
     })
     if (!ok) return
-    await beforeRestore?.()
-    await api.trust.restore(operation.id, path)
+    await restoreStarted?.(operation, path)
+    try {
+      await beforeRestore?.()
+      await api.trust.restore(operation.id, path)
+    } catch (err) {
+      await restoreFailed?.(operation, path)
+      throw err
+    }
+    await afterRestore?.(operation, path)
     await load()
   }
 

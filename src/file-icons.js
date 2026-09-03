@@ -15,6 +15,12 @@ const FILE_ICONS = {
               fill="none" stroke="#8E67C7" stroke-width="1.35"/>
              <path d="M4.8 14.4h2.4M10.8 14.4h2.4M16.8 14.4h2.4"
               stroke="#8E67C7" stroke-width="1.35" stroke-linecap="round"/>`,
+  flashcards: `<rect x="4.8" y="3.2" width="14.8" height="12.2" rx="2.2" fill="none"
+                stroke="#7B68B3" stroke-width="1.7"/>
+               <path d="M7.2 18.8h10.2a2.2 2.2 0 0 0 2.2-2.2v-7"
+                fill="none" stroke="#7B68B3" stroke-width="1.6" stroke-linecap="round"/>
+               <path d="M9.1 7.5a3 3 0 0 1 5.7 1.2c0 1.7-1.5 2.1-2.4 2.8M12.4 13.3h.01"
+                fill="none" stroke="#7B68B3" stroke-width="1.55" stroke-linecap="round"/>`,
   file: `<path d="M6.4 2.6h6.6L19 8.6V20a1.6 1.6 0 0 1-1.6 1.6H6.4A1.6 1.6 0 0 1 4.8 20V4.2a1.6 1.6 0 0 1 1.6-1.6z"
           fill="#8A93A5"/>
         <path d="M13 2.6 19 8.6h-4.4A1.6 1.6 0 0 1 13 7z" fill="#fff" fill-opacity=".42"/>

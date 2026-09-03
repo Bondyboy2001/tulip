@@ -115,6 +115,25 @@ cat > "$APP/Contents/Info.plist" <<PLIST
         <string>public.plain-text</string>
       </array>
     </dict>
+    <dict>
+      <key>CFBundleTypeName</key><string>CSV Document</string>
+      <key>CFBundleTypeRole</key><string>Editor</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>public.comma-separated-values-text</string>
+      </array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeName</key><string>PDF Document</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>com.adobe.pdf</string>
+        <string>public.pdf</string>
+      </array>
+    </dict>
   </array>
 </dict>
 </plist>

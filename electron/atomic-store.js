@@ -151,4 +151,4 @@ function makeCoalescedWriter () {
   }
 }
 
-module.exports = { makeCoalescedWriter, writeAtomicSync }
+module.exports = { makeCoalescedWriter, writeAtomicSync, syncDirectory }

@@ -115,7 +115,7 @@
       <div class="pane-split" id="pane-split" hidden>
         <div class="pane-split-grip" id="pane-split-grip" role="separator" tabindex="0"
              aria-orientation="horizontal" aria-label="Resize the lower panel"
-             title="Drag to resize · double-click to reset"></div>
+             title="Drag to resize · double-click to fit contents"></div>
         <nav class="pane-tabs is-lower" id="pane-tabs-below" role="tablist"
              aria-label="Lower panel">
           <button class="pane-tab" id="pane-outline-tab" role="tab" data-pane="outline" aria-selected="false">Outline</button>
@@ -125,8 +125,8 @@
         </nav>
       </div>
 
-      <!-- Drag the panel's own edge. Arrow keys nudge it, double-click puts
-           it back where it started. -->
+      <!-- Drag the panel's own edge. Arrow keys nudge it, double-click fits
+           the lower panel to its contents. -->
       <div class="grip" id="grip-sidebar" role="separator" tabindex="0"
            aria-orientation="vertical" aria-label="Resize sidebar"
            title="Drag to resize · double-click to reset"></div>
@@ -155,6 +155,14 @@
              name, the folder it is in as a tooltip, and the unsaved dot. -->
         <nav class="tabs" id="tabs" role="tablist" aria-label="Open notes"></nav>
         <div class="doc-tools">
+          <button class="study-start flashcard-bank-add" id="flashcard-bank-add" hidden
+                  title="Add a flashcard">
+            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+              <path d="M8 3v10M3 8h10" fill="none" stroke="currentColor" stroke-width="1.4"
+                    stroke-linecap="round"/>
+            </svg>
+            <span>Add card</span>
+          </button>
           <button class="study-start" id="study-start" hidden title="Study this language table">
             <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
               <rect x="2.5" y="3.2" width="9" height="7" rx="1.4" fill="none"
@@ -174,14 +182,17 @@
               <button class="view-option" data-view="read" title="Reading view (⌘1)"
                       aria-label="Reading view" aria-pressed="false">
                 <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M8 4.4S6.6 3.2 3.4 3.2v8.2C6.6 11.4 8 12.6 8 12.6s1.4-1.2 4.6-1.2V3.2C9.4 3.2 8 4.4 8 4.4z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M8 4.6v8" stroke="currentColor" stroke-width="1.2"/></svg>
+                <span class="view-option-label">Read</span>
               </button>
               <button class="view-option" data-view="edit" title="Editing view (⌘2)"
                       aria-label="Editing view" aria-pressed="false">
                 <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M1.7 8S4.1 3.9 8 3.9 14.3 8 14.3 8 11.9 12.1 8 12.1 1.7 8 1.7 8z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><circle cx="8" cy="8" r="1.9" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>
+                <span class="view-option-label">Edit</span>
               </button>
               <button class="view-option" data-view="raw" title="Raw view (⌘3)"
                       aria-label="Raw view" aria-pressed="false">
                 <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M5.9 4.3 2.6 8l3.3 3.7M10.1 4.3 13.4 8l-3.3 3.7" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                <span class="view-option-label">Raw</span>
               </button>
             </div>
             <!-- Why the two editing views are greyed out. An indicator, not a
@@ -199,13 +210,6 @@
                  as every fenced block's own control. -->
             <button class="doc-tool" id="doc-run" title="Run this file"
                     aria-label="Run this file" hidden></button>
-            <!-- The dock the run printed into, shown and put away. Only on
-                 screen once there is output to show — before that there is
-                 nothing to toggle. -->
-            <button class="doc-tool" id="doc-out" title="Show or hide the output"
-                    aria-label="Show or hide the output" aria-pressed="false" hidden>
-              <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><rect x="2.4" y="3.2" width="11.2" height="9.6" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="m5 6.7 1.9 1.6L5 9.9M8.7 10h2.5" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            </button>
             <!-- The ⌘⇧A the command palette carries, as a button — the panel
                  can be opened without its chord being remembered. -->
             <span class="doc-control-divider" aria-hidden="true"></span>
@@ -353,15 +357,34 @@
           </button>
         </div>
 
+        <!-- What kind of connection this is, and whose page it is. Over
+             https it is the site's own icon; over plain http — which the fence
+             in electron/main.js only allows for a server on this machine — it
+             says so in words, because a window with no address-bar marker at
+             all cannot tell a reader when the page they are typing into is
+             being carried in the clear. -->
+        <span class="site-mark" id="site-mark" hidden></span>
+
+        <!-- `list` rather than `autocomplete`: the suggestions are the vault's
+             own website files, gathered when the field is focused, so the bar
+             is also a way back to a site already filed. -->
         <input id="site-address" class="site-address" type="text" spellcheck="false"
                autocomplete="off" autocapitalize="off" autocorrect="off"
-               placeholder="Type an address…" aria-label="Address" />
+               list="site-known" placeholder="Type an address…" aria-label="Address" />
+        <datalist id="site-known"></datalist>
 
         <!-- Directly in the bar rather than in a group of its own: it is the
              only thing on this side now, and an empty group would still be
              holding the bar's gap open the whole time the button is hidden. -->
         <button class="site-btn is-wide" id="site-save" hidden
                 title="Point this file at the page on screen">Save</button>
+        <!-- The escape hatch every embedded browser needs: a page that wants a
+             real browser — a download flow, an extension, a bank — is one
+             click from one. -->
+        <button class="site-btn" id="site-external" title="Open this page in your browser"
+                aria-label="Open this page in your browser">
+          <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M9.2 3.4h3.4v3.4M12.6 3.4 8 8" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/><path d="M12.2 9.9v2.3a1.4 1.4 0 0 1-1.4 1.4H3.9a1.4 1.4 0 0 1-1.4-1.4V5.3a1.4 1.4 0 0 1 1.4-1.4h2.4" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/></svg>
+        </button>
       </div>
 
       <div class="stage" id="stage">
@@ -371,6 +394,20 @@
              only a mouse can read. -->
         <article class="reading" id="reading" role="document"
                  aria-label="Reading view" tabindex="0" hidden></article>
+        <section class="flashcard-bank" id="flashcard-bank" aria-label="Flashcard bank" hidden>
+          <header class="flashcard-bank-head">
+            <div>
+              <h2>Flashcards</h2>
+              <p id="flashcard-bank-count">No cards yet</p>
+            </div>
+            <button class="ask-btn" id="flashcard-bank-add-main" type="button">Add flashcard</button>
+          </header>
+          <section class="flashcard-bank-topics" id="flashcard-bank-topics" aria-labelledby="flashcard-bank-topics-title">
+            <h3 id="flashcard-bank-topics-title">Study by topic</h3>
+            <div id="flashcard-bank-topic-list"></div>
+          </section>
+          <div class="flashcard-bank-list" id="flashcard-bank-list"></div>
+        </section>
         <div class="tex-divider" id="tex-divider" role="separator" tabindex="0"
              aria-orientation="vertical" aria-label="Resize TeX source and PDF preview"
              title="Drag to resize · double-click to reset" hidden></div>
@@ -474,6 +511,8 @@
       <div class="empty" id="empty">
         <div class="empty-actions" id="empty-actions">
           <button class="empty-action" data-command="new-note">Create new note <kbd>⌘N</kbd></button>
+          <button class="empty-action" data-command="getting-started">Open Getting Started</button>
+          <button class="empty-action" data-command="setup">Getting started checklist</button>
           <button class="empty-action" data-command="new-whiteboard">Create new whiteboard</button>
           <button class="empty-action" data-command="switcher">Go to file <kbd>⌘O</kbd></button>
           <button class="empty-action" data-command="search">Search the vault <kbd>⌘⇧F</kbd></button>
@@ -698,6 +737,36 @@
     </section>
   </div>
 
+  <!-- A .fc bank studies one shuffled card at a time. Tags narrow the bank;
+       changing the filter starts a fresh non-repeating cycle. -->
+  <div class="fc-study" id="fc-study" hidden>
+    <section class="fc-study-box" role="dialog" aria-modal="true" aria-labelledby="fc-study-title">
+      <header class="fc-study-head">
+        <div>
+          <h2 id="fc-study-title">Study flashcards</h2>
+          <span id="fc-study-progress"></span>
+        </div>
+        <button class="icon-btn" id="fc-study-close" title="Close (esc)" aria-label="Close flashcard study">
+          <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="m4.6 4.6 6.8 6.8M11.4 4.6l-6.8 6.8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+        </button>
+      </header>
+      <div class="fc-study-tags" id="fc-study-tags" role="radiogroup" aria-label="Study area"></div>
+      <article class="fc-study-card" id="fc-study-card">
+        <img id="fc-study-image" alt="" hidden>
+        <h3 id="fc-study-question"></h3>
+        <div class="fc-study-options" id="fc-study-options" aria-label="Answer choices"></div>
+        <p class="fc-study-feedback" id="fc-study-feedback" role="status" aria-live="polite" hidden></p>
+        <p class="fc-study-explanation" id="fc-study-explanation" hidden></p>
+        <button class="fc-study-next" id="fc-study-next" hidden>Next</button>
+      </article>
+      <div class="fc-study-finished" id="fc-study-finished" hidden>
+        <strong>Cycle complete</strong>
+        <p id="fc-study-score"></p>
+        <button class="fc-study-next" id="fc-study-again">Shuffle and study again</button>
+      </div>
+    </section>
+  </div>
+
   <!-- Settings: a rail of sections, flat rows against each. The rows
        themselves are built in src/settings.js, where each one states its
        config key and its control together. -->
@@ -730,6 +799,64 @@
         <button class="ask-btn is-go" id="ask-go">OK</button>
       </div>
     </div>
+  </div>
+
+  <!-- A flashcard stays Markdown on disk, but its structured fields are quicker
+       and safer to fill here than by hand in a callout. The first answer is the
+       correct one; every field after it is another choice. -->
+  <div class="flashcard-composer" id="flashcard-composer" hidden>
+    <form class="flashcard-panel" id="flashcard-form" role="dialog" aria-modal="true"
+          aria-labelledby="flashcard-title">
+      <header class="flashcard-head">
+        <div>
+          <span class="flashcard-eyebrow">Study card</span>
+          <h2 class="flashcard-title" id="flashcard-title">Add flashcard</h2>
+        </div>
+        <button class="icon-btn" id="flashcard-close" type="button" title="Close (esc)"
+                aria-label="Close flashcard form">
+          <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="m4.6 4.6 6.8 6.8M11.4 4.6l-6.8 6.8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+        </button>
+      </header>
+
+      <div class="flashcard-field">
+        <div class="flashcard-field-head">
+          <label for="flashcard-question">Question</label>
+          <button class="flashcard-image-add" id="flashcard-image-add" type="button">Add image</button>
+          <input id="flashcard-image-input" type="file" accept="image/*" hidden>
+        </div>
+        <div class="flashcard-image-preview" id="flashcard-image-preview" hidden>
+          <img id="flashcard-image-preview-img" alt="Flashcard image preview">
+          <button id="flashcard-image-remove" type="button">Remove image</button>
+        </div>
+        <textarea id="flashcard-question" rows="2" placeholder="What should the learner know?" required></textarea>
+      </div>
+
+      <fieldset class="flashcard-choices">
+        <legend>Answer choices</legend>
+        <label class="flashcard-choice is-correct"><span>Correct answer</span><input id="flashcard-option-0" type="text" placeholder="Correct answer" autocomplete="off"></label>
+        <label class="flashcard-choice"><span>Other choice</span><input id="flashcard-option-1" type="text" placeholder="Other choice 1" autocomplete="off"></label>
+        <label class="flashcard-choice"><span>Other choice</span><input id="flashcard-option-2" type="text" placeholder="Other choice 2 (optional)" autocomplete="off"></label>
+        <label class="flashcard-choice"><span>Other choice</span><input id="flashcard-option-3" type="text" placeholder="Other choice 3 (optional)" autocomplete="off"></label>
+        <button class="flashcard-add-choice" id="flashcard-add-choice" type="button">Add answer choice</button>
+      </fieldset>
+
+      <label class="flashcard-field">
+        <span>Tags</span>
+        <input id="flashcard-tags" type="text" placeholder="ecology, biodiversity"
+               autocomplete="off">
+      </label>
+
+      <label class="flashcard-field">
+        <span>Explanation</span>
+        <textarea id="flashcard-explanation" rows="3" placeholder="Why is that the right answer?" required></textarea>
+      </label>
+
+      <p class="flashcard-error" id="flashcard-error" role="alert" hidden></p>
+      <footer class="flashcard-foot">
+        <button class="ask-btn" id="flashcard-cancel" type="button">Cancel</button>
+        <button class="ask-btn flashcard-submit" id="flashcard-add" type="submit">Add flashcard</button>
+      </footer>
+    </form>
   </div>
 
   <!-- The orphaned images, laid out to be judged: a thumbnail says in a

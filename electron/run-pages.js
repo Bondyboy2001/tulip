@@ -113,4 +113,4 @@ async function collectRunPages (dir, before, { alive, mayRemove }) {
   return pages
 }
 
-module.exports = { htmlFilesIn, collectRunPages, RUN_PAGE_LIMIT }
+module.exports = { htmlFilesIn, collectRunPages }

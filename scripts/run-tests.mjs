@@ -24,7 +24,7 @@
 
 import { spawn } from 'node:child_process'
 import { availableParallelism } from 'node:os'
-import { readFile } from 'node:fs/promises'
+import { readFile, readdir } from 'node:fs/promises'
 import path from 'node:path'
 
 /* Not part of the suite. It builds a production tree and swaps it into place
@@ -49,6 +49,7 @@ const NOT_A_TEST = new Set([
 const WINDOWED = new Set([
   'test:agent-diff',
   'test:docx-view',
+  'test:flashcards-render',
   'test:grid',
   'test:notebook-view',
   'test:table'
@@ -78,7 +79,6 @@ const all = Object.keys(scripts)
    it guarded regressed. A file under scripts/ named like a test has to be
    named by some script, or the runner refuses to start. */
 {
-  const { readdir } = await import('node:fs/promises')
   const named = Object.values(scripts).join('\n')
   const orphans = (await readdir('scripts'))
     .filter((file) => /^test-.*\.(mjs|cjs|js)$/.test(file))

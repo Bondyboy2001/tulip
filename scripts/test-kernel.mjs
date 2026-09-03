@@ -23,7 +23,56 @@ import path from 'node:path'
 import { createRequire } from 'node:module'
 
 const require = createRequire(import.meta.url)
-const { KernelHost } = require('../electron/kernel.js')
+const { KernelHost, decodeBinaryMessage } = require('../electron/kernel.js')
+
+let passed = 0
+const ok = (what) => { passed++; console.log(`ok - ${what}`) }
+
+/* ------------------------------------------------------- the binary frames
+
+   Above the skip below, deliberately: this half needs no Jupyter at all, and a
+   machine without one should still be told when the frame decoder is wrong.
+   ================================================================== */
+
+/** A message framed the way jupyter_server frames one that carries buffers:
+ *  a big-endian count, that many big-endian offsets, then the parts. */
+function frameLikeJupyter (message, buffers = []) {
+  const json = Buffer.from(JSON.stringify(message), 'utf8')
+  const parts = [json, ...buffers.map((each) => Buffer.from(each))]
+  const header = Buffer.alloc(4 * (parts.length + 1))
+  header.writeUInt32BE(parts.length, 0)
+  let at = header.length
+  parts.forEach((part, index) => {
+    header.writeUInt32BE(at, 4 * (index + 1))
+    at += part.length
+  })
+  return Buffer.concat([header, ...parts])
+}
+
+{
+  const message = {
+    msg_type: 'comm_msg',
+    parent_header: { msg_id: 'abc' },
+    content: { comm_id: 'w1', data: { method: 'update' } }
+  }
+  const frame = frameLikeJupyter(message, [Buffer.from([1, 2, 3, 4])])
+  const back = decodeBinaryMessage(frame.buffer.slice(
+    frame.byteOffset, frame.byteOffset + frame.byteLength))
+  assert.deepEqual(back, message,
+    'a binary frame — every widget message is one — was dropped rather than read')
+  ok('a message that arrived as bytes is read rather than dropped')
+
+  // The same message with nothing attached, which is the one-part frame.
+  const bare = frameLikeJupyter(message)
+  assert.deepEqual(decodeBinaryMessage(new Uint8Array(bare)), message)
+  ok('and so is one whose buffer list is empty')
+
+  // Nonsense is refused rather than turned into a loop over four billion parts.
+  assert.equal(decodeBinaryMessage(new Uint8Array([0, 0, 0, 0]).buffer), null)
+  assert.equal(decodeBinaryMessage(new Uint8Array([255, 255, 255, 255, 0, 0, 0, 8]).buffer), null)
+  assert.equal(decodeBinaryMessage('not bytes at all'), null)
+  ok('a frame that is not one is refused')
+}
 
 /* `shell` because on Windows the executable is jupyter.cmd, which spawn will
  * not find by the bare name — without it this probe can only ever report a
@@ -41,18 +90,21 @@ if (have.error || have.status !== 0) {
   process.exit(0)
 }
 
-let passed = 0
-const ok = (what) => { passed++; console.log(`ok - ${what}`) }
-
 const root = await mkdtemp(path.join(tmpdir(), 'tulip-kernel-test-'))
 await writeFile(path.join(root, 'data.txt'), 'from the notebook’s own folder\n')
 const notebook = path.join(root, 'Analysis.ipynb')
+
+/* Everything the host says that is not about one request: what the kernel is
+   doing, what it wants said, and what it says it speaks. */
+const heard = { states: [], notices: [], languages: [] }
 
 /* Every output for one request, collected the way the viewer collects it. */
 function collector (host) {
   const seen = new Map()      // msgId -> { outputs, counts, states }
   host.onEvent = (event) => {
-    if (event.kind === 'state' || event.kind === 'notice') return
+    if (event.kind === 'state') { heard.states.push(event.state); return }
+    if (event.kind === 'notice') { heard.notices.push(event.text); return }
+    if (event.kind === 'language') { heard.languages.push(event.languageInfo); return }
     const entry = seen.get(event.msgId) || { outputs: [], count: null }
     if (event.kind === 'output') entry.outputs.push([event.msgType, event.content])
     if (event.kind === 'count') entry.count = event.executionCount
@@ -63,6 +115,19 @@ function collector (host) {
 
 const host = new KernelHost({ rootDir: root })
 const seen = collector(host)
+
+/* One watchdog over the whole conversation. A kernel reply lost on a loaded
+   machine used to hang this suite for ever — an await with no deadline is a
+   test that cannot fail, only stall a lane for half an hour. Three minutes
+   covers an honest server start many times over; past that, what happened is
+   a finding to report, not a wait to extend. */
+const WATCHDOG_MS = 3 * 60 * 1000
+const watchdog = setTimeout(() => {
+  console.error(`kernel test: the conversation with Jupyter did not finish in `
+    + `${WATCHDOG_MS / 1000}s — a reply was lost or a server never became ready. `
+    + `Last states heard: ${JSON.stringify(heard.states.slice(-5))}`)
+  process.exit(1)
+}, WATCHDOG_MS)
 
 try {
   const started = Date.now()
@@ -191,12 +256,48 @@ try {
   await host.shutdown(twice)
   ok('two asks while a kernel is starting wait on the one kernel')
 
+  /* The token is a secret, and an argument vector is not: `ps` shows one to
+     every user on the machine. It travels in the environment instead. */
+  const running = await host.ensureServer()
+  assert.ok(running.token, 'the server has a token at all')
+  assert.equal(running.child.spawnargs.join(' ').includes(running.token), false,
+    'the server’s token is on its command line, where every local user can read it')
+  ok('the server’s token is not published in its command line')
+
+  /* What the kernel says it speaks, which is what nbformat records as
+     `language_info` and what an export needs to name a script file. Nothing
+     ever asked for it before, so a notebook that changed kernels lost it. */
+  for (let n = 0; n < 100 && !heard.languages.length; n++) await new Promise((r) => setTimeout(r, 100))
+  assert.equal(heard.languages[0]?.name, 'python')
+  assert.equal(heard.languages[0]?.file_extension, '.py')
+  ok('the kernel is asked what language it speaks')
+
+  /* A kernel that dies is not the same as a server that dies, and the socket
+     — which belongs to the server — stays up either way. So the only word
+     anything gets is a status message, which used to be read as `idle`: every
+     cell waiting on the kernel waited for ever, and so did the queue behind
+     them. */
+  const dying = path.join(root, 'Dying.ipynb')
+  const doomed = await host.kernelFor(dying, 'python3')
+  const noticesBefore = heard.notices.length
+  const killed = doomed.execute('import os\nos._exit(1)')
+  const ended = await Promise.race([
+    killed.done.then(() => 'settled', (err) => String(err?.message || err)),
+    new Promise((r) => setTimeout(() => r('never answered'), 30_000))
+  ])
+  assert.match(ended, /kernel died/i, `a cell whose kernel died: ${ended}`)
+  assert.ok(heard.notices.slice(noticesBefore).some((text) => /died/i.test(text)),
+    'and the reader is told what happened')
+  ok('a kernel that dies under a running cell says so rather than hanging')
+  await host.shutdown(dying)
+
   await host.shutdown(notebook)
   assert.equal(host.get(notebook), null)
   ok('a notebook’s kernel goes when the notebook does')
 } finally {
   await host.dispose().catch(() => {})
 }
+clearTimeout(watchdog)
 
 /* The failure a machine without Jupyter has, which is the one this feature
    most often meets. It has to arrive as the sentence that says what to install

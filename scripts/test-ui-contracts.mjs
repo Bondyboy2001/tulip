@@ -11,15 +11,59 @@ const read = (...parts) => fs.readFileSync(path.join(target, ...parts), 'utf8')
 const renderer = read(source ? 'src' : 'dist', 'renderer.js')
 const panelState = source ? read('src', 'panel-state.js') : renderer
 const copilot = source ? read('src', 'copilot.js') : renderer
+const copilotContext = source ? read('src', 'copilot-context.js') : renderer
 const settings = source ? read('src', 'settings.js') : renderer
 const ask = source ? read('src', 'ask.js') : renderer
 const runcode = source ? read('src', 'runcode.js') : renderer
 const manim = source ? read('src', 'manim.js') : renderer
+const infoPane = source ? read('src', 'info-pane.js') : renderer
+const overlayCatalog = source ? read('src', 'overlay-catalog.js') : renderer
+const editor = source ? read('src', 'editor.js') : renderer
 const styles = read(source ? 'src' : 'dist', source ? 'styles-features.css' : 'renderer.css')
+const flashcardStyles = read(source ? 'src' : 'dist', source ? 'styles.css' : 'renderer.css')
 const html = read(source ? 'src' : 'dist', 'index.html')
 const main = read('electron', 'main.js')
 const ai = read('electron', 'ai.js')
 const preload = read('electron', 'preload.js')
+const buildApp = source ? read('scripts', 'build-app.sh') : ''
+
+assert.match(main, /app\.on\('open-file'/,
+  'Finder document opens are accepted by the main process')
+assert.match(main, /await openVault\(path\.dirname\(real\)\)[\s\S]{0,120}createWindow\(\{ open:/,
+  'a Finder document opens through Tulip vault and window boundaries')
+if (source) {
+  assert.match(renderer, /const session = role\.open[\s\S]{0,120}\? \{ tabs: \[role\.open\], tabIndex: 0 \}/,
+    'a Finder document takes precedence over primary-window session restore')
+  assert.match(buildApp, /public\.comma-separated-values-text/,
+    'the macOS bundle declares CSV documents')
+  assert.match(buildApp, /<string>public\.pdf<\/string>/,
+    'the macOS bundle declares PDF documents')
+}
+
+assert.match(main,
+  /const INLINE_ATTACHMENT_EXT = new Set\(\[\s*\.\.\.MD_EXT, TEX_EXT, SITE_EXT, \.\.\.CODE_EXT, \.\.\.DATA_EXT\s*\]\)/,
+  'small text attachments follow the shared vault extension contract')
+if (source) {
+  assert.match(renderer, /const sourceFile = code \|\| viewingTex\(\)/,
+    'TeX and source files share the bounded source-context path')
+  assert.match(copilotContext, /if \(flashcards\) return 'flashcards'/,
+    'flashcard banks report their own Copilot context kind')
+  assert.match(copilot, /used: convo\.used \|\| 0/,
+    'context budgeting accounts for the conversation already in the model window')
+} else {
+  assert.match(renderer, /sourceContext/, 'the installed renderer carries source-file context')
+  assert.match(renderer, /contextBudget/, 'the installed renderer carries the shared turn budget')
+}
+assert.match(main, /inlineAttachments\(context, Number\(budget\.attachments\) \|\| undefined\)/,
+  'small attachment inlining follows the shared per-turn context budget')
+assert.match(main, /maxChars: Number\(budget\.pdf\) \|\| undefined/,
+  'ranked PDF context follows the shared per-turn context budget')
+assert.match(main, /delete context\.contextBudget/,
+  'the internal budget is removed before context reaches the model prompt')
+assert.match(main, /await stageZoom\(win, clamped \/ current\)[\s\S]{0,200}setZoomFactor\(clamped\)[\s\S]{0,100}sendTo\(win, 'zoom:unstage'\)[\s\S]{0,100}scheduleWindowRepaint\(win\)/,
+  'window zoom swaps from a painted destination-scale frame before its settle repaint')
+assert.match(preload, /ipcRenderer\.on\('zoom:stage'[\s\S]{0,1800}requestAnimationFrame\(\(\) => globalThis\.requestAnimationFrame\([\s\S]{0,300}ipcRenderer\.send\('zoom:staged', id\)/,
+  'the zoom staging frame is laid out and painted before main changes the native scale')
 
 for (const id of ['saved-searches', 'panel-save-search', 'ai-write']) {
   assert.match(html, new RegExp(`id=["']${id}["']`), `${id} is part of the installed shell`)
@@ -62,14 +106,15 @@ const tagBalance = (doc) => {
 }
 assert.equal(tagBalance(html), '', 'every tag in the shell is closed by its own')
 assert.doesNotMatch(html, /tex-preview-head|tex-preview-status|>PDF preview</)
-assert.match(renderer, /Search notes, PDFs, and highlights/)
+assert.match(overlayCatalog, /Search notes, PDFs, and highlights/)
 assert.match(renderer, /Saved searches|saved-searches/)
 assert.match(panelState, /aria-hidden/)
 assert.match(main, /searchPdfDocuments/)
 assert.match(main, /ai:doctor/)
 assert.match(preload, /doctor:\s*\(\)/)
 assert.match(preload, /tex:compile/)
-assert.match(main, /createTexCompiler/)
+/* The compiler is made in electron/ipc-render.js, beside the other renderers. */
+assert.match(read('electron', 'ipc-render.js'), /createTexCompiler/)
 assert.match(source ? read('src', 'styles.css') : styles, /\.tex-preview/)
 /* The file tree's own tints ride in the render-blocking core sheet. They once
    sat at the tail of the language keyboard's section, which the build slices
@@ -89,6 +134,66 @@ if (source) {
   const math = read('src', 'math.js')
   assert.match(math, /new URL\('katex\.css', document\.baseURI\)/)
   assert.doesNotMatch(math, /new URL\('katex\.css', import\.meta\.url\)/)
+  /* The primary editing and overlay textboxes have explicit names; a
+     placeholder is a visual hint, not an accessible label. */
+  assert.match(editor, /EditorView\.contentAttributes\.of\(\{ 'aria-label': 'Document editor' \}\)/)
+  assert.match(renderer, /panelInput\.setAttribute\('aria-label', OVERLAY_LABEL\[mode\]/)
+  /* View state is readable without decoding three neighbouring glyphs. */
+  for (const label of ['Read', 'Edit', 'Raw']) {
+    assert.match(html, new RegExp(`class="view-option-label">${label}<`))
+  }
+  /* Search rows carry both useful local context and the folder breadcrumb
+     that distinguishes identically named results. */
+  assert.match(renderer, /contextualLine|className = 'search-path'/)
+  /* The lower pane is sized from its separator and restores a separate height
+     for each kind, without another button competing with its tabs. */
+  assert.doesNotMatch(html, /id="pane-size-toggle"/)
+  assert.match(renderer, /function fitPaneBelow \(\)/)
+  assert.match(renderer, /paneBelowHeights/)
+  /* The resting palette is grouped and consumes each command only once. */
+  assert.match(renderer, /function paletteCommands \(\)/)
+  assert.doesNotMatch(renderer, /Suggested for this file/)
+  assert.match(renderer, /if \(contextCommand\(command\)\) take\(command\)/)
+  assert.match(renderer, /for \(const group of \['File', 'Appearance', 'Tools', 'App & Help'\]\)/)
+  assert.match(renderer, /className = 'panel-group'/)
+  assert.match(renderer, /rememberPaletteCommand\(item\.id\)/)
+  /* Zooming can push a desktop window through the drawer breakpoint while
+     macOS's native traffic lights remain fixed. The narrow titlebar must keep
+     the same left-side clearance instead of placing navigation beneath them. */
+  assert.match(flashcardStyles, /@media \(max-width: 760px\)[\s\S]{0,1200}\.doc-head \{ padding-left: 92px; \}/)
+  assert.doesNotMatch(flashcardStyles, /@media \(max-width: 760px\)[\s\S]{0,1200}\.doc-head \{ padding-left: 18px; \}/)
+  /* Zooming through the side-document drawer breakpoint must leave Copilot in
+     the grid. Its column then narrows the document instead of covering it. */
+  const narrowRightPanelCss = flashcardStyles.slice(
+    flashcardStyles.indexOf('@media (max-width: 1040px)'),
+    flashcardStyles.indexOf('@media (max-width: 760px)'))
+  assert.match(narrowRightPanelCss, /\.app \{\s*--col-side: 0px;\s*\}/)
+  assert.match(narrowRightPanelCss, /\.sidepane \{[\s\S]{0,180}position: fixed;/)
+  assert.doesNotMatch(narrowRightPanelCss, /--col-chat|\.sidepane,\s*\.ai|\[data-ai="open"\] \.ai/)
+  assert.doesNotMatch(flashcardStyles, /body:has\(\.app\[data-(?:ai|side)="open"\]\) \.drawer-scrim/)
+  assert.match(renderer, /function closeNarrowDrawer \(\)[\s\S]{0,360}dataset\.side === 'open'/)
+  assert.doesNotMatch(renderer, /function closeNarrowDrawer \(\)[\s\S]{0,500}dataset\.ai/)
+  assert.match(renderer, /drawerScrim\.addEventListener\('click', \(\) => \{[\s\S]{0,180}dataset\.sidebar === 'open'/)
+  assert.match(flashcardStyles, /@media \(max-width: 820px\)[\s\S]{0,160}\.view-option \{ width: 28px; padding: 0; justify-content: center; \}/)
+  /* Empty space in the tab row drags the window; real tabs remain interactive
+     and retain their own tab-reordering drag. */
+  assert.match(flashcardStyles, /\.tabs \{[\s\S]{0,420}-webkit-app-region: drag;/)
+  assert.match(flashcardStyles, /\.tab \{[\s\S]{0,520}-webkit-app-region: no-drag;/)
+  /* The default model picker is the deliberate shortlist; the complete
+     catalogue remains one named browse surface. */
+  assert.match(settings, /asOptions\(offeredModels\(modelCatalogue, values\(\)\.aiModels, chosen\)\)/)
+  assert.match(settings, /name: 'Browse all models'/)
+  assert.match(settings, /Run Copilot Doctor below to check/)
+  /* Setup guidance is discoverable without becoming a forced first-run tour.
+     The empty state and palette reach the same settings section. */
+  assert.match(html, /data-command="setup">Getting started checklist</)
+  assert.match(renderer, /id: 'setup', title: 'Getting started checklist…'/)
+  assert.match(renderer, /case 'setup': settings\.open\('start'\)/)
+  assert.match(renderer, /setSetting\('lastBackupAt', Date\.now\(\)\)/)
+  /* An empty bank has one creation action and cannot start a zero-card study. */
+  assert.match(renderer, /const studyable = viewingLanguageTable\(\) \|\| bankCards\.length > 0/)
+  assert.match(renderer, /flashcardBankAdd\.hidden =[^\n]+!bankCards\.length/)
+  assert.match(renderer, /flashcardBankTopics\.hidden = emptyBank/)
 }
 
 /* The window's own bundle is served over `tulip-app` for one reason: it is the
@@ -123,9 +228,15 @@ if (source) {
   assert.match(copilot, /cycleEffort\(event\.shiftKey \? -1 : 1\)/)
   assert.doesNotMatch(copilot, /effortRange|effortStops/)
   assert.match(renderer, /code-ai-hint[^\n]*⌘ Enter to send/)
+  assert.match(renderer, /codeAiInput\.rows = 3/)
+  assert.match(flashcardStyles, /\.code-ai-input \{[^}]*min-height: 76px/s)
   assert.match(renderer, /host: el\.texPdf,\s*selectionMenu: false/)
   assert.match(renderer, /id: 'new-file', title: 'New file…'/)
-  for (const id of ['fold-all-headings', 'unfold-all-headings', 'lint-file', 'export-pdf']) {
+  /* A tree click beside a real document opens a tab, but the empty tab already
+     on screen is itself the place for the first file. Always passing true here
+     stranded a permanent "New tab" at the left of the strip. */
+  assert.match(renderer, /openNote\(path, \{ newTab: !!state\.tabs\[state\.tabIndex\]\?\.path \}\)/)
+  for (const id of ['fold-all-headings', 'unfold-all-headings', 'lint-file', 'export-pdf', 'set-bookmark', 'go-to-bookmark']) {
     assert.match(renderer, new RegExp(`id: '${id}', title: [^\\n]+scope: 'markdown'`), `${id} is limited to Markdown files`)
   }
   assert.match(renderer, /id: 'note-history', title: [^\n]+scope: 'text'/)
@@ -196,12 +307,42 @@ if (source) {
   assert.match(newFileCommands, /id: 'new-tex'[^\n]*kind: 'tex'/)
   assert.match(renderer, /mode === 'new-files'[\s\S]{0,320}noteRef\(item\.path\)\.kind/)
   assert.match(renderer, /isSitePath\(relPath\) \|\| isWhiteboardPath\(relPath\)/)
-  assert.doesNotMatch(renderer, /infoRow\('Reading time'/)
-  assert.match(renderer, /infoRow\('Folder',[\s\S]{0,180}\(\) => copyPaths\(\[folder\]\)/)
-  assert.match(renderer, /api\.fileTags\.get\(path\)/)
-  assert.match(renderer, /api\.fileTags\.set\(path, next\)/)
+  assert.doesNotMatch(infoPane, /infoRow\('Reading time'/)
+  assert.match(infoPane, /infoRow\('Folder',[\s\S]{0,180}deps\.copyPaths\(\[folder\]\)/)
+
+  /* ---- where a tag lives ----
+
+     A Markdown note keeps its tags in its own head. That is the whole promise
+     of a vault of plain files: a tag set in Tulip has to be there when the
+     vault is read by anything else, and filing it in `.tulip/file-tags.json`
+     meant it was not. The sidecar stays for the kinds with no head to write —
+     a PDF, a Word document, a whiteboard — and `hasOwnHead` is the one test
+     that decides between them.
+
+     Guarded here because the failure is silent in both directions: a note
+     whose tags went back to the sidecar looks completely normal until the
+     vault is opened somewhere else, and a PDF whose tags went to a "head" it
+     does not have would simply lose them. */
+  assert.match(infoPane, /hasOwnHead\(path\) \? headListSection\(path, TAG_PROP\) : fileTagSection\(path, tags\)/)
+  assert.match(infoPane, /hasOwnHead = \(path\) =>[\s\S]{0,200}deps\.isNote\(path\)/)
+  // The sidecar is not even asked about a file that keeps its own.
+  assert.match(infoPane, /hasOwnHead\(path\) \? \[\] : deps\.api\.fileTags\.get\(path\)/)
+  assert.match(infoPane, /deps\.api\.fileTags\.set\(path, next\)/)
   assert.match(preload, /get: \(p\) => ipcRenderer\.invoke\('file-tags:get', p\)/)
-  assert.match(main, /ipcMain\.handle\('file-tags:set'/)
+  assert.match(read('electron', 'ipc-metadata.js'), /ipcMain\.handle\('file-tags:set'/)
+
+  /* The one-time move of what the sidecar was holding for notes, into the
+     notes. It has to merge rather than replace — a note already declaring
+     `tags:` keeps what it declared — and it must only clear the sidecar entry
+     once the note has actually been written. */
+  assert.match(main, /async function migrateNoteTags/)
+  assert.match(main, /const union = \[\.\.\.new Set\(\[\.\.\.head, \.\.\.sidecar\]\)\]/)
+
+  /* Tags are the only frontmatter control in Info. Generic properties and
+     aliases remain in the file, available from Raw view, but add no controls
+     to this compact pane. Tag edits still replace only the head. */
+  assert.doesNotMatch(infoPane, /propertiesSection|ALIAS_PROP|OWN_EDITOR/)
+  assert.match(infoPane, /changes: \{ from: 0, to: oldHead, insert: updated\.slice\(0, newHead\) \}/)
   assert.match(renderer, /if \(viewingWhiteboard\(\)\) \{[\s\S]{0,180}whiteboardInstance\?\.open\(relPath/)
   assert.doesNotMatch(ai, /turn-end', processed:/)
   assert.doesNotMatch(copilot, /tokens processed this turn/)
@@ -216,9 +357,17 @@ if (source) {
   assert.match(renderer, /li\.append\(docIcon\(fileKind, item\.path\)\)/)
   assert.match(renderer, /row\.append\(docIcon\(node\.kind, node\.path\)\)/)
   assert.match(preload, /create: \(dir\) => ipcRenderer\.invoke\('tex:create', dir\)/)
-  assert.match(main, /ipcMain\.handle\('tex:create'/)
-  assert.match(main, /EMPTY_TEX_DOCUMENT/)
+  /* The create handlers live in electron/ipc-create.js, beside the name rules
+     they share; the seeded TeX document moved with them. */
+  const createIpc = read('electron', 'ipc-create.js')
+  assert.match(createIpc, /ipcMain\.handle\('tex:create'/)
+  assert.match(createIpc, /EMPTY_TEX_DOCUMENT/)
   assert.match(renderer, /case 'new-file': openOverlay\('new-files', \{ dir \}\)/)
+  /* The explorer names the plain file format explicitly, and source creation
+     enters the existing language picker while preserving the clicked folder. */
+  assert.match(renderer, /label: `New markdown file\$\{suffix\}`[^\n]+createNote\(dir\)/)
+  assert.match(renderer,
+    /label: `New source file\$\{suffix\}`[^\n]+openOverlay\('new-source', \{ dir \}\)/)
   /* Creating a source or data file is the difference between the vault opening
      these and merely tolerating them. Both routes in are asserted: the picker
      that chooses a language, and the import filter that lets one be dragged. */
@@ -226,15 +375,16 @@ if (source) {
   assert.match(renderer, /case 'new-csv': createSource\(dir, '\.csv'\)/)
   assert.match(renderer, /case 'new-notebook': createSource\(dir, '\.ipynb'\)/)
   /* And a Word document, which the vault now writes as well as reads — one
-     blank package, made in main because it is a zip rather than a string. */
+     blank package, made in the create handlers because it is a zip rather
+     than a string. */
   assert.match(renderer, /case 'new-docx': createSource\(dir, '\.docx'\)/)
-  assert.match(main, /blankDocxBuffer/)
+  assert.match(read('electron', 'ipc-create.js'), /blankDocxBuffer/)
   /* A table, a notebook and a Word document are each read and edited in one
      pane, so the view switch is on the bar while any of them is open and the
      viewer is told which of the two views it is in. Without the lines that
      follow, the control would move and the document would not. */
   assert.match(renderer,
-    /el\.viewSwitch\.hidden = \(!text && !dataOpen && !notebookOpen && !docxOpen\) \|\| sourceOnly/)
+    /el\.viewSwitch\.hidden = flashcardOpen \|\| \(!text && !dataOpen && !notebookOpen && !docxOpen\) \|\| sourceOnly/)
   assert.match(renderer, /if \(dataOpen\) dataInstance\?\.setReadonly\(state\.view === 'read' \|\| readOnlyHere\(\)\)/)
   assert.match(renderer, /if \(notebookOpen\) notebookInstance\?\.setReadonly\(state\.view === 'read' \|\| readOnlyHere\(\)\)/)
   assert.match(renderer,
@@ -251,12 +401,40 @@ if (source) {
     /notebookInstance\?\.retarget\(path\)/, /docxInstance\?\.retarget\(followed\.to\)/,
     /dataInstance\?\.retarget\(followed\.to\)/, /notebookInstance\?\.retarget\(followed\.to\)/
   ]) assert.match(renderer, call)
-  assert.match(main, /ipcMain\.handle\('kernel:rename'/)
+  /* The kernel's handlers live beside the host, in electron/ipc-kernel.js. */
+  assert.match(read('electron', 'ipc-kernel.js'), /ipcMain\.handle\('kernel:rename'/)
   /* ⌘Z arrives as a menu command, and `stepHistory` hands it to whichever
      history the reader is looking at. Without this branch it fell through to
      the editor, which holds nothing while a viewed kind is on screen — so a
      mistyped word in a Word document could not be taken back at all. */
   assert.match(renderer, /if \(viewingDocx\(\)\) \{\s*\n\s*const stepped = docxInstance\?\.history\(redo\)/)
+  /* ---- the website's bar, and the page behind it ----
+
+     Every control asserted against a handler, on the same argument the Word
+     bar is asserted on below: a control with no listener is a button that does
+     nothing and says nothing about it. */
+  for (const id of ['site-mark', 'site-address', 'site-known', 'site-save', 'site-external']) {
+    assert.match(html, new RegExp(`id="${id}"`), `${id} is not in the website bar`)
+  }
+  assert.match(renderer, /el\.siteExternal\.addEventListener\('click'/)
+  assert.match(renderer, /el\.siteAddress\.addEventListener\('focus'[\s\S]{0,120}paintKnownSites\(\)/)
+  /* A website tab keeps its live page while the reader is elsewhere — the
+     whole point of the guest pool in src/site.js. `leave` hides it; only a
+     closed tab ends it, and the last tab holding a file is what says so. */
+  assert.match(renderer, /else if \(viewingSite\(\)\) site\.leave\(\)/)
+  assert.match(renderer, /!state\.tabs\.some\(\(other\) => other\.path === tab\.path\)[\s\S]{0,60}site\.forget\(tab\.path\)/)
+  // ⌘F over a page is Chromium's own find, not a refusal.
+  assert.match(renderer, /if \(viewingSite\(\)\) \{ siteFind\.open\(\); break \}/)
+  assert.doesNotMatch(renderer, /Find does not reach inside a web page/)
+  /* A file a page offers has somewhere to land, and the guests are where the
+     reader's right-click is answered. Both are main's, and both were missing
+     entirely — a download that goes nowhere and a menu that is not built are
+     each invisible from the renderer. */
+  assert.match(main, /session\.fromPartition\(partition\)\.on\('will-download'/)
+  assert.match(main, /contents\.on\('context-menu'/)
+  // A plain `target=_blank` link is not a sign-in popup and is not sized like one.
+  assert.match(main, /const signIn = disposition === 'new-window'/)
+
   /* The bar a Word document is edited from, in the strip the PDF's toolbar and
      the website's address bar live in. Every button is asserted against a
      handler, because a control with no listener is a button that does nothing
@@ -308,12 +486,8 @@ if (source) {
     ['Restart and Run All…', 'nb-restart-all']
   ]) {
     assert.match(main, new RegExp(`label: '${item}'[^\\n]*'${command}'`), `${item} is in the menu`)
-    /* Routed through `onNotebook`, which is where "only while a notebook is
-       open" now lives — and which also says so when one is not, instead of
-       going silent. These items are always enabled (the menu is built once at
-       launch and would have to be rebuilt on every tab switch to grey them out
-       per document), so choosing one over a note is a thing that happens, and
-       answering it with nothing at all reads as a broken command. */
+    /* Routed through `onNotebook` as a final guard too: the native menu is
+       contextual, but a command already in flight must still verify the tab. */
     assert.match(renderer, new RegExp(`case '${command}': onNotebook\\(`),
       `${command} goes through the notebook guard`)
   }
@@ -321,6 +495,16 @@ if (source) {
     'the notebook guard tests for an open notebook')
   assert.match(renderer, /function onNotebook \([\s\S]{0,320}else toast\(/,
     'and says so when there is not one')
+  assert.match(main, /const notebookActive = menuDocumentKind\(\) === 'notebook'/,
+    'the native menu follows the focused window document')
+  assert.match(main, /label: 'Notebook',\s*visible: notebookActive/,
+    'the Notebook menu is visible only for a notebook')
+  assert.match(preload, /menuContext: \(kind\) => ipcRenderer\.send\('menu:context'/,
+    'the bridge reports active document menu context')
+  assert.match(renderer, /api\.window\.menuContext\(notebookOpen \? 'notebook' : ''\)/,
+    'tab changes report whether the active document is a notebook')
+  assert.match(main, /ipcMain\.on\('menu:context'[\s\S]{0,300}buildMenu\(\)/,
+    'main rebuilds the contextual menu when that state changes')
   /* The keyboard sheet, asserted leg by leg for the same reason the notebook
      menu is: the Help item, the command the renderer answers it with, and the
      markup it fills. A menu entry whose command nobody handles is silence, and
@@ -397,25 +581,78 @@ if (source) {
       `${chord} ("${what}") is answered in ${proof[0]}, and that handler is gone`)
   }
   /* Completion, inspection and the answer to an `input()` all need the live
-     kernel, so all three cross the bridge rather than being guessed at here. */
+     kernel, so all three cross the bridge rather than being guessed at here.
+     The handlers answer from electron/ipc-kernel.js, beside the host. */
+  const kernelIpc = read('electron', 'ipc-kernel.js')
   for (const call of ['input', 'complete', 'inspect']) {
     assert.match(preload, new RegExp(`ipcRenderer\\.invoke\\('kernel:${call}'`))
-    assert.match(main, new RegExp(`ipcMain\\.handle\\('kernel:${call}'`))
+    assert.match(kernelIpc, new RegExp(`ipcMain\\.handle\\('kernel:${call}'`))
   }
   /* The one thing a notebook has to stop and ask about — a restart throws away
      every variable in the session — asked in the app's own dialog. */
-  assert.match(renderer, /\n\s*ask,\n\s*notify: \(text\) => toast\(text\),/)
+  assert.match(renderer, /\n\s*ask,\n/)
+  assert.match(renderer, /\n\s*beforeRun: mayRunCode,\n/)
+  assert.match(renderer, /\n\s*notify: toast,/)
   /* Auto-resize is offered for both grids and routed to whichever is open —
      the palette row and the thing it calls, which are easy to add one of. */
   assert.match(renderer,
     /if \(viewingLanguageTable\(\) \|\| viewingData\(\)\) \{\s*commands\.push\(\{ id: 'fit-columns'/)
   assert.match(renderer, /viewingData\(\) \? dataInstance\?\.fitColumns\(\) : editor\?\.fitAllColumns\(\)/)
   assert.match(preload, /create: \(dir, name, ext\) => ipcRenderer\.invoke\('source:create', dir, name, ext\)/)
-  assert.match(main, /ipcMain\.handle\('source:create'/)
-  assert.match(main, /!isCode\(source\) && !isData\(source\)\) \{ skipped\+\+; return \}/)
+  assert.match(read('electron', 'ipc-create.js'), /ipcMain\.handle\('source:create'/)
+  /* The import door admits whatever the vault walk itself keeps — one test,
+     stated once — so a newly supported kind cannot be listed in the tree and
+     refused at the door, which is exactly what happened to `.docx`. The door
+     itself lives in electron/ipc-vault-write.js. */
+  assert.match(read('electron', 'ipc-vault-write.js'), /if \(!isSnapshotFile\(source\)\) \{ skipped\+\+; return \}/)
   assert.match(renderer, /mode === 'new-files'\) \{ runCommand\(item\.id, dir\)/)
   assert.doesNotMatch(renderer, /title = 'Press ⌘Enter to send'/)
   assert.match(renderer, /codeAiPop\.isConnected && codeAiSession\?\.anchor === anchor/)
+  /* Slash commands borrow the command palette surface; applying that treatment
+     to every CodeMirror completion would also bloat note, tag and language
+     pickers. Keep the source marker and scoped class wired together. */
+  assert.match(editor, /function completionTooltipClass[\s\S]{0,300}'tk-slash-completion'/)
+  assert.match(editor, /tooltipClass: completionTooltipClass/)
+  assert.match(editor, /\.tk-slash-completion[\s\S]{0,800}borderRadius: '10px'/)
+  assert.match(editor, /\.tk-slash-completion[\s\S]{0,1200}background: 'var\(--accent-dim\)'/)
+  assert.match(html, /id="flashcard-add-choice"[^>]*>Add answer choice<\/button>/)
+  assert.match(html, /id="flashcard-image-add"[^>]*>Add image<\/button>/)
+  assert.match(html, /id="flashcard-image-input"[^>]*accept="image\/\*"/)
+  assert.match(html, /id="flashcard-tags"/)
+  assert.match(html, /id="flashcard-bank-add"/)
+  assert.match(html, /id="flashcard-bank"/)
+  assert.match(html, /id="flashcard-bank-add-main"/)
+  assert.match(html, /id="flashcard-bank-topic-list"/)
+  assert.match(html, /id="flashcard-bank-list"/)
+  assert.match(html, /id="fc-study"/)
+  assert.match(html, /flashcard-choice is-correct[^>]*><span>Correct answer<\/span>/)
+  assert.doesNotMatch(html, /name="flashcard-correct"/)
+  assert.match(renderer, /function addFlashcardChoice[\s\S]{0,1200}el\.flashcardAddChoice\.before\(row\)/)
+  assert.match(renderer, /function renumberFlashcardChoices[\s\S]{0,650}Remove other choice \$\{index\}/)
+  assert.match(renderer, /options,[\s\S]{0,80}correct: 0/)
+  assert.match(renderer, /tags: el\.flashcardTags\.value/)
+  assert.match(renderer, /buildFlashcardQueue\(study\.cards, tag\)/)
+  assert.match(renderer, /el\.reading\.hidden = !text \|\| flashcardOpen/)
+  assert.match(renderer, /el\.editorHost\.hidden = !text \|\| flashcardOpen/)
+  assert.match(renderer, /button\.addEventListener\('click', \(\) => openFlashcardStudy\(tag\)\)/)
+  assert.match(renderer, /id: 'new-flashcards', title: 'Flashcard bank'/)
+  assert.match(renderer, /function resetFlashcardChoices[\s\S]{0,180}\.flashcard-choice\.is-added/)
+  assert.match(renderer, /el\.flashcardAddChoice\.addEventListener\('click', \(\) => addFlashcardChoice\(\)\)/)
+  /* Quiz source stays behind a purpose-built card. Answering is handled inside
+     the widget; only its Edit button opens the structured form. */
+  assert.match(editor, /class FlashcardWidget extends WidgetType/)
+  assert.match(editor, /CustomEvent\('tulip:flashcard-edit'/)
+  assert.match(editor, /function buildFlashcardWidgets[\s\S]{0,700}new FlashcardWidget/)
+  assert.match(editor, /head\?\.kind\.id === 'quiz'[\s\S]{0,180}if \(card\) return false/)
+  assert.match(renderer, /document\.addEventListener\('tulip:flashcard-edit'/)
+  assert.match(renderer, /editing \? 'Save changes' : 'Add flashcard'/)
+  assert.match(flashcardStyles, /\.tk-flashcard-edit/)
+  assert.match(flashcardStyles, /\.flashcard-field textarea \{ overflow-y: hidden; \}/)
+  assert.match(flashcardStyles, /\.flashcard-bank \{[\s\S]{0,120}flex: 1;[\s\S]{0,80}min-width: 0;/)
+  assert.match(renderer, /flashcardForm\.addEventListener\('paste'/)
+  /* Flashcards are inserted from `/Flashcard`. Keeping the same action in the
+     command palette made two search surfaces compete for one operation. */
+  assert.doesNotMatch(renderer, /insert-flashcard/)
   assert.doesNotMatch(renderer, /document\.addEventListener\('pointerdown',[\s\S]{0,180}codeAiPop/)
   assert.doesNotMatch(renderer, /codeAiPop\.addEventListener\('keydown',[\s\S]{0,160}Escape/)
   /* Reject is the destructive half of the pair and is coloured as one — see
@@ -430,7 +667,9 @@ if (source) {
      difference is every subclass anyone actually uses — `MovingCameraScene`,
      `ThreeDScene` — offered and then refused. */
   assert.match(manim, /\/Scene\\b\/\.test/)
-  assert.match(main, /\/Scene\\b\/\.test/)
+  /* Main's half of the question moved into the render domain with the rest of
+     the manim renderer. */
+  assert.match(read('electron', 'ipc-render.js'), /\/Scene\\b\/\.test/)
   /* And a source file's language arrives as its extension, so the check for
      "is this python" goes through the alias list rather than one spelling. */
   assert.match(renderer, /isLanguage\(lang, 'python'\) && isManimSource\(code\)/)
@@ -589,11 +828,13 @@ if (source) {
   /* Source is dense and tool reads are cheap; a note is neither. The contract
      is that the two stay apart, not what either number happens to be — pinning
      the values would make a deliberate re-tune a test failure. */
-  const budgets = renderer.match(/code: \{ whole: (\d+), window: (\d+) \}/)
-  const notes = renderer.match(/note: \{ whole: (\d+), window: (\d+) \}/)
-  assert.ok(budgets && notes, 'both excerpt budgets must be readable')
-  assert.ok(Number(budgets[1]) < Number(notes[1]),
-            'a source file must start being windowed long before a note does')
+  if (source) {
+    const budgets = copilotContext.match(/code: \{ whole: (\d+), window: (\d+) \}/)
+    const notes = copilotContext.match(/note: \{ whole: (\d+), window: (\d+) \}/)
+    assert.ok(budgets && notes, 'both excerpt budgets must be readable')
+    assert.ok(Number(budgets[1]) < Number(notes[1]),
+              'a source file must start being windowed long before a note does')
+  }
   /* Compaction acts well below the red ring, because a thread that is resumed
      re-sends itself on every turn: waiting costs the whole context again. */
   const roomy = Number(copilot.match(/const ROOMY = ([\d.]+)/)?.[1])
@@ -610,5 +851,32 @@ if (source) {
     ]
   )
 }
+
+/* A note's merge base follows every successful save, not only the ones no
+   keystroke interrupted. With the base one save behind, a watcher event that
+   changed nothing merged the buffer against Tulip's own previous autosave and
+   called the result a conflict. And a disk that still matches the base is not
+   merged at all. */
+assert.match(renderer, /holdNoteStamp\(wrote, wroteReply\?\.stamp\)[\s\S]{0,900}if \(tab && tab\.path === wrote\) tab\.base = text[\s\S]{0,1400}if \(editor\.state\.doc === doc && state\.current\?\.path === wrote\)/,
+  'the tab base is updated after every successful write, before the dirty-flag identity test')
+assert.match(renderer, /if \(disk === buffer\) \{ mergeOpen = false; return true \}[\s\S]{0,600}if \(disk === base\) \{[\s\S]{0,120}mergeOpen = false/,
+  'a disk that still matches the base skips the merge')
+
+/* A bookmark is one comment line in the note; a fresh open of the note lands on
+   it, a return to its tab does not; the second bookmark replaces the first. */
+assert.match(read('src', 'bookmark.js'), /export const BOOKMARK_LINE = '<!-- bookmark -->'/)
+assert.match(renderer, /bookmark = place == null \} = \{\}\) \{/, 'a fresh open honours the bookmark, a tab return keeps its own place')
+assert.match(renderer, /place: tabPlace\(state\.tabs\[state\.tabIndex\]\),[\s\S]{0,200}bookmark: true/, 'launch reopens the last note at its bookmark')
+assert.match(renderer, /const had = bookmarkLineOf\(doc\.toString\(\)\)[\s\S]{0,700}changes\.push\(\{ from: at\.from, insert: BOOKMARK_LINE \+ '\\n' \}\)/, 'setting a bookmark removes the old one in the same edit')
+
+assert.match(read('src', 'markdown.js'), /md\.block\.ruler\.before\('html_block', 'bookmark'/, 'the reading view claims the bookmark ahead of raw HTML')
+/* `/bookmark` in the slash menu is the palette's "Bookmark this place": the
+   slash text is cleared first, then the renderer's own setBookmark runs. */
+assert.match(read('src', 'slash.js'), /action\('Bookmark', \[[^\]]*\], BLOCKS,\s*\(view\) => view\.dom\.dispatchEvent\(new CustomEvent\('tulip:bookmark'/, 'the slash menu offers Bookmark as an action')
+assert.match(renderer, /document\.addEventListener\('tulip:bookmark', \(\) => setBookmark\(\)\)/, 'the renderer answers /bookmark with setBookmark')
+assert.match(read('src', 'editor.js'), /const RENDERED = \[bookmarkPreview,/, 'the editing view draws the bookmark widget')
+assert.match(renderer, /editor\.scrollToLine\(marker, \{ center: true \}\)[\s\S]{0,80}restoreReadingPlace\(marker, \{ center: true \}\)/, 'the bookmark is centred in both views')
+assert.match(renderer, /if \(place && !marked\) \{/, 'the bookmark takes the remembered place\'s turn rather than racing it')
+assert.match(read('src', 'styles.css'), /\.bookmark-mark, \.tk-bookmark \{/, 'both views share the ribbon styles')
 
 console.log(`ui contracts: ${source ? 'source' : target}`)

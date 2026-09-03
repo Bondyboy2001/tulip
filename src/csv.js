@@ -107,6 +107,33 @@ const FIT_CHARS = 500
 const CHAR_WIDTH = 7.4
 const CELL_PADDING = 18
 
+/* The size past which a file is opened as a preview of its first rows rather
+   than in full.
+ *
+ * Thirty-two megabytes, which is roughly a quarter of a million rows of a
+ * dozen ordinary columns — comfortably above the two-hundred-thousand-row
+ * export this viewer was built for, and comfortably below the point where the
+ * window stops answering. Everything about opening a table is linear in its
+ * size and none of it is interruptible: the text crosses the IPC boundary as
+ * one string, the parser walks it a character at a time, and the column
+ * measure reads a sample of what comes out. A five-hundred-megabyte export
+ * put through that is not slow, it is a frozen window with no way to say what
+ * it is doing — so past this it is not attempted, and what is offered instead
+ * is the top of the file, read-only, with the whole of it one click away for
+ * a reader who knows what they are asking for.
+
+   Read-only matters more than the speed does. A preview holding the first
+   fifty thousand rows of a million-row file that could be *saved* would write
+   those fifty thousand over the million, which is the worst thing this file
+   could possibly do. */
+const PREVIEW_ABOVE = 32 * 1024 * 1024
+/* How much of the text a preview parses, and how many rows it keeps. The
+   character budget is what stops the parse itself from being the freeze; the
+   row cap is what the reader is told they are looking at. Four megabytes is
+   tens of thousands of rows of anything ordinary. */
+const PREVIEW_CHARS = 4 * 1024 * 1024
+const PREVIEW_ROWS = 50000
+
 /* Undo depth. Cell edits are patches and cost nothing to keep; the structural
    ones carry a shallow copy of the row list, which on a large file is real
    memory, so far fewer of those are kept. */
@@ -126,8 +153,31 @@ const addsToSelection = (event) => event.metaKey || (event.ctrlKey && !isMac())
 
 /* ------------------------------------------------------------- the format */
 
+/** Does the quoted field opening at `at` close cleanly on its own line?
+ *
+ *  Only asked under a tab delimiter, and only to decide whether the quote is
+ *  data — see the note in `readSeparated`. A field is genuinely quoted when a
+ *  lone quote (doubled quotes being one quote's worth of data) turns up before
+ *  the line ends and is followed by the delimiter, a line ending or the end of
+ *  the file. The line is the boundary on purpose: a closing quote found three
+ *  rows later is almost never this field's close — it is the next unit in a
+ *  column of them — and taking it as one is exactly how `"5 inch` used to
+ *  swallow the rest of the file into a single cell. The price is the quoted
+ *  multi-line TSV field, which honest TSV writers do not produce at all. */
+const closesQuoted = (source, at, delimiter) => {
+  for (let i = at + 1; i < source.length; i++) {
+    const ch = source[i]
+    if (ch === '\n' || ch === '\r') return false
+    if (ch !== '"') continue
+    if (source[i + 1] === '"') { i++; continue }
+    const after = source[i + 1]
+    return after === undefined || after === delimiter || after === '\n' || after === '\r'
+  }
+  return false
+}
+
 /**
- * Rows of fields, from separated text.
+ * Rows of fields, and the shape of the text they came out of.
  *
  * RFC 4180 with the leniencies every real file needs: either line ending, a
  * final newline or not, and a doubled `""` inside a quoted field standing for
@@ -137,17 +187,53 @@ const addsToSelection = (event) => event.metaKey || (event.ctrlKey && !isMac())
  * Written as one pass over the characters rather than a split-and-repair,
  * because a delimiter or a newline *inside* quotes is the ordinary case in
  * exported data, and splitting on either first is what gets that wrong.
+ *
+ * The shape is gathered in the same pass rather than by scanning the text
+ * again: three of its four members are answered by characters this loop is
+ * already looking at, and the fourth — who quoted what — is only knowable here.
+ *
+ * @returns {{rows: string[][], shape: {
+ *   newline: string, finalNewline: boolean, quoteAll: boolean,
+ *   quoteColumns: Set<number>, bom: boolean
+ * }}}
  */
-export function parseSeparated (text, delimiter = ',') {
-  // A byte-order mark is not part of the first heading.
-  const source = String(text ?? '').replace(/^\uFEFF/, '')
+export function readSeparated (text, delimiter = ',', { strictQuotes = false } = {}) {
+  const raw = String(text ?? '')
+  // A byte-order mark is not part of the first heading — but it is a fact
+  // about the file, and one that has to go back on when it is written.
+  const bom = raw.startsWith('\uFEFF')
+  const source = bom ? raw.slice(1) : raw
   const rows = []
   let row = []
   let field = ''
   let quoted = false
   let started = false
+  /* Whether *this* field was written quoted, which is not the same as whether
+     it needs to be. See `quoteColumns` below. */
+  let wasQuoted = false
+  let newline = ''
 
-  const endField = () => { row.push(field); field = ''; started = true }
+  /* Who quoted what, tallied per column rather than per cell.
+   *
+   * Per cell would be the exact answer and is not affordable: a two-hundred
+   * thousand row export of twenty columns is four million facts to carry
+   * beside four million strings, kept alive for as long as the tab is open.
+   * Per column is both cheap and the more useful answer anyway — a writer that
+   * quotes decides by column, and a cell *typed* into a column that Excel
+   * quotes wants quoting too, which a per-cell record could never say because
+   * the cell did not exist when the file was read. */
+  const quotedCol = []
+  const bareCol = []
+  let sawQuote = false
+
+  const endField = () => {
+    const c = row.length
+    if (wasQuoted) { quotedCol[c] = true; sawQuote = true } else if (field !== '') bareCol[c] = true
+    row.push(field)
+    field = ''
+    wasQuoted = false
+    started = true
+  }
   const endRow = () => { endField(); rows.push(row); row = []; started = false }
 
   for (let i = 0; i < source.length; i++) {
@@ -161,15 +247,34 @@ export function parseSeparated (text, delimiter = ',') {
       continue
     }
 
-    if (ch === '"' && field === '') { quoted = true; started = true; continue }
+    if (ch === '"' && field === '' && !wasQuoted) {
+      /* Under a comma, a semicolon or a pipe, a leading quote is a quoted
+         field and nothing else: those are the delimiters whose writers all
+         follow RFC 4180.
+
+         A tab file is the exception, and an expensive one. Almost nothing that
+         writes TSV quotes anything — the format's whole claim is that a tab
+         cannot appear in a value — so a leading quote there is far more likely
+         to be a unit than a syntax: `"5 inch` in a column of pipe sizes used to
+         open a quoted field that ran to the end of the file, and a
+         forty-thousand-row export arrived as one cell. Looking ahead for a
+         clean close costs a scan of one field in the ordinary case and settles
+         it honestly. */
+      if (strictQuotes || delimiter !== '\t' || closesQuoted(source, i, delimiter)) {
+        quoted = true
+        wasQuoted = true
+        started = true
+        continue
+      }
+    }
     if (ch === delimiter) { endField(); continue }
     if (ch === '\r') {
       // Swallow the LF of a CRLF; a bare CR is still a line ending.
-      if (source[i + 1] === '\n') i++
+      if (source[i + 1] === '\n') { i++; if (!newline) newline = '\r\n' } else if (!newline) newline = '\r'
       endRow()
       continue
     }
-    if (ch === '\n') { endRow(); continue }
+    if (ch === '\n') { if (!newline) newline = '\n'; endRow(); continue }
     field += ch
     started = true
   }
@@ -177,37 +282,85 @@ export function parseSeparated (text, delimiter = ',') {
   /* Whatever is left is a final row without a line ending. A file that *did*
      end with one leaves nothing behind, and must not gain a blank row for it —
      which is the difference between a table of 100 rows and one of 101 whose
-     last is empty. */
-  if (started || field !== '' || row.length) endRow()
+     last is empty. That same emptiness is how the writer knows to put the
+     final newline back, and only back, where there was one. */
+  const finalNewline = !(started || field !== '' || row.length)
+  if (!finalNewline) endRow()
 
-  return rows
+  /* A column is "a quoted column" when every value in it that could have been
+     written bare was written quoted instead. One bare value settles it the
+     other way: a writer that quotes by column does not sometimes forget. */
+  const width = rows.reduce((most, r) => Math.max(most, r.length), 0)
+  const quoteColumns = []
+  for (let c = 0; c < width; c++) quoteColumns[c] = !!quotedCol[c] && !bareCol[c]
+
+  return {
+    rows,
+    shape: {
+      newline: newline || '\n',
+      finalNewline: source.length ? finalNewline : true,
+      bom,
+      /* Every column quoted, which is what Excel and a great many database
+         exports emit and what a diff notices the loss of first. */
+      quoteAll: sawQuote && width > 0 && quoteColumns.every(Boolean),
+      quoteColumns
+    }
+  }
+}
+
+/**
+ * Rows of fields, from separated text.
+ *
+ * The shape-less half of `readSeparated`, kept because most callers — the
+ * delimiter sniffer, the clipboard — want the table and have no file to be
+ * faithful to.
+ */
+export function parseSeparated (text, delimiter = ',', options = {}) {
+  return readSeparated(text, delimiter, options).rows
 }
 
 /** Whether a field has to be quoted to survive the round trip. Leading and
  *  trailing spaces are included: readers differ on whether they keep them, and
- *  quoting is the only way to say the space is data. */
-const needsQuotes = (value, delimiter) =>
-  value.includes(delimiter) || value.includes('"') ||
+ *  quoting is the only way to say the space is data.
+ *
+ *  `wasQuoted` is the fifth reason, and the one that is not about the value at
+ *  all: a field the file quoted is written quoted whether or not it needs to
+ *  be, because the alternative is a diff against every line of a file whose
+ *  writer quotes everything. */
+const needsQuotes = (value, delimiter, wasQuoted = false) =>
+  wasQuoted || value.includes(delimiter) || value.includes('"') ||
   value.includes('\n') || value.includes('\r') ||
   value !== value.trim()
 
-const quoteField = (value, delimiter) =>
-  needsQuotes(value, delimiter) ? `"${value.replace(/"/g, '""')}"` : value
+const quoteField = (value, delimiter, wasQuoted = false) =>
+  needsQuotes(value, delimiter, wasQuoted) ? `"${value.replace(/"/g, '""')}"` : value
 
 /**
- * Separated text, from rows of fields. The inverse of `parseSeparated` for
+ * Separated text, from rows of fields. The inverse of `readSeparated` for
  * every file it can read.
  *
- * `newline` is the file's own, detected on open and handed back: a file
+ * `shape` is the file's own, handed back by the reader: the line ending, the
+ * final newline or its absence, and which columns were written quoted. A file
  * written with CRLF that came back LF is a diff against every line of it, from
- * an edit to one cell.
+ * an edit to one cell — and so is one whose forty quoted columns came back
+ * bare.
+ *
+ * The byte-order mark is deliberately *not* put on here. It is a property of
+ * the bytes rather than of the text, and `api.file.write` is what turns text
+ * into bytes; emitting it here would put a literal U+FEFF into a UTF-16 file
+ * that then got a real mark in front of it as well.
  */
-export function formatSeparated (rows, delimiter = ',', newline = '\n') {
+export function formatSeparated (rows, delimiter = ',', newline = '\n', shape = null) {
+  const quoteAll = !!shape?.quoteAll
+  const quoteColumns = shape?.quoteColumns ?? []
+  const finalNewline = shape ? shape.finalNewline !== false : true
   const body = rows
-    .map((row) => row.map((cell) => quoteField(String(cell ?? ''), delimiter)).join(delimiter))
+    .map((row) => row
+      .map((cell, c) => quoteField(String(cell ?? ''), delimiter, quoteAll || !!quoteColumns[c]))
+      .join(delimiter))
     .join(newline)
-  // A trailing newline, which is what every writer of these files emits.
-  return rows.length ? body + newline : ''
+  if (!rows.length) return ''
+  return finalNewline ? body + newline : body
 }
 
 /* ---------------------------------------------------------- the delimiter
@@ -291,12 +444,30 @@ export function sniffDelimiter (text, fallback = ',') {
   return best ? best.delimiter : fallback
 }
 
-/** The line ending the file already uses, so writing it back does not rewrite
- *  every line. Decided by the first ending in the file: a mixed file has to be
- *  normalised to something, and the one it opens with is the better guess. */
-const detectNewline = (text) => {
-  const at = String(text ?? '').indexOf('\n')
-  return at > 0 && text[at - 1] === '\r' ? '\r\n' : '\n'
+/**
+ * The line ending the file already uses, so writing it back does not rewrite
+ * every line. Decided by the first ending in the file: a mixed file has to be
+ * normalised to something, and the one it opens with is the better guess.
+ *
+ * All three endings, not two. The old reading looked only for an LF and called
+ * anything else Unix — which is right for CRLF and wrong for the third case: a
+ * bare-CR file (classic Mac, and what a surprising number of instruments and
+ * lab exports still emit) has no LF anywhere in it, so every one of them was
+ * silently rewritten to LF the first time a cell was touched. That is a
+ * one-cell edit arriving as a diff against the entire file, which is the exact
+ * failure this function exists to prevent.
+ *
+ * `readSeparated` works the same thing out in the pass it is already making
+ * over the characters, and is what the grid uses. This is kept for the callers
+ * that have only the text.
+ */
+export const detectNewline = (text) => {
+  const source = String(text ?? '')
+  const lf = source.indexOf('\n')
+  const cr = source.indexOf('\r')
+  if (cr < 0) return '\n'
+  if (cr + 1 === lf) return '\r\n'
+  return lf < 0 || cr < lf ? '\r' : '\n'
 }
 
 /* ------------------------------------------------------------ the reading
@@ -427,16 +598,105 @@ const quantityValue = (text) => {
   return Number.isNaN(number) ? null : number
 }
 
-/** A cell as a moment in time, or null. Deliberately narrow: only the two
- *  shapes that are unambiguously dates — ISO, and the slashed form — get
- *  parsed, because handing everything to `Date.parse` turns a product code
- *  into a year and sorts a column into nonsense. */
-const dateValue = (text) => {
-  const value = String(text ?? '').trim()
-  if (!/^\d{4}-\d{2}-\d{2}([T ].*)?$/.test(value) && !/^\d{1,2}\/\d{1,2}\/\d{2,4}$/.test(value)) {
-    return null
+/* The slashed date, taken apart rather than handed to `Date.parse`.
+ *
+ * `Date.parse` reads `05/01/2024` as the fifth of January because the ECMAScript
+ * specification says a non-ISO string is parsed however the implementation
+ * pleases, and every implementation pleases to read it American-first. In a
+ * British or European export that is the first of May, and — far worse — the
+ * *thirteenth* of January comes back NaN, so `13/01/2024` was not a date at
+ * all: it fell through to being a word, and `compareKeys` then compared a
+ * moment against a string. That is how a column of 2023 and 2024 dates sorted
+ * with January above the previous December and nothing on screen saying why.
+ *
+ * So the reading is decided per column, once, by `columnDateOrder`, and every
+ * value in that column is then read the same way. */
+const SLASHED = /^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/
+const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})([T ].*)?$/
+
+/** The order the app's own locale writes a slashed date in — the answer when
+ *  the column's own values cannot settle it, which is every column whose days
+ *  all happen to fall in the first twelve of the month.
+ *
+ *  Asked once. `formatToParts` builds a formatter, and a comparison sort would
+ *  otherwise ask this question a few million times for one click. */
+let localeOrder = null
+const localeDateOrder = () => {
+  if (localeOrder) return localeOrder
+  try {
+    const parts = new Intl.DateTimeFormat(undefined, {
+      day: '2-digit', month: '2-digit', year: 'numeric'
+    }).formatToParts(new Date(Date.UTC(2000, 0, 2)))
+    const day = parts.findIndex((part) => part.type === 'day')
+    const month = parts.findIndex((part) => part.type === 'month')
+    localeOrder = day >= 0 && month >= 0 && day < month ? 'dmy' : 'mdy'
+  } catch {
+    localeOrder = 'mdy'
   }
-  const at = Date.parse(value)
+  return localeOrder
+}
+
+/**
+ * Which way round a column writes its slashed dates.
+ *
+ * The file cannot say, so the column is asked. A first field above twelve can
+ * only be a day, and a second field above twelve can only be a month's
+ * neighbour — that is, the file is month-first. Both are proof; either one
+ * settles the whole column, because a column mixing the two conventions is not
+ * a thing any exporter produces and guessing per value is exactly the mixture
+ * this fix exists to end.
+ *
+ * Where neither appears — twelve months of the first of the month, a column of
+ * three rows — nothing in the data can decide it and the app's locale is the
+ * best remaining guess.
+ */
+export function columnDateOrder (rows, base, col) {
+  for (const index of base) {
+    const parts = SLASHED.exec(String(rows[index]?.[col] ?? '').trim())
+    if (!parts) continue
+    if (Number(parts[1]) > 12) return 'dmy'
+    if (Number(parts[2]) > 12) return 'mdy'
+  }
+  return localeDateOrder()
+}
+
+/** A two-digit year as the century a spreadsheet means by it: the POSIX split,
+ *  which every one of them uses. */
+const fullYear = (digits) => {
+  const year = Number(digits)
+  if (digits.length > 2) return year
+  return year < 69 ? 2000 + year : 1900 + year
+}
+
+/**
+ * A cell as a moment in time, or null.
+ *
+ * Deliberately narrow: only the two shapes that are unambiguously dates — ISO,
+ * and the slashed form — get read, because handing everything to `Date.parse`
+ * turns a product code into a year and sorts a column into nonsense.
+ *
+ * Built with `Date.UTC` rather than parsed. A local-time constructor puts a
+ * column of dates an hour apart across a daylight-saving boundary, which is
+ * invisible in the grid and real in the sort; UTC has no such seam and the
+ * numbers are only ever compared against each other.
+ *
+ * @param order 'dmy' or 'mdy' — how this *column* writes a slashed date, from
+ *              `columnDateOrder`. Nothing decides it per value: that is the
+ *              bug, not the feature.
+ */
+const dateValue = (text, order = 'mdy') => {
+  const value = String(text ?? '').trim()
+  const iso = ISO_DATE.exec(value)
+  if (iso) {
+    const at = Date.parse(value)
+    return Number.isNaN(at) ? null : at
+  }
+  const parts = SLASHED.exec(value)
+  if (!parts) return null
+  const day = Number(order === 'dmy' ? parts[1] : parts[2])
+  const month = Number(order === 'dmy' ? parts[2] : parts[1])
+  if (!day || day > 31 || !month || month > 12) return null
+  const at = Date.UTC(fullYear(parts[3]), month - 1, day)
   return Number.isNaN(at) ? null : at
 }
 
@@ -470,12 +730,30 @@ const QUANTITY = 0
 const MOMENT = 1
 const WORD = 2
 
-const cellKey = (text) => {
+const cellKey = (text, order = 'mdy') => {
   const quantity = quantityValue(text)
   if (quantity !== null) return { rank: QUANTITY, value: quantity, text }
-  const at = dateValue(text)
+  const at = dateValue(text, order)
   if (at !== null) return { rank: MOMENT, value: at, text }
   return { rank: WORD, value: 0, text }
+}
+
+/** One cell classifier per column, with the column's date reading baked in and
+ *  its answers remembered.
+ *
+ *  Many columns hold the same ten or twenty strings repeated two hundred
+ *  thousand times, and `cellKey` runs half a dozen regular expressions per
+ *  distinct value — so the duplicates pay once. */
+const columnClassifier = (order) => {
+  const cache = new Map()
+  return (text) => {
+    let hit = cache.get(text)
+    if (hit === undefined) {
+      hit = cellKey(text, order)
+      cache.set(text, hit)
+    }
+    return hit
+  }
 }
 
 /** The order two classified cells belong in. */
@@ -505,67 +783,202 @@ const compareKeys = (p, q) => {
  * answer: it puts the data together and the stray label at one end, rather
  * than interleaving them by their spelling.
  */
-export function compareCells (a, b) {
+export function compareCells (a, b, order = 'mdy') {
   const x = String(a ?? '')
   const y = String(b ?? '')
   if (x === y) return 0
-  return compareKeys(cellKey(x), cellKey(y))
+  return compareKeys(cellKey(x, order), cellKey(y, order))
 }
 
 /**
- * `base` reordered by one column.
- *
- * Blanks go last in both directions — a descending sort that opened with a
- * screen of empty cells would be answering a question nobody asked — and ties
- * keep the order they came in, so sorting by one column and then another
- * leaves the first sort as the tiebreak.
- *
- * Each cell is classified once, before the sort starts, and the comparator
- * only ever looks at the answers — see `cellKey`. The comparator is the one
- * piece of code here that runs a few million times on a large file, so
- * anything it can be told in advance, it is.
+ * `base` reordered by one column — `multiSortedOrder` with a single key.
  *
  * @param rows  every row of the file, in file order
  * @param base  the view's current row indices — filtered or not
  * @param col   which column to sort on
- * @param dir   'asc' or 'desc'
+ * @param dir   'asc' or 'desc', or nothing for the file's own order
  */
 export function sortedOrder (rows, base, col, dir) {
-  const sign = dir === 'desc' ? -1 : 1
-  // Many columns hold the same 10–20 strings repeated 200k times. `cellKey`
-  // runs 6 regexes per distinct value — memoize by exact text so duplicates pay once.
-  const keyCache = new Map()
-  const cachedKey = (text) => {
-    let hit = keyCache.get(text)
-    if (hit === undefined) {
-      hit = cellKey(text)
-      keyCache.set(text, hit)
-    }
-    return hit
-  }
+  return multiSortedOrder(rows, base, dir ? [{ col, dir }] : [])
+}
+
+/**
+ * `base` reordered by several columns at once, the first being the strongest.
+ *
+ * Not the same thing as sorting twice. Sorting by surname and then by first
+ * name gives a list ordered by first name, because the second sort is free to
+ * move a row anywhere — the stability of the first only survives an exact tie
+ * on the second key. What a person asking for "by department, then by name"
+ * wants is one ordering with two keys, and that is what this is: the keys are
+ * compared in turn and the first that disagrees settles the row.
+ *
+ * Each cell is classified once per column, before the sort starts, and the
+ * comparator only ever looks at the answers — see `cellKey`. The comparator is
+ * the one piece of code here that runs a few million times on a large file, so
+ * anything it can be told in advance, it is.
+ *
+ * @param rows  every row of the file, in file order
+ * @param base  the view's current row indices — filtered or not
+ * @param sorts [{ col, dir }] — strongest key first; `dir` is 'asc' or 'desc'
+ */
+export function multiSortedOrder (rows, base, sorts) {
+  const keys = (sorts ?? []).filter((key) => key && key.dir)
+  if (!keys.length) return base.slice()
+
+  /* One reading of a slashed date per column, decided from that column's own
+     values — the whole of item four's fix. Worked out here rather than inside
+     the comparator because it is a question about the column, and asking it
+     per value is what let `05/01` and `13/01` be read two different ways in
+     the same sort. */
+  const plans = keys.map(({ col, dir }) => ({
+    col,
+    sign: dir === 'desc' ? -1 : 1,
+    classify: columnClassifier(columnDateOrder(rows, base, col))
+  }))
+
   const keyed = base.map((index, at) => {
-    const text = String(rows[index]?.[col] ?? '')
-    // A blank is decided before anything else and never compared, so it is not
-    // worth classifying one.
-    const blank = text.trim() === ''
-    return { index, at, blank, key: blank ? null : cachedKey(text) }
+    const row = rows[index] || []
+    const cells = plans.map((plan) => {
+      const text = String(row[plan.col] ?? '')
+      // A blank is decided before anything else and never compared, so it is
+      // not worth classifying one.
+      return text.trim() === '' ? null : plan.classify(text)
+    })
+    return { index, at, cells }
   })
+
   keyed.sort((p, q) => {
-    if (p.blank || q.blank) return p.blank && q.blank ? p.at - q.at : (p.blank ? 1 : -1)
-    return sign * compareKeys(p.key, q.key) || p.at - q.at
+    for (let i = 0; i < plans.length; i++) {
+      const a = p.cells[i]
+      const b = q.cells[i]
+      /* Blanks go last in both directions — a descending sort that opened with
+         a screen of empty cells would be answering a question nobody asked. */
+      if (!a || !b) {
+        if (a === b) continue
+        return a ? -1 : 1
+      }
+      const verdict = plans[i].sign * compareKeys(a, b)
+      if (verdict) return verdict
+    }
+    // Ties keep the order they came in, so the view stays where the reader is.
+    return p.at - q.at
   })
   return keyed.map((k) => k.index)
 }
 
-/** The rows of `base` holding `query` anywhere in them, case-insensitively. An
- *  empty query is every row: the filter box being empty is not a filter. */
-export function filterOrder (rows, base, query) {
-  const needle = String(query ?? '').trim().toLowerCase()
-  if (!needle) return base.slice()
+/* ------------------------------------------------------------- the finding
+
+   What "matching" means, in one place, because four things ask it and they must
+   never disagree: the highlight on the cells, the count on the bar, ⌘G, and
+   "Only matches" hiding the rows that do not.
+
+   Three readings, and the reason there is more than one:
+
+     substring   the default, and what a person means nine times out of ten
+     whole cell  `12` finding the cell that says twelve and not the one that
+                 says 120 — the only way to find an id or a code in a column
+                 full of longer ones
+     regular     the reading a replace-all needs to be worth having, since
+     expression  `^\s+` and `(\d{4})-(\d{2})` are what a column of scraped
+                 data has to be cleaned with
+
+   A matcher is made once per keystroke and asked a few hundred thousand times,
+   so it is an object with the decisions already taken rather than a function
+   that re-reads the flags on every cell. */
+
+/**
+ * How to recognise `query` in a cell, and how to replace it there.
+ *
+ * @param {string} query what was typed into the find box
+ * @param {{regex?: boolean, whole?: boolean}} [options] both off is a
+ *   case-insensitive substring
+ * @returns {{
+ *   regex: boolean, whole: boolean, query: string,
+ *   test: (text: string) => boolean,
+ *   replace: (text: string, replacement: string) => string
+ * }|null} null when there is nothing to look for, or when `regex` is on and
+ *          what was typed is not yet a regular expression. A half-typed
+ *          `(\d+` is the ordinary state of a box being typed into, so it is
+ *          "no matcher yet" rather than an error to shout about.
+ */
+export function makeMatcher (query, { regex = false, whole = false } = {}) {
+  const source = String(query ?? '')
+  if (!source.trim()) return null
+
+  if (regex) {
+    let pattern
+    try {
+      pattern = new RegExp(whole ? `^(?:${source})$` : source, 'giu')
+    } catch {
+      try {
+        // Without `u`, so the many patterns that are valid only in the older
+        // grammar — a bare `\p`, an unescaped `{` — still work.
+        pattern = new RegExp(whole ? `^(?:${source})$` : source, 'gi')
+      } catch {
+        return null
+      }
+    }
+    return {
+      regex: true,
+      whole,
+      query: source,
+      test (text) {
+        pattern.lastIndex = 0
+        return pattern.test(String(text ?? ''))
+      },
+      replace (text, replacement) {
+        pattern.lastIndex = 0
+        /* `$1` and friends are what a regular-expression replace is for, so
+           the replacement is handed to the engine rather than escaped. */
+        return String(text ?? '').replace(pattern, replacement)
+      }
+    }
+  }
+
+  const needle = source.toLowerCase()
+  return {
+    regex: false,
+    whole,
+    query: source,
+    test (text) {
+      const value = String(text ?? '').toLowerCase()
+      return whole ? value === needle : value.includes(needle)
+    },
+    replace (text, replacement) {
+      const value = String(text ?? '')
+      if (whole) return value.toLowerCase() === needle ? replacement : value
+      /* Case-insensitively, and without a regular expression: escaping the
+         needle to build one would be a second place for the two readings to
+         drift apart. */
+      let out = ''
+      let at = 0
+      const lower = value.toLowerCase()
+      for (;;) {
+        const found = lower.indexOf(needle, at)
+        if (found < 0) break
+        out += value.slice(at, found) + replacement
+        at = found + needle.length
+      }
+      return out + value.slice(at)
+    }
+  }
+}
+
+/** The rows of `base` holding `query` anywhere in them. An empty query is
+ *  every row: the filter box being empty is not a filter.
+ *
+ *  @param options the find box's own — see `makeMatcher`. A matcher may be
+ *                 passed straight in, which is what the grid does so that a
+ *                 pattern is compiled once rather than once per call. */
+export function filterOrder (rows, base, query, options = {}) {
+  const matcher = query && typeof query === 'object' && typeof query.test === 'function'
+    ? query
+    : makeMatcher(query, options)
+  if (!matcher) return base.slice()
   return base.filter((index) => {
     const row = rows[index] || []
     for (const cell of row) {
-      if (String(cell ?? '').toLowerCase().includes(needle)) return true
+      if (matcher.test(cell)) return true
     }
     return false
   })
@@ -603,14 +1016,21 @@ export function columnValues (rows, base, col) {
     const text = String(rows[index]?.[col] ?? '')
     counts.set(text, (counts.get(text) ?? 0) + 1)
   }
-  const list = [...counts].map(([value, count]) => ({ value, count }))
+  /* The same reading of a slashed date the sort uses, for the same reason: a
+     panel that listed the column's dates in one order while the heading sorted
+     them in another would be two answers to one question. */
+  const order = columnDateOrder(rows, base, col)
+  /* Classified once per value rather than on every comparison — the same
+     economy `multiSortedOrder` makes, and for the same reason: `cellKey` is
+     half a dozen regular expressions, and a sort asks n log n times. */
+  const classify = columnClassifier(order)
+  const list = [...counts].map(([value, count]) =>
+    ({ value, count, key: value.trim() === '' ? null : classify(value) }))
   list.sort((p, q) => {
-    const pBlank = p.value.trim() === ''
-    const qBlank = q.value.trim() === ''
-    if (pBlank || qBlank) return pBlank && qBlank ? 0 : (pBlank ? 1 : -1)
-    return compareCells(p.value, q.value)
+    if (!p.key || !q.key) return !p.key && !q.key ? 0 : (!p.key ? 1 : -1)
+    return compareKeys(p.key, q.key)
   })
-  return list
+  return list.map(({ value, count }) => ({ value, count }))
 }
 
 /**
@@ -745,8 +1165,162 @@ export function parseClipboardGrid (text) {
   const source = String(text ?? '').replace(/\r\n?/g, '\n').replace(/\n$/, '')
   if (!source) return [['']]
   const delimiter = source.includes('\t') ? '\t' : (source.includes(',') ? ',' : '\t')
-  const grid = parseSeparated(source, delimiter)
+  /* Strictly quoted even under tabs: this text came off a clipboard, and a
+     spreadsheet's copy *does* quote a multi-line cell — the leniency that
+     saves `"5 inch` in a file would tear that cell in half here. */
+  const grid = parseSeparated(source, delimiter, { strictQuotes: true })
   return grid.length ? grid : [['']]
+}
+
+/* ----------------------------------------------------------- the exports
+
+   The same table, said in three other languages. A CSV is the lowest common
+   denominator and that is exactly its problem: the thing you were going to do
+   with it next wants a TSV because it is going into a shell pipeline, or JSON
+   because it is going into a script, or a Markdown table because it is going
+   into a note in this very vault. All three are two lines of code and none of
+   them is two lines of code the reader should have to write.
+
+   Kept beside the parser rather than in the grid because they are the same
+   kind of thing it is — a table in, text out, and nothing about the screen. */
+
+/** The table as tab-separated values. Not `formatSeparated` with a tab: the
+ *  point of a TSV is that a field never needs quoting, so a tab or a newline
+ *  inside a value is spelled the way the format's readers expect — escaped,
+ *  the way `\t` is in every other tab-separated thing. */
+export function gridToTsv (rows, newline = '\n') {
+  return rows
+    .map((row) => row
+      .map((cell) => String(cell ?? '').replace(/\\/g, '\\\\').replace(/\t/g, '\\t').replace(/\r?\n/g, '\\n'))
+      .join('\t'))
+    .join(newline) + (rows.length ? newline : '')
+}
+
+/**
+ * The table as JSON: an array of objects, keyed by the headings.
+ *
+ * Objects rather than arrays of arrays, because a script reading this wants
+ * `row.price` and not `row[7]` — and a heading is the one thing a CSV does
+ * carry that says which is which. A blank or duplicated heading would make two
+ * keys collide silently, so those become `column 8` and `price (2)`: a name
+ * nobody wrote is better than a field nobody can see has been overwritten.
+ *
+ * Values stay strings. A CSV holds text, and deciding here that `007` is seven
+ * or that `1-2` is a date is the guess that has cost every other CSV-to-JSON
+ * tool its reputation.
+ */
+export function gridToJson (header, rows) {
+  const keys = []
+  const taken = new Map()
+  header.forEach((name, c) => {
+    const base = String(name ?? '').trim() || `column ${c + 1}`
+    const seen = taken.get(base) ?? 0
+    taken.set(base, seen + 1)
+    keys.push(seen ? `${base} (${seen + 1})` : base)
+  })
+  return JSON.stringify(rows.map((row) => {
+    const out = {}
+    keys.forEach((key, c) => { out[key] = String(row[c] ?? '') })
+    return out
+  }), null, 2) + '\n'
+}
+
+/**
+ * The table as a Markdown table, for pasting into a note.
+ *
+ * A pipe inside a value ends the cell, so it is escaped; a newline inside one
+ * cannot be written at all in this dialect, so it becomes a `<br>` — which is
+ * what every Markdown renderer in the vault already draws as a line break, and
+ * is far better than a table that silently loses half a value.
+ *
+ * The columns are not padded to a common width. A padded table is pleasant to
+ * read in the source and turns a table of a thousand rows into a wall whose
+ * every line changes when one cell grows; the renderer does not care either
+ * way, and the reader can always run a formatter over it.
+ */
+export function gridToMarkdown (grid) {
+  if (!grid.length) return ''
+  const escape = (cell) => String(cell ?? '')
+    .replace(/\|/g, '\\|')
+    .replace(/\r?\n/g, '<br>')
+  const line = (cells) => `| ${cells.join(' | ')} |`
+  const width = grid.reduce((most, row) => Math.max(most, row.length), 0)
+  const at = (row, c) => escape(row[c] ?? '')
+  const body = grid.slice(1).map((row) =>
+    line(Array.from({ length: width }, (_, c) => at(row, c))))
+  return [
+    line(Array.from({ length: width }, (_, c) => at(grid[0], c))),
+    line(Array.from({ length: width }, () => '---')),
+    ...body
+  ].join('\n') + '\n'
+}
+
+/* ------------------------------------------------------- the header choice
+
+   Whether a file's first row is its headings, remembered for the session.
+
+   Per path and at module level rather than on the grid instance, because the
+   choice outlives the instance: closing the tab and reopening the file goes
+   through a fresh `open`, and a reader who has said "this file has no header
+   row" has said it about the file, not about the tab. The sidecar store's
+   `clean` pass strips keys it does not know, so this cannot live there without
+   a main-process change; the session is what can be kept from here. */
+const headerChoice = new Map()
+
+/** The headings a headerless file is shown under: the spreadsheet alphabet,
+ *  because `A, B, C … AA, AB` is what every reader of a table already knows
+ *  the anonymous columns are called. */
+export function numberedHeader (count) {
+  const names = []
+  for (let c = 0; c < Math.max(1, count); c++) {
+    let name = ''
+    for (let n = c; n >= 0; n = Math.floor(n / 26) - 1) {
+      name = String.fromCharCode(65 + (n % 26)) + name
+    }
+    names.push(name)
+  }
+  return names
+}
+
+/* -------------------------------------------------------- the restored view
+
+   What `place` may carry back into `open`, checked rather than trusted.
+
+   `place()` is round-tripped through the renderer on every reload an external
+   change forces, and the file may have changed shape on the way: a column the
+   sort named may be gone, a filter may key a column that no longer exists.
+   Each piece is validated against the file as it is *now*, and whatever no
+   longer fits is dropped silently — a sort on a vanished column is not worth a
+   dialog, it is worth the file's own order. */
+
+/** The sort keys `place` carried, kept only where they still name a column. */
+export function restoredSorts (place, width) {
+  const asked = Array.isArray(place?.sorts) ? place.sorts : []
+  const seen = new Set()
+  const kept = []
+  for (const key of asked) {
+    const col = Number(key?.col)
+    if (!Number.isInteger(col) || col < 0 || col >= width || seen.has(col)) continue
+    if (key.dir !== 'asc' && key.dir !== 'desc') continue
+    seen.add(col)
+    kept.push({ col, dir: key.dir })
+  }
+  return kept
+}
+
+/** The column filters `place` carried, as the Map of hidden-value Sets the
+ *  grid keeps them in. */
+export function restoredFilters (place) {
+  const filters = new Map()
+  const asked = Array.isArray(place?.filters) ? place.filters : []
+  for (const entry of asked) {
+    if (!Array.isArray(entry)) continue
+    const col = Number(entry[0])
+    if (!Number.isInteger(col) || col < 0) continue
+    const hidden = new Set((Array.isArray(entry[1]) ? entry[1] : []).map((v) => String(v)))
+    if (hidden.size) filters.set(col, hidden)
+  }
+  return filters
 }
 
 /* --------------------------------------------------------------- the grid */
@@ -842,7 +1416,22 @@ export function mountCsv ({
   const gap = document.createElement('span')
   gap.className = 'csv-bar-gap'
 
-  bar.append(search, onlyBtn, found, gap,
+  /* ⌘F opens the complete find-and-replace strip. It stays folded away until
+     then so the ordinary table bar does not carry search modes or a second
+     text field that are irrelevant while the table is being read. */
+  const replaceBox = document.createElement('input')
+  replaceBox.className = 'csv-replace'
+  replaceBox.type = 'text'
+  replaceBox.placeholder = 'Replace with'
+  replaceBox.spellcheck = false
+  replaceBox.hidden = true
+  const replaceOneBtn = button('Replace', 'replace-one', 'Replace this cell’s match and find the next')
+  const replaceAllBtn = button('Replace all', 'replace-all',
+    'Replace every match in the rows on screen')
+  replaceOneBtn.hidden = true
+  replaceAllBtn.hidden = true
+
+  bar.append(search, replaceBox, replaceOneBtn, replaceAllBtn, onlyBtn, found, gap,
     delimiterPick.root, filterBtn, clearFilters, fitAll, scrollBack, scrollForward,
     undoBtn, redoBtn, addRow, addCol)
 
@@ -917,11 +1506,36 @@ export function mountCsv ({
   table.setAttribute('aria-multiselectable', 'true')
   table.append(headRow, scroller)
 
-  frame.append(bar, table, menu, filterPanel)
+  /* One line under the bar for the things the grid has to say *about the
+     file* rather than about what was just done.
+   *
+     The status line is the wrong place for these. It is transient, it is
+     shared with every other document in the window, and what belongs here is
+     neither: "this file could not be decoded and is open read-only" and "you
+     are looking at the first fifty thousand rows of a million" are conditions
+     that hold for as long as the file is open, and each of them comes with
+     something the reader may want to do about it. So they sit against the
+     table they are about, with their own buttons, and they do not go away on
+     their own. */
+  const notice = document.createElement('div')
+  notice.className = 'csv-notice'
+  notice.hidden = true
+  notice.setAttribute('role', 'status')
+  const noticeText = document.createElement('span')
+  noticeText.className = 'csv-notice-text'
+  const noticeActions = document.createElement('span')
+  noticeActions.className = 'csv-notice-actions'
+  notice.append(noticeText, noticeActions)
+
+  frame.append(bar, notice, table, menu, filterPanel)
   host.replaceChildren(frame)
 
   /** @type {any} */
-  let current = null          // { path, delimiter, newline }
+  /* Everything about the file that is not its rows: where it is, how it is
+     separated, how its bytes spell its characters, the shape it was written in
+     and the stamp it had when it was read. All of it goes back on when it is
+     written — see `saveFile`. */
+  let current = null          // { path, delimiter, newline, shape, encoding, bom, stamp }
   let rows = []               // the body: every row after the header
   let header = []
   let widths = []
@@ -934,7 +1548,14 @@ export function mountCsv ({
   /* The view. Every display position is an index into this, and every index in
      it is a row of `rows` — which stays in the file's own order throughout. */
   let order = []
-  let sort = null             // { col, dir }
+  /* The sort, as a list of keys rather than one.
+   *
+   * "By department, then by name" is one ordering with two keys and not two
+   * sorts: sorting twice gives a list ordered by the *second* column, because
+   * the second sort is free to move any row that is not an exact tie on its own
+   * key. So the keys are kept and compared in turn — see `multiSortedOrder` —
+   * and `sorts[0]` is the strongest. An empty list is the file's own order. */
+  let sorts = []              // [{ col, dir }], strongest first
   let query = ''
   /* Column index → the Set of values hidden in that column. A way of looking,
      like the sort: it lives in `order` and never touches `rows`, so filtering
@@ -944,6 +1565,15 @@ export function mountCsv ({
      marking it. Off by default: finding is the more common thing to want from
      a box you can type into without meaning to lose your place. */
   let onlyMatches = false
+  /* Compiled once per keystroke rather than once per cell. */
+  let matcher = null
+  let replacing = false
+  /* Whether the file's first row is its headings. True for very nearly every
+     file, and wrong often enough to be worth a switch: a headerless export
+     opened as though it had one loses its first row of data to the column
+     heads, where it cannot be sorted, filtered, totalled or even seen
+     properly. */
+  let hasHeader = true
   let dirty = false
   let saving = null
   let flushRequested = false
@@ -975,6 +1605,18 @@ export function mountCsv ({
      click performed. */
   let sortBeforeClick = null
 
+  /** The key on one column, or nothing. Most of the grid only ever asks about
+   *  one column at a time — the heading it is painting, the column that was
+   *  just edited — and this is that question. */
+  const sortOn = (col) => sorts.find((key) => key.col === col) || null
+  /** Where a column sits in the ordering, one-based, when there is more than
+   *  one key. Zero means it is not a key, or is the only one. */
+  const sortRank = (col) => {
+    if (sorts.length < 2) return 0
+    const at = sorts.findIndex((key) => key.col === col)
+    return at < 0 ? 0 : at + 1
+  }
+
   /* What the selection adds up to, and the rectangle it was worked out for.
      Held rather than computed on demand because the status line asks for it on
      every repaint, and a whole-column selection is a hundred thousand cells. */
@@ -999,13 +1641,53 @@ export function mountCsv ({
      a column out of it is reading. */
   let readonly = false
 
+  /* Reading view is a preference; this is a *fact about the file* that makes
+     writing it destructive — it could not be decoded, or only part of it was
+     read. Kept apart from `readonly` because the two are cleared by entirely
+     different things and because this one has to survive the view switch: a
+     ⌘2 into Editing view must not hand somebody an editable preview of the
+     first fifty thousand rows of a file with a million in it. */
+  let lock = null             // { why } or null
+
   /** The one guard, on every path that would change the file. It says why
    *  rather than doing nothing, so a double-click on a cell in Reading view
    *  explains itself instead of feeling broken. */
   const editable = () => {
+    if (lock) { onStatus(lock.why); return false }
     if (!readonly) return true
     onStatus(keyLabel('Reading view — press ⌘2 to edit this table'))
     return false
+  }
+
+  /* --------------------------------------------------------- the notice */
+
+  const hideNotice = () => {
+    notice.hidden = true
+    noticeText.textContent = ''
+    noticeActions.replaceChildren()
+  }
+
+  /**
+   * Say something about the file, with the things that can be done about it.
+   *
+   * Deliberately not dismissable by pressing Escape or clicking away. The two
+   * things this says — the file could not be decoded, and only part of it was
+   * read — are both cases where the reader is one keystroke from destroying
+   * data, and a warning that a stray Escape takes away is a warning that will
+   * be gone by the time it mattered. It goes when the condition does.
+   */
+  const showNotice = (text, actions = []) => {
+    noticeText.textContent = text
+    notice.className = 'csv-notice'
+    const frag = document.createDocumentFragment()
+    for (const action of actions) {
+      const item = button(action.label, 'notice', action.title || action.label)
+      item.classList.add('csv-notice-btn')
+      item.addEventListener('click', () => { action.run() })
+      frag.append(item)
+    }
+    noticeActions.replaceChildren(frag)
+    notice.hidden = false
   }
 
   /* One command, two ways in.
@@ -1048,7 +1730,7 @@ export function mountCsv ({
      lets an insert splice `rows` and rebuild rather than patch. A filter makes
      it false for the same reason a sort does: a rebuild would drop the blank
      row that was just asked for, since a blank matches nothing. */
-  const plainOrder = () => !sort && !filtering()
+  const plainOrder = () => !sorts.length && !filtering()
 
   const setDirty = (next) => {
     if (next) revision++
@@ -1262,8 +1944,12 @@ export function mountCsv ({
   const rebuildOrder = ({ keepSource = null } = {}) => {
     let next = rows.map((_, i) => i)
     next = filteredOrder(rows, next, filters)
-    if (onlyMatches && query.trim()) next = filterOrder(rows, next, query)
-    if (sort && sort.col < columns()) next = sortedOrder(rows, next, sort.col, sort.dir)
+    if (onlyMatches && query.trim()) {
+      const flags = matchFlags()
+      next = next.filter((i) => flags[i])
+    }
+    const keys = sorts.filter((key) => key.col < columns())
+    if (keys.length) next = multiSortedOrder(rows, next, keys)
     order = next
     if (keepSource !== null) {
       const at = order.indexOf(keepSource)
@@ -1405,8 +2091,9 @@ export function mountCsv ({
       cell.setAttribute('aria-colindex', String(c + 1))
       /* Which way this column is pointed, said rather than drawn — the mark
          beside the label is a triangle, and a triangle reads as nothing. */
-      cell.setAttribute('aria-sort', sort && sort.col === c
-        ? (sort.dir === 'asc' ? 'ascending' : 'descending')
+      const key = sortOn(c)
+      cell.setAttribute('aria-sort', key
+        ? (key.dir === 'asc' ? 'ascending' : 'descending')
         : 'none')
       cell.title = readonly
         ? keyLabel('Click to sort · ⌘-click to select the column')
@@ -1419,7 +2106,11 @@ export function mountCsv ({
       label.textContent = header[c] ?? ''
       const mark = document.createElement('span')
       mark.className = 'csv-sort'
-      mark.textContent = sort && sort.col === c ? (sort.dir === 'asc' ? '▲' : '▼') : ''
+      /* The arrow, and — only when the ordering has more than one key — which
+         key this column is. Without the number a table sorted by three columns
+         shows three identical arrows and says nothing about which one wins. */
+      const rank = sortRank(c)
+      mark.textContent = key ? `${key.dir === 'asc' ? '▲' : '▼'}${rank || ''}` : ''
       /* Faint until the heading is hovered, and lit for good once the column
          is filtered — a funnel on every heading of a thirty-column export is
          thirty pieces of furniture, and a column that is hiding rows has to
@@ -1634,18 +2325,20 @@ export function mountCsv ({
    *  with, because the blocks name view positions and the change moved them. */
   const collapse = () => { anchor = { ...cursor }; extras = [] }
 
+  /** The positions a set of blocks covers along one axis, ascending and without
+   *  repeats — the rows a selection or the clipboard grid has, or the columns. */
+  const axisOf = (boxes, from, to) => {
+    const seen = new Set()
+    for (const box of boxes) for (let i = box[from]; i <= box[to]; i++) seen.add(i)
+    return [...seen].sort((a, b) => a - b)
+  }
+
   /**
    * The view rows the selection touches, ascending and without repeats — what
    * "delete the selected rows" means when the selection is in pieces. The
    * header is not one of them: it is a row on screen but not a row of the file.
    */
-  const selectedRows = () => {
-    const seen = new Set()
-    for (const box of ranges()) {
-      for (let r = Math.max(0, box.r0); r <= box.r1; r++) seen.add(r)
-    }
-    return [...seen].sort((a, b) => a - b)
-  }
+  const selectedRows = () => axisOf(ranges(), 'r0', 'r1').filter((r) => r >= 0)
 
   /**
    * The columns the selection touches, ascending and without repeats.
@@ -1654,13 +2347,7 @@ export function mountCsv ({
    * right-click inside the selection is about the selection; one outside it is
    * about the column under the pointer, the same way the row menu behaves.
    */
-  const selectedColumns = () => {
-    const seen = new Set()
-    for (const box of ranges()) {
-      for (let c = Math.max(0, box.c0); c <= box.c1; c++) seen.add(c)
-    }
-    return [...seen].sort((a, b) => a - b)
-  }
+  const selectedColumns = () => axisOf(ranges(), 'c0', 'c1').filter((c) => c >= 0)
 
   /** The columns an alignment item should act on: the selected ones when the
    *  clicked column is among them, and otherwise just the one clicked. */
@@ -1697,7 +2384,6 @@ export function mountCsv ({
   function decorate () {
     const boxes = ranges()
     const picked = (r, c) => shown && inSelection(r, c, boxes)
-    const needle = query.trim().toLowerCase()
     for (const cell of frame.querySelectorAll('.csv-cell')) {
       const r = Number(cell.dataset.row)
       const c = Number(cell.dataset.col)
@@ -1723,8 +2409,7 @@ export function mountCsv ({
       cell.classList.toggle('is-edge-b', inside && !picked(r + 1, c))
       cell.classList.toggle('is-edge-l', inside && !picked(r, c - 1))
       cell.classList.toggle('is-edge-r', inside && !picked(r, c + 1))
-      cell.classList.toggle('is-match',
-        !!needle && cell.textContent.toLowerCase().includes(needle))
+      cell.classList.toggle('is-match', !!matcher && matcher.test(cell.textContent))
     }
     /* The heading and the line number light up to say which column and which
        row the selection is in — so with nothing selected there is nothing for
@@ -1849,14 +2534,6 @@ export function mountCsv ({
     return parts.join(' · ')
   }
 
-  /** The positions a set of blocks covers along one axis, ascending and without
-   *  repeats — the rows the clipboard grid has, or the columns. */
-  const axisOf = (boxes, from, to) => {
-    const seen = new Set()
-    for (const box of boxes) for (let i = box[from]; i <= box[to]; i++) seen.add(i)
-    return [...seen].sort((a, b) => a - b)
-  }
-
   /**
    * Every value in the selection, row by row. The header counts as a row when
    * the selection reaches it, so copying a column copies its name.
@@ -1901,7 +2578,15 @@ export function mountCsv ({
     } else {
       delimiterPick.root.hidden = true
     }
-    for (const element of [undoBtn, redoBtn, addRow, addCol]) element.hidden = readonly
+    /* Replace changes the file, so the whole strip of it goes where the other
+       writing controls go: away, in Reading view and on a locked file. */
+    const canWrite = !readonly && !lock
+    replaceBox.hidden = !replacing || !canWrite
+    replaceOneBtn.hidden = !replacing || !canWrite
+    replaceAllBtn.hidden = !replacing || !canWrite
+    replaceOneBtn.disabled = !matcher
+    replaceAllBtn.disabled = !matcher
+    for (const element of [undoBtn, redoBtn, addRow, addCol]) element.hidden = readonly || !!lock
     undoBtn.disabled = !history.length
     redoBtn.disabled = !future.length
     /* Filtering is a way of looking, so both of its controls stay in Reading
@@ -1935,7 +2620,37 @@ export function mountCsv ({
     }
   }
 
-  const countMatches = () => filterOrder(rows, rows.map((_, i) => i), query).length
+  /* Which source rows the find box matches, remembered from one keystroke to
+     the next. The count in the bar and the "only matches" filter both asked
+     `filterOrder` over the whole file on every character typed — half a
+     million rows, twenty cells each, `toLowerCase` on every one. A plain
+     needle can only lose rows as it grows: a row holding "revenue" held
+     "revenu", so the rows to look at are the ones the shorter needle kept.
+     A pattern or a whole-cell match cannot narrow and is done from scratch.
+     Keyed on the rows and the revision, both of which every edit moves. */
+  let finding = null
+  const matchFlags = () => {
+    const plain = !!matcher && !matcher.regex && !matcher.whole
+    const fresh = finding && finding.rows === rows && finding.revision === revision
+    if (fresh && finding.query === query) return finding.flags
+    const flags = new Uint8Array(rows.length)
+    const narrow = fresh && finding.plain && plain &&
+      query.toLowerCase().includes(finding.query.toLowerCase())
+    for (let i = 0; i < rows.length; i++) {
+      if (narrow && !finding.flags[i]) continue
+      const row = rows[i] || []
+      for (const cell of row) {
+        if (matcher.test(cell)) { flags[i] = 1; break }
+      }
+    }
+    finding = { rows, revision, query, plain, flags }
+    return flags
+  }
+  const countMatches = () => {
+    let n = 0
+    for (const flag of matchFlags()) n += flag
+    return n
+  }
 
   /* Bring the cursor into view, vertically by row arithmetic and horizontally
      by the column offsets — neither needs the cell to exist in the DOM, which
@@ -2110,7 +2825,7 @@ export function mountCsv ({
     widths: widths.slice(),
     numeric: numeric.slice(),
     aligns: aligns.slice(),
-    sort: sort && { ...sort },
+    sorts: sorts.map((key) => ({ ...key })),
     cursor: { ...cursor },
     anchor: { ...anchor },
     extras: extras.map((box) => ({ ...box }))
@@ -2149,7 +2864,7 @@ export function mountCsv ({
     widths = patch.widths.slice()
     numeric = patch.numeric.slice()
     aligns = (patch.aligns || new Array(patch.widths.length).fill(null)).slice()
-    sort = patch.sort && { ...patch.sort }
+    sorts = (patch.sorts || []).map((key) => ({ ...key }))
     cursor = { ...patch.cursor }
     anchor = { ...patch.anchor }
     extras = (patch.extras || []).map((box) => ({ ...box }))
@@ -2226,10 +2941,10 @@ export function mountCsv ({
     const selector = `.csv-cell[data-row="${cursor.r}"][data-col="${cursor.c}"]`
     const cell = cursor.r === -1 ? headRow.querySelector(selector) : window_.querySelector(selector)
     if (!cell) return
-    /* A textarea rather than an input, and for one reason: it can wrap. Nothing
-       else about it is used — Enter, Tab and Escape are the grid's, taken
-       before the field ever sees them, so a value still cannot be given a
-       newline by typing one. */
+    /* A textarea rather than an input, for two reasons: it can wrap, and it
+       can hold a line break. Plain Enter, Tab and Escape are the grid's, taken
+       before the field ever sees them; ⇧⏎ and ⌥⏎ are left to the field, which
+       is how a newline gets into a value. */
     const input = document.createElement('textarea')
     input.className = 'csv-input'
     input.rows = 1
@@ -2270,7 +2985,7 @@ export function mountCsv ({
            the view and follow the row rather than the position: the cursor
            belongs to the thing that was edited. Any other blocks are positions
            and the rows under them have just moved, so they go. */
-        if (sort && sort.col === c) { extras = []; rebuildOrder({ keepSource: src }); paint() }
+        if (sortOn(c)) { extras = []; rebuildOrder({ keepSource: src }); paint() }
       }
     }
     /* A heading's cell holds its label, its sort mark and its resize grip, and
@@ -2286,17 +3001,25 @@ export function mountCsv ({
 
   let saveTimer = null
   const queueSave = () => {
+    /* Nothing to queue on a locked file: `editable` already refused the edit
+       that would have called this, and an armed timer on a preview would be a
+       write waiting for a bug to let it through. */
+    if (lock) return
     clearTimeout(saveTimer)
     saveTimer = setTimeout(() => { saveFile().catch(() => {}) }, 900)
   }
 
-  const saveFile = async ({ flush = false } = {}) => {
+  const saveFile = async ({ flush = false, force = false } = {}) => {
     if (flush) flushRequested = true
     if (saving) return saving
     saving = (async () => {
       do {
         if (editing) commitEdit()
         if (!current || !dirty) break
+        /* The lock is why nothing here can have been edited — see `editable` —
+           but the guard stands on its own: a preview or an undecodable file
+           must never be written, whatever state the flags got into. */
+        if (lock) break
         clearTimeout(saveTimer)
         /* What is about to be written, named. Formatting and writing a large
            file is not instant, and a cell typed during one belongs to a
@@ -2306,9 +3029,81 @@ export function mountCsv ({
            until the tab is closed and it goes. */
         const writingRevision = revision
         /* `rows` and not the view: a sort is a way of looking at the file, and
-           saving one must not rewrite every line of it. */
-        const text = formatSeparated([header, ...rows], current.delimiter, current.newline)
-        await file.write(current.path, text)
+           saving one must not rewrite every line of it. The header only goes
+           back on when it came off the file; a numbered one is the grid's own
+           furniture and writing it would add a row the file never had. And the
+           whole of the file's shape goes with the text — its own line ending,
+           its final newline or the lack of one, its quoting — because a save
+           that only changed one cell must only change one line. */
+        const table = hasHeader ? [header, ...rows] : rows
+        const text = formatSeparated(table, current.delimiter, current.newline, current.shape)
+        /* Written back as the bytes it arrived in: the encoding and the mark
+           are the file's, not the app's. `expect` is the stamp the text was
+           read at, so a version somebody else wrote in the meantime is refused
+           rather than overwritten — the 900 ms autosave is exactly the write
+           that can land inside a sync client's window. */
+        const outcome = await file.write(current.path, text, {
+          encoding: current.encoding,
+          bom: current.bom,
+          ...(current.stamp && !force ? { expect: current.stamp } : {}),
+          ...(force ? { force: true } : {})
+        })
+        /* The test harness's file object returns nothing; the real one answers
+           `{ ok, stamp }` or a refusal. Nothing back is the old success. */
+        if (outcome && outcome.ok === false) {
+          if (outcome.stale) {
+            /* Somebody else's version is on disk. The choice is the reader's,
+               and until they make it the grid stays dirty and stops trying:
+               re-queuing the same losing write every 900 ms would be asking
+               the same question forever. */
+            showNotice(
+              'This file has changed on disk since it was opened — saving now would overwrite that change.',
+              [{
+                label: 'Keep mine',
+                title: 'Write this table over the version on disk',
+                run: () => {
+                  hideNotice()
+                  saveFile({ flush: true, force: true }).catch(() => {})
+                }
+              }, {
+                label: 'Take theirs',
+                title: 'Reload the file from disk — unsaved edits here are lost',
+                run: () => {
+                  hideNotice()
+                  setDirty(false)
+                  grid.open(current.path, grid.place()).catch(() => {})
+                }
+              }]
+            )
+            break
+          }
+          if (outcome.unencodable) {
+            /* A character was typed that the file's own encoding cannot spell —
+               an emoji into a windows-1252 export, say. Substituting for it is
+               the corruption this whole path exists to prevent, so the write
+               was refused; the honest way out is the one the reader can say
+               yes to. */
+            showNotice(
+              `“${outcome.character || 'A character'}” cannot be written in this file’s encoding (${outcome.encoding || current.encoding}).`,
+              [{
+                label: 'Save as UTF-8',
+                title: 'Convert the file to UTF-8, which can spell everything',
+                run: () => {
+                  current.encoding = 'utf8'
+                  current.bom = false
+                  hideNotice()
+                  saveFile({ flush: true }).catch(() => {})
+                }
+              }]
+            )
+            break
+          }
+          throw new Error(outcome.error || 'The write failed.')
+        }
+        /* The stamp the bytes landed with is what the next write's `expect`
+           must name — without this every second autosave would refuse itself
+           as stale. */
+        if (outcome?.stamp) current.stamp = outcome.stamp
         const clean = revision === writingRevision
         if (clean) setDirty(false)
         /* Only a clean write is a saved file. Saying otherwise puts the status
@@ -2428,6 +3223,64 @@ export function mountCsv ({
     queueSave()
   }
 
+  /**
+   * Move one column to another position — the drop half of dragging a heading.
+   *
+   * An edit, unlike everything else a heading does: the cells change which
+   * field of each line they are, so every row is rewritten. Structural, so it
+   * snapshots like an insert or a delete does.
+   */
+  const moveColumn = (from, to) => {
+    if (!editable() || !current) return
+    if (from === to || from < 0 || to < 0 || from >= columns() || to >= columns()) return
+    record(snapshot())
+
+    /* One mapping for everything that names columns by index, so the widths,
+       the sort keys and the filters all keep describing the columns they were
+       about. */
+    const mapCol = (c) => {
+      if (c === from) return to
+      if (from < to && c > from && c <= to) return c - 1
+      if (to < from && c >= to && c < from) return c + 1
+      return c
+    }
+    /* Padded to the table's width before the move so the splice lands where
+       the column actually is, then trimmed back: the padding is scaffolding,
+       and leaving it would give every short row a tail of empty fields — a
+       diff on lines the edit never touched. */
+    const lift = (list, width) => {
+      const next = list.slice()
+      while (next.length < width) next.push('')
+      const [value] = next.splice(from, 1)
+      next.splice(to, 0, value)
+      return next
+    }
+    const width = columns()
+    header = lift(header, width)
+    rows = rows.map((row) => {
+      const wide = Math.max(row.length, from + 1, to + 1)
+      const next = lift(row, wide)
+      while (next.length > row.length && next[next.length - 1] === '') next.pop()
+      return next
+    })
+    widths = lift(widths, width)
+    numeric = lift(numeric, width)
+    aligns = lift(aligns.map((a) => a ?? null), width).map((a) => (a === '' ? null : a))
+    sorts = sorts.map((key) => ({ ...key, col: mapCol(key.col) }))
+    const nextFilters = new Map()
+    for (const [col, hidden] of filters) nextFilters.set(mapCol(col), hidden)
+    filters = nextFilters
+    cursor = { ...cursor, c: mapCol(cursor.c) }
+    anchor = { ...anchor, c: mapCol(anchor.c) }
+    extras = []
+    setDirty(true)
+    rebuildOrder()
+    paint()
+    rememberWidths()
+    queueSave()
+    onStatus(`Moved “${header[to] || `column ${to + 1}`}” to column ${to + 1}`)
+  }
+
   const deleteColumn = (at) => {
     if (!editable()) return
     if (columns() <= 1) { onStatus('A table keeps at least one column'); return }
@@ -2446,10 +3299,10 @@ export function mountCsv ({
     // The deleted column's filter goes with it; the ones after it move up.
     filters.delete(at)
     shiftFilters(at, -1)
-    if (sort) {
-      if (sort.col === at) sort = null
-      else if (sort.col > at) sort = { ...sort, col: sort.col - 1 }
-    }
+    /* The deleted column's own key goes; the keys to its right slide left with
+       the columns they name. */
+    sorts = sorts.filter((key) => key.col !== at)
+      .map((key) => (key.col > at ? { ...key, col: key.col - 1 } : key))
     clampCursor()
     collapse()
     rebuildOrder()
@@ -2509,33 +3362,98 @@ export function mountCsv ({
    * where positions mean nothing because rows have gone.
    */
   const sortBy = (col, dir) => {
-    sort = dir ? { col, dir } : null
+    sorts = dir ? [{ col, dir }] : []
     rebuildOrder()
     collapse()
     paint()
   }
 
+  /**
+   * Add a column to the ordering rather than replacing it — ⇧-click on a
+   * heading, and the heading menu's "Then by".
+   *
+   * A column already in the list keeps its place and changes direction, which
+   * is the only reading of ⇧-clicking it a second time: moving it to the end
+   * would silently demote the key the reader had just been adjusting.
+   */
+  const addSort = (col, dir) => {
+    const at = sorts.findIndex((key) => key.col === col)
+    if (!dir) sorts = sorts.filter((key) => key.col !== col)
+    else if (at >= 0) sorts = sorts.map((key) => (key.col === col ? { col, dir } : key))
+    else sorts = [...sorts, { col, dir }]
+    rebuildOrder()
+    collapse()
+    paint()
+  }
+
+  /** ⇧-click's own cycle, on a column that may already be a key: ascending,
+   *  descending, then out of the ordering altogether. */
+  const cycleAddSort = (col) => {
+    const key = sortOn(col)
+    if (!key) return addSort(col, 'asc')
+    return addSort(col, key.dir === 'asc' ? 'desc' : null)
+  }
+
   /** The next state of a heading that was clicked: ascending, then descending,
    *  then back to the file's own order. */
   const cycleSort = (col) => {
-    if (!sort || sort.col !== col) return sortBy(col, 'asc')
-    if (sort.dir === 'asc') return sortBy(col, 'desc')
+    const key = sorts.length === 1 ? sortOn(col) : null
+    if (!key) return sortBy(col, 'asc')
+    if (key.dir === 'asc') return sortBy(col, 'desc')
     return sortBy(col, null)
+  }
+
+  /**
+   * Whether the first row is the headings — the switch, not the reading.
+   *
+   * Not an edit: the file holds the same rows either way, and saving writes
+   * the same bytes, because `saveFile` only puts the header row back when it
+   * came off the file. What changes is where row one is shown — in the column
+   * heads, or as the first row of data where it can be sorted, filtered and
+   * totalled with the rest.
+   *
+   * The undo history goes with the toggle. Every entry in it names rows by
+   * their index, and moving row one in or out of the data renumbers every row
+   * behind it — replaying an old patch against the new numbering would edit
+   * the wrong rows, which is far worse than a history that starts here.
+   */
+  const setHasHeader = (flag) => {
+    const next = !!flag
+    if (next === hasHeader || !current) return
+    if (editing) commitEdit()
+    if (next) {
+      header = rows.length ? rows[0] : ['']
+      rows = rows.slice(1)
+    } else {
+      rows = [header, ...rows]
+      header = numberedHeader(columns())
+    }
+    hasHeader = next
+    headerChoice.set(current.path, next)
+    history = []
+    future = []
+    extras = []
+    cursor = { r: rows.length ? 0 : -1, c: Math.min(cursor.c, Math.max(0, columns() - 1)) }
+    anchor = { ...cursor }
+    forgetStats()
+    rebuildOrder()
+    paint()
+    onStatus(next ? 'First row shown as the headings' : 'First row shown as data')
   }
 
   /** Make the sort real: write the rows in the order they are being shown in.
    *  The one destructive thing sorting can do, so it is a button and an undo
    *  entry rather than a side effect of looking. */
   const applySort = () => {
-    if (!sort || !editable()) return
+    if (!sorts.length || !editable()) return
     record(snapshot())
     // Over every row, not just the filtered ones: applying a sort must not
     // silently drop what the filter is hiding.
-    const full = sortedOrder(rows, rows.map((_, i) => i), sort.col, sort.dir)
+    const full = multiSortedOrder(rows, rows.map((_, i) => i), sorts)
     const keep = sourceOf(cursor.r)
     const moved = new Map(full.map((src, at) => [src, at]))
     rows = full.map((i) => rows[i])
-    sort = null
+    sorts = []
     if (keep >= 0 && moved.has(keep)) cursor = { ...cursor, r: moved.get(keep) }
     collapse()
     rebuildOrder()
@@ -2552,8 +3470,12 @@ export function mountCsv ({
      `order` is untouched and only the marks are repainted — unless "Only
      matches" is on, which makes it a filter and puts it in `order` with the
      column ones. */
+  /** One matcher per keystroke, not one per cell. */
+  const refreshMatcher = () => { matcher = makeMatcher(query) }
+
   const setQuery = (text) => {
     query = text
+    refreshMatcher()
     if (onlyMatches) {
       const keep = sourceOf(cursor.r)
       rebuildOrder({ keepSource: keep })
@@ -2563,6 +3485,13 @@ export function mountCsv ({
     }
     paintBar()
     decorate()
+  }
+
+  const openFindReplace = () => {
+    replacing = true
+    paintBar()
+    search.focus()
+    search.select()
   }
 
   const setOnlyMatches = (flag) => {
@@ -2586,21 +3515,80 @@ export function mountCsv ({
   /** The next cell holding the query, wrapping once. Enter in the find box,
    *  and ⌘G is the same thing from the grid. */
   const findNext = (back = false) => {
-    const needle = query.trim().toLowerCase()
-    if (!needle || !viewRows()) return
+    if (!matcher || !viewRows()) return false
     const total = viewRows() * columns()
     const at = Math.max(0, cursor.r) * columns() + cursor.c
     for (let step = 1; step <= total; step++) {
       const index = ((at + (back ? -step : step)) % total + total) % total
       const r = Math.floor(index / columns())
       const c = index % columns()
-      if (String(valueAt(r, c)).toLowerCase().includes(needle)) {
+      if (matcher.test(valueAt(r, c))) {
         moveTo(r, c)
         scroller.focus({ preventScroll: true })
-        return
+        return true
       }
     }
     onStatus('No match')
+    return false
+  }
+
+  /* ---------------------------------------------------------- the replace */
+
+  /**
+   * Replace the match in the cell under the cursor and step to the next one —
+   * or, when the cursor is not on a match, only step: the first press finds,
+   * the second press changes, which is how every editor's Replace button
+   * behaves and the only rhythm that lets the reader see each change before it
+   * is made.
+   */
+  const replaceOne = () => {
+    if (!matcher || !editable()) return
+    const replacement = replaceBox.value
+    const value = String(valueAt(cursor.r, cursor.c))
+    if (cursor.r >= 0 && matcher.test(value)) {
+      const after = matcher.replace(value, replacement)
+      if (after !== value) {
+        const src = sourceOf(cursor.r)
+        writeSource(src, cursor.c, after)
+        record({ kind: 'cells', edits: [{ src, c: cursor.c, before: value, after }] })
+        setDirty(true)
+        if (sortOn(cursor.c)) rebuildOrder({ keepSource: src })
+        paint()
+        queueSave()
+      }
+    }
+    findNext()
+  }
+
+  /**
+   * Replace every match in the rows on screen — the filtered view, not the
+   * file, because a filter narrowed to "TV Show" followed by Replace All is a
+   * sentence about those rows and silently rewriting the hidden ones would be
+   * the grid deciding it knew better. With no filter on, the view *is* the
+   * file. One undo entry for the lot.
+   */
+  const replaceAll = () => {
+    if (!matcher || !editable()) return
+    const replacement = replaceBox.value
+    const edits = []
+    for (const viewRow of order) {
+      const row = rows[viewRow] || []
+      for (let c = 0; c < Math.max(row.length, columns()); c++) {
+        const before = String(row[c] ?? '')
+        if (!before || !matcher.test(before)) continue
+        const after = matcher.replace(before, replacement)
+        if (after === before) continue
+        edits.push({ src: viewRow, c, before, after })
+      }
+    }
+    if (!edits.length) { onStatus('No match'); return }
+    for (const edit of edits) writeSource(edit.src, edit.c, edit.after)
+    record({ kind: 'cells', edits })
+    setDirty(true)
+    rebuildOrder()
+    paint()
+    queueSave()
+    onStatus(`Replaced in ${edits.length.toLocaleString()} ${edits.length === 1 ? 'cell' : 'cells'}`)
   }
 
   /* ---------------------------------------------------- the column filter */
@@ -2815,7 +3803,7 @@ export function mountCsv ({
     for (const edit of edits) writeSource(edit.src, edit.c, '')
     record({ kind: 'cells', edits })
     setDirty(true)
-    if (sort) { rebuildOrder(); paint() } else paintRows({ force: true })
+    if (sorts.length) { rebuildOrder(); paint() } else paintRows({ force: true })
     decorate()
     queueSave()
   }
@@ -2874,7 +3862,7 @@ export function mountCsv ({
       r: Math.min(viewRows() - 1, startRow + grid.length - 1),
       c: Math.min(columns() - 1, cursor.c + wide - 1)
     }
-    if (sort) rebuildOrder()
+    if (sorts.length) rebuildOrder()
     paint()
     revealCursor()
     queueSave()
@@ -2920,9 +3908,61 @@ export function mountCsv ({
     if (!edits.length) return
     record({ kind: 'cells', edits })
     setDirty(true)
-    if (sort) rebuildOrder()
+    if (sorts.length) rebuildOrder()
     paint()
     queueSave()
+  }
+
+  /* ---------------------------------------------------------- the exports */
+
+  /**
+   * Write the table out as another format, beside the file it came from.
+   *
+   * A sibling with the new extension, and never over one that already exists:
+   * an export is a copy, and a copy that destroyed `data.tsv` on the grounds
+   * that you asked for a TSV would be an unpleasant surprise. Plain UTF-8,
+   * because the point of exporting is the file's next reader and UTF-8 is the
+   * one thing all of them take.
+   */
+  const exportAs = async (kind) => {
+    if (!current) return
+    const base = current.path.replace(/\.[^./\\]+$/, '')
+    const ext = kind === 'json' ? '.json' : '.tsv'
+    let target = `${base}${ext}`
+    if (typeof file.probe === 'function') {
+      for (let n = 0; target === current.path ||
+          (await file.probe(target).then((r) => r && r.ok !== false).catch(() => false)); n++) {
+        target = `${base} export${n ? ` ${n + 1}` : ''}${ext}`
+        if (n > 20) break
+      }
+    } else if (target === current.path) {
+      target = `${base} export${ext}`
+    }
+    const table = hasHeader ? [header, ...rows] : rows
+    const text = kind === 'json'
+      ? gridToJson(header, rows)
+      : gridToTsv(table)
+    try {
+      await file.write(target, text)
+      onStatus(`Exported to ${target.split('/').pop()}`)
+    } catch {
+      onStatus('The export could not be written')
+    }
+  }
+
+  /** The selection as a Markdown table on the clipboard, headed by the
+   *  columns' own headings — a table pasted into a note without them would be
+   *  data with the names stripped off. */
+  const copyMarkdown = async () => {
+    const values = selectionValues()
+    const cols = axisOf(ranges(), 'c0', 'c1')
+    const head = cols.map((c) => header[c] ?? '')
+    try {
+      await navigator.clipboard.writeText(gridToMarkdown([head, ...values]))
+      onStatus(`Copied ${values.length.toLocaleString()} ${values.length === 1 ? 'row' : 'rows'} as a Markdown table`)
+    } catch {
+      onStatus('Could not reach the clipboard')
+    }
   }
 
   /* ------------------------------------------------------- the right-click */
@@ -2998,6 +4038,7 @@ export function mountCsv ({
     if (readonly) {
       openMenu(event.clientX, event.clientY, [
         { label: 'Copy', run: () => copySelection() },
+        { label: 'Copy as Markdown table', run: () => copyMarkdown() },
         '-',
         { label: 'Select column', run: () => selectColumn(c) },
         { label: 'Select row', disabled: r < 0, run: () => selectRow(r) },
@@ -3008,6 +4049,7 @@ export function mountCsv ({
     }
     openMenu(event.clientX, event.clientY, [
       { label: 'Copy', run: () => copySelection() },
+      { label: 'Copy as Markdown table', run: () => copyMarkdown() },
       { label: 'Cut', run: () => copySelection({ cut: true }) },
       { label: 'Paste', run: () => pasteFromClipboard() },
       { label: 'Clear contents', run: () => clearSelection() },
@@ -3038,6 +4080,22 @@ export function mountCsv ({
   }
 
   const headMenu = (event, c) => {
+    /* Sorting is a way of looking too, so the same four items are in both
+       menus. "Then by" only appears once there is something for this column to
+       come *after*: on a table in its own order it would be a distinction
+       without a difference, and it is the one item here that needs explaining
+       to be understood. */
+    const sortItems = [
+      { label: 'Sort A → Z', run: () => sortBy(c, 'asc') },
+      { label: 'Sort Z → A', run: () => sortBy(c, 'desc') },
+      ...(sorts.length && !(sorts.length === 1 && sorts[0].col === c)
+        ? [
+            { label: 'Then by A → Z', run: () => addSort(c, 'asc') },
+            { label: 'Then by Z → A', run: () => addSort(c, 'desc') }
+          ]
+        : []),
+      { label: 'Clear sort', disabled: !sorts.length, run: () => sortBy(c, null) }
+    ]
     /* Filtering is a way of looking, so it is in both menus and worded the
        same in each. */
     const filterItems = [
@@ -3049,11 +4107,23 @@ export function mountCsv ({
       },
       { label: 'Clear all filters', disabled: !filtering(), run: () => clearAllFilters() }
     ]
+    /* Exports are reads, so they are in both menus. The header toggle is a way
+       of looking too — the file is the same rows either way — so it stays in
+       Reading view as well; only when the table is locked is it left out,
+       because it clears the undo history and a locked file has nothing to
+       lose it for. */
+    const tableItems = [
+      {
+        label: `${hasHeader ? '✓ ' : ''}First row is the headings`,
+        run: () => setHasHeader(!hasHeader)
+      },
+      '-',
+      { label: 'Export as TSV', run: () => { exportAs('tsv') } },
+      { label: 'Export as JSON', run: () => { exportAs('json') } }
+    ]
     if (readonly) {
       openMenu(event.clientX, event.clientY, [
-        { label: 'Sort A → Z', run: () => sortBy(c, 'asc') },
-        { label: 'Sort Z → A', run: () => sortBy(c, 'desc') },
-        { label: 'Clear sort', disabled: !sort, run: () => sortBy(c, null) },
+        ...sortItems,
         '-',
         ...filterItems,
         '-',
@@ -3061,15 +4131,15 @@ export function mountCsv ({
         { label: 'Fit all columns', run: () => fitAllColumns() },
         { label: 'Select column', run: () => selectColumn(c) },
         '-',
+        ...tableItems,
+        '-',
         ...alignItems(c)
       ])
       return
     }
     openMenu(event.clientX, event.clientY, [
-      { label: 'Sort A → Z', run: () => sortBy(c, 'asc') },
-      { label: 'Sort Z → A', run: () => sortBy(c, 'desc') },
-      { label: 'Clear sort', disabled: !sort, run: () => sortBy(c, null) },
-      { label: 'Write this order into the file', disabled: !sort, run: () => applySort() },
+      ...sortItems,
+      { label: 'Write this order into the file', disabled: !sorts.length, run: () => applySort() },
       '-',
       ...filterItems,
       '-',
@@ -3077,6 +4147,8 @@ export function mountCsv ({
       { label: 'Fit column width', run: () => fitColumn(c) },
       { label: 'Fit all columns', run: () => fitAllColumns() },
       { label: 'Select column', run: () => selectColumn(c) },
+      '-',
+      ...tableItems,
       '-',
       ...alignItems(c),
       '-',
@@ -3150,6 +4222,8 @@ export function mountCsv ({
       // A toggle keeps the focus it was given: the next thing the reader does
       // is likely to be turning it back off, or typing more into the box.
       case 'only-matches': setOnlyMatches(!onlyMatches); return
+      case 'replace-one': replaceOne(); return
+      case 'replace-all': replaceAll(); return
       case 'clear-filters': clearAllFilters(); break
       /* The panel takes the focus itself and keeps it while boxes are ticked,
          so this one does not hand it back to the grid. */
@@ -3186,7 +4260,31 @@ export function mountCsv ({
     }
   }
 
-  search.addEventListener('input', () => setQuery(search.value))
+  /* A big file waits for the typing to pause: each character costs a pass
+     over the rows the last one kept, and the first character keeps nearly
+     all of them. A small one answers at once, as it always did. */
+  const FIND_DEBOUNCE_ROWS = 5000
+  const FIND_DEBOUNCE_MS = 80
+  let findTimer = null
+  search.addEventListener('input', () => {
+    clearTimeout(findTimer)
+    if (rows.length < FIND_DEBOUNCE_ROWS) { setQuery(search.value); return }
+    findTimer = setTimeout(() => setQuery(search.value), FIND_DEBOUNCE_MS)
+  })
+  /* Enter in the replace box replaces — the box is only on screen because
+     replacing is what the reader is doing — and Escape folds the strip away. */
+  replaceBox.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      if (event.shiftKey || event.metaKey || event.ctrlKey) replaceAll()
+      else replaceOne()
+    } else if (event.key === 'Escape') {
+      event.preventDefault()
+      replacing = false
+      paintBar()
+      scroller.focus({ preventScroll: true })
+    }
+  })
   search.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') { event.preventDefault(); findNext(event.shiftKey) }
     else if (event.key === 'Escape') {
@@ -3221,12 +4319,60 @@ export function mountCsv ({
       scroller.focus({ preventScroll: true })
       return
     }
+    /* ⌥-click adds the column to the ordering instead of replacing it, which
+       is what makes "by department, then by name" two clicks. Not ⇧-click,
+       which every grid in the world — this one included, two lines up — reads
+       as "extend the selection to here"; taking it for a second sort key would
+       be one gesture with two meanings on the same element. */
+    if (event.altKey) {
+      cycleAddSort(c)
+      scroller.focus({ preventScroll: true })
+      return
+    }
     if (event.shiftKey) { moveTo(cursor.r, c, { extend: true }); return }
     if (event.detail > 1) return  // the double-click handler renames it
-    sortBeforeClick = sort && { ...sort }
+    sortBeforeClick = sorts.map((key) => ({ ...key }))
     cycleSort(c)
+    /* The same press may turn out to be a drag. Armed rather than started:
+       nothing happens until the pointer has moved far enough sideways that it
+       cannot be a click — see the frame's mousemove — and if it never does,
+       the sort this click just performed simply stands. */
+    if (!readonly && !lock) headerDrag = { c, x: event.clientX, active: false, to: null }
     scroller.focus({ preventScroll: true })
   })
+
+  /* -------------------------------------------------- dragging a heading */
+
+  /* The press that may become a column drag. `active` flips once the pointer
+     has moved past the slop a click can wander, and from then on the sort the
+     press performed is owed an undoing — a drag is not a click, and reordering
+     the rows on the way to reordering the columns would be doing both halves
+     of an ambiguous gesture. */
+  let headerDrag = null
+
+  const paintColumnDrop = (to) => {
+    for (const cell of headRow.querySelectorAll('.csv-th')) {
+      const c = Number(cell.dataset.col)
+      cell.classList.toggle('is-col-drop', to !== null && c === to && c !== headerDrag?.c)
+      cell.classList.toggle('is-col-lifted', headerDrag?.active === true && c === headerDrag?.c)
+    }
+  }
+
+  const endHeaderDrag = () => {
+    if (!headerDrag) return
+    const { c, to, active } = headerDrag
+    headerDrag = null
+    frame.classList.remove('is-col-dragging')
+    paintColumnDrop(null)
+    if (!active) return
+    /* The mousedown that began this sorted the column on its way here, and a
+       drag is not a request to reorder the rows — so the sort goes back to
+       whatever it was, exactly as the rename double-click puts it back. */
+    sorts = (sortBeforeClick || []).map((key) => ({ ...key }))
+    rebuildOrder()
+    if (to !== null && to !== c) moveColumn(c, to)
+    else paint()
+  }
 
   /**
    * The element of `kind` this event is about.
@@ -3257,7 +4403,10 @@ export function mountCsv ({
     /* The first click of this double-click sorted the column on its way here.
        Renaming a heading is not a request to reorder the table, so the sort
        goes back to whatever it was before that click. */
-    sortBy(sortBeforeClick ? sortBeforeClick.col : c, sortBeforeClick?.dir ?? null)
+    sorts = (sortBeforeClick || []).map((key) => ({ ...key }))
+    rebuildOrder()
+    collapse()
+    paint()
     moveTo(-1, c)
     beginEdit()
   })
@@ -3300,6 +4449,23 @@ export function mountCsv ({
 
   frame.addEventListener('mousemove', (event) => {
     if (resize) { onResizeMove(event); return }
+    if (headerDrag) {
+      /* Sideways only: a heading press that drifts down is on its way to the
+         body, not to another column. Six pixels is the slop a click wanders. */
+      if (!headerDrag.active && Math.abs(event.clientX - headerDrag.x) > 6) {
+        headerDrag.active = true
+        frame.classList.add('is-col-dragging')
+      }
+      if (headerDrag.active) {
+        const th = eventTarget(event, '.csv-th')
+        const to = th ? Number(th.dataset.col) : null
+        if (to !== headerDrag.to) {
+          headerDrag.to = to
+          paintColumnDrop(to)
+        }
+      }
+      return
+    }
     if (!dragging) return
     const target = dragging === 'rows'
       ? event.target.closest?.('.csv-gutter, .csv-cell')
@@ -3312,7 +4478,7 @@ export function mountCsv ({
     moveTo(r, Number.isNaN(c) ? cursor.c : c, { extend: true })
   })
 
-  window.addEventListener('mouseup', () => { dragging = null; endResize() })
+  window.addEventListener('mouseup', () => { dragging = null; endResize(); endHeaderDrag() })
 
   scroller.addEventListener('dblclick', (event) => {
     if (event.target.closest?.('.csv-gutter')) return
@@ -3374,6 +4540,17 @@ export function mountCsv ({
     // While a cell is open, the input owns almost everything typed into it.
     if (editing) {
       if (event.key === 'Enter') {
+        /* ⇧⏎ and ⌥⏎ put a line break *inside* the cell, which is the one thing
+           a value could never be given by typing before this: plain Enter has
+           always meant "done", so the break needs a chord, and these two are
+           the chords every spreadsheet already uses for it. Nothing is done
+           here — the field is a textarea and inserting a newline is its own
+           default — beyond keeping the key from the commit below. The value
+           then quotes itself on save, because a newline is one of the things
+           `needsQuotes` has always quoted for. Headings stay single-line: the
+           strip is one line tall and a broken heading would be drawn under
+           the table. */
+        if ((event.shiftKey || event.altKey) && editing.r !== -1) return
         event.preventDefault()
         commitEdit()
         moveTo(cursor.r + (event.shiftKey ? -1 : 1), cursor.c)
@@ -3421,7 +4598,7 @@ export function mountCsv ({
         case 'f':
           event.preventDefault()
           if (extend) filterColumn(cursor.c)
-          else { search.focus(); search.select() }
+          else openFindReplace()
           return
         case 'g': event.preventDefault(); findNext(extend); return
         case 'z': event.preventDefault(); fromKey(extend ? 'redo' : 'undo', () => stepHistory(extend)); return
@@ -3537,8 +4714,76 @@ export function mountCsv ({
      different delimiter is exactly an `open`, and writing it is exactly a
      `save`. */
   const grid = {
-    async open (path, place = null, forced = null) {
-      const text = await file.read(path)
+    /**
+     * Point the grid at a file.
+     *
+     * @param path   what to open
+     * @param place  where the reader was — the scroll offsets, and, since an
+     *               external change reopens the file through here, the whole
+     *               of how they were looking at it: the sort, the filters, the
+     *               find box. A file rewritten under the reader by a sync
+     *               client used to come back at the top, unsorted, unfiltered
+     *               and with the undo history gone, which is a heavier price
+     *               for somebody else's edit than the edit itself.
+     * @param forced a delimiter chosen by hand, which outranks the sniff
+     * @param whole  read the whole of a file big enough to be previewed — the
+     *               notice's own button, and the only way past `PREVIEW_ABOVE`
+     */
+    async open (path, place = null, forced = null, { whole = false } = {}) {
+      hideNotice()
+      lock = null
+
+      /* How big it is, asked before a byte of it is read. `file.probe` is the
+         cheap question — a stat and a sniff of the head — and it is the only
+         thing standing between the reader and a window that stops answering
+         while half a gigabyte crosses the IPC boundary as one string. */
+      let size = 0
+      if (typeof file.probe === 'function') {
+        const stat = await file.probe(path).catch(() => null)
+        if (Number.isFinite(stat?.size)) size = Number(stat.size)
+      }
+
+      /* Read as bytes and decoded by whatever those bytes turn out to be,
+         rather than as UTF-8 and hope.
+
+         This is the highest-priority fix in the file and it is invisible until
+         it bites: a Latin-1 or cp1252 export — which is what Excel on a
+         Windows machine still writes by default in much of the world — decoded
+         as UTF-8 puts U+FFFD in place of every accented character, and the
+         nine-hundred-millisecond autosave then writes those replacement
+         characters back over the reader's data. The damage is silent, total
+         for every name with an accent in it, and completely irreversible.
+
+         `readEncoded` hands back what the bytes actually were, and every write
+         from here on puts them back the same way. The fallback is for the
+         tests' own file object, which has only `read`. */
+      const read = typeof file.readEncoded === 'function'
+        ? await file.readEncoded(path)
+        : {
+            ok: true,
+            text: await file.read(path),
+            encoding: 'utf8',
+            bom: false,
+            clean: true,
+            stamp: null
+          }
+      if (!read || read.ok === false) {
+        throw new Error(read?.error || 'That file could not be read.')
+      }
+
+      const source = String(read.text ?? '')
+      /* Big enough to be a preview? Either answer may be the one that knows:
+         `probe` measures the bytes and is absent in tests, while the decoded
+         text is what the parser is actually about to walk. */
+      const previewing = !whole && (size > PREVIEW_ABOVE || source.length > PREVIEW_ABOVE)
+      /* Cut at a line ending, so the preview never stops in the middle of a
+         quoted field and turns the rest of it into a delimiter storm. */
+      let text = source
+      if (previewing && source.length > PREVIEW_CHARS) {
+        const cut = source.lastIndexOf('\n', PREVIEW_CHARS)
+        text = source.slice(0, cut > 0 ? cut + 1 : PREVIEW_CHARS)
+      }
+
       /* Everything kept beside this file, read before it is parsed: the
          delimiter decides what the rows even are, so it cannot wait until
          after the columns have been measured the way the widths do. */
@@ -3552,14 +4797,89 @@ export function mountCsv ({
       const delimiter = DELIMITER_CANDIDATES.includes(remembered)
         ? remembered
         : sniffDelimiter(text, declared)
-      const parsed = parseSeparated(text, delimiter)
-      /* The first row is the header. Not a guess about the file so much as the
-         only useful reading of one: a CSV with no header row is a CSV whose
-         first row is its own labels, and showing it as the header costs
-         nothing but a row that reads oddly. */
-      header = parsed.length ? parsed[0] : ['']
-      rows = parsed.slice(1)
-      current = { path, delimiter, declared, newline: detectNewline(text) }
+      const { rows: parsedAll, shape } = readSeparated(text, delimiter)
+      const parsed = previewing ? parsedAll.slice(0, PREVIEW_ROWS + 1) : parsedAll
+
+      /* Whether the first row is the headings. Remembered per file for the
+         session and carried across a reload in `place`; the sidecar cannot
+         hold it yet, so a restart forgets. Only ever false because somebody
+         said so — the default is the only useful reading of a file that has
+         not been asked about. */
+      hasHeader = typeof place?.hasHeader === 'boolean'
+        ? place.hasHeader
+        : (headerChoice.get(path) ?? true)
+      if (hasHeader) {
+        /* The first row is the header. Not a guess about the file so much as
+           the only useful reading of one: a CSV with no header row is a CSV
+           whose first row is its own labels, and showing it as the header
+           costs nothing but a row that reads oddly. */
+        header = parsed.length ? parsed[0] : ['']
+        rows = parsed.slice(1)
+      } else {
+        rows = parsed.slice()
+        header = numberedHeader(parsed.reduce((most, r) => Math.max(most, r.length), 1))
+      }
+      current = {
+        path,
+        delimiter,
+        declared,
+        newline: shape.newline,
+        shape,
+        encoding: read.encoding || 'utf8',
+        bom: !!read.bom,
+        /* What the file looked like when it was read, so a write can refuse to
+           land on top of somebody else's. */
+        stamp: read.stamp || null,
+        truncated: previewing,
+        size: size || source.length
+      }
+
+      /* The two conditions that make writing this file destructive, and the
+         notice that says so.
+
+         A preview first, because it is the one that would lose the most: fifty
+         thousand rows written over a million is not a bad save, it is a
+         deletion. */
+      if (previewing) {
+        lock = { why: `Showing the first ${rows.length.toLocaleString()} rows — this file is too large to edit here` }
+        showNotice(
+          `This file is ${Math.round(current.size / (1024 * 1024)).toLocaleString()} MB. ` +
+          `Showing the first ${rows.length.toLocaleString()} rows, read-only, so that saving cannot write them over the rest.`,
+          [{
+            label: 'Open the whole file',
+            title: 'Read all of it — the window will not respond while it does',
+            run: () => {
+              onStatus('Reading the whole file…')
+              grid.open(path, grid.place(), forced, { whole: true }).catch(() => {
+                onStatus('That file could not be opened in full')
+              })
+            }
+          }]
+        )
+      } else if (read.clean === false) {
+        /* Rare, and worth every line of this: it means the file carried a
+           byte-order mark and then contradicted it, so the decode substituted
+           U+FFFD and a save would burn those replacement characters into the
+           reader's data. Read-only until they say otherwise in as many words. */
+        lock = { why: 'This file could not be decoded — it is open read-only' }
+        showNotice(
+          'This file’s bytes do not match the encoding it declares, so some characters could not be read. ' +
+          'It is open read-only: saving would write “\uFFFD” over them.',
+          [{
+            label: 'Save as UTF-8 anyway',
+            title: 'Accept the substitutions and write the file back as UTF-8',
+            run: () => {
+              lock = null
+              current.encoding = 'utf8'
+              current.bom = false
+              hideNotice()
+              paintBar()
+              onStatus('This table will be saved as UTF-8')
+            }
+          }]
+        )
+      }
+
       cursor = { r: rows.length ? 0 : -1, c: 0 }
       anchor = { ...cursor }
       extras = []
@@ -3572,12 +4892,25 @@ export function mountCsv ({
       firstColBuilt = -1
       lastColBuilt = -1
       liveRows.clear()
-      sort = null
-      /* A filter belongs to the file it was made for: its values are that
-         file's values, and carrying it into the next one would open a table
-         with rows already missing for a reason nothing on screen explains. */
-      filters = new Map()
-      onlyMatches = false
+      /* The view the reader had, when this open is a reload of the file they
+         were already looking at, and a clean slate when it is a different
+         file. `place` is what tells the two apart: the renderer hands back
+         what `place()` gave it, and only for the same document.
+
+         A filter otherwise belongs to the file it was made for: its values are
+         that file's values, and carrying it into the next one would open a
+         table with rows already missing for a reason nothing on screen
+         explains. */
+      /* Bounded by the widest row, not the header: a sort on a column only
+         the body carries — see `columnCount` — is otherwise dropped on every
+         reload the watcher asks for. */
+      sorts = restoredSorts(place, columnCount())
+      filters = restoredFilters(place)
+      onlyMatches = !!place?.onlyMatches
+      query = typeof place?.query === 'string' ? place.query : ''
+      search.value = query
+      replaceBox.value = typeof place?.replacement === 'string' ? place.replacement : ''
+      refreshMatcher()
       closeFilter()
       history = []
       future = []
@@ -3635,10 +4968,17 @@ export function mountCsv ({
       order = []
       history = []
       future = []
-      sort = null
+      sorts = []
       filters = new Map()
       onlyMatches = false
       editing = null
+      lock = null
+      hideNotice()
+      replacing = false
+      query = ''
+      matcher = null
+      search.value = ''
+      replaceBox.value = ''
       closeMenu()
       closeFilter()
       liveRows.clear()
@@ -3687,15 +5027,33 @@ export function mountCsv ({
       rememberWidths()
     },
 
-    place: () => ({ top: scroller.scrollTop, left: scroller.scrollLeft }),
+    /**
+     * How the reader has the file, so a reload can put all of it back.
+     *
+     * Not only the scroll offsets: an external change reopens the file through
+     * `open`, and a reload that kept the reader's place while dropping their
+     * sort, their filters and their search was keeping the least of what they
+     * had. The undo history is the one thing that cannot come back — its
+     * patches name rows of a file that has since changed under it.
+     */
+    place: () => ({
+      top: scroller.scrollTop,
+      left: scroller.scrollLeft,
+      sorts: sorts.map((key) => ({ ...key })),
+      filters: [...filters].map(([col, hidden]) => [col, [...hidden]]),
+      onlyMatches,
+      query,
+      replacement: replaceBox.value,
+      hasHeader
+    }),
     dirty: () => dirty,
 
     /** ⌘F, routed here by the renderer while a table is the open document. */
-    find () { search.focus(); search.select() },
+    find () { openFindReplace() },
 
     /** The command palette's Auto-resize all columns, which a language table
      *  answers the same way. True when anything actually moved. */
-    fitColumns: () => fitAllColumns(),
+    fitColumns: fitAllColumns,
 
     /** The palette's Filter this column — the same panel the funnel opens, on
      *  the column the cursor is in. */
@@ -3725,7 +5083,16 @@ export function mountCsv ({
       const parts = [
         `${r.toLocaleString()} ${r === 1 ? 'row' : 'rows'} · ${c} ${c === 1 ? 'column' : 'columns'}`
       ]
-      if (sort) parts.push(`sorted by ${header[sort.col] || `column ${sort.col + 1}`} ${sort.dir === 'asc' ? '↑' : '↓'}`)
+      /* Said wherever the shape is said: a preview's row count is true of the
+         preview and a lie about the file, and this is the correction. */
+      if (current.truncated) {
+        parts.push(`the first rows of a ${Math.round(current.size / (1024 * 1024)).toLocaleString()} MB file, read-only`)
+      }
+      if (sorts.length) {
+        const named = sorts.map((key) =>
+          `${header[key.col] || `column ${key.col + 1}`} ${key.dir === 'asc' ? '↑' : '↓'}`)
+        parts.push(`sorted by ${named.join(', then ')}`)
+      }
       /* Named rather than counted: "filtered" alone leaves the reader hunting
          for which column is doing it, and the whole point of the line is that
          a table showing 812 of 8,000 rows says why. */
@@ -3746,11 +5113,29 @@ export function mountCsv ({
      *  has it — because a question about "the top rows" is about those. */
     context () {
       if (!current) return { text: '', rows: rows.length, columns: columns() }
-      const shown = order.slice(0, 50).map((i) => rows[i])
+      const count = 50
+      const active = Math.max(0, cursor.r)
+      const from = Math.max(0, Math.min(Math.max(0, order.length - count), active - Math.floor(count / 2)))
+      const shown = order.slice(from, from + count).map((i) => rows[i])
+      const text = formatSeparated([header, ...shown], current.delimiter, '\n')
+      const selectedRow = cursor.r >= 0 ? order[cursor.r] : -1
+      const column = header[cursor.c] || ''
+      const activeText = selectedRow >= 0
+        ? formatSeparated([rows[selectedRow]], current.delimiter, '\n')
+        : ''
       return {
-        text: formatSeparated([header, ...shown], current.delimiter, '\n'),
+        text,
         rows: rows.length,
-        columns: columns()
+        columns: columns(),
+        atRow: selectedRow >= 0 ? selectedRow + 1 : 0,
+        atColumn: cursor.c + 1,
+        column,
+        value: selectedRow >= 0 ? String(rows[selectedRow]?.[cursor.c] || '') : '',
+        shownRows: order.length,
+        sortedBy: sorts.map(({ col, dir }) => `${header[col] || `column ${col + 1}`} ${dir}`),
+        filteredBy: [...filters].filter(([, hidden]) => hidden.size)
+          .map(([col]) => header[col] || `column ${col + 1}`),
+        focus: activeText ? Math.max(0, text.indexOf(activeText)) : 0
       }
     },
 

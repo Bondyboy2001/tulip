@@ -2,7 +2,7 @@
 /* The half of `npm run typecheck` that is allowed to fail a build.
  *
  * tsconfig.json explains why the whole-tree run does not gate: it reports
- * ~2,570 errors, most of them the DOM's own typing, and a gate that is red on
+ * over two thousand errors, most of them the DOM's own typing, and a gate that is red on
  * the day it is installed is a gate that gets turned off. Its own comment says
  * what to do instead — take the modules that are already clean and hold them
  * there. This is that.
@@ -38,6 +38,17 @@ const CLEAN = [
   'electron/copilot-restore.js',
   'electron/copilot-search.js',
   'electron/index-cache.js',
+  'electron/ipc-drafts.js',
+  'electron/ipc-create.js',
+  'electron/ipc-files.js',
+  'electron/ipc-kernel.js',
+  'electron/ipc-metadata.js',
+  'electron/ipc-pdf.js',
+  'electron/ipc-render.js',
+  'electron/ipc-review.js',
+  'electron/ipc-spell.js',
+  'electron/ipc-vault-info.js',
+  'electron/ipc-vault-write.js',
   'electron/kill-tree.js',
   'electron/language-history-store.js',
   'electron/language-row.js',
@@ -51,13 +62,16 @@ const CLEAN = [
   'electron/search-narrow.js',
   'electron/trust-store.js',
   'electron/vault-events.js',
+  'electron/vault-kinds.js',
   'electron/whiteboard-data.js',
+  'src/blocks.js',
   'src/callouts.js',
   'src/citations.js',
   'src/cite.js',
   'src/copilot-turns.js',
   'src/countries.js',
   'src/dom.js',
+  'src/drafts.js',
   'src/file-icons.js',
   'src/find-bar.js',
   'src/find.js',
@@ -66,17 +80,22 @@ const CLEAN = [
   'src/highlight.js',
   'src/history.js',
   'src/htmlrun.js',
+  'src/info-pane.js',
+  'src/languages.js',
   'src/linediff.js',
   'src/links.js',
   'src/lint.js',
   'src/marks.js',
+  'src/manim.js',
   'src/math-editor.js',
   'src/merge.js',
   'src/mergepanel.js',
+  'src/mermaid.js',
   'src/mermaid-editor.js',
   'src/models.js',
   'src/money-editor.js',
   'src/money.js',
+  'src/overlay-catalog.js',
   'src/panel-state.js',
   'src/pdf-search.js',
   'src/pdf-text.js',
@@ -84,6 +103,7 @@ const CLEAN = [
   'src/properties.js',
   'src/rawhtml.js',
   'src/reading-split.js',
+  'src/review-panel.js',
   'src/review-stats.js',
   'src/runblocks.js',
   'src/saved-searches.js',
@@ -104,6 +124,7 @@ const CLEAN = [
   'src/time.js',
   'src/tree-diff.js',
   'src/vault-paths.js',
+  'src/whiteboard.js',
   'src/zoom.js'
 ]
 
@@ -114,7 +135,7 @@ const CLEAN = [
    lower the ceiling to match in the same commit that earned the drop; the
    gate says so rather than doing it, because a self-lowering ceiling would
    also quietly absorb a fix that later regresses. */
-const CEILING = 2291
+const CEILING = 2145
 
 /* The same tree does not count the same everywhere: a hosted runner's tsc
    sees a slightly different `@types` resolution (platform-specific optional

@@ -21,6 +21,7 @@
     { "id": "tip", "label": "Tip", "tone": "mint", "icon": "flame", "alias": ["hint", "important"] },
     { "id": "success", "label": "Success", "tone": "mint", "icon": "check", "alias": ["check", "done"] },
     { "id": "question", "label": "Question", "tone": "amber", "icon": "help", "alias": ["help", "faq"] },
+    { "id": "quiz", "label": "Flashcard", "tone": "violet", "icon": "help", "alias": ["flashcard", "flash-card", "multiple-choice"] },
     { "id": "warning", "label": "Warning", "tone": "amber", "icon": "alert", "alias": ["caution", "attention"] },
     { "id": "failure", "label": "Failure", "tone": "rose", "icon": "cross", "alias": ["fail", "missing"] },
     { "id": "danger", "label": "Danger", "tone": "rose", "icon": "zap", "alias": ["error"] },

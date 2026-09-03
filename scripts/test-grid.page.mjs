@@ -14,11 +14,58 @@ export async function run () {
 
   let selections = 0
 
+  /* The disk the fake file API answers with. The knobs are what the encoding
+     and staleness tests turn: the grid only ever sees the same contract the
+     real preload exposes, so what is exercised is the grid's half of it. */
+  let mtime = 1
+  let fakeEncoding = 'utf8'
+  let fakeBom = false
+  let fakeClean = true
+  let fakeSize = 0
+  let staleOnce = false
+  let lastWriteMeta = null
+  const exported = new Map()
+  /* Which path the one-slot fake disk is standing in for right now: whatever
+     was last opened. A write to any other path is an export landing beside
+     the file, and must not clobber the file itself. */
+  let openPath = 'Data/people.csv'
+
   const grid = mountCsv({
     host,
     file: {
-      read: async () => onDisk,
-      write: async (_path, text) => { onDisk = text; writes++ }
+      read: async (path) => { openPath = path; return onDisk },
+      readEncoded: async (path) => {
+        openPath = path
+        return {
+          ok: true,
+          text: onDisk,
+          encoding: fakeEncoding,
+          bom: fakeBom,
+          newline: '\n',
+          clean: fakeClean,
+          stamp: { mtimeMs: mtime, size: onDisk.length }
+        }
+      },
+      probe: async (path) => (path === openPath || path === 'Data/people.csv'
+        ? { ok: true, size: fakeSize || onDisk.length }
+        : { ok: false }),
+      write: async (path, text, metadata = null) => {
+        /* An export writes a sibling file, and a fake disk with one slot would
+           let it clobber the CSV under every test that follows. */
+        if (path !== openPath) {
+          exported.set(path, text)
+          return { ok: true, stamp: { mtimeMs: ++mtime, size: text.length } }
+        }
+        lastWriteMeta = metadata
+        if (staleOnce && metadata?.expect && !metadata?.force) {
+          staleOnce = false
+          return { ok: false, stale: true, error: 'changed on disk' }
+        }
+        onDisk = text
+        writes++
+        mtime++
+        return { ok: true, stamp: { mtimeMs: mtime, size: onDisk.length } }
+      }
     },
     onDirty: () => {},
     onSaved: () => {},
@@ -62,6 +109,7 @@ export async function run () {
   const click = (target, init) => { mouse(target, 'mousedown', init); mouse(target, 'mouseup', init) }
 
   const selected = () => document.querySelectorAll('.csv-cell.is-sel, .csv-cell.is-cursor').length
+  const editing = () => document.querySelector('.csv-input')
   const button = (act) => document.querySelector(`.csv-btn[data-act="${act}"]`)
 
   /* Sorting's writing half lives in the heading's menu now that the bar has
@@ -463,6 +511,7 @@ export async function run () {
   result.frameOk = !!frame
   result.status = status
   result.fileAtEnd = onDisk
+  result.context = grid.context()
 
   /* ------------------------------------------------- a column that starts late
 
@@ -791,6 +840,235 @@ export async function run () {
   await grid.save({ flush: true })
   result.writesFromAligning = writes - writesBeforeAligning
   result.fileAfterAligning = onDisk
+
+  /* ------------------------------------------------------- the multi-sort */
+
+  /* One ordering with two keys, not two sorts: ⌥-click adds the second. The
+     ordering arithmetic is the unit tests' business; what a browser has to
+     show for it is the numbered marks and the sentence in the summary. */
+  click(heading(2))
+  await wait()
+  click(heading(1), { altKey: true })
+  await wait()
+  const markOf = (c) => heading(c)?.querySelector('.csv-sort')?.textContent
+  result.multiSortMarks = [markOf(2), markOf(1)]
+  result.multiSortSummary = grid.summary()
+  await grid.save({ flush: true })
+  result.fileAfterMultiSort = onDisk
+  headMenuItem('Clear sort', 1).click()
+  await wait()
+
+  /* ---------------------------------------------------------- the replace */
+
+  search.value = 'Ada'
+  search.dispatchEvent(new Event('input', { bubbles: true }))
+  key('f', { metaKey: true })
+  await wait()
+  const replaceBox = document.querySelector('.csv-replace')
+  result.replaceShown = !!replaceBox && !replaceBox.hidden
+  result.findFocused = document.activeElement === search
+  result.advancedFindControlsGone = !button('regex') && !button('whole') && !button('replace-toggle')
+  replaceBox.value = 'Adelaide'
+  button('replace-all').click()
+  await wait()
+  result.afterReplaceAll = shown()
+  await grid.save({ flush: true })
+  result.fileAfterReplaceAll = onDisk
+  grid.history(false)
+  await grid.save({ flush: true })
+  result.fileAfterReplaceUndone = onDisk
+
+  search.value = ''
+  search.dispatchEvent(new Event('input', { bubbles: true }))
+  await wait()
+
+  /* ------------------------------------------- a newline inside a cell */
+
+  click(cell(0, 0))
+  key('F2')
+  await wait()
+  const open = document.querySelector('.csv-input')
+  key('Enter', { shiftKey: true })
+  /* The chord is left to the textarea — a synthetic keydown inserts nothing
+     itself, so the field still being open is the whole assertion: plain Enter
+     would have committed. The value is then set the way the key would have. */
+  result.editorSurvivesShiftEnter = !!document.querySelector('.csv-input') && open === editing()
+  open.value = 'Ada\nLovelace'
+  key('Enter')
+  await wait()
+  await grid.save({ flush: true })
+  result.fileAfterNewline = onDisk
+  grid.history(false)
+  await grid.save({ flush: true })
+  result.fileAfterNewlineUndone = onDisk
+
+  /* ------------------------------------------------------ the header row */
+
+  headMenuItem('✓ First row is the headings', 0).click()
+  await wait()
+  result.headerOffHeadings = [...document.querySelectorAll('.csv-head .csv-th .csv-th-label')]
+    .map((label) => label.textContent)
+  result.headerOffFirstRow = shown()[0]
+  result.headerOffRows = rowsOnScreen().length
+  // Not an edit: the same bytes go back regardless of where row one is shown.
+  const writesBeforeHeaderToggle = writes
+  await grid.save({ flush: true })
+  result.headerToggleWrites = writes - writesBeforeHeaderToggle
+  headMenuItem('First row is the headings', 0).click()
+  await wait()
+  result.headerOnRows = rowsOnScreen().length
+
+  /* ------------------------------------------------------ the moved column */
+
+  /* A heading dragged sideways takes its column with it. The press sorts on
+     its way in — a click cannot know it is a drag yet — so the drop also has
+     to have put that sort back. */
+  const from = heading(0).getBoundingClientRect()
+  mouse(heading(0), 'mousedown', { clientX: Math.round(from.left + 10), clientY: 10 })
+  const onto = heading(1).getBoundingClientRect()
+  /* The pointer's fall-back is `elementFromPoint`, so the coordinates have to
+     really be over the heading — a made-up y lands in the bar above it. */
+  const centreOf = (box) => ({
+    clientX: Math.round(box.left + box.width / 2),
+    clientY: Math.round(box.top + box.height / 2)
+  })
+  frame.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, ...centreOf(onto) }))
+  await wait()
+  result.dragTargetMarked = heading(1)?.classList.contains('is-col-drop')
+  window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
+  await wait()
+  result.movedHeadings = [...document.querySelectorAll('.csv-head .csv-th .csv-th-label')]
+    .map((label) => label.textContent)
+  result.movedSortCleared = grid.summary().includes('sorted') === false
+  await grid.save({ flush: true })
+  result.fileAfterMove = onDisk
+  grid.history(false)
+  await grid.save({ flush: true })
+  result.fileAfterMoveUndone = onDisk
+
+  /* -------------------------------------------------------- the exports */
+
+  headMenuItem('Export as TSV', 0).click()
+  await wait()
+  await wait()
+  result.exportStatus = status.at(-1)
+  result.exportedTsv = exported.get('Data/people.tsv')
+
+  click(cell(0, 0))
+  click(cell(1, 1), { shiftKey: true })
+  let markdownOnClipboard = ''
+  navigator.clipboard.writeText = async (text) => { markdownOnClipboard = text }
+  cell(0, 0).dispatchEvent(new MouseEvent('contextmenu', {
+    bubbles: true, cancelable: true, clientX: 40, clientY: 60
+  }))
+  ;[...document.querySelectorAll('.csv-menu-item')]
+    .find((item) => item.textContent === 'Copy as Markdown table').click()
+  await wait()
+  result.markdownCopy = markdownOnClipboard
+
+  /* ------------------------------------------------- the restored view */
+
+  /* An external change reloads through `open`, and the reload used to reset
+     the sort, the filters and the search. `place` now carries all three. */
+  click(heading(1))
+  await wait()
+  search.value = 'a'
+  search.dispatchEvent(new Event('input', { bubbles: true }))
+  await wait()
+  const keptPlace = grid.place()
+  await grid.open('Data/people.csv', keptPlace)
+  await wait()
+  result.reloadKeptSort = grid.summary()
+  result.reloadKeptQuery = document.querySelector('.csv-search').value
+  await grid.open('Data/people.csv')
+  await wait()
+
+  /* ------------------------------------------------------- the encoding */
+
+  /* The file that would not decode: open read-only, refuse every write, and
+     hand the way out to the reader in as many words. */
+  fakeClean = false
+  await grid.open('Data/people.csv')
+  await wait()
+  const noticeOf = () => document.querySelector('.csv-notice')
+  result.undecodableNotice = !noticeOf().hidden && noticeOf().textContent
+  click(cell(0, 0))
+  key('Z')
+  await wait()
+  result.undecodableEditorOpen = !!document.querySelector('.csv-input')
+  const writesBeforeUndecodable = writes
+  await grid.save({ flush: true })
+  result.undecodableWrites = writes - writesBeforeUndecodable
+  // The one way out, said yes to explicitly.
+  ;[...noticeOf().querySelectorAll('.csv-notice-btn')]
+    .find((b) => b.textContent === 'Save as UTF-8 anyway').click()
+  await wait()
+  click(cell(0, 0))
+  key('Z')
+  await wait()
+  result.acceptedEditorOpen = !!document.querySelector('.csv-input')
+  key('Escape')
+  fakeClean = true
+
+  /* A windows-1252 file goes back as windows-1252, mark and all. */
+  fakeEncoding = 'windows-1252'
+  fakeBom = true
+  await grid.open('Data/people.csv')
+  await wait()
+  click(cell(0, 0))
+  key('F2')
+  await wait()
+  document.querySelector('.csv-input').value = 'Zoë'
+  key('Enter')
+  await wait()
+  await grid.save({ flush: true })
+  result.writeMeta = {
+    encoding: lastWriteMeta?.encoding,
+    bom: lastWriteMeta?.bom,
+    expected: !!lastWriteMeta?.expect
+  }
+  fakeEncoding = 'utf8'
+  fakeBom = false
+
+  /* Somebody else's version lands between the read and the write: the save is
+     refused, the grid says so, and "Keep mine" is the only thing that forces. */
+  await grid.open('Data/people.csv')
+  await wait()
+  staleOnce = true
+  click(cell(0, 0))
+  key('F2')
+  await wait()
+  document.querySelector('.csv-input').value = 'Mine'
+  key('Enter')
+  await wait()
+  const diskBeforeStale = onDisk
+  await grid.save({ flush: true })
+  result.staleRefused = onDisk === diskBeforeStale
+  result.staleNotice = !noticeOf().hidden && noticeOf().textContent
+  ;[...noticeOf().querySelectorAll('.csv-notice-btn')]
+    .find((b) => b.textContent === 'Keep mine').click()
+  await wait()
+  await grid.save({ flush: true })
+  result.staleForcedThrough = onDisk.includes('Mine')
+
+  /* -------------------------------------------------------- the preview */
+
+  /* A file too large to open is opened as its head, read-only, and says so. */
+  fakeSize = 200 * 1024 * 1024
+  await grid.open('Data/people.csv')
+  await wait()
+  result.previewNotice = !noticeOf().hidden && noticeOf().textContent
+  result.previewSummary = grid.summary()
+  click(cell(0, 0))
+  key('Z')
+  await wait()
+  result.previewEditorOpen = !!document.querySelector('.csv-input')
+  ;[...noticeOf().querySelectorAll('.csv-notice-btn')]
+    .find((b) => b.textContent === 'Open the whole file').click()
+  await wait()
+  await wait()
+  result.wholeFileNoticeGone = noticeOf().hidden
+  fakeSize = 0
 
   return result
 }

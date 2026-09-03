@@ -246,11 +246,18 @@ check('the paragraph that was edited says what it was given',
   saved.blocks[1].runs[0].text === 'Tuesday', runText(saved.blocks[1]))
 
 /* The walk's reader inflates off the main thread and must read the same
-   document the synchronous one does. */
-readDocxBufferAsync(FILE).then((fromPool) => {
-  check('the async reader sees the same blocks', JSON.stringify(fromPool.blocks) === JSON.stringify(doc.blocks), 'blocks differ')
-  check('and the same stamp', fromPool.stamp === doc.stamp, `${fromPool.stamp} vs ${doc.stamp}`)
-}).catch((err) => check('the async reader reads the fixture', false, err.message))
+   document the synchronous one does. Awaited at the foot of the file, in
+   `main`, because a check that lands after the exit code was decided is a
+   check that can never fail the run. */
+async function asyncReaderChecks () {
+  try {
+    const fromPool = await readDocxBufferAsync(FILE)
+    check('the async reader sees the same blocks', JSON.stringify(fromPool.blocks) === JSON.stringify(doc.blocks), 'blocks differ')
+    check('and the same stamp', fromPool.stamp === doc.stamp, `${fromPool.stamp} vs ${doc.stamp}`)
+  } catch (err) {
+    check('the async reader reads the fixture', false, err.message)
+  }
+}
 
 /* A stale stamp is refused with a code the caller can act on — main uses it
    to offer the splice against the bytes the page was read from instead. */
@@ -463,8 +470,10 @@ refuses('a file that is not a zip is refused', Buffer.from('hello, not a zip at 
 refuses('a zip with no word/document.xml is refused',
   makeZip([['notes.txt', 'just a text file']]))
 
-if (failures) {
-  console.error(`\n${failures} check(s) failed`)
-  process.exit(1)
-}
-console.log('docx: read')
+asyncReaderChecks().then(() => {
+  if (failures) {
+    console.error(`\n${failures} check(s) failed`)
+    process.exit(1)
+  }
+  console.log('docx: read')
+})

@@ -20,7 +20,7 @@ import { embedSpec, renderEmbed } from './assets.js'
 import { attachArtefactBlock } from './runcode.js'
 import { DRAWN } from './languages.js'
 
-const api = window.tulip
+const api = /** @type {any} */ (window).tulip
 
 export function isManim (lang) {
   return String(lang || '').trim().toLowerCase() === DRAWN.manim
@@ -67,7 +67,7 @@ const runs = new Map()
    other embed — the resolver is trivial here only because main already answered
    the question resolution exists to answer. */
 export function videoFor (path) {
-  const video = renderEmbed(embedSpec(path, { resolve: () => path }))
+  const video = renderEmbed(embedSpec(path, /** @type {any} */ ({ resolve: () => path })))
 
   /* A scene almost always *builds* to its picture, so frame zero is a black
      rectangle and a note full of scenes reads as a note full of empty boxes.

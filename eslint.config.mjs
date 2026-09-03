@@ -133,8 +133,7 @@ export default [
       '.dist-stage-*/**',
       '.dist-previous-*/**',
       'build/**',
-      'output/**',
-      'bench/**'
+      'output/**'
     ]
   },
 
@@ -188,7 +187,7 @@ export default [
      the Electron-backed suites drive — `*.page.mjs` is the naming convention
      for the half of a test that executes in the page rather than in node. */
   {
-    files: ['scripts/**/*.js', '**/*.page.mjs'],
+    files: ['scripts/**/*.js', 'bench/**/*.js', '**/*.page.mjs'],
     languageOptions: {
       ecmaVersion: 'latest',
       sourceType: 'module',

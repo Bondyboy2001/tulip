@@ -2,6 +2,53 @@
 
 const { contextBridge, ipcRenderer, webUtils } = require('electron')
 
+/* Electron changes the renderer's backing scale before Chromium has always
+   painted the newly sized surface. On macOS that can expose a blank strip at
+   the right edge for one frame. Main asks for this temporary, equivalent CSS
+   scale first: it fills the window at the destination size, waits until that
+   frame exists, then swaps the native zoom underneath it and removes the
+   transform. Kept inside the preload so the page gets no generic DOM/IPC
+   escape hatch for controlling the handshake. */
+/** @type {{root: HTMLElement, before: {transform: string, transformOrigin: string, width: string, height: string}}|null} */
+let stagedZoom = null
+function clearStagedZoom () {
+  if (!stagedZoom) return
+  const { root, before } = stagedZoom
+  root.style.transform = before.transform
+  root.style.transformOrigin = before.transformOrigin
+  root.style.width = before.width
+  root.style.height = before.height
+  stagedZoom = null
+  void root.offsetWidth
+}
+
+ipcRenderer.on('zoom:stage', (_event, payload) => {
+  clearStagedZoom()
+  const ratio = Number(payload?.ratio)
+  const id = Number(payload?.id)
+  if (!Number.isFinite(ratio) || ratio <= 0 || !Number.isFinite(id)) return
+  const root = globalThis.document.documentElement
+  stagedZoom = {
+    root,
+    before: {
+      transform: root.style.transform,
+      transformOrigin: root.style.transformOrigin,
+      width: root.style.width,
+      height: root.style.height
+    }
+  }
+  root.style.transformOrigin = '0 0'
+  root.style.transform = `scale(${ratio})`
+  root.style.width = `${100 / ratio}%`
+  root.style.height = `${100 / ratio}%`
+  void root.offsetWidth
+  globalThis.requestAnimationFrame(() => globalThis.requestAnimationFrame(() => {
+    if (stagedZoom) ipcRenderer.send('zoom:staged', id)
+  }))
+})
+
+ipcRenderer.on('zoom:unstage', clearStagedZoom)
+
 /**
  * The renderer's entire view of the outside world. Everything is a named,
  * argument-checked call — no generic `invoke` escape hatch, so the main process
@@ -27,11 +74,22 @@ contextBridge.exposeInMainWorld('tulip', {
        vault it has never seen is `pick`, which is a native dialog. */
     recent: () => ipcRenderer.invoke('vault:recent'),
     open: (dir) => ipcRenderer.invoke('vault:open', dir),
-    // The other names notes answer to, for resolving `[[Alias]]`.
-    aliases: () => ipcRenderer.invoke('vault:aliases')
+     // The other names notes answer to, for resolving `[[Alias]]`.
+     aliases: () => ipcRenderer.invoke('vault:aliases'),
+     backup: () => ipcRenderer.invoke('vault:backup'),
+     restore: () => ipcRenderer.invoke('vault:restore')
   },
   file: {
     read: (p) => ipcRenderer.invoke('file:read', p),
+    /* The same read, plus the mtime and size the bytes were read at. Handed to
+       `write` as `expect` by a caller that would rather be refused than
+       overwrite an edit that arrived while it was thinking. */
+    readStamped: (p) => ipcRenderer.invoke('file:read', p, { stamp: true }),
+    /* For files the app did not write and cannot assume the encoding of — an
+       Excel `.csv` is windows-1252 far more often than anyone would like.
+       Answers with the text, the encoding and mark it was found in, the line
+       ending it uses, and whether the decode was lossless. */
+    readEncoded: (p) => ipcRenderer.invoke('file:read-encoded', p),
     // Size and dates, for the Info pane.
     info: (p) => ipcRenderer.invoke('file:info', p),
     write: (p, content, metadata) => ipcRenderer.invoke('file:write', p, content, metadata),
@@ -152,6 +210,11 @@ contextBridge.exposeInMainWorld('tulip', {
      attachments as a portable Markdown folder. `to` is the scripted seam. */
   exportHtml: (name, html, to) => ipcRenderer.invoke('note:export-html', name, html, to),
   exportMarkdown: (name, text, files, to) => ipcRenderer.invoke('note:export-markdown', name, text, files, to),
+  /* Whole-vault Markdown export: every note copied to a folder. `to` skips
+     the dialog for scripts. */
+  exportVault: (to) => ipcRenderer.invoke('vault:export-all', to),
+  /* Import `.md` files from a folder into the vault without overwriting. */
+  importFolder: (from) => ipcRenderer.invoke('vault:import-folder', from),
 
   /**
    * Executing a fenced block. The renderer sends the language and the code and
@@ -166,7 +229,9 @@ contextBridge.exposeInMainWorld('tulip', {
   run: {
     start: (lang, code, note) => ipcRenderer.invoke('run:start', lang, code, note ?? null),
     warm: (lang) => ipcRenderer.invoke('run:warm', lang),
-    kill: (id) => ipcRenderer.invoke('run:kill', id)
+    kill: (id) => ipcRenderer.invoke('run:kill', id),
+    trusted: () => ipcRenderer.invoke('run:trusted'),
+    trust: () => ipcRenderer.invoke('run:trust')
   },
 
   /**
@@ -333,7 +398,10 @@ contextBridge.exposeInMainWorld('tulip', {
      two answers agree. */
   spell: {
     check: (words) => ipcRenderer.invoke('spell:check', words),
-    suggest: (word) => ipcRenderer.invoke('spell:suggest', word)
+    suggest: (word) => ipcRenderer.invoke('spell:suggest', word),
+    /* The extra languages this build carries — see TULIP_SPELL_LANGUAGES in
+       build.mjs. Settings greys out the ones it does not. */
+    installed: () => ipcRenderer.invoke('spell:installed')
   },
   durability: {
     flush: () => ipcRenderer.invoke('durability:flush')
@@ -367,16 +435,20 @@ contextBridge.exposeInMainWorld('tulip', {
        reads anything else — see the handler in main. */
     open: (open = null) => ipcRenderer.invoke('window:new', open),
 
+    /* The native application menu is shared by every Mac window, so main
+       cannot infer which document-specific sections belong in it. Said when
+       the active tab changes; main keeps the last kind for each window. */
+    menuContext: (kind) => ipcRenderer.send('menu:context', String(kind || '')),
+
     /* A tab being carried from one window's strip to another's. The drag itself
        cannot hold this — it becomes an OS drag on the way across, and a custom
        flavour does not survive that — so main holds the claim and both strips
        ask it. See the account beside the handlers. */
     tabDragStart: (path) => ipcRenderer.send('tab:drag-start', path),
     tabDragEnd: () => ipcRenderer.send('tab:drag-end'),
-    /* Null unless ANOTHER window is dragging: a reorder inside one strip must
-       never look like a handoff. */
-    tabDragging: () => ipcRenderer.invoke('tab:dragging'),
-    /* Takes it, once. A second drop gets null. */
+    /* Takes what another window is dragging, once. A second drop gets null,
+       as does the window that started the drag — a reorder inside one strip
+       must never look like a handoff. */
     tabClaim: () => ipcRenderer.invoke('tab:claim')
   },
 
@@ -403,7 +475,7 @@ contextBridge.exposeInMainWorld('tulip', {
 
   // The answer to `app:flush`: the renderer has written what it had to write,
   // and the window may close. See the close handler in main.
-  flushed: () => ipcRenderer.invoke('app:flushed'),
+  flushed: (result) => ipcRenderer.invoke('app:flushed', result),
 
   /* "Still writing." Main gives a closing window a short quiet period and no
      more; this is how a genuinely slow save — a large notebook, a long grid —
@@ -445,7 +517,9 @@ contextBridge.exposeInMainWorld('tulip', {
       'document:free',
       // A document this window is editing was renamed or moved; its claim
       // now answers to the new name.
-      'document:relocated'
+      'document:relocated',
+      // A file offered by a page in a website tab, on its way into the vault.
+      'web:download'
     ]
     if (!allowed.includes(channel)) return () => {}
     const listener = (_e, payload) => fn(payload)

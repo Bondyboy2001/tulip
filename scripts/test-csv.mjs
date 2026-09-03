@@ -11,7 +11,18 @@
 import assert from 'node:assert/strict'
 import {
   parseSeparated,
+  readSeparated,
   formatSeparated,
+  detectNewline,
+  multiSortedOrder,
+  columnDateOrder,
+  makeMatcher,
+  gridToTsv,
+  gridToJson,
+  gridToMarkdown,
+  numberedHeader,
+  restoredSorts,
+  restoredFilters,
   numericValue,
   resolutionValue,
   compareCells,
@@ -371,6 +382,235 @@ ok('two corners make the rectangle between them', () => {
   // The heading is row -1, which is what makes a whole-column selection
   // include the column's name.
   assert.deepEqual(normalRect({ r: -1, c: 2 }, { r: 9, c: 2 }), { r0: -1, r1: 9, c0: 2, c1: 2 })
+})
+
+/* ----------------------------------------------------------- the shape
+
+   The four facts about a file the rows alone cannot say, and the reason they
+   are worth a section of their own: forget any one of them and an edit to one
+   cell arrives in git as a rewrite of every line. */
+
+ok('a byte-order mark is reported, and is not part of the first heading', () => {
+  const { rows, shape } = readSeparated('﻿a,b\n1,2\n')
+  assert.deepEqual(rows, [['a', 'b'], ['1', '2']])
+  assert.equal(shape.bom, true)
+  assert.equal(readSeparated('a,b\n').shape.bom, false)
+})
+
+ok('the line ending is the file’s own, all three of them', () => {
+  assert.equal(readSeparated('a,b\r\n1,2\r\n').shape.newline, '\r\n')
+  assert.equal(readSeparated('a,b\n1,2\n').shape.newline, '\n')
+  // The bare-CR file: classic Mac, and still what some instruments emit. It
+  // has no LF anywhere, so the old LF-or-CRLF reading rewrote every line.
+  assert.equal(readSeparated('a,b\r1,2\r').shape.newline, '\r')
+  assert.equal(detectNewline('a,b\r1,2\r'), '\r')
+  assert.equal(detectNewline('a,b\r\n1,2'), '\r\n')
+  assert.equal(detectNewline('a,b\n1,2'), '\n')
+})
+
+ok('a missing final newline is remembered, and not invented back', () => {
+  const ended = readSeparated('a,b\n1,2\n')
+  const bare = readSeparated('a,b\n1,2')
+  assert.equal(ended.shape.finalNewline, true)
+  assert.equal(bare.shape.finalNewline, false)
+  assert.equal(formatSeparated(bare.rows, ',', '\n', bare.shape), 'a,b\n1,2')
+  assert.equal(formatSeparated(ended.rows, ',', '\n', ended.shape), 'a,b\n1,2\n')
+})
+
+ok('a writer that quotes everything gets its quotes back', () => {
+  const text = '"a","b"\n"1","2"\n'
+  const { rows, shape } = readSeparated(text)
+  assert.equal(shape.quoteAll, true)
+  assert.equal(formatSeparated(rows, ',', '\n', shape), text)
+})
+
+ok('a column the writer quotes stays quoted, and its neighbours stay bare', () => {
+  const text = 'id,"name"\n1,"Ada"\n2,"Grace"\n'
+  const { rows, shape } = readSeparated(text)
+  assert.deepEqual(shape.quoteColumns, [false, true])
+  assert.equal(formatSeparated(rows, ',', '\n', shape), text)
+})
+
+ok('one bare value settles a column as unquoted', () => {
+  // A writer that quotes by column does not sometimes forget: the quotes on
+  // the other rows were about their content, not the column.
+  const { shape } = readSeparated('a\n"x, y"\nplain\n')
+  assert.deepEqual(shape.quoteColumns, [false])
+})
+
+ok('every file the reader can read comes back byte for byte', () => {
+  for (const text of [
+    'a,b\n1,2\n',
+    'a,b\r\n1,2\r\n',
+    'a,b\r1,2\r',
+    'a,b\n1,2',
+    '"a","b"\r\n"1, one","2"\r\n',
+    'x;"y ""q"""\n1;2',
+    'a,b\n"one\ntwo",three\n'
+  ]) {
+    const delimiter = text.includes(';') ? ';' : ','
+    const { rows, shape } = readSeparated(text, delimiter)
+    assert.equal(formatSeparated(rows, delimiter, shape.newline, shape),
+      text, JSON.stringify(text))
+  }
+})
+
+ok('a field that gains a newline quotes itself on the way out', () => {
+  // Which is what lets ⇧⏎ put a line break inside a cell.
+  assert.equal(formatSeparated([['a'], ['one\ntwo']], ',', '\n'), 'a\n"one\ntwo"\n')
+})
+
+/* -------------------------------------------------------------- TSV quotes */
+
+ok('a lone leading quote in a TSV is data, not syntax', () => {
+  // Almost nothing that writes TSV quotes anything, so `"5 inch` is a unit —
+  // and reading it as an opening quote swallowed the rest of the file into
+  // one cell.
+  assert.deepEqual(parseSeparated('size\tname\n"5 inch\tpipe\n6"\televen\n', '\t'),
+    [['size', 'name'], ['"5 inch', 'pipe'], ['6"', 'eleven']])
+})
+
+ok('a genuinely quoted TSV field still reads as one', () => {
+  assert.deepEqual(parseSeparated('a\tb\n"one\ttab"\ttwo\n', '\t'),
+    [['a', 'b'], ['one\ttab', 'two']])
+})
+
+/* --------------------------------------------------------------- the dates
+
+   The slashed date is ambiguous per value and settled per column: one day
+   above twelve proves the column day-first, one month above twelve proves it
+   month-first, and every value in the column is then read the same way. */
+
+ok('a day above twelve proves a column day-first', () => {
+  const rows = [['05/01/2024'], ['13/01/2024']]
+  assert.equal(columnDateOrder(rows, [0, 1], 0), 'dmy')
+})
+
+ok('a second field above twelve proves it month-first', () => {
+  const rows = [['01/13/2024'], ['05/01/2024']]
+  assert.equal(columnDateOrder(rows, [0, 1], 0), 'mdy')
+})
+
+ok('a UK date column sorts as the calendar, not as Date.parse reads it', () => {
+  /* The failure this exists to prevent: `05/01/2024` read US-style as 1 May
+     while `13/01/2024` failed to parse and stayed a word, so January 2024
+     sorted above December 2023. */
+  const rows = [['05/01/2024'], ['13/01/2024'], ['31/12/2023'], ['01/02/2024']]
+  const sorted = sortedOrder(rows, [0, 1, 2, 3], 0, 'asc').map((i) => rows[i][0])
+  assert.deepEqual(sorted, ['31/12/2023', '05/01/2024', '13/01/2024', '01/02/2024'])
+})
+
+ok('a US date column sorts month-first the same way throughout', () => {
+  const rows = [['01/13/2024'], ['12/31/2023'], ['02/01/2024']]
+  const sorted = sortedOrder(rows, [0, 1, 2], 0, 'asc').map((i) => rows[i][0])
+  assert.deepEqual(sorted, ['12/31/2023', '01/13/2024', '02/01/2024'])
+})
+
+ok('a date is never compared against a word as a moment', () => {
+  // Mixed prose is not a calendar: the stray label collates as text.
+  const rows = [['13/01/2024'], ['pending'], ['05/01/2024']]
+  const sorted = sortedOrder(rows, [0, 1, 2], 0, 'asc').map((i) => rows[i][0])
+  assert.deepEqual(sorted, ['05/01/2024', '13/01/2024', 'pending'])
+})
+
+ok('two-digit years land in the century a spreadsheet means', () => {
+  const rows = [['05/01/99'], ['05/01/01']]
+  assert.deepEqual(sortedOrder(rows, [0, 1], 0, 'asc'), [0, 1])
+})
+
+/* --------------------------------------------------------- the multi-sort */
+
+ok('two keys are one ordering, not two sorts', () => {
+  const rows = [['b', '2'], ['a', '2'], ['b', '1'], ['a', '1']]
+  const order = multiSortedOrder(rows, [0, 1, 2, 3],
+    [{ col: 0, dir: 'asc' }, { col: 1, dir: 'desc' }])
+  assert.deepEqual(order.map((i) => rows[i].join('')), ['a2', 'a1', 'b2', 'b1'])
+})
+
+ok('blanks go last per key, and ties keep their order', () => {
+  const rows = [['', 'x'], ['a', 'y'], ['a', 'y']]
+  const order = multiSortedOrder(rows, [0, 1, 2],
+    [{ col: 0, dir: 'asc' }, { col: 1, dir: 'asc' }])
+  assert.deepEqual(order, [1, 2, 0])
+})
+
+ok('no keys is the order that came in', () => {
+  assert.deepEqual(multiSortedOrder([['b'], ['a']], [0, 1], []), [0, 1])
+})
+
+/* ------------------------------------------------------------ the matcher */
+
+ok('the plain matcher is a case-insensitive substring', () => {
+  const m = makeMatcher('ada')
+  assert.ok(m.test('Ada Lovelace'))
+  assert.ok(!m.test('Grace'))
+  assert.equal(m.replace('Ada and ADA', 'X'), 'X and X')
+})
+
+ok('whole-cell matching finds 12 and not 120', () => {
+  const m = makeMatcher('12', { whole: true })
+  assert.ok(m.test('12'))
+  assert.ok(!m.test('120'))
+  assert.equal(m.replace('12', 'X'), 'X')
+  assert.equal(m.replace('120', 'X'), '120')
+})
+
+ok('a regular expression matches and replaces with its groups', () => {
+  const m = makeMatcher('(\\d{2})/(\\d{2})/(\\d{4})', { regex: true })
+  assert.ok(m.test('05/01/2024'))
+  assert.equal(m.replace('05/01/2024', '$3-$2-$1'), '2024-01-05')
+})
+
+ok('a half-typed pattern is "no matcher yet", not an error', () => {
+  assert.equal(makeMatcher('(\\d+', { regex: true }), null)
+  assert.equal(makeMatcher('   '), null)
+})
+
+ok('filterOrder takes the same options the box offers', () => {
+  const rows = [['item12'], ['12'], ['other']]
+  assert.deepEqual(filterOrder(rows, [0, 1, 2], '12', { whole: true }), [1])
+  assert.deepEqual(filterOrder(rows, [0, 1, 2], '^item', { regex: true }), [0])
+})
+
+/* ------------------------------------------------------------ the exports */
+
+ok('TSV escapes rather than quotes, which is what its readers expect', () => {
+  assert.equal(gridToTsv([['a', 'b\tc'], ['x\ny', 'z\\w']]),
+    'a\tb\\tc\nx\\ny\tz\\\\w\n')
+})
+
+ok('JSON keys off the headings, and invents names only where it must', () => {
+  const json = JSON.parse(gridToJson(['name', '', 'name'], [['Ada', '1', '2']]))
+  assert.deepEqual(json, [{ name: 'Ada', 'column 2': '1', 'name (2)': '2' }])
+})
+
+ok('JSON keeps values as the strings they are', () => {
+  const json = JSON.parse(gridToJson(['id'], [['007']]))
+  assert.equal(json[0].id, '007')
+})
+
+ok('a Markdown table escapes its pipes and breaks its lines', () => {
+  assert.equal(gridToMarkdown([['a', 'b|c'], ['1', 'x\ny']]),
+    '| a | b\\|c |\n| --- | --- |\n| 1 | x<br>y |\n')
+})
+
+/* ------------------------------------------------------- the restored view */
+
+ok('a reload puts back only the view that still fits the file', () => {
+  const sorts = restoredSorts({ sorts: [
+    { col: 1, dir: 'asc' }, { col: 9, dir: 'desc' },
+    { col: 1, dir: 'desc' }, { col: 0, dir: 'sideways' }
+  ] }, 3)
+  assert.deepEqual(sorts, [{ col: 1, dir: 'asc' }])
+  const filters = restoredFilters({ filters: [[2, ['x', 'y']], [0, []], ['junk']] })
+  assert.deepEqual([...filters.get(2)], ['x', 'y'])
+  assert.equal(filters.size, 1)
+})
+
+ok('a headerless file is shown under the spreadsheet alphabet', () => {
+  assert.deepEqual(numberedHeader(3), ['A', 'B', 'C'])
+  assert.equal(numberedHeader(27)[26], 'AA')
+  assert.equal(numberedHeader(28)[27], 'AB')
 })
 
 /* --------------------------------------------------------- the delimiter */

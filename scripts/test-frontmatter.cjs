@@ -10,7 +10,9 @@
  */
 
 const assert = require('node:assert/strict')
-const { writeListProp, parseFrontmatter } = require('../electron/frontmatter.cjs')
+const {
+  writeListProp, writeScalarProp, renameProp, parseFrontmatter, frontmatterTags
+} = require('../electron/frontmatter.cjs')
 
 let passed = 0
 let failed = 0
@@ -95,6 +97,110 @@ check('duplicate keys collapse to one', () => {
   const out = writeListProp(note, 'aliases', ['c'])
   assert.equal(out.match(/aliases:/g).length, 1)
   assert.ok(out.includes('alias-count: 1'))
+})
+
+/* The tag reader. A vault that arrives from another app spells its tags three
+   ways and Tulip has to answer the same for all of them, because the search
+   filter and the Info pane both read through here — and a note whose tags the
+   pane shows but the search cannot find is worse than no reader at all. */
+
+check('a flow list is read as tags', () => {
+  assert.deepEqual(frontmatterTags('---\ntags: [book, read/2026]\n---\nBody.\n'),
+    ['book', 'read/2026'])
+})
+
+check('a block list is read as tags', () => {
+  assert.deepEqual(frontmatterTags('---\ntags:\n  - book\n  - paper\n---\nBody.\n'),
+    ['book', 'paper'])
+})
+
+check('a bare scalar splits on commas and whitespace', () => {
+  assert.deepEqual(frontmatterTags('---\ntags: book, paper draft\n---\nBody.\n'),
+    ['book', 'paper', 'draft'])
+})
+
+check('the singular key is accepted and a leading # is not part of the name', () => {
+  assert.deepEqual(frontmatterTags('---\ntag: "#Book"\n---\nBody.\n'), ['book'])
+})
+
+check('a note with no head, and one with no tags, have none', () => {
+  assert.deepEqual(frontmatterTags('Body.\n'), [])
+  assert.deepEqual(frontmatterTags('---\ntitle: One\n---\nBody.\n'), [])
+})
+
+check('the same tag written twice is one tag', () => {
+  assert.deepEqual(frontmatterTags('---\ntags: [book, "#BOOK"]\n---\nBody.\n'), ['book'])
+})
+
+check('a tag list round-trips through the writer', () => {
+  const note = '---\ntitle: One\n---\nBody.\n'
+  const out = writeListProp(note, 'tags', ['book', 'read/2026'])
+  assert.equal(out, '---\ntitle: One\ntags: [book, read/2026]\n---\nBody.\n')
+  assert.deepEqual(frontmatterTags(out), ['book', 'read/2026'])
+})
+
+/* The scalar writer and the rename, which the Info pane's properties table
+   edits through. The promise is the list writer's: everything the head holds
+   that this was not asked about comes back exactly where it was. */
+
+check('a scalar lands in place and keeps its neighbours', () => {
+  const note = '---\ntitle: One\nstatus: draft\n---\nBody.\n'
+  assert.equal(writeScalarProp(note, 'status', 'reading'),
+    '---\ntitle: One\nstatus: reading\n---\nBody.\n')
+})
+
+check('a new scalar lands at the end of the head', () => {
+  assert.equal(writeScalarProp('---\ntitle: One\n---\nBody.\n', 'rating', 5),
+    '---\ntitle: One\nrating: 5\n---\nBody.\n')
+})
+
+check('null removes the property, the empty string empties it', () => {
+  const note = '---\ntitle: One\nstatus: draft\n---\nBody.\n'
+  assert.equal(writeScalarProp(note, 'status', null), '---\ntitle: One\n---\nBody.\n')
+  assert.equal(writeScalarProp(note, 'status', ''), '---\ntitle: One\nstatus:\n---\nBody.\n')
+})
+
+check('a value YAML would misread comes back quoted, and reads back whole', () => {
+  const out = writeScalarProp('Body.\n', 'note', 'a: b #c')
+  const prop = parseFrontmatter(out).entries.find((e) => e.key === 'note')
+  assert.equal(prop.value, 'a: b #c')
+})
+
+check('a rename keeps the value and drops the old name', () => {
+  const note = '---\ntitle: One\nstatus: draft\ntags: [x]\n---\nBody.\n'
+  const out = renameProp(note, 'status', 'stage')
+  assert.ok(out.includes('stage: draft'))
+  assert.ok(!out.includes('status:'))
+  assert.ok(out.includes('tags: [x]'))
+})
+
+check('a rename carries a list, and renaming to the same name changes nothing', () => {
+  const note = '---\nkinds:\n  - a\n  - b\n---\nBody.\n'
+  assert.equal(renameProp(note, 'kinds', 'sorts'), '---\nsorts: [a, b]\n---\nBody.\n')
+  assert.equal(renameProp(note, 'kinds', 'kinds'), note)
+  assert.equal(renameProp(note, 'missing', 'other'), note)
+})
+
+check('the head of a block mapping is verbatim, not an empty property', () => {
+  const parsed = parseFrontmatter('---\nnested:\n  deep: 1\nstatus: draft\n---\nBody.\n')
+  assert.deepEqual(parsed.entries.filter((e) => e.key !== undefined).map((e) => e.key),
+    ['status'])
+  // And still every line, in order, for the writer to carry.
+  assert.deepEqual(parsed.entries.map((e) => e.raw),
+    ['nested:', '  deep: 1', 'status: draft', ''])
+})
+
+check('an empty value is still a property when nothing is indented under it', () => {
+  const parsed = parseFrontmatter('---\nstatus:\ntitle: One\n---\nBody.\n')
+  const status = parsed.entries.find((e) => e.key === 'status')
+  assert.equal(status.value, null)
+})
+
+check('a verbatim line survives a scalar write', () => {
+  const note = '---\nnested:\n  deep: 1\nstatus: draft\n---\nBody.\n'
+  const out = writeScalarProp(note, 'status', 'done')
+  assert.ok(out.includes('nested:\n  deep: 1'))
+  assert.ok(out.includes('status: done'))
 })
 
 console.log(`\n${passed} checks passed${failed ? `, ${failed} failed` : ''}`)

@@ -41,7 +41,13 @@ mkdirSync(profile, { recursive: true })
    one. Resolved here so both sides of the harness name the same folder. */
 const watched = realpathSync(vault)
 writeFileSync(path.join(vault, 'Seed.md'), '# Seed\n\nA note that was already here, mentioning pomegranate.\n')
-writeFileSync(path.join(profile, 'config.json'), JSON.stringify({ vaultPath: watched }))
+/* This suite tests the run pipeline, not the consent prompt. Its disposable
+   vault is explicitly trusted just as a reader's vault is after accepting the
+   prompt, so the compiled-language test reaches compile, stage and execute. */
+writeFileSync(path.join(profile, 'config.json'), JSON.stringify({
+  vaultPath: watched,
+  trustedVaults: [watched]
+}))
 
 
 /* The checks themselves live in scripts/test-ipc.harness.cjs and run inside an

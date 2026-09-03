@@ -19,11 +19,11 @@ const STOP = new Set([
   /* Question scaffolding and function words. They appear on nearly every page
      of a book, so scoring on them is noise that inflates the page budget. */
   'the', 'and', 'but', 'for', 'not', 'was', 'were', 'are', 'is', 'do', 'does',
-  'did', 'can', 'will', 'would', 'could', 'may', 'might', 'must', 'than',
+  'did', 'can', 'will', 'may', 'might', 'must', 'than',
   'then', 'too', 'very', 'just', 'its', 'his', 'her', 'them', 'say', 'says',
   'said', 'tell', 'know', 'see', 'look', 'find', 'show', 'make', 'come',
-  'think', 'want', 'need', 'get', 'being', 'been', 'has', 'have', 'had',
-  'who', 'whom', 'whose', 'how', 'why', 'also', 'over', 'under', 'through'
+  'think', 'want', 'need', 'get', 'being', 'been', 'has', 'had',
+  'who', 'whom', 'whose', 'how', 'why', 'over', 'under', 'through'
 ])
 
 const PAGE = /^--- page (\d+) of (\d+) ---\s*$/gm
@@ -79,9 +79,12 @@ function queryTerms (query) {
 /* Stops at `cap`, because the caller only ever asks whether a term appears up
    to a few times — counting the rest of a page after the answer is settled is
    most of a book scanned for nothing. */
+const WORD = /[\p{L}\p{N}]/u
 const occurrences = (text, term, cap) => {
   let count = 0
   for (let at = text.indexOf(term); at !== -1; at = text.indexOf(term, at + term.length)) {
+    if ((at > 0 && WORD.test(text[at - 1])) ||
+      (at + term.length < text.length && WORD.test(text[at + term.length]))) continue
     if (++count >= cap) break
   }
   return count
@@ -89,14 +92,21 @@ const occurrences = (text, term, cap) => {
 
 const TERM_CAP = 6
 
-function scorePage (page, terms, phrase, openPage) {
+function scorePage (page, terms, phrase, openPage, weights, askedPage) {
   const text = page.folded
   let score = 0
-  for (const term of terms) score += occurrences(text, term, TERM_CAP) * (2 + Math.min(5, term.length / 3))
+  let matches = false
+  for (const term of terms) {
+    const count = occurrences(text, term, TERM_CAP)
+    if (count) matches = true
+    score += count * (2 + Math.min(5, term.length / 3)) * (weights.get(term) || 1)
+    score += occurrences(text.slice(0, 600), term, 2) * 2
+  }
   if (phrase.length >= 8 && text.includes(phrase)) score += 24
+  if (askedPage && page.page === askedPage) { score += 100; matches = true }
   if (openPage) score += Math.max(0, 12 - Math.abs(page.page - openPage) * 4)
   else if (page.page === 1) score += 2
-  return score
+  return { score, matches }
 }
 
 function excerpt (page, terms, limit) {
@@ -116,7 +126,7 @@ function excerpt (page, terms, limit) {
    need the budget of one that spans several. The open page is the anchor for
    a termless question, because "summarise this page" is a real request and
    the page the reader is looking at is the one it means. */
-function contextBudget (terms) {
+function retrievalBudget (terms) {
   if (terms.length) {
     return {
       maxPages: Math.min(6, 1 + terms.length),
@@ -128,16 +138,21 @@ function contextBudget (terms) {
 
 /**
  * @param {string} query
- * @param {{path:string,textPath:string,openPage?:number,pages:{page:number,pages:number,text:string,folded:string}[]}[]} documents
+ * @param {{path:string,textPath?:string,openPage?:number,revision?:string,pages:{page:number,pages:number,text:string,folded:string}[]}[]} documents
+ * @param {{maxPages?: number, maxChars?: number}} [options]
  *   `pages` comes from `parsePages`. The caller holds them across turns rather
  *   than splitting the same book up again for every question.
  */
-function relevantPdfContext (query, documents, { maxPages = 6, maxChars = 14000 } = {}) {
+function relevantPdfContext (query, documents, options = {}) {
+  const { maxPages, maxChars } = options
   const terms = queryTerms(query)
   const phrase = folded(query).trim()
-  const budget = contextBudget(terms)
-  const askedPages = maxPages !== 6 ? maxPages : budget.maxPages
-  const askedChars = maxChars !== 14000 ? maxChars : budget.maxChars
+  const askedPage = Number(folded(query).match(/\bpage\s+(\d+)\b/)?.[1] || 0)
+  /* How much to hand over is decided by the question unless the caller says:
+     a one-word question gets a few pages, a specific one gets more. */
+  const budget = retrievalBudget(terms)
+  const askedPages = maxPages ?? budget.maxPages
+  const askedChars = maxChars ?? budget.maxChars
   const ranked = []
 
   /* A question with nothing to search for is a question about the page in
@@ -150,9 +165,10 @@ function relevantPdfContext (query, documents, { maxPages = 6, maxChars = 14000 
     if (!open) return ''
     const page = open.pages.find((candidate) => candidate.page === Number(open.openPage))
     if (!page) return ''
+    const revision = open.revision ? `\n<!-- tulip-pdf-revision:${open.revision} -->` : ''
     return [
       'Relevant PDF pages selected locally from extracted text and OCR:',
-      `--- ${open.path} page ${page.page} of ${page.pages} ---\n${excerpt(page, [], askedChars)}`,
+      `--- ${open.path} page ${page.page} of ${page.pages} ---${revision}\n${excerpt(page, [], askedChars)}`,
       'Use these pages first. The complete page-marked text files are listed above; search or read them if the answer depends on omitted material.'
     ].join('\n\n').slice(0, askedChars + 1200)
   }
@@ -161,12 +177,24 @@ function relevantPdfContext (query, documents, { maxPages = 6, maxChars = 14000 
      hundred pages and six of them are used; cloning every one to hang a score
      off it allocated the whole document again, per turn, to throw away all but
      the handful that got chosen. */
+  const allPages = (documents || []).flatMap((document) => document.pages)
+  const weights = new Map(terms.map((term) => {
+    const found = allPages.reduce((count, page) => count + (occurrences(page.folded, term, 1) ? 1 : 0), 0)
+    return [term, 1 + Math.log((allPages.length + 1) / (found + 1))]
+  }))
+
   for (const document of documents || []) {
     for (const page of document.pages) {
+      const openPage = Number(document.openPage) || 0
+      const rankedPage = scorePage(page, terms, phrase, openPage, weights, askedPage)
+      /* An attached PDF with no matching term should not donate arbitrary
+         pages merely because the budget has room. For the open document its
+         current page remains useful context even when the wording differs. */
+      if (!rankedPage.matches && page.page !== openPage) continue
       ranked.push({
         page,
         document,
-        score: scorePage(page, terms, phrase, Number(document.openPage) || 0)
+        score: rankedPage.score
       })
     }
   }
@@ -190,8 +218,10 @@ function relevantPdfContext (query, documents, { maxPages = 6, maxChars = 14000 
 
   if (!selected.length) return ''
   const perPage = Math.max(800, Math.floor(askedChars / selected.length))
-  const blocks = selected.map(({ page, document }) =>
-    `--- ${document.path} page ${page.page} of ${page.pages} ---\n${excerpt(page, terms, perPage)}`)
+  const blocks = selected.map(({ page, document }) => {
+    const revision = document.revision ? `\n<!-- tulip-pdf-revision:${document.revision} -->` : ''
+    return `--- ${document.path} page ${page.page} of ${page.pages} ---${revision}\n${excerpt(page, terms, perPage)}`
+  })
   return [
     'Relevant PDF pages selected locally from extracted text and OCR:',
     blocks.join('\n\n'),

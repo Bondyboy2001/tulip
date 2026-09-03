@@ -152,6 +152,12 @@ ok('the status line is told the document’s length', () => {
 ok('the copilot is handed the document as text, headings and all', () => {
   assert.deepEqual(r.text, ['# Field notes', '## Monday', 'Warm and bright'])
 })
+ok('the copilot context is a focused paragraph window with document position', () => {
+  assert.equal(r.context.at, 1)
+  assert.ok(r.context.paragraphs > 3)
+  assert.match(r.context.text, /# Field notes/)
+  assert.equal(r.context.title, 'Field notes, week 12')
+})
 
 /* ------------------------------------------------------ and what it did */
 
@@ -400,6 +406,84 @@ ok('the bar is told what the caret is sitting in', () => {
   assert.deepEqual(r.formatMarks, ['bold'])
   assert.equal(r.formatList, 'bullet')
   assert.equal(r.formatTable, true, 'a cell did not report that it is in a table')
+})
+
+/* ---------------------------------------------- the document moved under us
+
+   A `.docx` is not mergeable. When the file on disk is no longer the one the
+   page was read from — a sync client wrote it, another app saved it — there is
+   no right answer available at write time: forcing loses their version,
+   re-reading loses the reader's. So the disk's version is put aside as a
+   conflict copy and the reader's edits go in against the bytes the page was
+   read from, which keeps both.
+
+   These are here rather than in test-docx.cjs because the halves were already
+   tested separately and the wiring between them was not: main answering
+   `{stale}`, and the renderer making a copy. Neither of those tells you that a
+   reader who typed a sentence into a document a sync client touched still has
+   their sentence. */
+
+ok('a stale write asks about the document, once, by name', () => {
+  assert.equal(r.conflictAsked, 1)
+  assert.equal(r.conflictPath, 'Notes/Field notes.docx')
+})
+
+ok('and goes again, forcing, once the disk copy is safe', () => {
+  assert.equal(r.conflictAttempts, 2, 'the write should have been retried')
+  assert.deepEqual(r.conflictForced, [false, true],
+    'the first attempt must not force, and the second must')
+})
+
+/* The retry carries the same edit — the stamp the page was read at included.
+   Forcing a different body would write something nobody typed. */
+ok('the retry is the same edit, not a fresh one', () => {
+  assert.equal(r.conflictSameStamp, true)
+})
+
+ok('the reader keeps what they typed, and the page comes back clean', () => {
+  assert.ok(r.conflictTyped.includes('Z'), `the typed character is not there: ${r.conflictTyped}`)
+  assert.equal(r.conflictClean, true, 'the page still says it has unsaved edits')
+  assert.ok(r.conflictSaved > 0, 'nothing reported the document as saved')
+})
+
+/* A reader who declines the copy has declined the write. The failure has to be
+   loud: a silent success would leave the page believing it is on disk when the
+   document there is somebody else's. */
+ok('declining the copy fails the save rather than forcing it', () => {
+  assert.equal(r.declinedAsked, 1)
+  assert.match(r.declinedError, /changed on disk/)
+  assert.equal(r.declinedDirty, true, 'the page must still know it is unsaved')
+})
+
+/* ------------------------------------------------- lists inside lists */
+
+ok('items taken out of a sub-list leave the item that held them whole', () => {
+  assert.deepEqual(r.leftSubList.slice(0, 4),
+    ['UL:outer one', 'P:inner one', 'P:inner two', 'UL:outer two'])
+})
+
+ok('Return on an empty sub-item climbs out one level at a time', () => {
+  assert.deepEqual(r.enterMadeItem.slice(0, 2), ['UL:outer one|outer two', 'P:after the list'])
+  assert.deepEqual(r.enterClimbed.slice(0, 2), ['UL:outer one||outer two', 'P:after the list'])
+  assert.deepEqual(r.enterLeft.slice(0, 3), ['UL:outer one', 'P:', 'UL:outer two'])
+})
+
+ok('a letter typed in bold beside a sub-list keeps the sub-list', () => {
+  assert.deepEqual(r.boldBesideSubList, { text: 'outer onex', bold: true, subItems: 2 })
+})
+
+ok('a paragraph the browser emptied is saved empty, not as a break', () => {
+  assert.equal(r.emptiedByBrowser, true, 'the browser refused the delete')
+  assert.deepEqual(r.emptiedRuns, [], `saved as ${JSON.stringify(r.emptiedRuns)} from ${r.emptiedHtml}`)
+})
+
+ok('a selection ending at the start of the next paragraph leaves it alone', () => {
+  assert.deepEqual(r.touchedNext, { warned: 0, heading: 'quoted', itemStill: 'LI' })
+})
+
+ok('Return over a selection from an empty bullet takes nothing out of the list', () => {
+  assert.equal(r.enterOverSelection[0].startsWith('UL:outer one|outer two|'), true, r.enterOverSelection.join(' / '))
+  assert.equal(r.enterOverSelection.some((line) => line.startsWith('P:after the list')), true)
 })
 
 ok('closing empties the pane', () => assert.equal(r.closedTo, 0))

@@ -26,7 +26,8 @@ import { ZOOM_STEPS, DEFAULT_ZOOM, nearestStep } from './zoom.js'
    different things. */
 import {
   DEFAULT_CATALOGUE,
-  allModels, asOptions, defaultEnabled, modelFromConfig, providerLabel
+  allModels, asOptions, defaultEnabled, modelFromConfig, offeredModels,
+  providerLabel, splitKey
 } from './models.js'
 import { fileSize } from './units.js'
 
@@ -94,6 +95,31 @@ const SECTIONS = [
         name: 'Keep version history in the vault',
         hint: 'Store each note’s history in the vault’s own .tulip folder, so it travels with the notes through Git or a sync client, instead of in this app’s data folder.',
         fallback: false
+      }
+    ]
+  },
+  {
+    id: 'start',
+    group: 'Help',
+    label: 'Getting started',
+    rows: [
+      {
+        name: 'Learn the essentials',
+        hint: 'Open Tulip’s portable Getting Started note for views, links, search, study and safe code execution.',
+        action: { id: 'getting-started', label: 'Open guide' }
+      },
+      {
+        name: 'Check optional tools',
+        hint: 'See whether Copilot providers, TeX, Python and related tools are ready on this Mac.',
+        action: { id: 'readiness', label: 'Check setup' }
+      },
+      {
+        key: 'lastBackupAt',
+        name: 'Last verified backup',
+        hint: (cfg) => cfg.lastBackupAt
+          ? `Completed ${new Date(cfg.lastBackupAt).toLocaleString()}.`
+          : 'No verified backup has been recorded yet.',
+        action: { id: 'backup', label: 'Back up now' }
       }
     ]
   },
@@ -244,9 +270,9 @@ const SECTIONS = [
         key: 'autoInstallPythonDeps',
         type: 'toggle',
         name: 'Install missing packages',
-        hint: 'A block that stops on a missing import has it installed, then runs again. ' +
+        hint: 'Off by default: a pasted note can name any package. When on, a block that stops on a missing import has it installed, then runs again. ' +
           'A script declaring its own dependencies is left alone.',
-        fallback: true
+        fallback: false
       },
       {
         type: 'environments',
@@ -356,13 +382,13 @@ const SECTIONS = [
         key: 'aiModel',
         type: 'models',
         name: 'Default model',
-        hint: 'Who answers when the copilot is asked — any model the CLI offers.'
+        hint: 'Who answers when the copilot is asked — selected from your shortlist.'
       },
       {
         key: 'aiModels',
         type: 'catalogue',
-        name: 'Models offered',
-        hint: 'The shortlist the panel offers — /model still reaches the whole catalogue.',
+        name: 'Browse all models',
+        hint: 'Open a provider below to add models to the shortlist used by the panel and default picker.',
         /* Beside the name rather than in the list: it undoes the whole list, and a
            control that clears three hundred ticks does not belong among them. */
         action: { id: 'clear-models', label: 'Reset', title: 'Tick nothing — offer no models of your own' }
@@ -445,12 +471,20 @@ function chordLabel (accel) {
  * @param api       window.tulip
  * @param values    () => the current config object
  * @param onChange  (key, value) => void — persist it and put it into effect
+ * @param onCommand run an app command outside the settings pane
  */
-export function mountSettings ({ el, api, values, onChange }) {
+export function mountSettings ({ el, api, values, onChange, onCommand }) {
   let active = SECTIONS[0].id
   let modelCatalogue = DEFAULT_CATALOGUE
   /* The rebindable commands, from the menu itself — see hotkeys:list. */
   let hotkeyCatalogue = []
+  /* The extra dictionaries this build carries — see spell:installed. `null`
+     until the answer arrives, which the grid reads as "assume they are all
+     there": the ordinary build has all of them, and a grid that greyed itself
+     out for the moment before the answer came back would flicker on every
+     open. */
+  let spellInstalled = null
+  /** @type {Array<{id:string, label:string, signedIn:boolean, version?:string, status:string}>|null} */
   let doctorState = null
   /**
    * One python environment, as `python:envs` reports it.
@@ -711,12 +745,25 @@ export function mountSettings ({ el, api, values, onChange }) {
       const grid = node('div', 'model-shelf-grid')
       const chosen = new Set(Array.isArray(valueOf(row)) ? valueOf(row) : [])
       for (const { id, label } of SPELL_LANGUAGES) {
+        /* A build can be made without some of these — see
+           TULIP_SPELL_LANGUAGES in build.mjs. One that is not here cannot be
+           turned on, and saying so is the whole point: the checker goes quietly
+           without a dictionary it cannot find, so a tickable box for a language
+           that is not in the build would be a setting that does nothing and
+           reports nothing. */
+        const here = !spellInstalled || spellInstalled.includes(id)
         const option = node('button', 'model-option')
         option.type = 'button'
         option.setAttribute('role', 'checkbox')
-        option.setAttribute('aria-checked', String(chosen.has(id)))
-        option.classList.toggle('is-on', chosen.has(id))
+        option.setAttribute('aria-checked', String(here && chosen.has(id)))
+        option.classList.toggle('is-on', here && chosen.has(id))
         option.append(node('span', 'model-tick'), node('span', 'model-name', label))
+        if (!here) {
+          option.disabled = true
+          option.classList.add('is-absent')
+          option.title = `${label} is not in this build of Tulip.`
+          option.append(node('span', 'model-note', 'not in this build'))
+        }
         option.addEventListener('click', () => {
           const next = new Set(chosen)
           if (next.has(id)) next.delete(id)
@@ -891,27 +938,33 @@ export function mountSettings ({ el, api, values, onChange }) {
       }).root
     },
 
-    /**
-     * The default model, chosen from the whole catalogue.
-     *
-     * Deliberately not limited to the list below it: picking a model here is
-     * how you say "this is the one", and having to go and tick it first before
-     * you were allowed to would be a rule with nothing behind it. One picked
-     * here is offered in the panel whether it is ticked or not — see
-     * `offeredModels`, which always keeps room for the current choice.
-     */
+    /** The default model, chosen from the same deliberate shortlist the
+     *  composer offers. The current choice remains present even if it has just
+     *  been unticked, which gives the reader somewhere stable to move from. */
     models (row) {
       const chosen = modelFromConfig(values())
-      return dropdown({
+      const wrap = node('div', 'model-default')
+      wrap.append(dropdown({
         label: 'Default model',
         className: 'is-wide',
-        // Several hundred entries: typing is the only sane way through them.
         search: true,
-        options: asOptions(allModels(modelCatalogue)),
+        options: asOptions(offeredModels(modelCatalogue, values().aiModels, chosen)),
         value: chosen,
         placeholder: 'No model selected',
         onChange: (key) => change(row, key)
-      }).root
+      }).root)
+
+      const providerId = splitKey(chosen).provider
+      const readiness = doctorState?.find((provider) => provider.id === providerId)
+      const status = readiness
+        ? readiness.signedIn
+          ? `${readiness.label} is ready${readiness.version ? ` · ${readiness.version}` : ''}.`
+          : `${readiness.label} is not ready · ${readiness.status}.`
+        : providerId
+          ? `Run Copilot Doctor below to check ${providerLabel(providerId)}.`
+          : 'Choose a model, then run Copilot Doctor to check its provider.'
+      wrap.append(node('span', `settings-hint model-readiness${readiness?.signedIn ? ' is-ready' : ''}`, status))
+      return wrap
     },
 
     /**
@@ -1206,25 +1259,16 @@ export function mountSettings ({ el, api, values, onChange }) {
       input.value = values()[row.key] ?? ''
       // On commit rather than on keystroke: a half-typed "1" out of "120"
       // would otherwise be saved and clamped on its way past.
+      // An emptied field clears the key rather than storing '', which is
+      // not a number and is refused at the door — see electron/config-keys.js.
       const commit = () => {
         const n = Number(input.value)
-        change(row, input.value.trim() && n > 0 ? n : '')
+        change(row, input.value.trim() && n > 0 ? n : undefined)
       }
       input.addEventListener('change', commit)
       input.addEventListener('blur', commit)
       wrap.append(input)
-      if (row.suffix) wrap.append(node('span', 'field-suffix', row.suffix))
       return wrap
-    },
-
-    text (row) {
-      const input = node('input', 'field')
-      input.type = 'text'
-      input.spellcheck = false
-      input.placeholder = row.placeholder || ''
-      input.value = values()[row.key] ?? ''
-      input.addEventListener('change', () => change(row, input.value.trim()))
-      return input
     },
 
     themes () {
@@ -1281,7 +1325,14 @@ export function mountSettings ({ el, api, values, onChange }) {
   const ROW_ACTIONS = {
     // Every tick off, and it stays off: the pane reads an empty list as a
     // choice, not as an absence, so this is not undone the next time it opens.
-    'clear-models': () => { onChange('aiModels', []); renderBody() }
+    'clear-models': () => { onChange('aiModels', []); renderBody() },
+    'getting-started': () => { close(); onCommand('getting-started') },
+    readiness: () => { active = 'copilot'; renderRail(); renderBody() },
+    backup: async () => {
+      const result = await api.vault.backup().catch(() => null)
+      if (result?.ok) onChange('lastBackupAt', Date.now())
+      renderBody()
+    }
   }
 
   function renderRail () {
@@ -1320,7 +1371,8 @@ export function mountSettings ({ el, api, values, onChange }) {
         name.append(act)
       }
       label.append(name)
-      if (row.hint) label.append(node('div', 'settings-hint', row.hint))
+      const hint = typeof row.hint === 'function' ? row.hint(values()) : row.hint
+      if (hint) label.append(node('div', 'settings-hint', hint))
       line.append(label)
 
       const control = CONTROLS[row.type]?.(row)
@@ -1471,6 +1523,13 @@ export function mountSettings ({ el, api, values, onChange }) {
       hotkeyCatalogue = Array.isArray(list) ? list : []
       if (!el.root.hidden) renderBody()
     }).catch(() => {})
+    if (!spellInstalled) {
+      Promise.resolve(api.spell?.installed?.()).then((list) => {
+        if (!Array.isArray(list)) return
+        spellInstalled = list
+        if (!el.root.hidden) renderBody()
+      }).catch(() => {})
+    }
     openedFrom = document.activeElement
     el.root.hidden = false
     // Dragged on an earlier open: keep that spot, pulled back into a window

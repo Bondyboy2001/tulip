@@ -1,6 +1,8 @@
+import { isBookmarkLine, bookmarkMarkup } from './bookmark.js'
 import { EditorView, Decoration, ViewPlugin, WidgetType, keymap, drawSelection,
          rectangularSelection, dropCursor, highlightActiveLine,
          lineNumbers } from '@codemirror/view'
+import { completionTooltipSize } from './completion-tooltip.js'
 import { EditorState, EditorSelection, Prec, StateEffect, StateField,
          Compartment, Facet, Transaction } from '@codemirror/state'
 import { syntaxTree, HighlightStyle, syntaxHighlighting, indentOnInput,
@@ -46,6 +48,7 @@ import {
   embedResizeGrip, wireEmbedResize
 } from './assets.js'
 import { calloutHead, calloutIcon } from './callouts.js'
+import { parseFlashcards } from './flashcards.js'
 import {
   slashEmbed, openEmbedPicker, slashCommands, fenceLanguages, calloutKinds,
   hashTags, tagChoices as tagChoicesFacet,
@@ -58,8 +61,20 @@ import { headingsFor, blockReferences, blockReferenceOnLine } from './headings.j
 import { findInlineHighlights } from './marks.js'
 import { findCitations } from './citations.js'
 import { fileDiff, withinLines } from './linediff.js'
+import { escapeRe } from './vault-paths.js'
 
 /* ---------------------------------------------------------------- theme */
+
+/** Give only the `/` command list its own surface. The other completions —
+ *  note names, fence languages, tags — keep the compact picker they already
+ *  use. The tooltip is created while the caret is still after the slash query,
+ *  so the line itself is the most reliable source marker available here. */
+function completionTooltipClass (state) {
+  const head = state.selection.main.head
+  const line = state.doc.lineAt(head)
+  const before = state.sliceDoc(line.from, head)
+  return /^\s*\/[\w-]*$/.test(before) ? 'tk-slash-completion' : ''
+}
 
 const tulipTheme = EditorView.theme({
   '&': { color: 'var(--ink)', backgroundColor: 'transparent', height: '100%' },
@@ -296,10 +311,12 @@ const tulipTheme = EditorView.theme({
   '.cm-tooltip.cm-tooltip-autocomplete': { padding: '4px' },
   '.cm-tooltip.cm-tooltip-autocomplete > ul': {
     fontFamily: 'var(--font-ui)',
-    fontSize: '12px',
-    maxHeight: '17em',
-    minWidth: '176px',
-    maxWidth: '260px'
+    fontSize: '13px',
+    maxHeight: 'min(30em, calc(50vh - 24px))',
+    minWidth: '224px',
+    maxWidth: 'min(380px, calc(100vw - 32px))',
+    overflowY: 'auto',
+    overscrollBehavior: 'contain'
   },
   /* A list of short labels, so the row is only as tall as one: the menu is
      read by scanning down a column of names, and every pixel between them is
@@ -307,10 +324,10 @@ const tulipTheme = EditorView.theme({
      the card's padding rather than a stripe across it — the same shape the
      sidebar and the quick switcher use for the row you are on. */
   '.cm-tooltip.cm-tooltip-autocomplete > ul > li': {
-    padding: '4px 9px',
+    padding: '6px 11px',
     borderRadius: '5px',
     color: 'var(--ink-soft)',
-    lineHeight: '1.4',
+    lineHeight: '1.35',
     whiteSpace: 'nowrap',
     overflow: 'hidden',
     textOverflow: 'ellipsis'
@@ -321,7 +338,7 @@ const tulipTheme = EditorView.theme({
   },
   // The group headers the slash menu sets — quiet, like the sidebar's labels.
   '.cm-tooltip.cm-tooltip-autocomplete > ul > completion-section': {
-    padding: '7px 9px 3px',
+    padding: '8px 11px 4px',
     fontSize: '9.5px',
     fontWeight: '650',
     letterSpacing: '.08em',
@@ -331,7 +348,7 @@ const tulipTheme = EditorView.theme({
     opacity: '1'
   },
   '.cm-tooltip.cm-tooltip-autocomplete > ul > completion-section:first-child': {
-    paddingTop: '3px'
+    paddingTop: '4px'
   },
   /* Only the lists whose right-hand column says something the label does not —
      a language's spelled-out name beside its id. The slash menu carries no
@@ -344,6 +361,51 @@ const tulipTheme = EditorView.theme({
     fontStyle: 'normal',
     fontSize: '11px',
     color: 'var(--faint)'
+  },
+
+  /* The slash list and the command palette are two ways to find commands, so
+     they share one visual language: the same surface, frame, shadow, type,
+     inset list, rounded rows and selected fill. Only the geometry differs —
+     this one hangs from the caret and has no search field. */
+  '.cm-tooltip.cm-tooltip-autocomplete.tk-slash-completion': {
+    padding: '0',
+    background: 'var(--surface)',
+    border: '1px solid var(--line)',
+    borderRadius: '10px',
+    boxShadow: '0 1px 2px #0000000d, 0 12px 40px -8px #00000026'
+  },
+  '.cm-tooltip.cm-tooltip-autocomplete.tk-slash-completion > ul': {
+    minWidth: '320px',
+    maxWidth: 'min(420px, calc(100vw - 32px))',
+    padding: '6px',
+    fontFamily: 'var(--font-ui)',
+    fontSize: '13.5px'
+  },
+  '.cm-tooltip.cm-tooltip-autocomplete.tk-slash-completion > ul > li': {
+    minHeight: '0',
+    padding: '7px 11px',
+    borderRadius: '6px',
+    lineHeight: '1.5',
+    color: 'var(--ink)'
+  },
+  '.cm-tooltip.cm-tooltip-autocomplete.tk-slash-completion > ul > li[aria-selected]': {
+    background: 'var(--accent-dim)',
+    boxShadow: 'none',
+    color: 'var(--ink)'
+  },
+  '.cm-tooltip.cm-tooltip-autocomplete.tk-slash-completion > ul > completion-section': {
+    margin: '0',
+    padding: '8px 11px 4px',
+    border: '0',
+    background: 'none',
+    fontFamily: 'var(--font-ui)',
+    fontSize: '9.5px',
+    fontWeight: '650',
+    letterSpacing: '.08em',
+    color: 'var(--faint)'
+  },
+  '.cm-tooltip.cm-tooltip-autocomplete.tk-slash-completion > ul > completion-section:first-child': {
+    paddingTop: '4px'
   }
 })
 
@@ -375,6 +437,11 @@ const highlight = HighlightStyle.define([
   { tag: t.contentSeparator, class: 'tk-mark' },
   ...codeTokens
 ])
+
+/* The extension form of it, made once: reconfiguring the colour compartment
+   with a fresh `syntaxHighlighting(highlight)` on every switch of document
+   handed CodeMirror a new extension to diff against the old on each. */
+const highlighting = syntaxHighlighting(highlight)
 
 /* -------------------------------------------------------- live preview */
 
@@ -724,7 +791,7 @@ function revealEquation (view, label) {
      the element is looked for after the scroll, not before it. */
   view.requestMeasure({
     read: () => view.dom.querySelector(`[data-equation="${CSS.escape(label)}"]`),
-    write: (found) => flashTarget(found)
+    write: flashTarget
   })
 }
 
@@ -739,7 +806,7 @@ function revealEquation (view, label) {
  */
 function revealFootnote (view, id, { toDefinition }) {
   const text = view.state.doc.toString()
-  const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const escaped = escapeRe(id)
   /* A definition is `[^id]:` at the head of a line; a marker is the same span
      anywhere else. Written as one regex so the two searches cannot drift. */
   const pattern = toDefinition
@@ -764,7 +831,7 @@ function revealFootnote (view, id, { toDefinition }) {
         return Math.abs(pos - at) < Math.abs(view.posAtDOM(best) - at) ? el : best
       })
     },
-    write: (found) => flashTarget(found)
+    write: flashTarget
   })
 }
 
@@ -802,6 +869,293 @@ class CalloutIconWidget extends WidgetType {
   }
   ignoreEvent () { return true }
 }
+
+/* A quiz is Markdown on disk, but it is not presented as a callout in the
+   editor. The whole source range becomes one study card; its only route back
+   to authoring is the explicit Edit button, which opens the structured form
+   in renderer.js instead of exposing blockquote markers under a click. */
+class FlashcardWidget extends WidgetType {
+  constructor (card, from, to, source) {
+    super()
+    this.card = card
+    this.from = from
+    this.to = to
+    this.source = source
+  }
+
+  eq (other) {
+    return other.from === this.from &&
+      other.to === this.to &&
+      other.source === this.source
+  }
+
+  toDOM (view) {
+    const box = document.createElement('div')
+    box.className = 'tk-flashcard-box'
+    box.contentEditable = 'false'
+
+    const card = document.createElement('article')
+    card.className = 'tk-flashcard'
+
+    const head = document.createElement('header')
+    head.className = 'tk-flashcard-head'
+    const eyebrow = document.createElement('span')
+    eyebrow.className = 'tk-flashcard-eyebrow'
+    eyebrow.textContent = 'Flashcard'
+    const edit = document.createElement('button')
+    edit.type = 'button'
+    edit.className = 'tk-flashcard-edit'
+    edit.textContent = 'Edit'
+    edit.setAttribute('aria-label', `Edit flashcard: ${this.card.question}`)
+    edit.addEventListener('click', (event) => {
+      event.preventDefault()
+      event.stopPropagation()
+      view.dom.dispatchEvent(new CustomEvent('tulip:flashcard-edit', {
+        bubbles: true,
+        detail: {
+          from: this.from,
+          to: this.to,
+          source: this.source,
+          card: this.card
+        }
+      }))
+    })
+    head.append(eyebrow, edit)
+
+    const question = document.createElement('h3')
+    question.className = 'tk-flashcard-question'
+    question.textContent = this.card.question
+
+    const tags = document.createElement('div')
+    tags.className = 'tk-flashcard-tags'
+    for (const tag of this.card.tags || []) {
+      const chip = document.createElement('span')
+      chip.textContent = tag
+      tags.append(chip)
+    }
+
+    let media = null
+    if (this.card.image) {
+      const embed = findEmbeds(`![[${this.card.image}]]`)[0]
+      if (embed) {
+        media = document.createElement('div')
+        media.className = 'tk-flashcard-media'
+        const resolve = view.state.facet(tableAssetResolver)
+        media.append(renderEmbed(specForEmbed(embed, { resolve }), () => view.requestMeasure()))
+      }
+    }
+
+    const choices = document.createElement('div')
+    choices.className = 'tk-flashcard-options'
+    choices.setAttribute('role', 'group')
+    choices.setAttribute('aria-label', 'Answer choices')
+
+    const feedback = document.createElement('p')
+    feedback.className = 'tk-flashcard-feedback'
+    feedback.hidden = true
+
+    const explanation = document.createElement('div')
+    explanation.className = 'tk-flashcard-explanation'
+    explanation.textContent = this.card.explanation
+    explanation.hidden = true
+
+    const buttons = this.card.options.map((option, index) => {
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.className = `tk-flashcard-option is-tone-${index % 4}`
+      button.textContent = option
+      button.addEventListener('click', (event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        const correct = index === this.card.correct
+        buttons.forEach((choice, choiceIndex) => {
+          choice.disabled = true
+          choice.classList.toggle('is-correct', choiceIndex === this.card.correct)
+          choice.classList.toggle('is-wrong', choiceIndex !== this.card.correct)
+        })
+        button.classList.add('is-selected')
+        feedback.dataset.result = correct ? 'correct' : 'wrong'
+        feedback.textContent = correct
+          ? 'Correct'
+          : `The correct answer is “${this.card.options[this.card.correct]}”.`
+        feedback.hidden = false
+        explanation.hidden = false
+      })
+      choices.append(button)
+      return button
+    })
+
+    card.append(...(media ? [media] : []), head, question,
+      ...((this.card.tags || []).length ? [tags] : []), choices, feedback, explanation)
+    box.append(card)
+    return box
+  }
+
+  ignoreEvent () { return true }
+
+  destroy (dom) { destroyEmbeds(dom) }
+}
+
+function buildFlashcardWidgets (state) {
+  const cards = parseFlashcards(state.doc.toString())
+  const ranges = cards.map((card) => {
+    const from = state.doc.line(card.start + 1).from
+    /* parseFlashcards.end is the zero-based line just after the quoted block,
+       which is also the one-based number of its final source line. */
+    const to = state.doc.line(Math.min(card.end, state.doc.lines)).to
+    const source = state.doc.sliceString(from, to)
+    return Decoration.replace({
+      widget: new FlashcardWidget(card, from, to, source),
+      block: true
+    }).range(from, to)
+  })
+  return Decoration.set(ranges, true)
+}
+
+/* Block replacements belong to document state, not to the visible-range live
+   preview plugin. Keeping them here mirrors the table widget and lets
+   CodeMirror lay out a multi-line card as one stable block. */
+/* Whether a change could have made, unmade or altered a card. A card is a
+   run of `>` lines beginning with a quiz head, so only a change that touches a
+   quoted line — in the document before it or the one after, one line either
+   side for the newline that joins or splits two — can change the answer.
+   Everything else is a rebuild that would come back the same. */
+const QUOTE_START = /^\s*>/
+function nearQuotedLine (doc, from, to) {
+  const first = Math.max(1, doc.lineAt(from).number - 1)
+  const last = Math.min(doc.lines, doc.lineAt(to).number + 1)
+  for (let n = first; n <= last; n++) if (QUOTE_START.test(doc.line(n).text)) return true
+  return false
+}
+function touchesFlashcards (transaction) {
+  const before = transaction.startState.doc
+  const after = transaction.state.doc
+  let hit = false
+  transaction.changes.iterChangedRanges((fromA, toA, fromB, toB) => {
+    if (!hit) hit = nearQuotedLine(before, fromA, toA) || nearQuotedLine(after, fromB, toB)
+  })
+  return hit
+}
+
+/* The cards as they were, moved to where the change put them. The widgets are
+   made afresh because a card carries its own place — the offsets and line
+   numbers the composer opens it at — and a mapped decoration would keep the
+   old ones. What is not redone is the parse: `buildFlashcardWidgets` copied
+   the whole note out of the rope and split it into lines on every keystroke
+   in every note, cards or none. */
+function remapFlashcardWidgets (widgets, transaction) {
+  if (widgets.size === 0) return widgets
+  const doc = transaction.state.doc
+  const mapped = widgets.map(transaction.changes)
+  const ranges = []
+  for (const iter = mapped.iter(); iter.value; iter.next()) {
+    const old = iter.value.spec.widget
+    const from = iter.from
+    const to = iter.to
+    const card = { ...old.card, start: doc.lineAt(from).number - 1, end: doc.lineAt(to).number }
+    ranges.push(Decoration.replace({
+      widget: new FlashcardWidget(card, from, to, doc.sliceString(from, to)),
+      block: true
+    }).range(from, to))
+  }
+  return Decoration.set(ranges, true)
+}
+
+/* ------------------------------------------------------------- bookmark
+
+   The marker line drawn as the ribbon the reading view draws — see
+   src/bookmark.js. A block replacement, so it is document state like the
+   cards above: the line is hidden whole and laid out as one stable row. */
+class BookmarkWidget extends WidgetType {
+  eq () { return true }
+  toDOM (view) {
+    const row = document.createElement('div')
+    row.className = 'tk-bookmark'
+    row.contentEditable = 'false'
+    row.title = 'Bookmark — the note opens here. Click to edit.'
+    row.innerHTML = bookmarkMarkup()
+    /* A click puts the caret at the end of the marker's line and reveals the
+       source at once, rather than on the settled reveal the field otherwise
+       waits for: the swap here is at the click, not above it, and the editor
+       is told to leave the press alone (`ignoreEvent`), so there is no mouse
+       selection left to re-read the press against the changed page. The
+       position is asked of the view at click time — the decoration moves with
+       every edit above it while the widget stays the same, so an offset kept
+       here would go stale. */
+    row.addEventListener('mousedown', (event) => {
+      event.preventDefault()
+      const at = view.posAtDOM(row)
+      view.dispatch({
+        selection: { anchor: view.state.doc.lineAt(at).to },
+        effects: selectionRevealEffect.of(null)
+      })
+      view.focus()
+    })
+    return row
+  }
+
+  ignoreEvent (event) { return event.type === 'mousedown' }
+}
+
+/* Every marker line but the one the caret is on: that one is shown as text so
+   it can be read and edited — the same rule the headings and rules follow. */
+function buildBookmarkWidgets (state) {
+  const ranges = []
+  const { doc } = state
+  const active = selectionLines(state)
+  for (let n = 1; n <= doc.lines; n++) {
+    const line = doc.line(n)
+    if (!isBookmarkLine(line.text) || active.has(n)) continue
+    ranges.push(Decoration.replace({ widget: new BookmarkWidget(), block: true }).range(line.from, line.to))
+  }
+  return Decoration.set(ranges, true)
+}
+
+/* Only a change to a line that holds, held or could hold the marker can
+   change the answer; everything else is the ranges moved along. */
+function touchesBookmark (transaction) {
+  const before = transaction.startState.doc
+  const after = transaction.state.doc
+  let hit = false
+  transaction.changes.iterChangedRanges((fromA, toA, fromB, toB) => {
+    if (hit) return
+    hit = /bookmark/.test(before.sliceString(before.lineAt(fromA).from, before.lineAt(toA).to)) ||
+      /bookmark/.test(after.sliceString(after.lineAt(fromB).from, after.lineAt(toB).to))
+  })
+  return hit
+}
+
+/* The caret moving onto or off the marker swaps a ribbon for a line of text,
+   which changes the height of everything below it. Done on the mousedown that
+   moved the caret, that shift lands under a button still held, and the mouse
+   selection re-reads the press against the moved document — the caret ends up
+   a line from the click. So the swap waits for the live preview's reveal, the
+   effect it dispatches once the selection has settled and the button is up:
+   the rule the headings and rules follow, for the same reason. Rebuilt whole
+   on each reveal — the caret *leaving* the marker is what puts the ribbon
+   back — and a set that compares equal where nothing changed redraws nothing. */
+const bookmarkPreview = StateField.define({
+  create: buildBookmarkWidgets,
+  update (widgets, transaction) {
+    if (transaction.docChanged && touchesBookmark(transaction)) return buildBookmarkWidgets(transaction.state)
+    if (transaction.effects.some((effect) => effect.is(selectionRevealEffect))) {
+      return buildBookmarkWidgets(transaction.state)
+    }
+    return transaction.docChanged ? widgets.map(transaction.changes) : widgets
+  },
+  provide: (field) => EditorView.decorations.from(field)
+})
+
+const flashcardPreview = StateField.define({
+  create: buildFlashcardWidgets,
+  update (widgets, transaction) {
+    if (!transaction.docChanged) return widgets
+    return touchesFlashcards(transaction)
+      ? buildFlashcardWidgets(transaction.state)
+      : remapFlashcardWidgets(widgets, transaction)
+  },
+  provide: (field) => EditorView.decorations.from(field)
+})
 
 /** The disclosure beside a heading. CodeMirror owns the folded range; this
  *  widget only presents the direct control for it. */
@@ -948,6 +1302,33 @@ function fullyHidden (hidden, from, to) {
 }
 
 /**
+ * Where a click at the end of rendered text was aiming.
+ *
+ * On a rendered line the closing `**` of a bold run is concealed, so a click
+ * just past the last visible letter lands before it — and when the line opens
+ * up the caret is sitting inside the emphasis, with the marks after it. Nobody
+ * clicking at the end of the sentence meant that. So a caret resting at the
+ * start of a concealed run that reaches the end of the inline node around it
+ * is carried out to that end. An opening mark starts where the caret is rather
+ * than before it, so a click at the front of the run stays put.
+ */
+function pastHiddenTail (state, hidden, pos) {
+  let end = pos
+  for (;;) {
+    let next = end
+    hidden.between(end, end, (a, b) => { if (a <= end && b > next) next = b })
+    if (next === end) break
+    end = next
+  }
+  if (end === pos) return pos
+  for (let node = syntaxTree(state).resolveInner(pos, 1); node; node = node.parent) {
+    if (node.from >= pos) continue
+    return node.to === end ? end : pos
+  }
+  return pos
+}
+
+/**
  * A selection drawn over a rendered line meant "everything I could see". The
  * moment the line opens up, the characters that were concealed appear inside
  * the span it was drawn across — so dragging to the end of `- [6.5 Struct]`
@@ -965,7 +1346,12 @@ function fullyHidden (hidden, from, to) {
 function widenOverHidden (state, hidden) {
   let moved = false
   const ranges = state.selection.ranges.map((r) => {
-    if (r.empty) return r
+    if (r.empty) {
+      const at = pastHiddenTail(state, hidden, r.head)
+      if (at === r.head) return r
+      moved = true
+      return EditorSelection.cursor(at)
+    }
     const first = state.doc.lineAt(r.from)
     const last = state.doc.lineAt(r.to)
     const from = fullyHidden(hidden, first.from, r.from) ? first.from : r.from
@@ -1337,6 +1723,12 @@ function buildDecorations (view, imageSource = null) {
           const prefix = /^[ \t]*(?:>[ \t]?)+/.exec(opening.text)?.[0] || ''
           const body = opening.text.slice(prefix.length)
           const head = calloutHead(body)
+
+          if (head?.kind.id === 'quiz') {
+            const source = state.doc.sliceString(node.from, node.to)
+            const card = parseFlashcards(source)[0]
+            if (card) return false
+          }
 
           const first = opening.number
           const last = state.doc.lineAt(node.to).number
@@ -2021,7 +2413,7 @@ function diffRange (a, b) {
    no idea what markdown is would show it — leaving bold orange and inline code
    in a box is still an opinion about the markup, and the view's whole claim is
    that it has none. */
-const RENDERED = [livePreview, mathPreview, tablePreview, tableCursorGuard, tableSearchHighlight,
+const RENDERED = [bookmarkPreview, flashcardPreview, livePreview, mathPreview, tablePreview, tableCursorGuard, tableSearchHighlight,
                   moneyPreview, runBlocks, propertiesPreview,
                   mermaidBlocks, tikzBlocks, svgBlocks, codeBlockView,
                   headingFoldService, codeFolding({ placeholderText: ' … ' }),
@@ -2155,8 +2547,17 @@ export function createEditor ({
     return { from: before.from + 2, options, validFor: /^[^\]]*$/ }
   }
 
+  /* Built once: `sourceEffects` reconfigures the title compartment on every
+     switch of document or view, and a new StateField each time was a new
+     field for CodeMirror to compute and the old one to forget. */
+  const titleField = titleFor(noteTitle, onRename, noteFlag, titleEditable)
+
   const extensions = [
         history(),
+        /* CodeMirror supplies the textbox role; Tulip supplies what the box
+           edits. Without this the largest control in the window was announced
+           only as an unnamed textbox. */
+        EditorView.contentAttributes.of({ 'aria-label': 'Document editor' }),
         /* A solid caret: the default 1.2 s blink reads as a flicker. */
         drawSelection({ cursorBlinkRate: 0 }),
         highlightActiveLine(),
@@ -2177,8 +2578,8 @@ export function createEditor ({
         search(findConfig),
         EditorView.lineWrapping,
         sourceLanguage.of(MD_SOURCE),
-        sourceTitle.of(titleFor(noteTitle, onRename, noteFlag, titleEditable)),
-        sourceColor.of(syntaxHighlighting(highlight)),
+        sourceTitle.of(titleField),
+        sourceColor.of(highlighting),
         sourceAttributes.of(EditorView.editorAttributes.of({ class: '' })),
         sourceNumbers.of([]),
         /* A language note is a table editor, not a free-form buffer: the only
@@ -2226,8 +2627,10 @@ export function createEditor ({
         proseBrackets,
         autocompletion({
           override: [wikiCompletion, slashCommands, fenceLanguages, calloutKinds, hashTags],
+          tooltipClass: completionTooltipClass,
           icons: false
         }),
+        completionTooltipSize,
         tulipTheme,
         Prec.high(keymap.of(markdownKeymap)),
         keymap.of([
@@ -2407,10 +2810,8 @@ export function createEditor ({
 
   const sourceEffects = () => [
     sourceLanguage.reconfigure(sourceParser()),
-    sourceTitle.reconfigure(isProse()
-      ? titleFor(noteTitle, onRename, noteFlag, titleEditable)
-      : []),
-    sourceColor.reconfigure(raw && isProse() ? [] : syntaxHighlighting(highlight)),
+    sourceTitle.reconfigure(isProse() ? titleField : []),
+    sourceColor.reconfigure(raw && isProse() ? [] : highlighting),
     sourceAttributes.reconfigure(EditorView.editorAttributes.of({
       class: isProse() ? (raw ? 'is-raw' : '') : `is-source is-raw${sourceMode === 'tex' ? ' is-tex' : ''}`
     })),
@@ -2699,12 +3100,25 @@ export function createEditor ({
      height by unhiding the markup. The line is the one thing all three agree
      on. */
 
+  /* A window resize at a large Electron zoom can briefly leave CodeMirror
+     between layouts, with no document tiles to answer `posAtCoords`. Keep the
+     last real answer through that frame: losing a few pixels of scroll
+     precision is truthful enough, while throwing here rejects the document
+     transition that asked for the place and leaves the app shell blank. */
+  let lastTopLine = 1
+
   /** The source line at the top of the visible area. 1-based. */
   view.topLine = () => {
-    const box = view.scrollDOM.getBoundingClientRect()
-    const pos = view.posAtCoords({ x: box.left + 8, y: box.top + 2 }, false)
-    if (pos == null) return 1
-    return view.state.doc.lineAt(Math.max(0, Math.min(pos, view.state.doc.length))).number
+    try {
+      const box = view.scrollDOM.getBoundingClientRect()
+      const pos = view.posAtCoords({ x: box.left + 8, y: box.top + 2 }, false)
+      if (pos != null) {
+        lastTopLine = view.state.doc.lineAt(
+          Math.max(0, Math.min(pos, view.state.doc.length))
+        ).number
+      }
+    } catch { /* CodeMirror is between resize layouts; retain the last line. */ }
+    return lastTopLine
   }
 
   /**
@@ -2776,11 +3190,11 @@ export function createEditor ({
     }
   }
 
-  /** Put that line back at the top. */
-  view.scrollToLine = (n) => {
+  /** Put that line back at the top — or, asked to, in the middle of the view. */
+  view.scrollToLine = (n, { center = false } = {}) => {
     const { doc } = view.state
     const line = doc.line(Math.max(1, Math.min(n, doc.lines)))
-    view.dispatch({ effects: EditorView.scrollIntoView(line.from, { y: 'start', yMargin: 0 }) })
+    view.dispatch({ effects: EditorView.scrollIntoView(line.from, { y: center ? 'center' : 'start', yMargin: 0 }) })
   }
 
   return view

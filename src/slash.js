@@ -139,6 +139,7 @@ function touchedLines (changes, doc) {
 const placeholderField = ViewPlugin.fromClass(
   class {
     constructor (view) {
+      /** @type {Array<[number, number]>} */
       this.ranges = placeholderRanges(view.state.doc)
       this.decorations = placeholderDeco(this.ranges)
     }
@@ -149,7 +150,8 @@ const placeholderField = ViewPlugin.fromClass(
       const touched = touchedLines(update.changes, doc)
       if (!touched) return
       const kept = this.ranges
-        .map(([from, to]) => [update.changes.mapPos(from), update.changes.mapPos(to)])
+        .map(([from, to]) => /** @type {[number, number]} */ (
+          [update.changes.mapPos(from), update.changes.mapPos(to)]))
         .filter(([from]) => from < touched.from || from > touched.to)
       const found = placeholderRanges(doc, touched.from, touched.to)
       this.ranges = kept.concat(found).sort((a, b) => a[0] - b[0])
@@ -157,9 +159,9 @@ const placeholderField = ViewPlugin.fromClass(
     }
   },
   {
-    decorations: (v) => v.decorations,
+    decorations: (v) => /** @type {any} */ (v).decorations,
     provide: () => EditorView.atomicRanges.of(
-      (view) => view.plugin(placeholderField)?.decorations ?? Decoration.none)
+      (view) => /** @type {any} */ (view.plugin(placeholderField))?.decorations ?? Decoration.none)
   }
 )
 
@@ -190,7 +192,7 @@ export function openEmbedPicker (view, from, to) {
       view.dom.getBoundingClientRect()
   })()
 
-  const menu = dropdown({
+  const menu = dropdown(/** @type {any} */ ({
     options,
     value: '',
     onChange: (value) => applyEmbed(view, from, to, value),
@@ -202,7 +204,7 @@ export function openEmbedPicker (view, from, to) {
       menu.root.remove()
       view.focus()
     }
-  })
+  }))
   menu.root.style.cssText =
     'position:fixed;opacity:0;pointer-events:none;z-index:-1'
   menu.root.style.left = `${Math.round(coords.left)}px`
@@ -234,8 +236,10 @@ function applyEmbed (view, from, to, value) {
    completion in the same autocompletion() config. Templates are snippets: the
    cursor lands in the first blank, and Tab walks the rest.
 
-   Filtering is this module's own (label + hidden aliases, so `/img` finds
-   Image and `/error` finds Callout), which is why the result says
+   Filtering is this module's own. Visible labels get first priority, so `/f`
+   finds Flashcard rather than the hidden `fence` alias for Code block; aliases
+   are used only when no visible label starts with the query (`/img` still finds
+   Image or file, and `/error` still finds Callout). This is why the result says
    `filter: false`: CodeMirror's matcher would otherwise re-filter against the
    text from `from` — which includes the `/` — and match nothing. */
 
@@ -252,7 +256,11 @@ const EMBEDS = { name: 'Embeds', rank: 1 }
  * The label is the whole row. */
 function command (label, aliases, section, template) {
   const completion = snippetCompletion(template, { label, section, type: 'keyword' })
-  return { completion, haystack: `${label} ${aliases.join(' ')}`.toLowerCase() }
+  return {
+    completion,
+    label: label.toLowerCase(),
+    aliases: aliases.map((alias) => alias.toLowerCase())
+  }
 }
 
 /** A command that does something to the view instead of writing a template.
@@ -269,7 +277,8 @@ function action (label, aliases, section, run) {
         run(view, from)
       }
     },
-    haystack: `${label} ${aliases.join(' ')}`.toLowerCase()
+    label: label.toLowerCase(),
+    aliases: aliases.map((alias) => alias.toLowerCase())
   }
 }
 
@@ -287,6 +296,13 @@ const COMMANDS = [
      editor draws a grid over them the moment they are there. */
   action('Table', ['grid', 'rows', 'columns', 'spreadsheet', 'csv'], BLOCKS,
     (view) => insertTable(view)),
+
+  /* A flashcard has several fields and one answer to mark, so a form is less
+     error-prone than asking the writer to fill a long snippet by hand. The
+     renderer owns that form; this event only says where the request came
+     from, after the slash text has been removed. */
+  action('Flashcard', ['quiz', 'card', 'question', 'multiple choice'], BLOCKS,
+    (view) => view.dom.dispatchEvent(new CustomEvent('tulip:flashcard', { bubbles: true }))),
 
   /* One entry for all thirteen kinds: thirteen rows differed only in a word,
      and the writer still had to read them all. This writes `> [!` and opens
@@ -320,13 +336,20 @@ const COMMANDS = [
   /* Opens the note's tag editor. No placeholder YAML is written: the head is
      created only once the reader supplies an actual tag. */
   action('Tags', ['labels', 'frontmatter', 'metadata', 'yaml', 'head'], BLOCKS,
-    (view) => view.dom.dispatchEvent(new CustomEvent('tulip:tags', { bubbles: true })))
+    (view) => view.dom.dispatchEvent(new CustomEvent('tulip:tags', { bubbles: true }))),
+
+  /* The same as "Bookmark this place" in the palette: the ribbon goes above
+     the line the slash was typed on, and the note's old bookmark, if any,
+     moves with it. The renderer owns the marker and the save, so the request
+     is handed up once the slash text is gone. */
+  action('Bookmark', ['mark', 'place', 'ribbon', 'resume', 'here'], BLOCKS,
+    (view) => view.dom.dispatchEvent(new CustomEvent('tulip:bookmark', { bubbles: true })))
 ]
 
 /**
  * The completion source. Returns null whenever the text before the cursor is
  * not its trigger, so the sources beside it never fight. Re-consulted on each
- * keystroke — the filter is an includes() over a handful of strings.
+ * keystroke — visible labels are preferred, with aliases as a fallback.
  */
 export function slashCommands (context) {
   const before = context.matchBefore(/\/[\w-]*/)
@@ -339,8 +362,11 @@ export function slashCommands (context) {
   if (inFence(context.state, before.from)) return null
 
   const query = before.text.slice(1).toLowerCase()
-  const options = COMMANDS
-    .filter((c) => !query || c.haystack.includes(query))
+  const visible = COMMANDS.filter((c) => !query || c.label.startsWith(query))
+  const matches = visible.length
+    ? visible
+    : COMMANDS.filter((c) => c.aliases.some((alias) => alias.startsWith(query)))
+  const options = matches
     .map((c) => c.completion)
   if (!options.length) return null
 
@@ -353,7 +379,7 @@ export function slashCommands (context) {
  *  code, not an instruction to the editor. Same walk fenceLanguages makes. */
 function inFence (state, pos) {
   const node = syntaxTree(state).resolveInner(pos, -1)
-  for (let n = node; n; n = n.parent) {
+  for (let n = /** @type {any} */ (node); n; n = n.parent) {
     if (n.name === 'FencedCode') return true
   }
   return false
@@ -543,7 +569,7 @@ export function fenceLanguages (context) {
   if (/\S/.test(context.state.sliceDoc(line.from, before.from))) return null
 
   const node = syntaxTree(context.state).resolveInner(context.pos, -1)
-  for (let n = node; n; n = n.parent) {
+  for (let n = /** @type {any} */ (node); n; n = n.parent) {
     if (n.name === 'FencedCode' && context.state.doc.lineAt(n.from).number !== line.number) return null
   }
 

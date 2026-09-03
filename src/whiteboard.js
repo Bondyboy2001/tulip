@@ -11,7 +11,7 @@ import {
 import { whiteboardElementsText } from '../electron/whiteboard-data.js'
 import { noteName, WHITEBOARD_EXT } from './vault-paths.js'
 
-const boardName = (path) => String(path).split('/').pop().replace(WHITEBOARD_EXT, '')
+const boardName = (path) => (String(path).split('/').pop() || '').replace(WHITEBOARD_EXT, '')
 
 /* ------------------------------------------------------------- stylesheet */
 
@@ -24,6 +24,7 @@ const boardName = (path) => String(path).split('/').pop().replace(WHITEBOARD_EXT
    The same `document.baseURI` reasoning as math.js's loadStyles: `dist` is
    where build.mjs puts the file, and `import.meta.url` is wherever esbuild's
    splitting last put *this* module, which is not the same place. */
+/** @type {Promise<void> | null} */
 let loadingStyles = null
 
 function loadStyles () {
@@ -35,7 +36,7 @@ function loadStyles () {
   link.dataset.tulipWhiteboard = ''
 
   loadingStyles = new Promise((resolve, reject) => {
-    link.addEventListener('load', resolve, { once: true })
+    link.addEventListener('load', () => resolve(), { once: true })
     link.addEventListener('error', () => {
       loadingStyles = null
       // Taken back out so the next attempt starts clean, rather than leaving a
@@ -44,7 +45,7 @@ function loadStyles () {
       reject(new Error('Whiteboard styles could not be loaded.'))
     }, { once: true })
   })
-  document.head.append(link)
+  document.head?.append(link)
   return loadingStyles
 }
 
@@ -64,6 +65,8 @@ const sceneText = (scene) => serializeAsJSON(
   scene.elements || [], scene.appState || {}, scene.files || {}, 'local'
 )
 
+/** @param {any} api @param {{x:number,y:number}|null} client
+ * @param {HTMLElement|null} host */
 const scenePoint = (api, client = null, host = null) => {
   const app = api.getAppState()
   const zoom = app.zoom?.value || 1
@@ -189,14 +192,19 @@ export function mountWhiteboard ({
   document.body.append(dialog)
 
   const root = createRoot(canvas)
+  /** @type {any} */
   let current = null
+  /** @type {any} */
   let excalidraw = null
+  /** @type {any} */
   let latest = null
   let ready = false
   let dirty = false
   let revision = 0
   let savedRevision = 0
+  /** @type {any} */
   let changeTimer = null
+  /** @type {any} */
   let saving = null
   let flushRequested = false
   let palette = theme()
@@ -276,6 +284,7 @@ export function mountWhiteboard ({
     }))
   }
 
+  /** @param {any} skeleton @param {{x:number,y:number}|null} [point] */
   const insert = (skeleton, point = null) => {
     if (!excalidraw) return
     const at = point || scenePoint(excalidraw)
@@ -288,6 +297,7 @@ export function mountWhiteboard ({
     excalidraw.scrollToContent(made, { fitToViewport: false, animate: true })
   }
 
+  /** @param {string} path @param {{x:number,y:number}|null} [point] */
   const addNote = (path, point = null) => {
     const resolved = resolveNote(path)
     if (!resolved) { onStatus(`No note matches “${path}”`); return false }
@@ -392,8 +402,9 @@ export function mountWhiteboard ({
       paint()
     },
 
-    async open (path, place = null) {
+    async open (path, /** @type {{x?: number, y?: number, zoom?: number}|null} */ place = null) {
       const source = await file.read(path)
+      /** @type {any} */
       let scene
       try { scene = JSON.parse(source) } catch { throw new Error('This whiteboard is not valid JSON.') }
       if (scene?.type !== 'excalidraw' || !Array.isArray(scene.elements)) {
@@ -429,7 +440,11 @@ export function mountWhiteboard ({
       root.render(null)
     },
 
-    focus () { canvas.querySelector('.excalidraw')?.focus?.() || canvas.focus() },
+    focus () {
+      const target = canvas.querySelector('.excalidraw')
+      if (target instanceof HTMLElement) target.focus()
+      else canvas.focus()
+    },
     place () {
       if (!excalidraw) return null
       const app = excalidraw.getAppState()
@@ -447,7 +462,7 @@ export function mountWhiteboard ({
     resize () { requestAnimationFrame(() => excalidraw?.refresh()) },
     key (key, options = {}) {
       const target = canvas.querySelector('.excalidraw') || canvas
-      target.focus?.()
+      if (target instanceof HTMLElement) target.focus()
       target.dispatchEvent(new KeyboardEvent('keydown', {
         key, metaKey: !!options.metaKey, shiftKey: !!options.shiftKey, bubbles: true
       }))

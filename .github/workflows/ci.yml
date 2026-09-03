@@ -49,9 +49,10 @@ jobs:
         run: npm run lint
 
       # The whole-tree `npm run typecheck` still does not gate — it reports
-      # ~2,570 findings, most of them the DOM's own typing, and tsconfig.json
-      # says why at length. This gates the 44 modules that are already clean
-      # under strictNullChecks, so the class of bug that has actually shipped
+      # thousands of findings, most of them the DOM's own typing, and
+      # tsconfig.json says why at length. This gates the modules that are
+      # already clean (the gate's output counts them) under strictNullChecks,
+      # so the class of bug that has actually shipped
       # here twice (a null deref reachable before the thing is built) cannot
       # come back in them. Widening the list is the ongoing work; see the
       # header of scripts/typecheck-gate.mjs.
@@ -128,6 +129,9 @@ jobs:
           test -f build/Tulip.app/Contents/Resources/app/dist/renderer.js
           codesign --verify --deep --strict --verbose=2 build/Tulip.app
 
+      - name: The packaged app launches and writes a vault
+        run: npm run test:packaged-app -- build/Tulip.app/Contents/MacOS/Tulip
+
       # Zipped rather than uploaded as a directory: the upload action does not
       # preserve the executable bit or the symlinks inside a .app, and a bundle
       # that arrives without either is a bundle that will not launch. `ditto`
@@ -176,6 +180,10 @@ jobs:
           test -f build/Tulip-win32-x64/resources/app/electron/main.js
           test -f build/Tulip-win32-x64/resources/app/dist/renderer.js
           test ! -f build/Tulip-win32-x64/resources/default_app.asar
+
+      - name: The packaged app launches and writes a vault
+        shell: bash
+        run: npm run test:packaged-app -- build/Tulip-win32-x64/Tulip.exe
 
       # A portable folder, so it goes up as it is — the upload action zips it,
       # and Windows has no executable bit to lose on the way.

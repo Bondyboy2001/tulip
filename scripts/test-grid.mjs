@@ -78,6 +78,9 @@ app.whenReady().then(async () => {
   })
   try {
     await win.loadFile(${JSON.stringify(path.resolve('node_modules/.cache/grid-page.html'))})
+    app.focus({ steal: true })
+    win.focus()
+    win.webContents.focus()
     for (let wait = 0; wait < 120; wait++) {
       const probe = await win.webContents.executeJavaScript(\`
         (async () => {
@@ -423,6 +426,13 @@ ok('the headings, the line numbers and the cells each say what they are', () => 
   assert.equal(r.ariaFirstBodyRow, '2', 'the header is row one')
   assert.equal(r.ariaColIndex, '2')
 })
+ok('the copilot context names the active grid cell and visible row window', () => {
+  assert.ok(r.context.atRow > 0)
+  assert.ok(r.context.atColumn > 0)
+  assert.equal(r.context.column, 'date')
+  assert.ok(r.context.shownRows > 0)
+  assert.match(r.context.text, /^name,date/m)
+})
 
 ok('and which cell is selected, and which one the keyboard is on', () => {
   assert.equal(r.ariaSelected, 'true')
@@ -559,6 +569,111 @@ ok('and none of it is an edit to the file', () => {
   assert.equal(r.writesFromAligning, 0, 'aligning a column wrote the file')
   assert.equal(r.fileAfterAligning,
     'name,score,when\nAda,10,2026-01-02\nGrace,2,2025-12-31\nAlan,,2026-03-04\nBob,9,2026-02-01\n')
+})
+
+/* ----------------------------------------------------------- the multi-sort */
+
+ok('⌥-clicking a second heading makes it the second key, and says so', () => {
+  assert.deepEqual(r.multiSortMarks, ['▲1', '▲2'])
+  assert.ok(r.multiSortSummary.includes('sorted by when ↑, then score ↑'), r.multiSortSummary)
+})
+
+ok('a two-key sort is still a way of looking, not an edit', () => {
+  assert.equal(r.fileAfterMultiSort, FIXTURE)
+})
+
+/* -------------------------------------------------------------- the replace */
+
+ok('Replace All rewrites every match in view, as one undoable edit', () => {
+  assert.equal(r.replaceShown, true, 'the replace strip never appeared')
+  assert.equal(r.findFocused, true, '⌘F did not focus the find field')
+  assert.equal(r.advancedFindControlsGone, true, 'advanced find controls remain in the toolbar')
+  assert.deepEqual(r.afterReplaceAll, ['Adelaide', 'Grace', 'Alan', 'Bob'])
+  assert.equal(r.fileAfterReplaceAll, FIXTURE.replace('Ada,', 'Adelaide,'))
+  assert.equal(r.fileAfterReplaceUndone, FIXTURE)
+})
+
+/* ------------------------------------------------- a newline inside a cell */
+
+ok('⇧⏎ stays in the cell, and the break survives the file and comes back out', () => {
+  assert.ok(r.editorSurvivesShiftEnter, 'Shift+Enter committed the cell')
+  assert.equal(r.fileAfterNewline, FIXTURE.replace('Ada,', '"Ada\nLovelace",'))
+  assert.equal(r.fileAfterNewlineUndone, FIXTURE)
+})
+
+/* ------------------------------------------------------------ the header row */
+
+ok('a headerless file keeps its first row as data, under lettered columns', () => {
+  assert.deepEqual(r.headerOffHeadings, ['A', 'B', 'C'])
+  assert.equal(r.headerOffFirstRow, 'name')
+  assert.equal(r.headerOffRows, 5)
+  assert.equal(r.headerOnRows, 4)
+})
+
+ok('where the first row is shown is not an edit to the file', () => {
+  assert.equal(r.headerToggleWrites, 0)
+})
+
+/* ----------------------------------------------------------- the moved column */
+
+ok('a heading dragged sideways takes its column with it, undoably', () => {
+  assert.ok(r.dragTargetMarked, 'the drop target never lit')
+  assert.deepEqual(r.movedHeadings, ['score', 'name', 'when'])
+  assert.ok(r.movedSortCleared, 'the press’s own sort was left standing')
+  assert.equal(r.fileAfterMove,
+    'score,name,when\n10,Ada,2026-01-02\n2,Grace,2025-12-31\n,Alan,2026-03-04\n9,Bob,2026-02-01\n')
+  assert.equal(r.fileAfterMoveUndone, FIXTURE)
+})
+
+/* --------------------------------------------------------------- the exports */
+
+ok('Export as TSV writes a sibling, escaped rather than quoted', () => {
+  assert.ok(r.exportStatus.includes('people.tsv'), r.exportStatus)
+  assert.equal(r.exportedTsv,
+    'name\tscore\twhen\nAda\t10\t2026-01-02\nGrace\t2\t2025-12-31\nAlan\t\t2026-03-04\nBob\t9\t2026-02-01\n')
+})
+
+ok('the selection copies as a Markdown table, headings included', () => {
+  assert.equal(r.markdownCopy,
+    '| name | score |\n| --- | --- |\n| Ada | 10 |\n| Grace | 2 |\n')
+})
+
+/* ---------------------------------------------------------- the restored view */
+
+ok('a reload through place() keeps the sort and the search', () => {
+  assert.ok(r.reloadKeptSort.includes('sorted by score ↑'), r.reloadKeptSort)
+  assert.equal(r.reloadKeptQuery, 'a')
+})
+
+/* -------------------------------------------------------------- the encoding */
+
+ok('a file that would not decode opens read-only and says why', () => {
+  assert.ok(String(r.undecodableNotice).includes('read-only'), String(r.undecodableNotice))
+  assert.equal(r.undecodableEditorOpen, false, 'typing opened a cell on an undecodable file')
+  assert.equal(r.undecodableWrites, 0)
+})
+
+ok('“Save as UTF-8 anyway” is the one way back to editing', () => {
+  assert.equal(r.acceptedEditorOpen, true)
+})
+
+ok('a windows-1252 file goes back as windows-1252, mark, stamp and all', () => {
+  assert.deepEqual(r.writeMeta, { encoding: 'windows-1252', bom: true, expected: true })
+})
+
+ok('a save onto somebody else’s version is refused, until “Keep mine”', () => {
+  assert.ok(r.staleRefused, 'the stale write landed anyway')
+  assert.ok(String(r.staleNotice).includes('changed on disk'), String(r.staleNotice))
+  assert.ok(r.staleForcedThrough, 'Keep mine did not write')
+})
+
+/* --------------------------------------------------------------- the preview */
+
+ok('a file too large to open becomes a read-only head, with the way out named', () => {
+  assert.ok(String(r.previewNotice).includes('read-only'), String(r.previewNotice))
+  assert.ok(r.previewSummary.includes('read-only'), r.previewSummary)
+  assert.equal(r.previewEditorOpen, false, 'a preview let a cell open')
+  assert.ok(r.wholeFileNoticeGone, 'opening the whole file left the notice up')
 })
 
 console.log(`\n${passed} checks passed`)

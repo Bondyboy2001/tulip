@@ -94,6 +94,9 @@ if (probe.error) throw new Error(probe.error)
 const result = probe.result
 console.error(JSON.stringify(result, null, 2))
 
+assert.equal(result.resizeTopLine, result.measuredTopLine,
+  'a transient resize layout keeps the last valid top line')
+
 /* The state carries the whole diff: the rewritten line is lit, the words that
    moved inside it are marked over exactly the changed words, and every removed
    line is in the widget — with its own changed words marked the same way. */
@@ -121,6 +124,27 @@ assert.deepEqual(result.rawLines, [3], 'the review survives the view switch')
 assert.ok(result.rawWords >= 1, 'raw view: the changed words are still marked')
 assert.equal(result.inRawView.deletedDisplay, 'block', 'raw view: removed lines are shown')
 assert.notEqual(result.inRawView.addedPaint, 'rgba(0, 0, 0, 0)', 'raw view: the added line is painted')
+
+/* Reject clears the review as soon as it is confirmed. The subsequent file
+   restore leaves both the editor state and the rendered page colour-free. */
+assert.equal(result.rejected.text, [
+  '# Title', '',
+  'The quick brown fox jumps over the lazy dog.', '',
+  'Second paragraph stays.', '',
+  'Old line to delete.', ''
+].join('\n'))
+assert.deepEqual(
+  [
+    result.rejected.linesBeforeRestore,
+    result.rejected.wordsBeforeRestore,
+    result.rejected.widgetsBeforeRestore,
+    result.rejected.lines,
+    result.rejected.words,
+    result.rejected.widgets,
+    result.rejected.painted
+  ],
+  [0, 0, 0, 0, 0, 0, 0],
+  'reject clears every diff decoration before restoring the text and keeps it clear')
 
 assert.match(result.codeStyle.deletedFontFamily, /monospace/, 'code removals use the code font')
 assert.equal(result.codeStyle.deletedFontSize, '12.5px', 'code removals use the code font size')

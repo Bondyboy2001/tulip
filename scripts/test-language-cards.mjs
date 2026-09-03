@@ -13,10 +13,11 @@
 import {
   RECOGNISE, PRODUCE, DICTATE, CLOZE, UNLOCK_STABILITY, NEW_PER_DAY,
   languageCards, buildQueue, unlocked, clozeOf, studyColumns, dueCount,
-  sessionGrade, studyFeedback, recordFirstTry,
-  normalizeLanguageTable, isLanguageTablePath, importCards
+  studyKinds, sessionGrade, studyFeedback, recordFirstTry,
+  normalizeLanguageTable, importCards
 } from '../src/language-table.js'
-import { AGAIN, GOOD, DAY, newCard } from '../src/srs.js'
+import { isLanguageTablePath } from '../src/vault-paths.js'
+import { AGAIN, HARD, GOOD, DAY, newCard } from '../src/srs.js'
 import { EXACT, CLOSE, WRONG } from '../src/study-match.js'
 import VAULT_CONTRACT from '../electron/vault-contract.json'
 
@@ -139,14 +140,15 @@ check('cards: the cloze asks the sentence and answers the word',
   cloze.prompt.includes('____') && cloze.answer === 'καρότο')
 check('cards: every kind says what it is asking for',
   !!recognise.label && !!produce.label && !!cloze.label)
-check('session: only an exact answer leaves the retry queue',
+check('session: exact, close and wrong answers earn distinct scheduler grades',
   sessionGrade(EXACT) === GOOD &&
-  sessionGrade(CLOSE) === AGAIN &&
+  sessionGrade(CLOSE) === HARD &&
   sessionGrade(WRONG) === AGAIN)
-check('session: feedback clearly distinguishes right from wrong',
+check('session: feedback clearly distinguishes right, close and wrong',
   studyFeedback(EXACT).text === '✓ Correct' &&
+  studyFeedback(CLOSE).text === '~ Almost' &&
   studyFeedback(WRONG).text === '✕ Incorrect' &&
-  studyFeedback(CLOSE).result === 'wrong')
+  studyFeedback(CLOSE).result === 'close')
 const firstTry = { firstTrySeen: new Set(), firstTryCorrect: 0, firstTryWrong: 0 }
 recordFirstTry(firstTry, 'water', true)
 recordFirstTry(firstTry, 'bread', false)
@@ -169,6 +171,10 @@ check('cards: study-stages picks the kinds',
 check('cards: study-stages always keeps recognition',
   languageCards(`---\nstudy-stages: cloze\n---\n${TABLE}`, PATH)
     .some((card) => card.kind === RECOGNISE))
+check('session: existing tables stay recognition-first',
+  [...studyKinds(TABLE)].join('') === RECOGNISE)
+check('session: explicit stages reach the study session',
+  [...studyKinds(`---\nstudy-stages: all\n---\n${TABLE}`)].sort().join('') === 'cdfr')
 check('cards: a table with no rows makes no cards',
   languageCards('| Word | English |\n| --- | --- |\n', PATH).length === 0)
 check('cards: text with no table makes no cards', languageCards('hello', PATH).length === 0)

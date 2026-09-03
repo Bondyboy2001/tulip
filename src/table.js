@@ -22,6 +22,7 @@ import { getSearchQuery, searchPanelOpen } from '@codemirror/search'
 import { escapeHtml } from './dom.js'
 import { MONEY_SOURCE, moneyNode } from './money.js'
 import { findMath, renderMathInto } from './math.js'
+import { escapeRe } from './vault-paths.js'
 import {
   findEmbeds, specForEmbed, renderEmbed, withEmbedSize,
   embedResizeGrip, wireEmbedResize, fitImageCell
@@ -835,11 +836,7 @@ function resizeCellImage (view, cell, rendered, width) {
 function clearSelectedCells (view, wrap) {
   replaceCellValues(
     view,
-    // A language table's header names its columns and is not editable by hand;
-    // a rectangle that happens to cover it must not empty it either.
-    selectedCells(wrap)
-      .filter((cell) => !cell.dataset.locked)
-      .map((cell) => ({ cell, value: '' }))
+    selectedCells(wrap).map((cell) => ({ cell, value: '' }))
   )
 }
 
@@ -1087,14 +1084,7 @@ function wireCellSelection (wrap, view) {
     event.preventDefault()
 
     const point = { r: Number(cell.dataset.row), c: Number(cell.dataset.col) }
-    const saved = {
-      r: Number(wrap.dataset.cellAnchorRow),
-      c: Number(wrap.dataset.cellAnchorCol)
-    }
-    const anchor = event.shiftKey &&
-      Number.isInteger(saved.r) && Number.isInteger(saved.c)
-      ? saved
-      : point
+    const anchor = (event.shiftKey && savedCellAnchor(wrap)) || point
 
     /* A drag that stays inside one cell belongs to the text: make an ordinary
        character selection so Copy gets exactly the highlighted words. Only
@@ -1880,15 +1870,6 @@ function syncColumnWidths (table, widths) {
   table.dataset.widths = signature
 
   table.classList.toggle('has-column-widths', Boolean(signature))
-  /* Whether anything in this table can still take up slack. A column nobody
-     dragged is written `0` and sized by its content — under fixed layout it is
-     also the column that absorbs the space between the dragged widths and the
-     frame, one column at its own width rather than every column stretched in
-     proportion. Either way the grid fills its frame; this only says how. */
-  table.classList.toggle(
-    'has-flexible-column',
-    Boolean(signature) && widths.some((width) => !width)
-  )
 
   let group = table.querySelector(':scope > colgroup')
   if (!signature) { group?.remove(); return }
@@ -1912,7 +1893,7 @@ function fittedWidths (wrap, host = wrap?.closest('.cm-scroller')) {
 
   const probe = table.cloneNode(true)
   probe.querySelector(':scope > colgroup')?.remove()
-  probe.classList.remove('has-column-widths', 'has-flexible-column')
+  probe.classList.remove('has-column-widths')
   Object.assign(probe.style, {
     position: 'fixed',
     left: '-100000px',
@@ -2517,13 +2498,12 @@ function buildTables (state) {
    text the cells are showing.
    ================================================================== */
 
-const escapeRegex = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 /** A search query as a pattern, or null when it is not one worth painting. */
 function searchPattern (query) {
   if (!query?.search || !query.valid) return null
   const flags = query.caseSensitive ? 'g' : 'gi'
-  const body = query.regexp ? query.search : escapeRegex(query.search)
+  const body = query.regexp ? query.search : escapeRe(query.search)
   try {
     return new RegExp(query.wholeWord ? `\\b(?:${body})\\b` : body, flags)
   } catch {
