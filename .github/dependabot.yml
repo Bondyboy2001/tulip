@@ -1,0 +1,16 @@
+# Weekly bumps for the two things this repo does not pin by hand: the npm
+# tree (proven by `npm ci` + the suite, with `npm audit` as the backstop and
+# the overrides in package.json for advisories nobody upstream has fixed) and
+# the Actions it runs on (pinned to major versions in ci.yml).
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

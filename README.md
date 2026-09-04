@@ -219,9 +219,10 @@ npm run bench:boot # real launches, timed — see bench/boot-bench.mjs
 
 The lint rules are few and every one of them fires only on a defect — including
 one written for this codebase, `tulip/consistent-optional-chaining`, after three
-launch-time crashes got through. `npm run typecheck` is deliberately outside
-`verify`: it reports around two thousand findings today, of which the useful
-third are null-safety, and tsconfig.json says what to do about that.
+launch-time crashes got through. `npm run typecheck` (`tsc --checkJs` under
+`strictNullChecks`) is clean across the whole tree, and `typecheck:gate` holds
+it there: every module is on its clean list at a ceiling of zero, so a new
+null-safety finding fails the build. tsconfig.json says why that check exists.
 
 The window is served over a `tulip-app://` protocol rather than from `file://`,
 for one reason: Chromium keeps no V8 code cache for a `file:` page, so every
