@@ -44,8 +44,7 @@ const SECTIONS = [
       {
         key: 'defaultVaultPath',
         type: 'default-vault',
-        name: 'Default vault',
-        hint: 'The vault Tulip opens on launch. Switching vaults from the sidebar does not change it.'
+        name: 'Default vault'
       }
     ]
   },
@@ -1241,28 +1240,18 @@ export function mountSettings ({ el, api, values, onChange }) {
     },
 
     /**
-     * The vault Tulip opens on launch. Three moves and nothing typed: pin the
-     * open vault, pick a folder through the native dialog, or clear back to
-     * reopening whatever was last open. The dialog pick goes through main's
+     * The vault Tulip opens on launch: the pinned path beside the button, or
+     * whatever was last open when nothing is pinned. One move — pick a folder
+     * through the native dialog. The pick goes through main's
      * `vault:pick-default`, which enters the folder into the recent list — the
      * value check in `config:set` only accepts the open vault or a recent one,
      * so the write that follows is one main will keep.
      */
     'default-vault' (row) {
-      const wrap = node('div', 'ai-doctor')
-      const results = node('div', 'ai-doctor-results')
-      const current = values().vaultPath || ''
+      const wrap = node('div', 'env-actions')
       const pinned = values()[row.key] || ''
-      const lines = []
-      lines.push(current ? `Open now: ${current}` : 'No vault is open.')
-      lines.push(pinned ? `Opens on launch: ${pinned}` : 'Opens on launch: the last vault open.')
-      for (const text of lines) results.append(node('span', 'settings-hint', text))
-      const actions = node('div', 'env-actions')
-      const use = node('button', 'model-refresh', 'Use open vault')
-      use.type = 'button'
-      use.title = 'Open this vault on every launch'
-      use.disabled = !current || current === pinned
-      use.addEventListener('click', () => change(row, current))
+      const shown = node('span', 'settings-hint', pinned || 'Last open')
+      if (pinned) shown.title = pinned
       const pick = node('button', 'model-refresh', 'Choose…')
       pick.type = 'button'
       pick.title = 'Choose the vault Tulip opens on launch'
@@ -1276,15 +1265,7 @@ export function mountSettings ({ el, api, values, onChange }) {
           pick.disabled = false
         }
       })
-      actions.append(use, pick)
-      if (pinned) {
-        const clear = node('button', 'ghost is-compact', 'Clear')
-        clear.type = 'button'
-        clear.title = 'Reopen whatever vault was last open instead'
-        clear.addEventListener('click', () => change(row, undefined))
-        actions.append(clear)
-      }
-      wrap.append(results, actions)
+      wrap.append(shown, pick)
       return wrap
     },
 
@@ -1376,7 +1357,7 @@ export function mountSettings ({ el, api, values, onChange }) {
       // beside it — the theme grid and the model list are both of those.
       if (row.type === 'themes' || row.type === 'catalogue' || row.type === 'doctor' ||
           row.type === 'hotkeys' || row.type === 'languages' ||
-          row.type === 'environments' || row.type === 'default-vault') line.classList.add('is-stacked')
+          row.type === 'environments') line.classList.add('is-stacked')
       el.body.append(line)
     }
   }
