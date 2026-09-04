@@ -18,7 +18,10 @@
     }
   ],
   "fallbacks": {
-    "opencode": []
+    "opencode": [
+      { "id": "opencode/claude-opus-4-6", "label": "claude-opus-4-6", "group": "opencode", "efforts": ["low", "medium", "high"], "effort": "high", "context": 200000 },
+      { "id": "opencode/gpt-5.4", "label": "gpt-5.4", "group": "opencode", "efforts": ["minimal", "low", "medium", "high", "max"], "effort": "high", "context": 400000 }
+    ]
   },
   "efforts": [
     {

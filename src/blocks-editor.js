@@ -23,7 +23,8 @@ const OPENING = /^\s*(?:```|~~~)\s*([\w+-]+)/
    to make that one walk. Keyed on the document *and* the tree: the parser
    advances a note's tree without touching its text, and a fence that has only
    just finished parsing must not be answered for out of a stale list. */
-let fenceCache = { doc: null, tree: null, list: null }
+/** @type {{ doc: any, tree: any, list: Array<{ node: { from: number, to: number }, first: any, last: any, lang: string, code: string }> }} */
+let fenceCache = { doc: null, tree: null, list: /** @type {any} */ (null) }
 
 /**
  * Hands every finished fenced block in the document to `visit`, as its node,
@@ -63,7 +64,7 @@ function fenceList (state) {
          produce byte-identical strings, because everything downstream (run
          results, tikz and manim artefact hashes, the mermaid cache) is keyed
          by them. A fence in a list item disagreed in every one of those. */
-      const indent = /^[ \t]*/.exec(first.text)[0].length
+      const indent = (/^[ \t]*/.exec(first.text)?.[0] || '').length
       let code = last.number - first.number < 2
         ? ''
         : doc.sliceString(doc.line(first.number + 1).from, doc.line(last.number - 1).to)
@@ -137,7 +138,7 @@ function shiftOnly (tr, fences) {
  * keystroke. The field remembers where every fence stands to make that call.
  * Widget eq() keeps the untouched ones alive across every rebuild.
  *
- * @param {(state) => DecorationSet} build
+ * @param {(state: any) => import('@codemirror/view').DecorationSet} build
  * @param {{ also?: (tr) => boolean }} [opts]  a further reason to rebuild
  */
 export function fenceField (build, { also } = {}) {
@@ -175,7 +176,7 @@ export function fenceField (build, { also } = {}) {
  * holding the picture that block describes.
  *
  * @param {(lang: string) => boolean} matches
- * @param {(code: string) => WidgetType} makeWidget
+ * @param {(code: string) => import('@codemirror/view').WidgetType} makeWidget
  * @param {{ also?: (tr) => boolean }} [opts]
  */
 export function pictureBlocks (matches, makeWidget, opts) {

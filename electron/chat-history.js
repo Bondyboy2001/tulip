@@ -20,14 +20,20 @@
    what changed — so the cap on the record itself is applied here. */
 const MAX_CHAT_NOTES = 60
 
+/* How many conversations per note survive a merge. The panel trims to 20 in
+   memory; the file keeps the same bound so a trim in one window cannot erase
+   conversations another window still holds but has not dirtied. */
+const MAX_CONVOS_PER_NOTE = 20
+
 /**
  * The merge is by note, not by conversation: what the window holds for a note
  * is the whole truth about that note, and merging deeper would resurrect chats
- * `/new` had put away.
- *
- * Removals are applied before the writes, so a note renamed onto a name being
- * written in the same breath keeps the write rather than losing it to its own
- * rename.
+ * `/new` had put away — except that a whole-note replace also drops convos the
+ * writer had already trimmed from memory. So per note, union by conversation
+ * id (writer wins on id collision), then trim oldest-first. Explicit removals
+ * still win: they are applied before the writes, so a note renamed onto a name
+ * being written in the same breath keeps the write rather than losing it to
+ * its own rename.
  */
 function mergeChatHistory (existing, update) {
   /* An older renderer sends the history whole, with note paths at the top
@@ -39,7 +45,39 @@ function mergeChatHistory (existing, update) {
   const merged = { ...(existing && typeof existing === 'object' ? existing : {}) }
   for (const path of Array.isArray(update.remove) ? update.remove : []) delete merged[path]
   for (const [path, entry] of Object.entries(update.notes)) {
-    if (path && entry) merged[path] = entry
+    if (!path || !entry) continue
+    const prev = merged[path]
+    if (!prev || !Array.isArray(prev.convos) || !Array.isArray(entry.convos)) {
+      merged[path] = entry
+      continue
+    }
+    // Union by conversation id: the writer's version wins on collision, and
+    // convos the writer trimmed from memory survive on disk. On equal `at`
+    // the writer's order wins, so the fresh write reads first.
+    const byId = new Map()
+    const order = new Map()
+    let seq = 0
+    for (const convo of prev.convos) if (convo?.id && !byId.has(convo.id)) {
+      byId.set(convo.id, convo)
+      order.set(convo.id, 1e9 + (seq++))
+    }
+    for (const convo of entry.convos) if (convo?.id) {
+      byId.set(convo.id, convo)
+      order.set(convo.id, seq++)
+    }
+    const convos = [...byId.values()].sort((a, b) => {
+      const gap = (Number(b?.at) || 0) - (Number(a?.at) || 0)
+      if (gap) return gap
+      return (order.get(a?.id) ?? 0) - (order.get(b?.id) ?? 0)
+    }).slice(0, MAX_CONVOS_PER_NOTE)
+    const hadActive = entry.active != null || prev.active != null
+    const active = entry.active && byId.has(entry.active)
+      ? entry.active
+      : !entry.active && prev.active && byId.has(prev.active) ? prev.active : entry.active
+    const next = { ...entry, convos, at: Math.max(Number(entry.at) || 0, Number(prev.at) || 0) }
+    if (hadActive) next.active = active
+    else delete next.active
+    merged[path] = next
   }
 
   const paths = Object.keys(merged)
@@ -51,4 +89,4 @@ function mergeChatHistory (existing, update) {
   return Object.fromEntries(kept.map((path) => [path, merged[path]]))
 }
 
-module.exports = { mergeChatHistory, MAX_CHAT_NOTES }
+module.exports = { mergeChatHistory, MAX_CHAT_NOTES, MAX_CONVOS_PER_NOTE }

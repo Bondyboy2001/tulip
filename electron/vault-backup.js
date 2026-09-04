@@ -33,7 +33,7 @@ async function digest (file) {
   const stream = fsSync.createReadStream(file)
   await new Promise((resolve, reject) => {
     stream.on('data', (chunk) => hash.update(chunk))
-    stream.on('end', resolve)
+    stream.on('end', /** @type {() => void} */ (resolve))
     stream.on('error', reject)
   })
   return hash.digest('hex')
@@ -157,4 +157,4 @@ async function restoreVault (source, target) {
   }
 }
 
-module.exports = { BACKUP_EXTENSION, MANIFEST, backupVault, restoreVault, verifyBackup }
+module.exports = { BACKUP_EXTENSION, backupVault, restoreVault, verifyBackup }

@@ -31,6 +31,7 @@ const replace = (source, values) => source.replace(/{{([a-zA-Z]+)}}/g, (_match, 
    for a file only the first Copilot turn needs. The cost of laziness is that
    a missing or mangled prompt.md now surfaces at that first turn instead of
    at boot, with the same message. */
+/** @type {{ turnRules: string, readTurnRules: string, systemTemplate: string } | null} */
 let loaded = null
 const template = () => {
   if (loaded) return loaded
@@ -347,6 +348,8 @@ function quoted (context, sent) {
 /**
  * What a session has already put in front of the model, so it is not put there
  * twice. One of these per session — see `send` in ai.js.
+ *
+ * @typedef {{ opened: string, body: string, bodyOf: string, pdfs: string, pageKeys: (Set<string> | null), rules: boolean, rulesMode: (string | null), turns: number }} SentRecord
  */
 const nothingSent = () => ({
   opened: '', body: '', bodyOf: '', pdfs: '', pageKeys: null, rules: false, rulesMode: null, turns: 0
@@ -441,6 +444,11 @@ const RULES_REMINDER_TURNS = 10
  *
  * With no memory passed — the tests, and the first turn of any thread — the
  * whole thing goes, which is what makes the naming below true afterwards.
+ *
+ * @param {string} text
+ * @param {any} context
+ * @param {SentRecord | null} [sent]
+ * @param {{ mode?: (string | null) }} [options]
  */
 function promptFor (text, context, sent = null, { mode = null } = {}) {
   const ordinaryAttachments = Array.isArray(context?.attachments)

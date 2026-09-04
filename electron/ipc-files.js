@@ -31,9 +31,9 @@ const { MD_EXT, isTex, isCode, isData, isLanguageTable } = require('./vault-kind
  *   languageHistory: { sync: (p: string, text: string, opts?: any) => Promise<any> },
  *   getTrust: () => { creationTime: (p: string, at?: number) => number | null } | null,
  *   noteSelfWrite: (abs: string, stamp?: string | null) => void,
- *   markIndexDirty: () => void,
+ *   markIndexDirty: (relPath?: string) => void,
  *   invalidateVaultSnapshot: () => void,
- *   freeName: (dir: string, base: string, ext?: string) => string,
+ *   freeName: (dir: string, base: string, ext?: string) => Promise<string>,
  *   maxOpenBytes: number,
  *   tooBig: (abs: string, size: number) => Error
  * }} ctx
@@ -268,7 +268,8 @@ function makeFilesDomain (ctx) {
 
       /* Still the same disagreement, and the copy it made is still there. Written
          over rather than added to. */
-      if (episode && now - episode.at < CONFLICT_EPISODE_MS && fsSync.existsSync(episode.target)) {
+      if (episode && now - episode.at < CONFLICT_EPISODE_MS &&
+        await fs.stat(episode.target).then(() => true).catch(() => false)) {
         try {
           await fs.copyFile(abs, episode.target)
         } catch {
@@ -276,7 +277,7 @@ function makeFilesDomain (ctx) {
         }
         episode.at = now
         noteSelfWrite(episode.target)
-        markIndexDirty()
+        markIndexDirty(rel(episode.target))
         invalidateVaultSnapshot()
         /* `repeat` so the window can say it once rather than once a second: the
            file it named the first time is the file this went into. */
@@ -285,7 +286,7 @@ function makeFilesDomain (ctx) {
 
       const ext = path.extname(abs)
       const stem = path.basename(abs, ext)
-      const target = freeName(path.dirname(abs), `${stem} (conflicted copy)`, ext)
+      const target = await freeName(path.dirname(abs), `${stem} (conflicted copy)`, ext)
       try {
         /* `COPYFILE_EXCL` so this can never land on a file that appeared between
            `freeName` looking and the copy happening — losing the disk's version is
@@ -297,7 +298,7 @@ function makeFilesDomain (ctx) {
       }
       conflictEpisodes.set(abs, { target, at: now })
       noteSelfWrite(target)
-      markIndexDirty()
+      markIndexDirty(rel(target))
       invalidateVaultSnapshot()
       return { path: rel(target), repeat: false }
     })

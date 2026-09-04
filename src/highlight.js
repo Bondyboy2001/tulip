@@ -52,8 +52,20 @@ const TOKEN_CACHE_ENTRIES = 96
 const TOKEN_CACHE_BYTES = 2 * 1024 * 1024
 let tokenCacheBytes = 0
 
+/* The key used to be the whole block: `language + code`. A pasted 100 kB
+   fence then paid for a 100 kB key on top of the tokens already held, and every
+   lookup hashed the full text twice (once for the key, once for the parse
+   decision). Length plus head/tail plus a full-text hash names the block just
+   as well for a cache: a collision needs the same language, the same length,
+   the same first and last 64 characters, *and* the same djb2. */
+function hashText (text) {
+  let hash = 5381
+  for (let i = 0; i < text.length; i++) hash = ((hash << 5) + hash + text.charCodeAt(i)) | 0
+  return (hash >>> 0).toString(36)
+}
+
 function tokenKey (language, code) {
-  return `${language}\0${code}`
+  return `${language}\0${code.length}\0${code.slice(0, 64)}\0${code.slice(-64)}\0${hashText(code)}`
 }
 
 function cachedTokens (key) {
@@ -66,8 +78,11 @@ function cachedTokens (key) {
 
 function rememberTokens (key, code, tokens) {
   /* UTF-16 strings are two bytes per code unit. Class names are shared literals
-     in practice, but counting them too keeps the bound conservative. */
-  const bytes = 2 * (key.length + code.length +
+     in practice, but counting them too keeps the bound conservative. The key no
+     longer holds the block (see tokenKey), so what is retained is the key plus
+     the token texts — the `code` parameter itself is the caller's and is not
+     kept. */
+  const bytes = 2 * (key.length +
     tokens.reduce((sum, token) => sum + token.text.length + token.classes.length, 0))
   if (bytes > TOKEN_CACHE_BYTES) return
 

@@ -9,7 +9,7 @@
    but this one channel let it write any key at all, and some config keys are
    not preferences:
 
-     vaultPath, defaultVaultPath   where every later path is resolved against
+     vaultPath                where every later path is resolved against
      tikzCommand, manimCommand     split on whitespace and spawned
 
    So the renderer could have moved the vault out from under the app, or turned
@@ -17,7 +17,14 @@
    pane is open. Nothing in the app does that today; the point is that the shape
    of the channel should not permit it.
 
-   Main still writes those keys itself (pickVault, boot) — this list governs the
+   `defaultVaultPath` is the one path the renderer may name: the vault Tulip
+   opens on launch. The shape is checked here and the value is checked again in
+   main's `config:set` handler, which only accepts the current vault or a vault
+   from the recent list that still exists — a native dialog is the only way a
+   new folder enters that list. An arbitrary path is refused there, so naming
+   one cannot turn the next launch into a read of an attacker-chosen folder.
+
+   Main still writes the other keys itself (pickVault, boot) — this list governs the
    IPC handler only, not `writeConfig`. Adding a setting means adding it here,
    which is the intended cost: an allowed key is a decision, not an accident.
 
@@ -47,7 +54,9 @@ const orCleared = (check) => (v) => v === undefined || check(v)
 const MEASURE_NAMES = ['narrow', 'normal', 'wide']
 
 const CONFIG_KEYS = {
-  /* Read by main, and so the ones where a wrong type reaches real logic. */
+  /* No longer read — kept so a config left by an older version loads rather
+     than being rejected. Writes land now and are checkpointed to the disk's
+     platters on a timer, on hide and on quit. */
   durability: string,
   historyInVault: boolean,
   /* Written only after the integrity-checked backup call has completed. */
@@ -91,6 +100,10 @@ const CONFIG_KEYS = {
   /* What was open, for restoring the session. */
   view: string,
   lastNote: orCleared(string),
+  /* The vault Tulip opens on launch, when set — see Settings → Vault. The
+     shape is a path or cleared; main's `config:set` handler additionally
+     requires it to be the open vault or a recent one that still exists. */
+  defaultVaultPath: orCleared(string),
   /* A blank tab is deliberately stored as null. Refusing the whole list when
      one was blank left the previous session on disk, including paths that had
      since disappeared. */
@@ -134,10 +147,8 @@ const CONFIG_KEYS = {
      id with no shipped dictionary is skipped at load, so the list is only
      length-checked here. */
   spellLanguages: stringList,
-  /* Milliseconds after the last keystroke, which is how the renderer reads it
-     (`Number(cfg.autosave) || 600`). It was allowlisted as a boolean, with no
-     settings row to write it — and had one been added, `Number(true)` is a
-     1ms autosave. */
+  /* No longer read — kept so a config left by an older version loads rather
+     than being rejected. Notes are written 600ms after the last keystroke. */
   autosave: orCleared(number),
 
   /* The copilot. */

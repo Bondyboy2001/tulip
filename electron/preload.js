@@ -67,13 +67,19 @@ contextBridge.exposeInMainWorld('tulip', {
     // `known` is the revision the caller already drew; passing it lets main
     // answer "still that one" instead of sending the whole tree back.
     snapshot: (known) => ipcRenderer.invoke('vault:snapshot', known),
-    notes: () => ipcRenderer.invoke('vault:notes'),
+    /* Paged: `{ offset, limit }` walks the index `limit` notes at a time
+       (default 200, max 1000) and the answer carries its `total`. */
+    notes: (opts) => ipcRenderer.invoke('vault:notes', opts),
     /* The vaults connected before this one, so switching between two of them
        is a pick from a list rather than a walk through a file dialog. Main
        keeps the list and will only open something already on it — choosing a
        vault it has never seen is `pick`, which is a native dialog. */
     recent: () => ipcRenderer.invoke('vault:recent'),
     open: (dir) => ipcRenderer.invoke('vault:open', dir),
+    /* The folder picker for Settings → Vault. Answers with the chosen folder
+       without switching to it; the settings pane then pins it via config:set,
+       which only accepts recent vaults — and this pick just made it one. */
+    pickDefault: () => ipcRenderer.invoke('vault:pick-default'),
      // The other names notes answer to, for resolving `[[Alias]]`.
      aliases: () => ipcRenderer.invoke('vault:aliases'),
      backup: () => ipcRenderer.invoke('vault:backup'),

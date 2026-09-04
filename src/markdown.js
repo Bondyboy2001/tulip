@@ -123,6 +123,11 @@ export function createMarkdown ({ resolveEmbedSrc }) {
    * below run on it so they cannot disagree about what ends a link — the offsets
    * are the only thing that differed between them, and they are the easiest
    * thing to get wrong when only one of the two is edited.
+   *
+   * The fast path is two character reads: at any other position one of the two
+   * rules bails on the first and the other on the second, so prose pays almost
+   * nothing. Only a `[[` pays for the `]]` search, and only a closed span pays
+   * for the walk over its inside.
    */
   function wikiSpan (src, pos, bang) {
     if (bang && src.charCodeAt(pos) !== 0x21) return null             // !
@@ -130,16 +135,31 @@ export function createMarkdown ({ resolveEmbedSrc }) {
     if (src.charCodeAt(at) !== 0x5B || src.charCodeAt(at + 1) !== 0x5B) return null
     const end = src.indexOf(']]', at + 2)
     if (end === -1) return null
-    /* Inside a table cell the source spells the span's own pipes `\|` — a bare
-       one would end the cell — so an escaped pipe reads as the separator here. */
-    const inner = src.slice(at + 2, end).replace(/\\\|/g, '|')
-    if (inner.includes('[')) return null
-
-    const bar = inner.indexOf('|')
+    /* One walk over the inside, no tail allocated: a `[` anywhere rejects the
+       span, and the first pipe — bare or `\|`-escaped — is the separator. The
+       escaped form reads as the separator because that is what the old
+       slice-then-replace-then-indexOf did (inside a table cell the source
+       spells the span's own pipes `\|`, a bare one would end the cell), and an
+       escape elsewhere changes nothing: a `\[` still rejects, exactly as the
+       old `includes('[')` on the replaced string did. */
+    let bar = -1
+    let escaped = false
+    for (let i = at + 2; i < end; i++) {
+      const c = src.charCodeAt(i)
+      if (c === 0x5B) return null                                     // [
+      if (bar !== -1) continue
+      if (c === 0x7C) bar = escaped ? i - 1 : i                       // |
+      escaped = c === 0x5C                                            // \
+    }
+    const cut = (from, to) => src.slice(from, to).replace(/\\\|/g, '|').trim()
+    if (bar === -1) {
+      const target = cut(at + 2, end)
+      return { next: end + 2, target, suffix: '' }
+    }
     return {
       next: end + 2,
-      target: (bar === -1 ? inner : inner.slice(0, bar)).trim(),
-      suffix: bar === -1 ? '' : inner.slice(bar + 1).trim()
+      target: cut(at + 2, bar),
+      suffix: cut(bar + (src.charCodeAt(bar) === 0x5C ? 2 : 1), end)
     }
   }
 
@@ -172,13 +192,17 @@ export function createMarkdown ({ resolveEmbedSrc }) {
   /* `#tag`, matched exactly the way the editor's tag pass matches it (see the
      tag loop in src/editor.js) so the two views agree on what is a tag. A
      heading's `#` never arrives here — the block parser has already taken it —
-     and a `#` inside code is consumed by the code-span rule first. */
+     and a `#` inside code is consumed by the code-span rule first.
+     Sticky, not sliced: the old `exec` on `src.slice(pos)` copied the rest of
+     the line at every `#`, which is quadratic across a note full of them. */
+  const HASHTAG_SCAN = /#[\p{L}\p{N}][\p{L}\p{N}/_-]*/uy
   md.inline.ruler.after('wikilink', 'hashtag', (mdState, silent) => {
     const { src, pos } = mdState
     if (src.charCodeAt(pos) !== 0x23 /* # */) return false
     // Only off a boundary: `and a #tag` is one, `bug#42` is not.
     if (pos > 0 && !/\s/.test(src[pos - 1])) return false
-    const match = /^#[\p{L}\p{N}][\p{L}\p{N}/_-]*/u.exec(src.slice(pos))
+    HASHTAG_SCAN.lastIndex = pos
+    const match = HASHTAG_SCAN.exec(src)
     if (!match) return false
     if (!silent) {
       const token = mdState.push('hashtag', '', 0)
@@ -212,7 +236,7 @@ export function createMarkdown ({ resolveEmbedSrc }) {
       if (!match) continue
 
       tokens[i].content = tokens[i].content.slice(match[0].length)
-      const first = tokens[i].children[0]
+      const first = tokens[i].children?.[0]
       if (first && first.type === 'text') first.content = first.content.slice(match[0].length)
 
       // The source line travels with the token so a click can find the exact
@@ -221,7 +245,7 @@ export function createMarkdown ({ resolveEmbedSrc }) {
       const map = tokens[i - 1].map || tokens[i - 2].map
       const box = new mdState.Token('taskbox', '', 0)
       box.meta = { checked: match[1] !== ' ', line: map ? map[0] : null }
-      tokens[i].children.unshift(box)
+      tokens[i].children?.unshift(box)
       tokens[i - 2].attrJoin('class', 'task-item')
       if (box.meta.checked) tokens[i - 2].attrJoin('class', 'is-done')
     }
@@ -235,34 +259,36 @@ export function createMarkdown ({ resolveEmbedSrc }) {
   md.core.ruler.after('task_lists', 'ordered_list_numbers', (mdState) => {
     const tokens = mdState.tokens
     const lists = []
-
-    const startFor = (index) => {
-      const token = tokens[index]
-      let start = Number(token.attrGet('start')) || 1
-      if (start !== 1 || tokens[index - 1]?.type !== 'fence') return start
-
-      const close = index - 2
-      if (tokens[close]?.type !== 'ordered_list_close') return start
-      let open = close - 1
-      while (open >= 0 && tokens[open].type !== 'ordered_list_open') open--
-      if (open < 0) return start
-
-      const level = tokens[open].level + 1
-      const count = tokens.slice(open + 1, close)
-        .filter((item) => item.type === 'list_item_open' && item.level === level).length
-      return count > 0 ? count + 1 : start
-    }
+    /* The list a fence-interrupted numbering resumes from: the ordered list
+       whose close sits directly under the fence (`..._close, fence,
+       ..._open`). Counted as it was walked — each `list_item_open` ticks its
+       own innermost open — so resuming is a lookup, not a walk back plus a
+       slice-and-filter over everything the list held. One pass either way. */
+    /** @type {any} */
+    let lastClose = null
 
     for (let i = 0; i < tokens.length; i++) {
       const token = tokens[i]
       if (token.type === 'ordered_list_open' || token.type === 'bullet_list_open') {
-        lists.push({ ordered: token.type === 'ordered_list_open', next: startFor(i) })
+        let next = Number(token.attrGet('start')) || 1
+        if (next === 1 && token.type === 'ordered_list_open' &&
+            tokens[i - 1]?.type === 'fence' && lastClose?.index === i - 2 &&
+            lastClose.count > 0) {
+          next = lastClose.count + 1
+        }
+        lists.push({ ordered: token.type === 'ordered_list_open', next, count: 0 })
       } else if (token.type === 'ordered_list_close' || token.type === 'bullet_list_close') {
-        lists.pop()
+        const open = lists.pop()
+        lastClose = token.type === 'ordered_list_close' && open
+          ? { index: i, count: open.count }
+          : null
       } else if (token.type === 'list_item_open') {
         const list = lists.at(-1)
-        if (list?.ordered) {
-          token.meta = { ...token.meta, orderedNumber: list.next++ }
+        if (list) {
+          list.count++
+          if (list.ordered) {
+            token.meta = { ...token.meta, orderedNumber: list.next++ }
+          }
         }
       }
     }
@@ -290,7 +316,7 @@ export function createMarkdown ({ resolveEmbedSrc }) {
   }
 
   md.renderer.rules.taskbox = (tokens, i) => {
-    const { checked, line } = tokens[i].meta
+    const { checked, line } = /** @type {{ checked: boolean, line: number | null }} */ (tokens[i].meta)
     // Without a source line there is nothing to write back to, so the box stays
     // inert rather than pretending to work.
     const hook = line === null ? ' disabled' : ` data-line="${line}"`
@@ -331,7 +357,7 @@ export function createMarkdown ({ resolveEmbedSrc }) {
        is not focusable and has no role of its own either, so both are stated:
        a link that only a mouse can follow is a note only a mouse can read. */
     return `<a class="wikilink" role="link" tabindex="0" ` +
-           `data-wikilink="${escapeAttr(meta.target)}">${escapeHtml(content)}</a>`
+           `data-wikilink="${escapeAttr(/** @type {{ target: string }} */ (meta).target)}">${escapeHtml(content)}</a>`
   }
 
   /**
@@ -340,6 +366,9 @@ export function createMarkdown ({ resolveEmbedSrc }) {
    * be a second copy of `renderEmbed`, and the two would have to be kept looking
    * and behaving identically by hand. This is how fenced code already works (see
    * `dressCodeBlocks`).
+   *
+   * @param {string} src
+   * @param {{ alt?: string, size?: { width: number, height: number | null } | null, syntax?: string }} [opts]
    */
   function embedSlot (src, { alt = '', size = null, syntax = 'wiki' } = {}) {
     return `<span class="embed-slot" data-src="${escapeAttr(src)}" data-alt="${escapeAttr(alt)}"` +
@@ -350,7 +379,7 @@ export function createMarkdown ({ resolveEmbedSrc }) {
   }
 
   md.renderer.rules.wikiembed = (tokens, i) => {
-    const { target, suffix } = tokens[i].meta
+    const { target, suffix } = /** @type {{ target: string, suffix: string }} */ (tokens[i].meta)
     const { alt, size } = parseEmbedSuffix(suffix)
     return embedSlot(target, { alt, size, syntax: 'wiki' })
   }
@@ -360,7 +389,7 @@ export function createMarkdown ({ resolveEmbedSrc }) {
      against the note's folder anyway. */
   md.renderer.rules.image = (tokens, i) => {
     const token = tokens[i]
-    const src = token.attrGet('src') || ''
+    const src = /** @type {string} */ (token.attrGet('src') || '')
     /* The alt text carries the same `|400` suffix rule as a wiki embed — the form
        drag-resizing writes — so it goes through the one parser for it, on the same
        terms the editing view's scanner reads it (`bareSize: false`: a caption that

@@ -12,6 +12,7 @@ import { syntaxTree, HighlightStyle, syntaxHighlighting, indentOnInput,
 import { stex } from '@codemirror/legacy-modes/mode/stex'
 import { codeTokens, languageFor, languageSupportFor, primeLanguageDescription } from './highlight.js'
 import { languageChip } from './languages.js'
+import { multiCursor } from './multicursor.js'
 import { primeSyntaxTree } from './spelling.js'
 
 export { openSearchPanel }
@@ -61,7 +62,6 @@ import { headingsFor, blockReferences, blockReferenceOnLine } from './headings.j
 import { findInlineHighlights } from './marks.js'
 import { findCitations } from './citations.js'
 import { fileDiff, withinLines } from './linediff.js'
-import { escapeRe } from './vault-paths.js'
 
 /* ---------------------------------------------------------------- theme */
 
@@ -451,6 +451,17 @@ const HIDDEN_MARKS = new Set([
   'LinkMark', 'QuoteMark', 'SubscriptMark', 'SuperscriptMark'
 ])
 
+/* The per-line scanners in buildDecorations, compiled once. They used to be
+   literals inside the line loop — a fresh compile per visible line per
+   rebuild, on every keystroke and every scroll — and `matchAll` clones the
+   regex it is handed, so sharing one constant is safe. The tag expression
+   matches the reading view's (see the hashtag rule in src/markdown.js) so the
+   two views agree on what is a tag. */
+const FOOTNOTE_RE = /\[\^[^\]\s]+\]/g
+const EQREF_RE = /\\(eqref|ref)\{([^{}\n]+)\}/g
+const WIKILINK_RE = /\[\[([^[\]|]+)(\|([^[\]]+))?\]\]/g
+const TAG_RE = /(^|\s)(#[\p{L}\p{N}][\p{L}\p{N}/_-]*)/gu
+
 /**
  * The note's name, and the place it is renamed.
  *
@@ -590,6 +601,7 @@ const embedNoteResolver = Facet.define({ combine: (v) => v[0] || (() => null) })
 /* A picture deliberately keeps its geometry when the caret crosses its line.
    This is the explicit way through that rule: the image's own source button
    names the exact replaced range that should open as Markdown. */
+/** @type {import('@codemirror/state').StateEffectType<{ from: number, to: number }>} */
 const embedSourceEffect = StateEffect.define()
 
 /* What a line may hold beside an embed and still count as holding only that
@@ -796,6 +808,37 @@ function revealEquation (view, label) {
 }
 
 /**
+ * Where every footnote's two ends are, built lazily and kept per document
+ * version. Clicking a marker used to copy the whole note and scan it with a
+ * freshly compiled regex — per click — only to learn one offset. The document
+ * object is immutable, so identity *is* the version: a new edit is a new
+ * object and rebuilds the index once, and every click after that reuses it.
+ */
+let footnoteIndex = { doc: null, defs: new Map(), refs: new Map() }
+function footnotePositions (doc) {
+  if (footnoteIndex.doc === doc) return footnoteIndex
+  const defs = new Map()
+  const refs = new Map()
+  const text = doc.toString()
+  const scan = /\[\^([^\]\s]+)\]/g
+  let m
+  while ((m = scan.exec(text))) {
+    const id = m[1]
+    const at = m.index
+    /* A definition is `[^id]:` at the head of a line; a marker is the same
+       span anywhere else — the same distinction the click regex used to draw
+       one search at a time. `at === 0` is a head of line without asking. */
+    if ((at === 0 || text[at - 1] === '\n') && text[at + m[0].length] === ':') {
+      if (!defs.has(id)) defs.set(id, at)
+    } else if (!refs.has(id)) {
+      refs.set(id, at)
+    }
+  }
+  footnoteIndex = { doc, defs, refs }
+  return footnoteIndex
+}
+
+/**
  * Show the reader the other end of a footnote.
  *
  * The same move as `revealEquation`, for the same reason: a marker asks where
@@ -805,15 +848,9 @@ function revealEquation (view, label) {
  * is what the reading view's back-arrow does.
  */
 function revealFootnote (view, id, { toDefinition }) {
-  const text = view.state.doc.toString()
-  const escaped = escapeRe(id)
-  /* A definition is `[^id]:` at the head of a line; a marker is the same span
-     anywhere else. Written as one regex so the two searches cannot drift. */
-  const pattern = toDefinition
-    ? new RegExp(`^\\[\\^${escaped}\\]:`, 'm')
-    : new RegExp(`(?<!^)\\[\\^${escaped}\\]|^\\[\\^${escaped}\\](?!:)`, 'm')
-  const at = text.search(pattern)
-  if (at === -1) return
+  const index = footnotePositions(view.state.doc)
+  const at = (toDefinition ? index.defs : index.refs).get(id)
+  if (at === undefined) return
   view.dispatch({ effects: EditorView.scrollIntoView(at, { y: 'center' }) })
   const selector = toDefinition
     ? `[data-footnote-def="${CSS.escape(id)}"]`
@@ -934,6 +971,7 @@ class FlashcardWidget extends WidgetType {
       tags.append(chip)
     }
 
+    /** @type {HTMLDivElement | null} */
     let media = null
     if (this.card.image) {
       const embed = findEmbeds(`![[${this.card.image}]]`)[0]
@@ -1321,7 +1359,7 @@ function pastHiddenTail (state, hidden, pos) {
     end = next
   }
   if (end === pos) return pos
-  for (let node = syntaxTree(state).resolveInner(pos, 1); node; node = node.parent) {
+  for (let node = /** @type {import('@lezer/common').SyntaxNode | null} */ (syntaxTree(state).resolveInner(pos, 1)); node; node = node.parent) {
     if (node.from >= pos) continue
     return node.to === end ? end : pos
   }
@@ -1393,15 +1431,48 @@ const foldedExactly = (state, range) => {
 /** Let CodeMirror's fold commands and state use Markdown heading sections. */
 const headingFoldService = foldService.of((state, lineStart) => {
   const line = state.doc.lineAt(lineStart)
-  const list = headingsFor(state.doc)
+  const list = /** @type {HeadingEntry[]} */ (headingsFor(state.doc))
   const heading = list.find((entry) => entry.line === line.number)
   return heading ? headingFoldRange(state, heading, list) : null
 })
+
+/* The heading branch of `buildDecorations` runs per ATX node and used to scan
+   the heading list for its line each time; a line holds at most one heading,
+   so a map answers in one step. The map itself was then rebuilt on every
+   rebuild — every keystroke and every scroll — over a list that only changes
+   with the document. Held here keyed on the same document identity
+   `headingsFor` uses, so one entry covers many rebuilds of one note. */
+/**
+ * @typedef {{ level: number, text: string, line: number, slug: string }} HeadingEntry
+ * @type {{ doc: any, list: HeadingEntry[] | null, map: Map<number, HeadingEntry> | null }}
+ */
+let headingMapCache = { doc: null, list: null, map: null }
+/**
+ * @param {any} doc
+ * @returns {{ list: HeadingEntry[], map: Map<number, HeadingEntry> }}
+ */
+function headingIndexFor (doc) {
+  // `headingsFor` is null-typed to the checker (see its cache in headings.js)
+  // but always an array at runtime; the fallback keeps it an array to both.
+  const list = headingsFor(doc) || []
+  let map = headingMapCache.doc === doc && headingMapCache.list === list
+    ? headingMapCache.map
+    : null
+  if (!map) {
+    map = new Map(list.map((entry) => [entry.line, entry]))
+    headingMapCache = { doc, list, map }
+  }
+  return { list, map }
+}
 
 /**
  * Decorations are rebuilt from the visible ranges on every relevant update.
  * Markup is hidden unless the cursor sits on that line — the line you are
  * editing always shows its true source, everything else reads as prose.
+ */
+/**
+ * @param {any} view
+ * @param {{ from: number, to: number } | null} [imageSource]
  */
 function buildDecorations (view, imageSource = null) {
   const { state } = view
@@ -1420,19 +1491,60 @@ function buildDecorations (view, imageSource = null) {
      The equations are lazier still. They are wanted only by the `\eqref`
      branch far below, which most notes never reach, so the index is not built
      unless something asks for it. */
-  const documentHeadings = headingsFor(state.doc)
+  const { list: documentHeadings, map: headingByLine } = headingIndexFor(state.doc)
+  /* The heading branch below runs per ATX node and used to scan this list for
+     its line each time. A line holds at most one heading, so a map answers in
+     one step — shared with every other rebuild of this document version. */
+  /** @type {any} */
   let equationCache = null
   const equations = () => (equationCache ||= equationsFor(state.doc))
 
   const isActive = (pos) => activeLines.has(state.doc.lineAt(pos).number)
 
+  /* `claimed` and `hidden` used to be scanned end to end for every candidate —
+     a `.some` over a list that grows with every match, per match, per line, per
+     rebuild: quadratic in the number of decorations. Both are spans in a
+     document, so both stay sorted by start and are searched by bisection.
+     Claimed spans never overlap — an overlapping candidate is skipped, never
+     stored — so the walk back is one step in practice; hidden spans can (hide
+     never checks), so it continues while a span can still reach the query,
+     bounded by the longest span stored. Inserts are splices, but both lists
+     are viewport-sized: hundreds of entries, not thousands. */
+  const lowerBoundStart = (spans, x) => {
+    let lo = 0
+    let hi = spans.length
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1
+      if (spans[mid][0] < x) lo = mid + 1
+      else hi = mid
+    }
+    return lo
+  }
+  const overlapsSorted = (spans, maxLen, from, to) => {
+    /* Overlap needs start < to and end > from. Past the bisection point every
+       start is >= to; walking back, a span starting at or under from - maxLen
+       ends at or under from, so nothing earlier can reach either. */
+    const floor = from - maxLen
+    for (let i = lowerBoundStart(spans, to) - 1; i >= 0 && spans[i][0] > floor; i--) {
+      if (from < spans[i][1] && to > spans[i][0]) return true
+    }
+    return false
+  }
+  const insertSorted = (spans, from, to) => {
+    spans.splice(lowerBoundStart(spans, from), 0, [from, to])
+  }
+  let hiddenMax = 0
+  const noteHidden = (from, to) => {
+    insertSorted(hidden, from, to)
+    if (to - from > hiddenMax) hiddenMax = to - from
+  }
+
   const hide = (from, to) => {
     if (to <= from) return
     ranges.push(Decoration.replace({}).range(from, to))
-    hidden.push([from, to])
+    noteHidden(from, to)
   }
-  const insideHidden = (from, to) =>
-    hidden.some(([a, b]) => from < b && to > a)
+  const insideHidden = (from, to) => overlapsSorted(hidden, hiddenMax, from, to)
 
   const tree = syntaxTree(state)
 
@@ -1488,7 +1600,12 @@ function buildDecorations (view, imageSource = null) {
      tree pass went first it would hide the brackets as LinkMarks and this pass
      would find nothing left to claim. */
   const claimed = []
-  const isClaimed = (from, to) => claimed.some(([a, b]) => from < b && to > a)
+  let claimedMax = 0
+  const claim = (from, to) => {
+    insertSorted(claimed, from, to)
+    if (to - from > claimedMax) claimedMax = to - from
+  }
+  const isClaimed = (from, to) => overlapsSorted(claimed, claimedMax, from, to)
 
   /* Embeds come first of all, because `![[picture.png]]` contains a perfectly
      good wikilink and the pass below would otherwise render the `[[…]]` half of
@@ -1504,6 +1621,11 @@ function buildDecorations (view, imageSource = null) {
     for (let n = startLine; n <= endLine; n++) {
       const line = state.doc.line(n)
       const active = activeLines.has(n)
+      /* Each scanner below names a character its matches cannot do without,
+         so lines without one skip the scan without starting it. Almost every
+         line takes every early-out, and this runs on every keystroke. */
+      const hasBracket = line.text.includes('[')
+      const hasBackslash = line.text.includes('\\')
 
       // One scanner, shared with the reading view — see src/assets.js. It
       // returns nothing for a line with no `![` in it, which is almost every
@@ -1513,7 +1635,7 @@ function buildDecorations (view, imageSource = null) {
         const end = line.from + embed.to
         if (inCode(start, end) || isClaimed(start, end)) continue
 
-        claimed.push([start, end])
+        claim(start, end)
 
         /* An embed with no target — `![[ ]]` — is an instruction to choose,
            not a missing picture, so the live preview stays off it; the slash
@@ -1549,7 +1671,7 @@ function buildDecorations (view, imageSource = null) {
           line.text.slice(0, embed.from) + line.text.slice(embed.to))
 
         ranges.push(Decoration.replace({ widget: new EmbedWidget(spec, figure) }).range(start, end))
-        hidden.push([start, end])
+        noteHidden(start, end)
       }
 
       /* Footnotes are claimed here, before the tree pass, for the same reason
@@ -1557,11 +1679,11 @@ function buildDecorations (view, imageSource = null) {
          above it a valid shortcut reference link, so lezer parses it as a Link
          and the pass below would hide its brackets as LinkMarks. Claiming the
          span settles that it is a footnote, and marks it as one. */
-      for (const m of line.text.matchAll(/\[\^[^\]\s]+\]/g)) {
+      if (hasBracket) for (const m of line.text.matchAll(FOOTNOTE_RE)) {
         const start = line.from + m.index
         const end = start + m[0].length
         if (inCode(start, end) || isClaimed(start, end)) continue
-        claimed.push([start, end])
+        claim(start, end)
         // `[^1]:` at the head of a line is the definition, which is a label
         // rather than a reference and should not be lifted into superscript.
         const definition = m.index === 0 && line.text[m.index + m[0].length] === ':'
@@ -1580,15 +1702,15 @@ function buildDecorations (view, imageSource = null) {
         const start = line.from + cite.from
         const end = line.from + cite.to
         if (inCode(start, end) || isClaimed(start, end)) continue
-        claimed.push([start, end])
+        claim(start, end)
         ranges.push(Decoration.mark({ class: 'tk-citation' }).range(start, end))
       }
 
-      for (const m of line.text.matchAll(/\\(eqref|ref)\{([^{}\n]+)\}/g)) {
+      if (hasBackslash) for (const m of line.text.matchAll(EQREF_RE)) {
         const start = line.from + m.index
         const end = start + m[0].length
         if (inCode(start, end) || isClaimed(start, end)) continue
-        claimed.push([start, end])
+        claim(start, end)
         const label = m[2].trim()
         if (active) {
           ranges.push(
@@ -1604,19 +1726,19 @@ function buildDecorations (view, imageSource = null) {
               widget: new EquationRefWidget(label, m[1] === 'eqref' ? `(${tag})` : tag)
             }).range(start, end)
           )
-          hidden.push([start, end])
+          noteHidden(start, end)
         }
       }
 
       // Brackets are excluded from the target so a stray "[[" (in code, say)
       // cannot match across the line and swallow a real link's "]]".
-      for (const m of line.text.matchAll(/\[\[([^[\]|]+)(\|([^[\]]+))?\]\]/g)) {
+      if (hasBracket) for (const m of line.text.matchAll(WIKILINK_RE)) {
         const start = line.from + m.index
         const end = start + m[0].length
         if (inCode(start, end) || isClaimed(start, end)) continue
         const label = m[3] || m[1]
         const target = m[1].trim()
-        claimed.push([start, end])
+        claim(start, end)
 
         if (active) {
           ranges.push(
@@ -1673,7 +1795,7 @@ function buildDecorations (view, imageSource = null) {
         const heading = HEADING.exec(name)
         if (heading) {
           const line = state.doc.lineAt(node.from)
-          const entry = documentHeadings.find((item) => item.line === line.number)
+          const entry = headingByLine.get(line.number)
           const fold = entry && headingFoldRange(state, entry, documentHeadings)
           const folded = fold ? foldedExactly(state, fold) : false
           ranges.push(
@@ -1823,7 +1945,7 @@ function buildDecorations (view, imageSource = null) {
               widget: new TaskWidget(/[xX]/.test(text), node.from)
             }).range(node.from, node.to)
           )
-          hidden.push([node.from, node.to])
+          noteHidden(node.from, node.to)
           // A finished task reads as finished, not just as a ticked box. The
           // rule is drawn over the task's own words and nothing else: as a line
           // decoration it covered the whole line box, and a nested item's
@@ -1872,17 +1994,17 @@ function buildDecorations (view, imageSource = null) {
               Decoration.replace({ widget: new OrderedMarkWidget(number[0]) })
                 .range(node.from, node.to)
             )
-            hidden.push([node.from, node.to])
+            noteHidden(node.from, node.to)
             return
           }
           const after = state.doc.sliceString(node.to, Math.min(node.to + 6, state.doc.length))
           const task = /^\s*\[[ xX]\]/.exec(after)
           if (task) {
             // The checkbox is the bullet; a dash beside it is noise.
-            hide(node.from, node.to + (/^\s*/.exec(after)[0].length))
+            hide(node.from, node.to + (/** @type {RegExpExecArray} */ (/^\s*/.exec(after))[0].length))
           } else {
             ranges.push(Decoration.replace({ widget: new BulletWidget() }).range(node.from, node.to))
-            hidden.push([node.from, node.to])
+            noteHidden(node.from, node.to)
           }
           return
         }
@@ -1953,7 +2075,7 @@ function buildDecorations (view, imageSource = null) {
         }
       }
 
-      for (const m of line.text.matchAll(/(^|\s)(#[\p{L}\p{N}][\p{L}\p{N}/_-]*)/gu)) {
+      if (line.text.includes('#')) for (const m of line.text.matchAll(TAG_RE)) {
         const start = line.from + m.index + m[1].length
         const end = start + m[2].length
         if (insideHidden(start, end) || isClaimed(start, end) || inCode(start, end)) continue
@@ -1979,6 +2101,7 @@ const livePreview = ViewPlugin.fromClass(
   class {
     constructor (view) {
       this.timer = null
+      this.viewportRaf = 0
       this.imageSource = null
       /* A selection being dragged out is the one case where re-rendering the
          selected lines is actively harmful: swapping them to source changes
@@ -2010,6 +2133,28 @@ const livePreview = ViewPlugin.fromClass(
     cancel () {
       if (this.timer !== null) clearTimeout(this.timer)
       this.timer = null
+      if (this.viewportRaf) {
+        cancelAnimationFrame(this.viewportRaf)
+        this.viewportRaf = 0
+      }
+    }
+
+    /* A scroll with nothing else: one rebuild per frame, not one per scroll
+       event. A fast wheel gesture fires many `viewportChanged` updates per
+       frame, each of which rebuilt the whole viewport synchronously; the
+       queued rebuild reads the live ranges, so it draws where the scroll
+       stopped rather than every stop along the way. An edit arriving first
+       takes the immediate branch below, which cancels this. */
+    queueViewport (view) {
+      if (this.viewportRaf) return
+      if (typeof requestAnimationFrame !== 'function') {
+        Object.assign(this, buildDecorations(view, this.imageSource))
+        return
+      }
+      this.viewportRaf = requestAnimationFrame(() => {
+        this.viewportRaf = 0
+        Object.assign(this, buildDecorations(view, this.imageSource))
+      })
     }
 
     settle (view) {
@@ -2020,7 +2165,7 @@ const livePreview = ViewPlugin.fromClass(
         /* Measured against the decorations still on screen — `this.atomic` is
            the set that concealed the text, and the rebuild this dispatch
            triggers is what takes it away. */
-        const selection = widenOverHidden(view.state, this.atomic)
+        const selection = widenOverHidden(view.state, /** @type {any} */ (this).atomic)
         view.dispatch({
           ...(selection ? { selection } : {}),
           effects: selectionRevealEffect.of(null)
@@ -2070,13 +2215,22 @@ const livePreview = ViewPlugin.fromClass(
 
       if (refreshed || foldChanged || update.docChanged || update.viewportChanged ||
           syntaxTree(update.startState) !== syntaxTree(update.state)) {
+        /* A scroll on its own waits for the frame — see `queueViewport`. The
+           tree comparison is part of that question: a changed tree with no
+           document change still rebuilds at once, as before. */
+        if (!refreshed && !foldChanged && !update.docChanged && update.viewportChanged &&
+            !settled && !sourceEffect &&
+            syntaxTree(update.startState) === syntaxTree(update.state)) {
+          this.queueViewport(update.view)
+          return
+        }
         this.cancel()
         Object.assign(this, buildDecorations(update.view, this.imageSource))
       } else if (settled) {
         Object.assign(this, buildDecorations(update.view, this.imageSource))
       } else if (update.selectionSet) {
         const next = selectionLines(update.state).signature
-        if (this.active === next) {
+        if (/** @type {any} */ (this).active === next) {
           this.cancel()
           this.held = false
           return
@@ -2095,9 +2249,9 @@ const livePreview = ViewPlugin.fromClass(
     }
   },
   {
-    decorations: (v) => v.decorations,
+    decorations: (v) => /** @type {any} */ (v).decorations,
     provide: () =>
-      EditorView.atomicRanges.of((view) => view.plugin(livePreview)?.atomic ?? Decoration.none)
+      EditorView.atomicRanges.of((view) => /** @type {any} */ (view.plugin(livePreview))?.atomic ?? Decoration.none)
   }
 )
 
@@ -2152,6 +2306,7 @@ function titleFor (noteTitle, onRename, noteFlag, titleEditable) {
 
 /* Marks the span the copilot just rewrote, so a change arriving from outside
    the keyboard is seen happening rather than discovered afterwards. */
+/** @type {import('@codemirror/state').StateEffectType<{ from: number, to: number } | null>} */
 const flashEffect = StateEffect.define()   // { from, to } | null
 
 /**
@@ -2177,6 +2332,7 @@ const agentFlash = StateField.define({
 /* The inline review is presentation only and never enters the document or
    undo history. It remains until the Copilot review is explicitly accepted,
    so leaving the note or continuing to type cannot silently dismiss it. */
+/** @type {import('@codemirror/state').StateEffectType<{ before: any, after: any } | null>} */
 const agentDiffEffect = StateEffect.define() // { before, after } | null
 
 class AgentDeletedWidget extends WidgetType {
@@ -2284,6 +2440,7 @@ const agentDiff = StateField.define({
 
 /* Shown from the moment an Edit tool announces its target until its write
    lands. It points at the work without moving the user's caret or focus. */
+/** @type {import('@codemirror/state').StateEffectType<number | null>} */
 const agentWorkingEffect = StateEffect.define() // document position | null
 const agentWorking = StateField.define({
   create: () => Decoration.none,
@@ -2306,6 +2463,7 @@ const agentWorking = StateField.define({
    characters at a time. Keeping this as presentation rather than a stream of
    document transactions is what makes the whole Copilot write one Undo step
    and prevents autosave from ever seeing a half-written replacement. */
+/** @type {import('@codemirror/state').StateEffectType<{ from: number, to: number } | null>} */
 const agentTypingEffect = StateEffect.define() // { from, to } | null
 
 class AgentTypingCursor extends WidgetType {
@@ -2356,6 +2514,7 @@ const agentTyping = StateField.define({
    Positions come from outside, so the field maps them through edits and keeps
    them until the next pass — otherwise every keystroke would blink every
    underline in the note off and on again while the dictionary was asked. */
+/** @type {import('@codemirror/state').StateEffectType<{ from: number, to: number }[]>} */
 const misspellingEffect = StateEffect.define() // [{ from, to }]
 
 const misspellings = StateField.define({
@@ -2485,12 +2644,14 @@ export function createEditor ({
   let numbered = false
   let sourceMode = 'markdown'
   let agentTypingRun = 0
+  /** @type {any} */
   let agentTypingTimer = 0
   /* Whoever is waiting on the reveal currently running. Cancelling one means
      settling it, not dropping it: the caller has the rest of the edit to finish
      — the review diff to file, the tab to repaint, the tally to report — and a
      promise that never resolves silently abandons all of it. That is how an
      `Edited` row ends up with no diff beside it. */
+  /** @type {(() => void) | null} */
   let agentTypingDone = null
 
   const stopAgentTyping = () => {
@@ -2530,7 +2691,7 @@ export function createEditor ({
       }
 
       const wanted = before.text.slice(3).toLowerCase()
-      const options = headingsFor(context.state.doc)
+      const options = /** @type {HeadingEntry[]} */ (headingsFor(context.state.doc))
         .filter((h) => h.text.toLowerCase().includes(wanted))
         .slice(0, 40)
         .map((h) => ({ label: `#${h.text}`, detail: `H${h.level}`, type: 'text' }))
@@ -2563,6 +2724,7 @@ export function createEditor ({
         highlightActiveLine(),
         dropCursor(),
         rectangularSelection(),
+        multiCursor,
         indentOnInput(),
         /* One indent level is four spaces — what Tab inserts, what Enter
            inside a fence deepens by, and what Backspace at the head of a code
@@ -2646,7 +2808,7 @@ export function createEditor ({
             const el = event.target
             if (!(el instanceof HTMLElement)) return
             const equation = el.dataset.equationRef ||
-              el.closest('[data-equation-ref]')?.dataset.equationRef
+              /** @type {HTMLElement | null} */ (el.closest('[data-equation-ref]'))?.dataset.equationRef
             if (equation) {
               event.preventDefault()
               /* A transcluded note carries its own copy of the equation, and a
@@ -2668,16 +2830,16 @@ export function createEditor ({
                anchor branch further down handles those. */
             if (!el.closest('.transclude')) {
               const ref = el.dataset.footnoteRef ||
-                el.closest('[data-footnote-ref]')?.dataset.footnoteRef
+                /** @type {HTMLElement | null} */ (el.closest('[data-footnote-ref]'))?.dataset.footnoteRef
               const def = el.dataset.footnoteDef ||
-                el.closest('[data-footnote-def]')?.dataset.footnoteDef
+                /** @type {HTMLElement | null} */ (el.closest('[data-footnote-def]'))?.dataset.footnoteDef
               if (ref || def) {
                 event.preventDefault()
                 revealFootnote(view, ref || def, { toDefinition: Boolean(ref) })
                 return true
               }
             }
-            const asset = el.dataset.asset || el.closest('[data-asset]')?.dataset.asset
+            const asset = el.dataset.asset || /** @type {HTMLElement | null} */ (el.closest('[data-asset]'))?.dataset.asset
             if (asset) { onOpenLink({ type: 'asset', target: asset }); return true }
             /* An embed that turned out to be a URL rather than a file. It is a
                real anchor, but nothing in the editor follows anchors, so the
@@ -2686,27 +2848,27 @@ export function createEditor ({
                A YouTube card is the exception: a plain click on one starts the
                player in place, which the card handles itself, so only the
                modified click — the one that means "not here" — is taken. */
-            const card = el.closest('a.embed-yt')
+            const card = /** @type {HTMLAnchorElement | null} */ (el.closest('a.embed-yt'))
             if (card) {
               if (!(event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)) return
               onOpenLink({ type: 'url', target: card.href })
               return true
             }
-            const remote = el.closest('a.embed-link')
+            const remote = /** @type {HTMLAnchorElement | null} */ (el.closest('a.embed-link'))
             if (remote) { onOpenLink({ type: 'url', target: remote.href }); return true }
             /* A transcluded note carries the reading view's markup — real
                anchors included — into an editor that never had any. Left
                alone, clicking one would navigate the whole window. A web
                address goes to the browser; anything else (a footnote's own
                `#fn1`) is swallowed rather than followed. */
-            const anchor = el.closest('a[href]')
+            const anchor = /** @type {HTMLAnchorElement | null} */ (el.closest('a[href]'))
             if (anchor && el.closest('.transclude')) {
               event.preventDefault()
               const href = anchor.getAttribute('href') || ''
               if (EXTERNAL_SCHEME.test(href)) onOpenLink({ type: 'url', target: anchor.href })
               return true
             }
-            const wiki = el.dataset.wikilink || el.closest('[data-wikilink]')?.dataset.wikilink
+            const wiki = el.dataset.wikilink || /** @type {HTMLElement | null} */ (el.closest('[data-wikilink]'))?.dataset.wikilink
             if (wiki) {
               // ⌘-click opens it in a new tab; ⌥-click in the side pane —
               // beside what you are writing rather than over it.
@@ -2784,6 +2946,7 @@ export function createEditor ({
      the moment that takes and is reconfigured when it lands. Held against the
      mode it was loaded for: switching tabs mid-fetch must not colour Julia
      with the Python parser that was still on its way. */
+  /** @type {any} */
   let codeSource = null
   let codeSourceFor = ''
 
@@ -2833,8 +2996,8 @@ export function createEditor ({
   /**
    * Each note gets a brand-new state rather than a replacing transaction, so
    * undo can never walk backwards out of this note and into the last one.
-   */
-  view.setDoc = (text) => {
+   */;
+  /** @type {any} */ (view).setDoc = (text) => {
     stopAgentTyping()
     view.setState(EditorState.create({ doc: text, extensions }))
     // A fresh state resets every compartment to its default, so the source
@@ -2850,16 +3013,16 @@ export function createEditor ({
    *
    * A preference rather than a per-file choice: it is a way of reading code,
    * and someone who wants the numbers wants them in every file they open.
-   */
-  view.setLineNumbers = (on) => {
+   */;
+  /** @type {any} */ (view).setLineNumbers = (on) => {
     const next = !!on
     if (numbered === next) return
     numbered = next
     view.dispatch({ effects: sourceEffects() })
   }
 
-  /** Raw view: the file as it is on disk, monospaced, nothing hidden. */
-  view.setRaw = (on) => {
+  /** Raw view: the file as it is on disk, monospaced, nothing hidden. */;
+  /** @type {any} */ (view).setRaw = (on) => {
     if (raw === on) return
     raw = on
     view.dispatch({ effects: sourceEffects() })
@@ -2871,8 +3034,8 @@ export function createEditor ({
    * extension — `py`, `jl`, `cpp` — which languages.js resolves to a language
    * and highlight.js to a parser. Markdown keeps its three views; everything
    * else is always source.
-   */
-  view.setSourceMode = (mode) => {
+   */;
+  /** @type {any} */ (view).setSourceMode = (mode) => {
     const next = String(mode || 'markdown').toLowerCase()
     if (sourceMode === next) return
     sourceMode = next
@@ -2881,15 +3044,15 @@ export function createEditor ({
     markSourceMode()
     // A source file is symbols, and the marks from the last Markdown note are
     // not about it. The renderer's next pass will decline to check it at all.
-    if (!isProse()) view.setMisspellings([])
+    if (!isProse()) /** @type {any} */ (view).setMisspellings([])
   }
 
-  /** Redraw the parts that read from outside the document — the inline title. */
-  view.refresh = () => { view.dispatch({ effects: refreshEffect.of(null) }) }
+  /** Redraw the parts that read from outside the document — the inline title. */;
+  /** @type {any} */ (view).refresh = () => { view.dispatch({ effects: refreshEffect.of(null) }) }
 
-  /** Select the inline filename so a newly created document can be named. */
-  view.focusTitle = () => {
-    const input = view.dom.querySelector('.tk-title-field:not([readonly])')
+  /** Select the inline filename so a newly created document can be named. */;
+  /** @type {any} */ (view).focusTitle = () => {
+    const input = /** @type {HTMLInputElement | null} */ (view.dom.querySelector('.tk-title-field:not([readonly])'))
     if (!input) return false
     input.focus()
     input.select()
@@ -2907,13 +3070,13 @@ export function createEditor ({
      still the one running.
 
      So this switch now only decides whether the app draws anything. */
-  let spellcheck = true
-  view.setSpellcheck = (on) => {
+  let spellcheck = true;
+  /** @type {any} */ (view).setSpellcheck = (on) => {
     spellcheck = on !== false
     // Turning it off has to take the underlines with it. Turning it on cannot
     // put them back from here — the words come from the dictionary, and the
     // renderer asks for a fresh pass.
-    if (!spellcheck) view.setMisspellings([])
+    if (!spellcheck) /** @type {any} */ (view).setMisspellings([])
   }
 
   /**
@@ -2921,8 +3084,8 @@ export function createEditor ({
    * the answer for the current document, not an addition to the last one.
    *
    * @param {{from: number, to: number}[]} ranges
-   */
-  view.setMisspellings = (ranges) => {
+   */;
+  /** @type {any} */ (view).setMisspellings = (ranges) => {
     const wanted = (spellcheck && sourceMode !== 'tex' && ranges) || []
     // A pass that found nothing, over a note that was already clean, is not a
     // transaction — and this runs every half second while you type.
@@ -2935,10 +3098,11 @@ export function createEditor ({
    * right-click menu needs to know before it can offer to correct it.
    *
    * @returns {{ from: number, to: number, word: string } | null}
-   */
-  view.misspellingAt = (pos) => {
+   */;
+  /** @type {any} */ (view).misspellingAt = (pos) => {
     const set = view.state.field(misspellings, false)
     if (!set) return null
+    /** @type {{ from: number, to: number, word: string } | null} */
     let hit = null
     /* Both edges count. A click lands on one side or the other of the first
        letter depending on which half of it was hit, and "not quite on the word"
@@ -2958,6 +3122,7 @@ export function createEditor ({
    * caret stays where it was, ⌘Z still walks back through it, and the changed
    * lines remain lit until the Copilot review is accepted.
    */
+  /** @type {any} */
   let fade = null
 
   const scrollToAgentEdit = (at) => {
@@ -2966,8 +3131,8 @@ export function createEditor ({
       effects: EditorView.scrollIntoView(pos, { y: 'center', yMargin: 80 })
     })
   }
-
-  view.revealAgentEdit = (at) => {
+;
+  /** @type {any} */ (view).revealAgentEdit = (at) => {
     const pos = Math.max(0, Math.min(at, view.state.doc.length))
     view.dispatch({ effects: [
       agentWorkingEffect.of(pos),
@@ -2985,16 +3150,16 @@ export function createEditor ({
     scrollToAgentEdit(change?.from || 0)
     return true
   }
-
-  view.showAgentDiff = showAgentDiff
-  view.clearAgentDiff = () => {
+;
+  /** @type {any} */ (view).showAgentDiff = showAgentDiff;
+  /** @type {any} */ (view).clearAgentDiff = () => {
     view.dispatch({ effects: [
       agentDiffEffect.of(null),
       agentWorkingEffect.of(null)
     ] })
   }
-
-  view.patch = (text, { agent = false, before = null } = {}) => {
+;
+  /** @type {any} */ (view).patch = (text, { agent = false, before = null } = {}) => {
     const current = view.state.doc.toString()
     const change = diffRange(current, text)
     const baseline = before ?? current
@@ -3025,8 +3190,8 @@ export function createEditor ({
    * Patch the real Markdown once, but uncover the inserted text like a cursor
    * moving through it. The returned promise is only the presentation settling;
    * the document transaction has already happened before this function yields.
-   */
-  view.patchAnimated = async (text, { before = null } = {}) => {
+   */;
+  /** @type {any} */ (view).patchAnimated = async (text, { before = null } = {}) => {
     const current = view.state.doc.toString()
     const change = diffRange(current, text)
     const baseline = before ?? current
@@ -3061,7 +3226,7 @@ export function createEditor ({
     const duration = Math.min(4500, Math.max(260, glyphEnds.length * 16))
     const started = performance.now()
 
-    await new Promise((resolve) => {
+    await /** @type {Promise<void>} */ (new Promise((resolve) => {
       agentTypingDone = resolve
       const settle = () => {
         if (agentTypingDone === resolve) agentTypingDone = null
@@ -3088,7 +3253,7 @@ export function createEditor ({
         agentTypingTimer = setTimeout(frame, 20)
       }
       agentTypingTimer = setTimeout(frame, 20)
-    })
+    }))
 
     if (run === agentTypingRun) showAgentDiff(baseline, text)
     return true
@@ -3107,8 +3272,8 @@ export function createEditor ({
      transition that asked for the place and leaves the app shell blank. */
   let lastTopLine = 1
 
-  /** The source line at the top of the visible area. 1-based. */
-  view.topLine = () => {
+  /** The source line at the top of the visible area. 1-based. */;
+  /** @type {any} */ (view).topLine = () => {
     try {
       const box = view.scrollDOM.getBoundingClientRect()
       const pos = view.posAtCoords({ x: box.left + 8, y: box.top + 2 }, false)
@@ -3128,33 +3293,33 @@ export function createEditor ({
    * before the page ever sees it — so the keymap installed above only answers
    * when something else is holding the keyboard. These are what the menu calls,
    * and they are the same commands, on the same history.
-   */
-  view.undo = () => undo(view)
-  view.redo = () => redo(view)
+   */;
+  /** @type {any} */ (view).undo = () => undo(view);
+  /** @type {any} */ (view).redo = () => redo(view)
 
-  /** Give every column in the note back to its content — see fitAllColumns. */
-  view.fitAllColumns = () => fitAllColumns(view)
+  /** Give every column in the note back to its content — see fitAllColumns. */;
+  /** @type {any} */ (view).fitAllColumns = () => fitAllColumns(view)
 
-  /** Fold every Markdown heading that owns a section, including nested ones. */
-  view.foldAllHeadings = () => {
+  /** Fold every Markdown heading that owns a section, including nested ones. */;
+  /** @type {any} */ (view).foldAllHeadings = () => {
     const { state } = view
-    const list = headingsFor(state.doc)
+    const list = /** @type {HeadingEntry[]} */ (headingsFor(state.doc))
     const effects = list
       .map((heading) => headingFoldRange(state, heading, list))
       .filter((range) => range && !foldedExactly(state, range))
-      .map((range) => foldEffect.of(range))
+      .map((range) => foldEffect.of(/** @type {any} */ (range)))
     if (effects.length) view.dispatch({ effects })
     return effects.length > 0
   }
 
-  /** Unfold heading sections without disturbing a folded code block. */
-  view.unfoldAllHeadings = () => {
+  /** Unfold heading sections without disturbing a folded code block. */;
+  /** @type {any} */ (view).unfoldAllHeadings = () => {
     const { state } = view
-    const list = headingsFor(state.doc)
+    const list = /** @type {HeadingEntry[]} */ (headingsFor(state.doc))
     const headingRanges = new Set(list
       .map((heading) => headingFoldRange(state, heading, list))
       .filter(Boolean)
-      .map(({ from, to }) => `${from}:${to}`))
+      .map(/** @type {(range: { from: number, to: number }) => string} */ (({ from, to }) => `${from}:${to}`)))
     const effects = []
     foldedRanges(state).between(0, state.doc.length, (from, to) => {
       if (headingRanges.has(`${from}:${to}`)) effects.push(unfoldEffect.of({ from, to }))
@@ -3171,27 +3336,27 @@ export function createEditor ({
    * given the opening fence's line element and the form, put the form in the
    * block, under the fence and above the code — where the reading view's copy
    * of it sits. Answers whether it managed to.
-   */
-  view.showCodeForm = (line, form) => {
+   */;
+  /** @type {any} */ (view).showCodeForm = (line, form) => {
     const pos = view.posAtDOM(line)
     const { doc } = view.state
     if (pos == null || pos > doc.length) return false
     const fence = doc.lineAt(pos)
     // A fence with nothing under it yet: the form goes where the code would.
     if (fence.number >= doc.lines) return false
-    view.dispatch({ effects: setCodeAiForm.of({ form, pos: doc.line(fence.number + 1).from }) })
+    view.dispatch({ effects: /** @type {any} */ (setCodeAiForm).of({ form, pos: doc.line(fence.number + 1).from }) })
     return true
   }
 
-  /** Take it out again. Silent when there is nothing open. */
-  view.hideCodeForm = () => {
+  /** Take it out again. Silent when there is nothing open. */;
+  /** @type {any} */ (view).hideCodeForm = () => {
     if (view.state.field(codeAiForm, false)) {
       view.dispatch({ effects: setCodeAiForm.of(null) })
     }
   }
 
-  /** Put that line back at the top — or, asked to, in the middle of the view. */
-  view.scrollToLine = (n, { center = false } = {}) => {
+  /** Put that line back at the top — or, asked to, in the middle of the view. */;
+  /** @type {any} */ (view).scrollToLine = (n, { center = false } = {}) => {
     const { doc } = view.state
     const line = doc.line(Math.max(1, Math.min(n, doc.lines)))
     view.dispatch({ effects: EditorView.scrollIntoView(line.from, { y: center ? 'center' : 'start', yMargin: 0 }) })

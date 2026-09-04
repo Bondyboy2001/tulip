@@ -1,5 +1,12 @@
+// @ts-ignore — resolved by the esbuild CSS loader, which tsc does not see
 import './styles.css'
-import './styles-features.css'
+/* styles-features.css is not imported here: it styles surfaces that are hidden
+   or unmounted at boot (saved searches, the AI doctor, review statistics), so
+   it arrives after the first paint — see prefetchFeatureStyles. The one block
+   that sizes the shell itself, the sidebar's second panel, lives in styles.css
+   instead. A dynamic `import()` would not defer it either way: esbuild hoists
+   CSS reached through a dynamic import into the entry point's own stylesheet
+   (see build.mjs), so the file is a named build entry fetched as a link. */
 import { createMarkdown } from './markdown.js'
 import { BOOKMARK_LINE, bookmarkLineOf } from './bookmark.js'
 import { mountPanels } from './panels.js'
@@ -73,8 +80,15 @@ import { mountMergePanel } from './mergepanel.js'
 import { merge3 } from './merge.js'
 import { fileDiff } from './linediff.js'
 import { MARK_COLORS } from './pdf-colors.js'
-import { mountSite, readAddress } from './site.js'
-import { mountSiteFind } from './site-find.js'
+/* site.js and site-find.js arrive with the first website, not with the window:
+   a guest process and its chrome are dead weight in a vault of notes. Until
+   then `site` and `siteFind` below stand in as null, and every use either
+   awaits `ensureSite` first (anything that needs the viewer) or reads through
+   `?.` (teardown and observers, which must stay no-ops when there is nothing
+   to tear down — mounting a viewer only to close it would defeat the point).
+   `readAddress` comes along the same way: it is a pure function of the file's
+   text, but importing it statically would drag the whole viewer module — guest
+   background included — back onto the eager path. */
 import { mountPanelAccessibility } from './panel-state.js'
 import { mountSavedSearches } from './saved-searches.js'
 import { COUNTRIES, countryCode, languageIdentity } from './countries.js'
@@ -83,8 +97,8 @@ import {
   generalCommandGroup, contextCommand
 } from './overlay-catalog.js'
 
-const api = window.tulip
-const $ = (id) => document.getElementById(id)
+const api = /** @type {any} */ (window).tulip
+const $ = (id) => /** @type {HTMLElement} */ (document.getElementById(id))
 
 /* ------------------------------------------------------- failures, out loud
 
@@ -140,8 +154,11 @@ api.version().then((version) => {
 /* ----------------------------------------------------------------- state */
 
 const state = {
+  /** @type {any} */
   vault: null,
+/** @type {any} */
   tree: [],
+  /** @type {any} */
   files: [],          // flattened, for the switcher and wikilinks
   /* Frontmatter `aliases`, as lowercased alias -> the paths that claim it. The
      tree does not carry them — they live inside notes, and the sidebar is a
@@ -153,19 +170,24 @@ const state = {
   marks: {},
   /* The tree's one tab stop, as a path. The arrows move it; renderTree puts it
      back on the same row, or on the open note if that row has gone. */
+  /** @type {any} */
   treeFocus: null,
   assetsKey: '',      // the attachment list as last seen, to skip no-op rebuilds
   /* Main's signature for the vault as it is currently drawn — { tree, assets }.
      Sent back with the next snapshot request so an unchanged vault answers
      without shipping the tree; see loadTree. */
+/** @type {any} */
   revision: null,
+/** @type {any} */
   assets: [],
+/** @type {any} */
   resolveAsset: () => null,
   /** @type {any} */
   current: null,      // { path, name, dir } — the active tab's note
   /* One entry per open tab. A tab is a note *and* the trail that led to it:
      back and forward belong to the tab you are in, the way they do in a
      browser, so following links in one leaves the other where you left it. */
+  /** @type {any} */
   tabs: [],           // { path, history: [{ path, at, top }], historyAt }
   tabIndex: -1,
   cfg: {},            // the stored settings, as last read or written
@@ -187,139 +209,143 @@ const state = {
   heldElsewhere: new Set(),
   picked: new Set(),   // multi-selected file paths in the tree
   pickAnchor: null,    // where a shift-range measures from
+  /** @type {any} */
   dragging: null,      // paths currently being dragged in the tree
   theme: 'light',
   // The typeface in each role — see FONT_ROLES in fonts.js.
   fonts: { body: 'charter', ui: 'system-sans' },
   /* The file tree is the sidebar's upper panel and is not optional. This is
      the panel underneath it, or null for none. See setPaneBelow. */
+  /** @type {any} */
   paneBelow: null,
+  /** @type {any} */
   saveTimer: null,
   /* Whether this is the session's own window — the first one opened. A second
      window on the same vault is a full window in every way but two: it does not
      restore or remember the tab strip, and it does not hold the copilot. See
      `sessionOnly` and the account beside `createWindow` in main. */
   primary: true,
+  /** @type {any} */
   overlay: null       // { mode, items, index }
 }
 
 const el = {
-  app: $('app'),
+  app: /** @type {HTMLElement} */ ($('app')),
   sidebar: /** @type {HTMLElement} */ ($('sidebar')),
-  tree: $('tree'),
-  vaultLabel: $('vault-label'),
-  tabs: $('tabs'),
-  navBack: $('nav-back'),
-  navForward: $('nav-forward'),
-  stage: $('stage'),
-  main: document.querySelector('.main'),
-  editorHost: $('editor-host'),
-  reading: $('reading'),
+  tree: /** @type {HTMLElement} */ ($('tree')),
+  vaultLabel: /** @type {HTMLElement} */ ($('vault-label')),
+  tabs: /** @type {HTMLElement} */ ($('tabs')),
+  navBack: /** @type {HTMLButtonElement} */ ($('nav-back')),
+  navForward: /** @type {HTMLButtonElement} */ ($('nav-forward')),
+  stage: /** @type {HTMLElement} */ ($('stage')),
+  main: /** @type {HTMLElement} */ (document.querySelector('.main')),
+  editorHost: /** @type {HTMLElement} */ ($('editor-host')),
+  reading: /** @type {HTMLElement} */ ($('reading')),
   flashcardBank: /** @type {HTMLElement} */ ($('flashcard-bank')),
   flashcardBankCount: /** @type {HTMLParagraphElement} */ ($('flashcard-bank-count')),
   flashcardBankAddMain: /** @type {HTMLButtonElement} */ ($('flashcard-bank-add-main')),
   flashcardBankTopics: /** @type {HTMLElement} */ ($('flashcard-bank-topics')),
   flashcardBankTopicList: /** @type {HTMLDivElement} */ ($('flashcard-bank-topic-list')),
   flashcardBankList: /** @type {HTMLDivElement} */ ($('flashcard-bank-list')),
-  texDivider: $('tex-divider'),
-  texPreview: $('tex-preview'),
-  texPdf: $('tex-pdf'),
-  data: $('data'),
-  notebook: $('notebook'),
-  docx: $('docx'),
-  docxTools: $('docx-tools'),
-  docxBody: $('docx-body'),
-  docxH1: $('docx-h1'),
-  docxH2: $('docx-h2'),
-  docxH3: $('docx-h3'),
-  docxBold: $('docx-bold'),
-  docxItalic: $('docx-italic'),
-  docxUnderline: $('docx-underline'),
-  docxStrike: $('docx-strike'),
-  docxBullets: $('docx-bullets'),
-  docxNumbers: $('docx-numbers'),
-  docxTable: $('docx-table'),
-  docxRow: $('docx-row'),
-  docxColumn: $('docx-column'),
-  docxDeleteRow: $('docx-delete-row'),
-  docxDeleteColumn: $('docx-delete-column'),
-  docxOpenWord: $('docx-open-word'),
-  fileview: $('fileview'),
-  empty: $('empty'),
-  emptyActions: $('empty-actions'),
-  landing: $('landing'),
-  connectVault: $('btn-connect-vault'),
-  bootScreen: $('boot-screen'),
-  bootTitle: $('boot-title'),
-  bootMessage: $('boot-message'),
-  bootDetail: $('boot-detail'),
-  bootRetry: $('boot-retry'),
-  bootConnect: $('boot-connect'),
-  statusLeft: $('status-left'),
-  statusRight: $('status-right'),
-  overlay: $('overlay'),
-  panel: $('panel'),
+  texDivider: /** @type {HTMLElement} */ ($('tex-divider')),
+  texPreview: /** @type {HTMLElement} */ ($('tex-preview')),
+  texPdf: /** @type {HTMLElement} */ ($('tex-pdf')),
+  data: /** @type {HTMLElement} */ ($('data')),
+  notebook: /** @type {HTMLElement} */ ($('notebook')),
+  docx: /** @type {HTMLElement} */ ($('docx')),
+  docxTools: /** @type {HTMLElement} */ ($('docx-tools')),
+  docxBody: /** @type {HTMLButtonElement} */ ($('docx-body')),
+  docxH1: /** @type {HTMLButtonElement} */ ($('docx-h1')),
+  docxH2: /** @type {HTMLButtonElement} */ ($('docx-h2')),
+  docxH3: /** @type {HTMLButtonElement} */ ($('docx-h3')),
+  docxBold: /** @type {HTMLButtonElement} */ ($('docx-bold')),
+  docxItalic: /** @type {HTMLButtonElement} */ ($('docx-italic')),
+  docxUnderline: /** @type {HTMLButtonElement} */ ($('docx-underline')),
+  docxStrike: /** @type {HTMLButtonElement} */ ($('docx-strike')),
+  docxBullets: /** @type {HTMLButtonElement} */ ($('docx-bullets')),
+  docxNumbers: /** @type {HTMLButtonElement} */ ($('docx-numbers')),
+  docxTable: /** @type {HTMLButtonElement} */ ($('docx-table')),
+  docxRow: /** @type {HTMLButtonElement} */ ($('docx-row')),
+  docxColumn: /** @type {HTMLButtonElement} */ ($('docx-column')),
+  docxDeleteRow: /** @type {HTMLButtonElement} */ ($('docx-delete-row')),
+  docxDeleteColumn: /** @type {HTMLButtonElement} */ ($('docx-delete-column')),
+  docxOpenWord: /** @type {HTMLButtonElement} */ ($('docx-open-word')),
+  fileview: /** @type {HTMLElement} */ ($('fileview')),
+  empty: /** @type {HTMLElement} */ ($('empty')),
+  emptyActions: /** @type {HTMLElement} */ ($('empty-actions')),
+  landing: /** @type {HTMLElement} */ ($('landing')),
+  connectVault: /** @type {HTMLButtonElement} */ ($('btn-connect-vault')),
+  bootScreen: /** @type {HTMLElement} */ ($('boot-screen')),
+  bootTitle: /** @type {HTMLElement} */ ($('boot-title')),
+  bootMessage: /** @type {HTMLElement} */ ($('boot-message')),
+  bootDetail: /** @type {HTMLElement} */ ($('boot-detail')),
+  bootRetry: /** @type {HTMLButtonElement} */ ($('boot-retry')),
+  bootConnect: /** @type {HTMLButtonElement} */ ($('boot-connect')),
+  statusLeft: /** @type {HTMLElement} */ ($('status-left')),
+  statusRight: /** @type {HTMLElement} */ ($('status-right')),
+  overlay: /** @type {HTMLElement} */ ($('overlay')),
+  panel: /** @type {HTMLElement} */ ($('panel')),
   panelInput: /** @type {HTMLInputElement} */ ($('panel-input')),
-  panelList: $('panel-list'),
-  panelFoot: $('panel-foot'),
-  panelCount: $('panel-count'),
-  shortcuts: $('shortcuts'),
-  shortcutsBody: $('shortcuts-body'),
-  shortcutsClose: $('shortcuts-close'),
-  toast: $('toast'),
-  ask: $('ask'),
-  askTitle: $('ask-title'),
-  askGo: $('ask-go'),
-  askCancel: $('ask-cancel'),
-  orphans: $('orphans'),
-  orphansList: $('orphans-list'),
-  orphansCount: $('orphans-count'),
-  orphansAll: $('orphans-all'),
-  orphansClose: $('orphans-close'),
-  ctx: $('ctx'),
-  viewSwitch: $('view-switch'),
-  lockMark: $('lock-mark'),
-  docRun: $('doc-run'),
-  fileRunOut: $('file-run-out'),
+  panelList: /** @type {HTMLUListElement} */ ($('panel-list')),
+  panelFoot: /** @type {HTMLElement} */ ($('panel-foot')),
+  panelCount: /** @type {HTMLElement} */ ($('panel-count')),
+  shortcuts: /** @type {HTMLElement} */ ($('shortcuts')),
+  shortcutsBody: /** @type {HTMLElement} */ ($('shortcuts-body')),
+  shortcutsClose: /** @type {HTMLButtonElement} */ ($('shortcuts-close')),
+  toast: /** @type {HTMLElement} */ ($('toast')),
+  ask: /** @type {HTMLElement} */ ($('ask')),
+  askTitle: /** @type {HTMLElement} */ ($('ask-title')),
+  askGo: /** @type {HTMLButtonElement} */ ($('ask-go')),
+  askCancel: /** @type {HTMLButtonElement} */ ($('ask-cancel')),
+  orphans: /** @type {HTMLElement} */ ($('orphans')),
+  orphansList: /** @type {HTMLElement} */ ($('orphans-list')),
+  orphansCount: /** @type {HTMLElement} */ ($('orphans-count')),
+  orphansAll: /** @type {HTMLButtonElement} */ ($('orphans-all')),
+  orphansClose: /** @type {HTMLButtonElement} */ ($('orphans-close')),
+  ctx: /** @type {HTMLElement} */ ($('ctx')),
+  viewSwitch: /** @type {HTMLElement} */ ($('view-switch')),
+  lockMark: /** @type {HTMLElement} */ ($('lock-mark')),
+  docRun: /** @type {HTMLButtonElement} */ ($('doc-run')),
+  fileRunOut: /** @type {HTMLElement} */ ($('file-run-out')),
   studyStart: /** @type {HTMLButtonElement} */ ($('study-start')),
   flashcardBankAdd: /** @type {HTMLButtonElement} */ ($('flashcard-bank-add')),
-  langKeys: $('lang-keys'),
-  langKeysRow: $('lang-keys-row'),
-  langKeysShift: $('lang-keys-shift'),
-  langMode: $('lang-mode'),
-  zoom: $('zoom'),
-  outlineList: $('outline-list'),
-  linksList: $('links-list'),
-  spellingList: $('spelling-list'),
-  infoPane: $('info-pane'),
-  paneOutlineTab: $('pane-outline-tab'),
+  langKeys: /** @type {HTMLElement} */ ($('lang-keys')),
+  langKeysRow: /** @type {HTMLElement} */ ($('lang-keys-row')),
+  langKeysShift: /** @type {HTMLButtonElement} */ ($('lang-keys-shift')),
+  langMode: /** @type {HTMLButtonElement} */ ($('lang-mode')),
+  zoom: /** @type {HTMLButtonElement} */ ($('zoom')),
+  outlineList: /** @type {HTMLElement} */ ($('outline-list')),
+  linksList: /** @type {HTMLElement} */ ($('links-list')),
+  spellingList: /** @type {HTMLElement} */ ($('spelling-list')),
+  infoPane: /** @type {HTMLElement} */ ($('info-pane')),
+  paneOutlineTab: /** @type {HTMLButtonElement} */ ($('pane-outline-tab')),
   paneSplit: /** @type {HTMLElement} */ ($('pane-split')),
   paneSplitGrip: /** @type {HTMLElement} */ ($('pane-split-grip')),
   paneSplitToggle: /** @type {HTMLButtonElement} */ ($('pane-split-toggle')),
   paneTabsBelow: /** @type {HTMLElement} */ ($('pane-tabs-below')),
-  panelChips: $('panel-chips'),
-  panelReplace: $('panel-replace'),
-  panelReplaceInput: $('panel-replace-input'),
-  panelReplaceGo: $('panel-replace-go'),
-  panelSaveSearch: $('panel-save-search'),
-  savedSearches: $('saved-searches'),
-  askDetail: $('ask-detail'),
-  flashcardComposer: $('flashcard-composer'),
-  flashcardForm: $('flashcard-form'),
-  flashcardTitle: $('flashcard-title'),
-  flashcardClose: $('flashcard-close'),
-  flashcardCancel: $('flashcard-cancel'),
-  flashcardQuestion: $('flashcard-question'),
+  panelChips: /** @type {HTMLElement} */ ($('panel-chips')),
+  panelReplace: /** @type {HTMLElement} */ ($('panel-replace')),
+  panelReplaceInput: /** @type {HTMLInputElement} */ ($('panel-replace-input')),
+  panelReplaceGo: /** @type {HTMLButtonElement} */ ($('panel-replace-go')),
+  panelSaveSearch: /** @type {HTMLButtonElement} */ ($('panel-save-search')),
+  savedSearches: /** @type {HTMLElement} */ ($('saved-searches')),
+  askDetail: /** @type {HTMLElement} */ ($('ask-detail')),
+  flashcardComposer: /** @type {HTMLElement} */ ($('flashcard-composer')),
+  flashcardForm: /** @type {HTMLFormElement} */ ($('flashcard-form')),
+  flashcardTitle: /** @type {HTMLElement} */ ($('flashcard-title')),
+  flashcardClose: /** @type {HTMLButtonElement} */ ($('flashcard-close')),
+  flashcardCancel: /** @type {HTMLButtonElement} */ ($('flashcard-cancel')),
+  flashcardQuestion: /** @type {HTMLTextAreaElement} */ ($('flashcard-question')),
   flashcardTags: /** @type {HTMLInputElement} */ ($('flashcard-tags')),
-  flashcardExplanation: $('flashcard-explanation'),
-  flashcardImageAdd: $('flashcard-image-add'),
-  flashcardImageInput: $('flashcard-image-input'),
-  flashcardImagePreview: $('flashcard-image-preview'),
-  flashcardImagePreviewImg: $('flashcard-image-preview-img'),
-  flashcardImageRemove: $('flashcard-image-remove'),
-  flashcardAddChoice: $('flashcard-add-choice'),
-  flashcardError: $('flashcard-error'),
-  flashcardAdd: $('flashcard-add'),
+  flashcardExplanation: /** @type {HTMLTextAreaElement} */ ($('flashcard-explanation')),
+  flashcardImageAdd: /** @type {HTMLButtonElement} */ ($('flashcard-image-add')),
+  flashcardImageInput: /** @type {HTMLInputElement} */ ($('flashcard-image-input')),
+  flashcardImagePreview: /** @type {HTMLElement} */ ($('flashcard-image-preview')),
+  flashcardImagePreviewImg: /** @type {HTMLImageElement} */ ($('flashcard-image-preview-img')),
+  flashcardImageRemove: /** @type {HTMLButtonElement} */ ($('flashcard-image-remove')),
+  flashcardAddChoice: /** @type {HTMLButtonElement} */ ($('flashcard-add-choice')),
+  flashcardError: /** @type {HTMLElement} */ ($('flashcard-error')),
+  flashcardAdd: /** @type {HTMLButtonElement} */ ($('flashcard-add')),
   fcStudy: /** @type {HTMLDivElement} */ ($('fc-study')),
   fcStudyTitle: /** @type {HTMLHeadingElement} */ ($('fc-study-title')),
   fcStudyProgress: /** @type {HTMLSpanElement} */ ($('fc-study-progress')),
@@ -335,59 +361,59 @@ const el = {
   fcStudyFinished: /** @type {HTMLDivElement} */ ($('fc-study-finished')),
   fcStudyScore: /** @type {HTMLParagraphElement} */ ($('fc-study-score')),
   fcStudyAgain: /** @type {HTMLButtonElement} */ ($('fc-study-again')),
-  settings: $('settings'),
-  settingsRail: $('settings-rail'),
-  settingsBody: $('settings-body'),
-  settingsTitle: $('settings-title'),
-  settingsClose: $('settings-close'),
-  aiPanel: $('ai'),
-  aiLog: $('ai-log'),
-  aiAttachments: $('ai-attachments'),
-  aiInput: $('ai-input'),
-  aiSend: $('ai-send'),
-  aiClose: $('ai-close'),
-  aiToggle: $('ai-toggle'),
-  aiAttach: $('ai-attach'),
-  aiWrite: $('ai-write'),
-  aiWriteLabel: $('ai-write-label'),
-  aiConfigSep: $('ai-config-sep'),
-  aiContext: $('ai-context'),
-  aiContextWrap: $('ai-context-wrap'),
-  aiContextPop: $('ai-context-pop'),
-  aiMenu: $('ai-menu'),
-  aiConfig: $('ai-config'),
-  aiConfigModel: $('ai-config-model'),
-  aiConfigEffort: $('ai-config-effort'),
-  gripSidebar: $('grip-sidebar'),
-  gripAi: $('grip-ai'),
-  sidepane: $('sidepane'),
-  sidepaneBody: $('sidepane-body'),
-  sidepaneClose: $('sidepane-close'),
-  gripSide: $('grip-side'),
-  pdf: $('pdf'),
-  pdfTools: $('pdf-tools'),
-  pdfPrev: $('pdf-prev'),
-  pdfNext: $('pdf-next'),
-  pdfPage: $('pdf-page'),
-  pdfPages: $('pdf-pages'),
-  pdfFit: $('pdf-fit'),
-  pdfToolSelect: $('pdf-tool-select'),
-  pdfToolMark: $('pdf-tool-mark'),
-  pdfPens: $('pdf-pens'),
-  foldAll: $('btn-fold-all'),
-  site: $('site'),
-  htmlview: $('htmlview'),
-  siteTools: $('site-tools'),
-  siteBack: $('site-back'),
-  siteForward: $('site-forward'),
-  siteReload: $('site-reload'),
-  siteMark: $('site-mark'),
-  siteAddress: $('site-address'),
-  siteKnown: $('site-known'),
-  siteSave: $('site-save'),
-  siteExternal: $('site-external'),
-  whiteboard: $('whiteboard'),
-  drawerScrim: $('drawer-scrim')
+  settings: /** @type {HTMLElement} */ ($('settings')),
+  settingsRail: /** @type {HTMLElement} */ ($('settings-rail')),
+  settingsBody: /** @type {HTMLElement} */ ($('settings-body')),
+  settingsTitle: /** @type {HTMLElement} */ ($('settings-title')),
+  settingsClose: /** @type {HTMLButtonElement} */ ($('settings-close')),
+  aiPanel: /** @type {HTMLElement} */ ($('ai')),
+  aiLog: /** @type {HTMLElement} */ ($('ai-log')),
+  aiAttachments: /** @type {HTMLElement} */ ($('ai-attachments')),
+  aiInput: /** @type {HTMLTextAreaElement} */ ($('ai-input')),
+  aiSend: /** @type {HTMLButtonElement} */ ($('ai-send')),
+  aiClose: /** @type {HTMLButtonElement} */ ($('ai-close')),
+  aiToggle: /** @type {HTMLButtonElement} */ ($('ai-toggle')),
+  aiAttach: /** @type {HTMLButtonElement} */ ($('ai-attach')),
+  aiWrite: /** @type {HTMLButtonElement} */ ($('ai-write')),
+  aiWriteLabel: /** @type {HTMLElement} */ ($('ai-write-label')),
+  aiConfigSep: /** @type {HTMLElement} */ ($('ai-config-sep')),
+  aiContext: /** @type {HTMLElement} */ ($('ai-context')),
+  aiContextWrap: /** @type {HTMLElement} */ ($('ai-context-wrap')),
+  aiContextPop: /** @type {HTMLElement} */ ($('ai-context-pop')),
+  aiMenu: /** @type {HTMLElement} */ ($('ai-menu')),
+  aiConfig: /** @type {HTMLElement} */ ($('ai-config')),
+  aiConfigModel: /** @type {HTMLElement} */ ($('ai-config-model')),
+  aiConfigEffort: /** @type {HTMLElement} */ ($('ai-config-effort')),
+  gripSidebar: /** @type {HTMLElement} */ ($('grip-sidebar')),
+  gripAi: /** @type {HTMLElement} */ ($('grip-ai')),
+  sidepane: /** @type {HTMLElement} */ ($('sidepane')),
+  sidepaneBody: /** @type {HTMLElement} */ ($('sidepane-body')),
+  sidepaneClose: /** @type {HTMLButtonElement} */ ($('sidepane-close')),
+  gripSide: /** @type {HTMLElement} */ ($('grip-side')),
+  pdf: /** @type {HTMLElement} */ ($('pdf')),
+  pdfTools: /** @type {HTMLElement} */ ($('pdf-tools')),
+  pdfPrev: /** @type {HTMLButtonElement} */ ($('pdf-prev')),
+  pdfNext: /** @type {HTMLButtonElement} */ ($('pdf-next')),
+  pdfPage: /** @type {HTMLInputElement} */ ($('pdf-page')),
+  pdfPages: /** @type {HTMLElement} */ ($('pdf-pages')),
+  pdfFit: /** @type {HTMLButtonElement} */ ($('pdf-fit')),
+  pdfToolSelect: /** @type {HTMLButtonElement} */ ($('pdf-tool-select')),
+  pdfToolMark: /** @type {HTMLButtonElement} */ ($('pdf-tool-mark')),
+  pdfPens: /** @type {HTMLElement} */ ($('pdf-pens')),
+  foldAll: /** @type {HTMLButtonElement} */ ($('btn-fold-all')),
+  site: /** @type {HTMLElement} */ ($('site')),
+  htmlview: /** @type {HTMLElement} */ ($('htmlview')),
+  siteTools: /** @type {HTMLElement} */ ($('site-tools')),
+  siteBack: /** @type {HTMLButtonElement} */ ($('site-back')),
+  siteForward: /** @type {HTMLButtonElement} */ ($('site-forward')),
+  siteReload: /** @type {HTMLButtonElement} */ ($('site-reload')),
+  siteMark: /** @type {HTMLElement} */ ($('site-mark')),
+  siteAddress: /** @type {HTMLInputElement} */ ($('site-address')),
+  siteKnown: /** @type {HTMLDataListElement} */ ($('site-known')),
+  siteSave: /** @type {HTMLButtonElement} */ ($('site-save')),
+  siteExternal: /** @type {HTMLButtonElement} */ ($('site-external')),
+  whiteboard: /** @type {HTMLElement} */ ($('whiteboard')),
+  drawerScrim: /** @type {HTMLButtonElement} */ ($('drawer-scrim'))
 }
 
 /* A collapsed grid column is also absent to the keyboard and accessibility
@@ -398,8 +424,8 @@ mountPanelAccessibility(el.app, {
   sidepane: el.sidepane,
   aiPanel: el.aiPanel,
   returnFocus: {
-    sidebar: () => el.tabs.querySelector('[aria-current="true"]')?.focus(),
-    sidepane: () => el.tabs.querySelector('[aria-current="true"]')?.focus(),
+    sidebar: () => /** @type {HTMLElement} */ (el.tabs.querySelector('[aria-current="true"]'))?.focus(),
+    sidepane: () => /** @type {HTMLElement} */ (el.tabs.querySelector('[aria-current="true"]'))?.focus(),
     aiPanel: () => el.aiToggle.focus()
   }
 })
@@ -522,8 +548,8 @@ const isEditableTextPath = (path) =>
  *  two distinguishable rows — see the note beside the tree's own branch. */
 const docLabel = (path) =>
   isCodePath(path) || isDataPath(path)
-    ? String(path || '').split('/').pop()
-    : String(path || '').split('/').pop()
+    ? /** @type {string} */ (String(path || '').split('/').pop())
+    : /** @type {string} */ (String(path || '').split('/').pop())
       .replace(isTexPath(path)
         ? TEX_EXT
         : isPdfPath(path)
@@ -555,7 +581,7 @@ const tabLabel = (path) =>
  *  — for a file that turned out to be text anyway. `text` for a name with no
  *  extension at all, which is the editor's own plain mode. */
 const plainToken = (path) => {
-  const name = String(path || '').split('/').pop()
+  const name = /** @type {string} */ (String(path || '').split('/').pop())
   const dot = name.lastIndexOf('.')
   return dot > 0 ? name.slice(dot + 1).toLowerCase() : 'text'
 }
@@ -624,12 +650,12 @@ const { ask, answer } = mountAsk(el)
    relative `<img src>` in raw HTML points, which depends on the note being
    rendered — the same index and folder the note's own embeds resolve against. */
 const md = createMarkdown({
-  resolveEmbedSrc: (src) => embedSpec(src, {
+  resolveEmbedSrc: (src) => /** @type {string} */ (embedSpec(src, /** @type {any} */ ({
     resolve: state.resolveAsset,
     dir: state.current?.dir || '',
     // An `<img>` tag says what its target is as plainly as `![](…)` does.
     writtenAsImage: true
-  }).url
+  })).url)
 })
 
 /* ---------------------------------------------------------------- editor */
@@ -753,8 +779,11 @@ function vaultLists () {
    whether or not an editor exists, so the text has to live somewhere the
    reading view can reach — and when the editor does arrive it is handed the
    note, the source mode and the raw flag it missed. */
+/** @type {any} */
 let editor = null
+/** @type {any} */
 let editorArriving = null
+/** @type {any} */
 let openSearchPanel = null
 
 /* What the editor would be showing, for as long as there is no editor. Kept in
@@ -813,7 +842,7 @@ function ensureEditor () {
   if (editorArriving) return editorArriving
   editorArriving = import('./editor.js').then((mod) => {
     openSearchPanel = mod.openSearchPanel
-    const built = mod.createEditor(editorDeps)
+    const built = /** @type {any} */ (mod.createEditor(editorDeps))
     editor = built
     /* Everything it missed while it did not exist. The order matches
        `openNote`: the source mode decides how the text is parsed, so it is
@@ -949,7 +978,11 @@ function ensurePdf () {
     pdf = mountPdf({
       host: el.pdf,
       api,
-      onDoc: (info) => {
+      // The plain viewer offers the selection menu; the TeX preview below says
+      // otherwise explicitly. Stated rather than left to the default so the
+      // two calls read as the deliberate pair they are.
+      selectionMenu: true,
+      onDoc: (/** @type {any} */ info) => {
         pdfContents = info.outline
         el.pdfPages.textContent = String(info.pages)
         el.pdfPage.value = String(info.page)
@@ -980,7 +1013,7 @@ function ensurePdf () {
     /* The compiled half of a TeX workspace. It deliberately has no highlight
        store: this PDF is a disposable build artifact, while the `.tex` source
        is the document the user and Copilot edit. */
-    texPdf = mountPdf({
+    texPdf = mountPdf(/** @type {any} */ ({
       host: el.texPdf,
       selectionMenu: false,
       api: {
@@ -991,7 +1024,7 @@ function ensurePdf () {
       },
       onStuck: () => toast('Preview stopped responding'),
       onError: toast
-    })
+    }))
 
     pdfFind = mountPdfFind({
       host: el.stage,
@@ -1013,6 +1046,7 @@ const { restoreTexSplit } = mountTexSplit({
   api
 })
 
+/** @type {any} */
 let texCompileTimer = null
 let texCompileGeneration = 0
 const TEX_COMPILE_DELAY_MS = 300
@@ -1053,31 +1087,65 @@ async function compileTex (generation = ++texCompileGeneration) {
  * Same division as the PDF's: the module owns the page and the guest it lives
  * in, and everything that makes it a document of this app — the tab, the
  * toolbar, the status bar — is decided here.
+ *
+ * Mounted lazily, like every other document viewer: a vault of notes must not
+ * pay for a guest process it never opens. The tab is claimed before the viewer
+ * lands (see openViewed), so between `enterDoc` and the import resolving,
+ * `viewingSite()` is true while `site` is still null — every use below is
+ * written for that gap. `pendingSiteZoom` carries the stored zoom across it:
+ * boot reads the preference before there is a viewer to tell, and the first
+ * mount applies it as its starting size.
  */
-const site = mountSite({
-  host: el.site,
-  api,
-  // One callback rather than several, because every one of these changes at
-  // once as often as not: a navigation moves the address, the title, both
-  // arrows and the loading state in the same breath.
-  onState: (view) => {
-    paintSiteBar(view)
-    updateStatus()
-  },
-  // The guest counts its own matches and answers when it has — see
-  // src/site-find.js, which shows the number rather than working it out.
-  onFind: (tally) => siteFind.found(tally)
-})
+/** @type {any} */
+let site = null
+/** @type {any} */
+let siteFind = null
+/** @type {Promise<any> | null} */
+let siteLoading = null
+/** The file-address reader, arriving with the viewer module. */
+/** @type {any} */
+let siteReadAddress = null
+let pendingSiteZoom = 1
 
-/* ⌘F over a page. Built here beside the viewer rather than lazily, the way the
-   PDF's bar is: it is a few elements and no stylesheet of its own, and a bar
-   that has to be imported before it can answer a keypress is a bar that misses
-   the keypress that asked for it. */
-const siteFind = mountSiteFind({
-  host: el.stage,
-  site,
-  onClose: () => { if (viewingSite()) site.focus() }
-})
+function ensureSite () {
+  if (site) return Promise.resolve(site)
+  siteLoading ||= Promise.all([
+    import('./site.js'),
+    import('./site-find.js')
+  ]).then(([{ mountSite, readAddress }, { mountSiteFind }]) => {
+    siteReadAddress = readAddress
+    site = mountSite({
+      host: el.site,
+      api,
+      // The size the reader last read the web at. A preference of theirs rather
+      // than of any one site, read at boot and applied to the first mount.
+      zoom: pendingSiteZoom,
+      // One callback rather than several, because every one of these changes at
+      // once as often as not: a navigation moves the address, the title, both
+      // arrows and the loading state in the same breath.
+      onState: (view) => {
+        paintSiteBar(view)
+        updateStatus()
+      },
+      // The guest counts its own matches and answers when it has — see
+      // src/site-find.js, which shows the number rather than working it out.
+      onFind: (tally) => siteFind.found(tally)
+    })
+
+    /* ⌘F over a page. Built beside the viewer rather than eagerly, the way the
+       PDF's bar is: it is a few elements and no stylesheet of its own, and it
+       is mounted here so a keypress that arrives before the import resolves
+       waits on the same promise instead of missing the bar that asked for it —
+       see the `find` command. */
+    siteFind = mountSiteFind({
+      host: el.stage,
+      site,
+      onClose: () => { if (viewingSite()) site.focus() }
+    })
+    return site
+  }).finally(() => { siteLoading = null })
+  return siteLoading
+}
 
 /* Document viewers own their buffers, but the shell owns the shared dirty
    flag, tab marker, save queue and status line. A write landing does not make
@@ -1200,7 +1268,7 @@ function ensureNotebook () {
         /* The app's own dialect, handed in rather than rebuilt: a formula in a
            notebook's prose is set exactly as one in a note is, and `prepare`
            is what gets KaTeX here before the first cell is drawn. */
-        markdown: {
+        markdown: /** @type {any} */ ({
           prepare: (text) => prepareMath(text),
           render: (text) => md.render(text),
           /* And the second half of rendering, which the notebook had no way to
@@ -1210,11 +1278,11 @@ function ensureNotebook () {
              holes where their images should be, whether the image was a file
              beside the notebook or one pasted into the cell. */
           dress: (node) => dressEmbeds(node)
-        },
+        }),
         /* Running cells. The bridge is handed in the same way the file access
            is, so the viewer names what it needs and the renderer decides what
            that is — and a window built without it simply has no Run button. */
-        kernel: {
+        kernel: /** @type {any} */ ({
           start: (path, wanted) => api.kernel.start(path, wanted),
           execute: (path, code) => api.kernel.execute(path, code),
           interrupt: (path) => api.kernel.interrupt(path),
@@ -1231,11 +1299,11 @@ function ensureNotebook () {
           complete: (path, code, at) => api.kernel.complete(path, code, at),
           inspect: (path, code, at) => api.kernel.inspect(path, code, at),
           on: (fn) => api.on('kernel:event', fn)
-        },
+        }),
         /* The one question a notebook has to stop and ask — a restart throws
            away every variable in the session — asked in the app's own dialog
            rather than not at all. */
-        ask,
+        ask: /** @type {any} */ (ask),
         beforeRun: mayRunCode,
         notify: toast,
         onDirty: setViewerDirty,
@@ -1432,7 +1500,7 @@ function paintZoom () {
  *
  * @param {1|-1|'fit'} step  in one stop, out one stop, or back to fitting
  */
-function zoomDoc (step) {
+async function zoomDoc (step) {
   /* A website answers the same keys, and for the same reason: the guest carries
      a zoom of its own that the window's cannot reach, so ⌘+ over a page has to
      be handed to the page or it does nothing a reader can see. It has no
@@ -1442,7 +1510,8 @@ function zoomDoc (step) {
     /* Kept, because it is the reader's rather than the document's: someone who
        reads the web at 125% reads it at 125% next week too, and this was the
        one zoom in the app that forgot itself at every relaunch. */
-    api.config.set({ siteZoom: site.setZoom(step) })
+    const viewer = await ensureSite().catch(() => null)
+    if (viewer) api.config.set({ siteZoom: viewer.setZoom(step) })
     return
   }
   if (viewingWhiteboard()) { whiteboardInstance?.zoom(step); return }
@@ -1518,25 +1587,34 @@ el.pdfPage.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') { el.pdfPage.value = String(pdf.page()); el.pdfPage.blur() }
 })
 
-/* ------------------------------------------------- the website's toolbar */
+/* ------------------------------------------------- the website's toolbar
+   The buttons below only answer while a page is on screen, which is also what
+   guarantees the viewer is mounted — but each still goes through `ensureSite`
+   rather than reaching for `site`, so a click landing in the mount gap waits
+   for the viewer instead of throwing on null. */
 
-el.siteBack.addEventListener('click', () => site.back())
-el.siteForward.addEventListener('click', () => site.forward())
+el.siteBack.addEventListener('click', () => { ensureSite().then((s) => s.back()).catch(() => {}) })
+el.siteForward.addEventListener('click', () => { ensureSite().then((s) => s.forward()).catch(() => {}) })
 // The one button a browser gives two jobs: while the page is on its way in,
 // pressing it is how you stop waiting for it.
 el.siteReload.addEventListener('click', () => {
-  if (el.siteReload.classList.contains('is-loading')) site.stop()
-  else site.reload()
+  ensureSite().then((s) => {
+    if (el.siteReload.classList.contains('is-loading')) s.stop()
+    else s.reload()
+  }).catch(() => {})
 })
 el.siteSave.addEventListener('click', () => {
-  site.saveHome()
-  setStatusRight('This file now points here')
+  ensureSite().then((s) => {
+    s.saveHome()
+    setStatusRight('This file now points here')
+  }).catch(() => {})
 })
-el.siteExternal.addEventListener('click', () => openPageInBrowser())
+el.siteExternal.addEventListener('click', () => { openPageInBrowser().catch(() => {}) })
 
 /** The page on screen, handed to the reader's own browser. */
-function openPageInBrowser () {
-  const url = site.url()
+async function openPageInBrowser () {
+  const viewer = await ensureSite().catch(() => null)
+  const url = viewer?.url()
   if (!url) return
   api.openExternal(url)
   setStatusRight('Opened in your browser')
@@ -1553,18 +1631,24 @@ function openPageInBrowser () {
    change when a `.website` file is added, removed or rewritten, all of which
    move the tree — so a reader who focuses the bar ten times in a row walks the
    disk once, and one who adds a bookmark meanwhile sees it immediately. */
+/** @type {any} */
 let knownSitesAt = null
 
 async function paintKnownSites () {
   if (knownSitesAt && knownSitesAt === state.revision) return
   knownSitesAt = state.revision
+  /* The reader is read from the viewer module, which arrives with the first
+     site open — and this list is only ever asked for from the address bar, so
+     by the time it runs the module is here. Without it there is nothing truthful
+     to offer, and an empty list beats inventing one. */
+  if (!siteReadAddress) return
   /* Every website file, the one on screen included: the list is then a
      function of the tree alone, which is what makes the revision above a
      sufficient key — and a bookmark's own address in its own completion list
      costs a line nobody has to read. */
   const paths = (state.files || []).map((file) => file.path).filter(isSitePath)
   const read = await Promise.all(paths.slice(0, 200).map(async (path) => {
-    try { return readAddress(await api.file.read(path)) } catch { return null }
+    try { return siteReadAddress(await api.file.read(path)) } catch { return null }
   }))
   const seen = new Map()
   for (const said of read) {
@@ -1585,20 +1669,25 @@ async function paintKnownSites () {
    lives. Escape puts back where the page actually is, so the bar is never left
    showing an address nobody is at. */
 el.siteAddress.addEventListener('keydown', async (e) => {
+  /* The field is only focusable while a site is on screen, so the viewer is
+     mounted — or mounting, in which case this waits on the same promise the
+     open is already holding rather than racing it. */
+  const viewer = await ensureSite().catch(() => null)
+  if (!viewer) return
   if (e.key === 'Escape') {
     e.preventDefault()
     /* Escape means stop, the way it does in a browser — and then, having
        nothing left to stop, it means "put back the address I was at". A page
        still on its way in is the more urgent of the two, so it goes first. */
-    if (el.siteReload.classList.contains('is-loading')) { site.stop(); return }
-    el.siteAddress.value = site.url()
+    if (el.siteReload.classList.contains('is-loading')) { viewer.stop(); return }
+    el.siteAddress.value = viewer.url()
     el.siteAddress.blur()
     return
   }
   if (e.key !== 'Enter') return
   e.preventDefault()
   const typed = el.siteAddress.value
-  if (await site.goTo(typed)) el.siteAddress.blur()
+  if (await viewer.goTo(typed)) el.siteAddress.blur()
   // Said rather than silently refused: a typo in an address bar looks exactly
   // like a page that is taking its time.
   else if (typed.trim()) setStatusRight('That is not a web address')
@@ -1610,7 +1699,7 @@ el.siteAddress.addEventListener('focus', () => {
   el.siteAddress.select()
   paintKnownSites()
 })
-el.siteAddress.addEventListener('blur', () => paintSiteBar(site.state()))
+el.siteAddress.addEventListener('blur', () => { if (site) paintSiteBar(site.state()) })
 
 function queueSave () {
   clearTimeout(state.saveTimer)
@@ -1618,7 +1707,9 @@ function queueSave () {
      would then dismiss the panel underneath the reader — the merge owns the
      save until it is resolved. */
   if (mergeOpen) return
-  state.saveTimer = setTimeout(saveNow, Number(state.cfg.autosave) || 600)
+  /* Fixed at 600ms: short enough that a quit or a crash loses nothing worth
+     naming, long enough that typing does not write on every keystroke. */
+  state.saveTimer = setTimeout(saveNow, 600)
 }
 
 /* ---------------------------------------------------------------- drafts
@@ -1652,6 +1743,7 @@ const { queueDraft, clearDraft } = makeDrafts({
 
 /* Rebuilding the outline means re-scanning the note, which is not something to
    do on every keystroke — a heading only ever appears between them. */
+/** @type {any} */
 let outlineTimer = null
 function queueOutline () {
   if (!outlineOpen()) return
@@ -2121,7 +2213,7 @@ function patchTree (before, after) {
 function restoreTreeTabStop () {
   if (el.tree.querySelector('.row[tabindex="0"]')) return
   const fallback =
-    el.tree.querySelector('.row.is-active') || el.tree.querySelector('.row[data-path]')
+    /** @type {HTMLElement} */ (el.tree.querySelector('.row.is-active') || el.tree.querySelector('.row[data-path]'))
   if (fallback) {
     fallback.tabIndex = 0
     state.treeFocus = fallback.dataset.path
@@ -2207,7 +2299,7 @@ function treeRows () {
 /** Move the tree's single tab stop, and the focus with it. */
 function focusTreeRow (row) {
   if (!row) return
-  for (const other of el.tree.querySelectorAll('.row[tabindex="0"]')) other.tabIndex = -1
+  for (const other of /** @type {NodeListOf<HTMLElement>} */ (el.tree.querySelectorAll('.row[tabindex="0"]'))) other.tabIndex = -1
   row.tabIndex = 0
   state.treeFocus = row.dataset.path
   row.focus()
@@ -2228,8 +2320,8 @@ function parentRowOf (path) {
 function wireTreeKeys () {
   el.tree.addEventListener('keydown', (event) => {
     // A row being renamed holds an input, and the arrows belong to the text.
-    if (event.target.closest('input, textarea')) return
-    const row = event.target.closest('.row[data-path]')
+    if (/** @type {HTMLElement} */ (event.target).closest('input, textarea')) return
+    const row = /** @type {any} */ (event.target).closest('.row[data-path]')
     if (!row) return
     const path = row.dataset.path
     const isFolder = row.dataset.type === 'folder'
@@ -2507,7 +2599,7 @@ function buildLevel (nodes, depth) {
  * the DOM holds is exactly what is visible, already in order.
  */
 function visibleRows () {
-  return [...el.tree.querySelectorAll('.row[data-path]')].map((r) => r.dataset.path)
+  return [...el.tree.querySelectorAll('.row[data-path]')].map((r) => /** @type {HTMLElement} */ (r).dataset.path)
 }
 
 /**
@@ -2536,7 +2628,7 @@ function topLevelOnly (paths) {
 
 function markPicked () {
   for (const row of el.tree.querySelectorAll('.row[data-path]')) {
-    row.classList.toggle('is-picked', state.picked.has(row.dataset.path))
+    row.classList.toggle('is-picked', state.picked.has(/** @type {HTMLElement} */ (row).dataset.path))
   }
   const count = state.picked.size
   setStatusRight(count > 1 ? `${count} selected` : '')
@@ -2663,7 +2755,7 @@ const carriesFiles = (e) => !!e.dataTransfer?.types?.includes('Files')
 /** A drag carrying files from outside the app rather than rows from inside it. */
 const fromOutside = (e) => !state.dragging && carriesFiles(e)
 
-el.tree.addEventListener('dragover', (e) => {
+el.tree.addEventListener('dragover', (/** @type {any} */ e) => {
   if (fromOutside(e)) {
     e.preventDefault()
     e.dataTransfer.dropEffect = 'copy'
@@ -2684,7 +2776,7 @@ el.tree.addEventListener('drop', (e) => {
   if (fromOutside(e)) {
     e.preventDefault()
     // A drop that missed every row means the vault root.
-    importFrom(e, e.target.closest?.('.row.is-folder')?.dataset.path || '')
+    importFrom(e, /** @type {any} */ (e.target).closest?.('.row.is-folder')?.dataset.path || '')
     return
   }
   if (e.target !== el.tree) return
@@ -2700,7 +2792,7 @@ el.tree.addEventListener('drop', (e) => {
  * and so does the tree's empty space, which means the vault root.
  */
 function wireDrag (row, node) {
-  row.addEventListener('dragstart', (event) => {
+  row.addEventListener('dragstart', (/** @type {any} */ event) => {
     const paths = state.picked.has(node.path) && state.picked.size > 1
       ? topLevelOnly(state.picked)
       : [node.path]
@@ -3013,7 +3105,7 @@ function showInFileExplorer (path) {
   revealInTree(path)
 }
 
-const cssEscape = (s) => (window.CSS?.escape ? CSS.escape(s) : s.replace(/"/g, '\\"'))
+const cssEscape = (s) => (/** @type {any} */ (window.CSS)?.escape ? CSS.escape(s) : s.replace(/"/g, '\\"'))
 
 /* ------------------------------------------------------------- open/save */
 
@@ -3138,8 +3230,9 @@ async function leaveDoc () {
   /* Left, not closed. A website tab keeps its live page while the reader is
      elsewhere — see src/site.js — so that coming back is coming back to the
      page rather than to a fresh load of its address. The page is hidden and
-     muted meanwhile; only closing the tab ends it. */
-  else if (viewingSite()) site.leave()
+     muted meanwhile; only closing the tab ends it. A viewer still mounting has
+     no page to leave, so this stays a no-op for it. */
+  else if (viewingSite()) site?.leave()
   else if (viewingWhiteboard()) await whiteboardInstance?.close()
   else if (viewingData()) await dataInstance?.close()
   else if (viewingNotebook()) await notebookInstance?.close()
@@ -3160,6 +3253,7 @@ async function leaveDoc () {
    the viewer has actually mounted. */
 
 /** The path this window holds the claim on, so that leaving can give it up. */
+/** @type {any} */
 let claimedPath = null
 
 /** Ask to be the window editing `path`. */
@@ -3247,7 +3341,7 @@ api.on('document:free', (path) => {
    already on disk — main waits for that before it answers the taker. */
 /* Renamed or moved while this window was editing it: the claim answers to the
    new name now, and so must the release that leaving sends. */
-api.on('document:relocated', ({ from, to } = {}) => {
+api.on('document:relocated', (/** @type {any} */ { from, to } = {}) => {
   if (!from || !to) return
   if (claimedPath === from) claimedPath = to
   if (state.heldElsewhere.has(from)) {
@@ -3402,6 +3496,7 @@ async function openText (path, { focus = true, history = true, place = null, new
  * nothing. Which means the recovery below matters — a document that never
  * arrives has to hand the tab back rather than leave it pointing at nothing.
  *
+ * @param {object} viewer the kind's own viewer handle
  * @param viewer.show     puts the document up; throwing is a failure to open
  * @param viewer.failed   what to say when it does
  * @param viewer.focus    where the caret goes once it is up
@@ -3485,16 +3580,17 @@ function openPdf (path, opts = {}) {
 function openSite (path, opts = {}) {
   return openViewed(path, opts, {
     show: async (p, place) => {
-      await site.open(p, place)
+      const viewer = await ensureSite()
+      await viewer.open(p, place)
       // A different page is a different search — the query stays, the tally
       // does not.
-      siteFind.reset()
+      siteFind?.reset()
     },
     failed: 'That website could not be opened.',
     /* A file with no address yet is a file waiting to be told one, so the caret
        goes where the telling happens. With an address it goes to the page,
        which is what the arrow keys and the scroll wheel should reach. */
-    focus: () => { if (site.home()) site.focus(); else el.siteAddress.focus() }
+    focus: () => { if (site?.home()) site.focus(); else el.siteAddress.focus() }
   })
 }
 
@@ -3592,6 +3688,7 @@ function openFile (path, opts = {}) {
    every other document opens in, and opening a table is not the user changing
    their mind about it. Writing 'edit' to the config from here, which is what
    this used to do, lost the setting for the vault and not just for the table. */
+/** @type {any} */
 let heldView = null
 
 const showView = (view) => {
@@ -3628,7 +3725,7 @@ resolveRunPermission(mayRunCode)
    the buffer's it was loaded from otherwise — so what runs is what is on
    screen, saved or not. Which files get the button is applyPanes's call,
    below, like every other piece of document chrome. */
-const fileRun = mountFileRun({
+const fileRun = mountFileRun(/** @type {any} */ ({
   button: el.docRun,
   host: el.fileRunOut,
   source: () => ({
@@ -3650,7 +3747,8 @@ const fileRun = mountFileRun({
     lookup: (code) => api.manim.lookup(state.current?.name || 'Untitled', code, ''),
     make: videoFor
   }
-})
+}))
+/** @type {any} */
 let fileRunPath = null
 
 /**
@@ -3751,7 +3849,7 @@ function applyPanes () {
   el.site.hidden = !siteOpen
   // The same rule the PDF's bar keeps: a find bar over a document that is no
   // longer on screen is a bar searching something nobody can see.
-  if (!siteOpen) siteFind.close()
+  if (!siteOpen) siteFind?.close()
   el.htmlview.hidden = !htmlOpen
   paintHtmlView(htmlOpen)
   el.whiteboard.hidden = !whiteboardOpen
@@ -3823,6 +3921,7 @@ function applyPanes () {
    remembers where that was, so a button taking the focus for the length of a
    click cannot lose it. */
 
+/** @type {[string, () => void][]} */
 const DOCX_TOOLS = [
   ['docxBody', () => docxInstance?.setHeading(0)],
   ['docxH1', () => docxInstance?.setHeading(1)],
@@ -3926,6 +4025,7 @@ function openAsset (relPath) {
 /* One small player for timestamped `[[lecture.mp3#t=12:35]]` links. It is
    deliberately transient: the timestamp belongs to the Markdown link, not to
    a playlist or a sidecar record. */
+/** @type {any} */
 let mediaDock = null
 
 function openTimedMedia (spec) {
@@ -3982,7 +4082,7 @@ function renderTabs () {
 
   state.tabs.forEach((tab, i) => {
     const active = i === state.tabIndex
-    const button = document.createElement('button')
+    const button = /** @type {any} */ (document.createElement('button'))
     button.type = 'button'
     button.className = `tab${active ? ' is-active' : ''}${tab.pinned ? ' is-pinned' : ''}`
     // The folder a note sits in is the tooltip rather than the label: the strip
@@ -4066,7 +4166,7 @@ function renderTabs () {
        the drag is in flight, and an index recorded at render time would
        resolve to a different tab by the time it is read back. */
     button.tab = tab
-    button.addEventListener('dragstart', (e) => {
+    button.addEventListener('dragstart', (/** @type {any} */ e) => {
       e.dataTransfer.effectAllowed = 'move'
       /* Deliberately empty, and it stays empty. Once a drag leaves the window
          it is an OS drag, and whatever is in `text/plain` is what every other
@@ -4094,7 +4194,7 @@ function renderTabs () {
      so it is put back on whichever tab is now the active one. */
   const hadFocus = el.tabs.contains(document.activeElement)
   el.tabs.replaceChildren(frag)
-  const current = el.tabs.querySelector('.tab.is-active')
+  const current = /** @type {HTMLElement} */ (el.tabs.querySelector('.tab.is-active'))
   if (hadFocus) current?.focus()
   current?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
   markTabOverflow()
@@ -4108,9 +4208,9 @@ function renderTabs () {
 el.tabs.addEventListener('keydown', (e) => {
   const STEP = { ArrowLeft: -1, ArrowRight: 1 }
   if (!(e.key in STEP) && e.key !== 'Home' && e.key !== 'End') return
-  const tabs = [...el.tabs.querySelectorAll('.tab')]
+  const tabs = /** @type {HTMLElement[]} */ ([...el.tabs.querySelectorAll('.tab')])
   if (!tabs.length) return
-  const at = tabs.indexOf(document.activeElement.closest?.('.tab'))
+  const at = tabs.indexOf(/** @type {any} */ (document.activeElement)?.closest?.('.tab'))
   if (at === -1) return
   e.preventDefault()
   const to = e.key === 'Home'
@@ -4324,7 +4424,7 @@ function markTabOverflow () {
 /* The drag moves the buttons themselves — pure DOM, no re-render, so the
    dragged element survives to fire its own dragend. Redrawing the strip
    mid-drag would replace that element, and its dragend would die with it. */
-el.tabs.addEventListener('dragover', (e) => {
+el.tabs.addEventListener('dragover', (/** @type {any} */ e) => {
   const moving = el.tabs.querySelector('.tab.is-dragging')
   /* Nothing of ours is being dragged in this strip, so this is either another
      window's tab arriving or something else entirely. Taking the drop is how
@@ -4357,7 +4457,7 @@ el.tabs.addEventListener('dragover', (e) => {
 el.tabs.addEventListener('dragleave', (e) => {
   // Only when the pointer has actually left the strip, not when it crosses from
   // one tab button to the next — those bubble here as a leave too.
-  if (!el.tabs.contains(e.relatedTarget)) el.tabs.classList.remove('is-drop-target')
+  if (!el.tabs.contains(/** @type {any} */ (e.relatedTarget))) el.tabs.classList.remove('is-drop-target')
 })
 
 /**
@@ -4391,7 +4491,7 @@ api.on('tab:claimed', async (path) => {
 
 /** The state catches up with where the drag left the buttons. */
 function settleTabOrder () {
-  const order = [...el.tabs.querySelectorAll('.tab')].map((b) => b.tab)
+  const order = [...el.tabs.querySelectorAll('.tab')].map((/** @type {any} */ b) => b.tab)
   // A strip that changed under the drag — a tab closed, a rename box open —
   // cannot be trusted as an ordering; the redraw below puts truth back.
   if (order.length !== state.tabs.length) { renderTabs(); return }
@@ -4510,9 +4610,10 @@ async function closeTab (i, { record = true } = {}) {
 
   /* A website's live page belongs to the tabs holding it, so the last of them
      to go is what ends it. Asked after the splice, so the tab being closed is
-     not counted among the ones keeping it alive. */
+     not counted among the ones keeping it alive. A viewer never mounted holds
+     no pages, so there is nothing to end for it. */
   if (tab.path && isSitePath(tab.path) && !state.tabs.some((other) => other.path === tab.path)) {
-    site.forget(tab.path)
+    site?.forget(tab.path)
   }
 
   // The strip always holds at least one tab: closing the last note leaves an
@@ -4660,8 +4761,10 @@ function markPlace () {
     return
   }
   if (viewingSite()) {
-    const { url } = site.place()
-    if (url) entry.url = url
+    // A viewer still mounting has no place to report yet; the open in flight
+    // will mark its own place once it lands.
+    const place = site?.place()
+    if (place?.url) entry.url = place.url
     return
   }
   if (viewingWhiteboard()) {
@@ -4840,7 +4943,7 @@ async function reloadCurrent () {
      hand, by a sync or by the copilot should move the page the way an edited
      note moves the text. */
   if (viewingSite()) {
-    try { site.rehome(await api.file.read(state.current.path)) } catch { /* gone */ }
+    try { site?.rehome(await api.file.read(state.current.path)) } catch { /* gone */ }
     return
   }
 
@@ -4986,6 +5089,7 @@ function rememberAgentBefore (relPath, needle = '', tool = 'Edit', turn = '') {
  * on screen, not the note the reply is being written into.
  */
 /* The tail of the chain of edits being absorbed — see `onEdited` below. */
+/** @type {Promise<any>} */
 let absorbQueue = Promise.resolve()
 
 async function absorbAgentEdit (relPath) {
@@ -5028,7 +5132,7 @@ async function absorbAgentEdit (relPath) {
 
   // The file on screen is a website, and its text is an address rather than
   // anything the editor holds. Following it means moving the page.
-  if (viewingSite()) { site.rehome(text); return }
+  if (viewingSite()) { site?.rehome(text); return }
 
   /* A whiteboard is JSON on disk but an Excalidraw scene on screen. Feeding
      that JSON through the hidden CodeMirror buffer would neither update the
@@ -5384,6 +5488,7 @@ async function recheckOpenNote () {
       seen.modified === diskStamp.modified && seen.size === diskStamp.size) return
 
   let disk
+  /** @type {any} */
   let stampOnDisk = null
   try {
     const got = await api.file.readStamped(path)
@@ -5530,7 +5635,9 @@ const copilotDeps = {
    in the history file, so a rename that the panel sleeps through leaves every
    conversation about that note under a name nothing will ask for again. It
    loads. Renames are rare; a lost conversation is not recoverable. */
+/** @type {any} */
 let copilotLive = null
+/** @type {any} */
 let copilotArriving = null
 
 function loadCopilot () {
@@ -5606,6 +5713,7 @@ const codeAiField = node('div', 'code-ai-field')
 codeAiField.append(codeAiInput, codeAiHint)
 codeAiPop.append(codeAiField)
 
+/** @type {any} */
 let codeAiSession = null
 
 function closeCodeAi ({ restore = true } = {}) {
@@ -5618,7 +5726,7 @@ function closeCodeAi ({ restore = true } = {}) {
   if (restore && connected) anchor.focus()
 }
 
-el.app.addEventListener('tulip:code-copilot', (event) => {
+el.app.addEventListener('tulip:code-copilot', (/** @type {CustomEvent} */ event) => {
   const { anchor, code, lang } = event.detail || {}
   if (!(anchor instanceof HTMLElement)) return
   if (codeAiPop.isConnected && codeAiSession?.anchor === anchor) {
@@ -5751,8 +5859,9 @@ async function copilotContext (options = {}) {
      name (see `text` in src/site.js): the fence is untouched, and this is the
      reader's own request for the page they are looking at. */
   if (viewingSite()) {
-    const view = site.state()
-    const page = await site.text()
+    const viewer = await ensureSite()
+    const view = viewer.state()
+    const page = await viewer.text()
     return done({
       note: state.current.path,
       kind: 'site',
@@ -5974,10 +6083,15 @@ async function goToCitation (path, page) {
   el.pdf.focus()
 }
 
+/** @type {any} */
 let speech = null
+/** @type {any} */
 let languageStudy = null
+/** @type {any} */
 let keyboard = null
+/** @type {any} */
 let languageAlphabets = null
+/** @type {any} */
 let languageLoading = null
 
 /* Study, speech, the on-screen keyboard and its alphabet catalogue are a
@@ -6055,6 +6169,7 @@ paintAiToggle()
 /** @type {{cards: ReturnType<typeof parseFlashcards>, tag: string,
  *  queue: ReturnType<typeof parseFlashcards>, index: number, correct: number,
  *  wrong: number, answered: boolean} | null} */
+/** @type {any} */
 let fcStudy = null
 
 /** Turn the parser's line range back into the exact source range the editor
@@ -6309,6 +6424,7 @@ function keysFor (dir) {
 
 /* The folder the strip was last built for, so moving between the three files of
    one language does not rebuild the same row of buttons. */
+/** @type {any} */
 let keyboardFor = null
 
 function paintKeyboard () {
@@ -6391,6 +6507,7 @@ function updateStatus () {
 /* Zoom indicator. It stays beside Copilot so the current window size is always
    visible and the reset control never has to be caught before it fades. */
 const DEFAULT_ZOOM_PERCENT = Math.round(DEFAULT_ZOOM * 100)
+/** @type {any} */
 let zoomTimer = null
 let zoomPercent = DEFAULT_ZOOM_PERCENT
 
@@ -6443,6 +6560,7 @@ document.addEventListener('wheel', (event) => {
 
 /* The right-hand end of the status bar keeps its own timer: it is a passing
    remark, and clearing it must not cancel the word count settling on the left. */
+/** @type {any} */
 let statusRightTimer = null
 function setStatusRight (msg) {
   el.statusRight.textContent = msg
@@ -6779,6 +6897,7 @@ function markOutlineRow (index) {
    asked for is remembered instead, and held for exactly as long as the view
    stays where the request put it — the moment they scroll, geometry has the
    answer again. */
+/** @type {any} */
 let outlinePin = null
 
 /* --------------------------------------------------------- sidebar panes
@@ -6814,7 +6933,7 @@ const PANES = {
   info: { body: () => el.infoPane, paint: renderInfo }
 }
 
-const paneTabBelow = (name) => el.paneTabsBelow.querySelector(`.pane-tab[data-pane="${name}"]`)
+const paneTabBelow = (name) => /** @type {HTMLElement} */ (el.paneTabsBelow.querySelector(`.pane-tab[data-pane="${name}"]`))
 
 /* PDFs cannot participate in the Markdown backlink graph. Keep the control
    out of the tab order as well as out of sight, and hand an already-open Links
@@ -6915,7 +7034,7 @@ el.paneSplitToggle.addEventListener('click', () => {
 })
 
 el.paneTabsBelow.addEventListener('click', (event) => {
-  const button = event.target.closest('.pane-tab')
+  const button = /** @type {any} */ (event.target).closest('.pane-tab')
   if (button) setPaneBelow(button.dataset.pane)
 })
 
@@ -7026,7 +7145,7 @@ el.paneTabsBelow?.addEventListener('keydown', (event) => {
 
   const tabs = Object.keys(PANES).map(paneTabBelow).filter((tab) => !tab.hidden)
   if (tabs.length < 2) return
-  const from = tabs.indexOf(document.activeElement)
+  const from = tabs.indexOf(/** @type {any} */ (document.activeElement))
   if (from < 0) return
 
   event.preventDefault()
@@ -7163,6 +7282,7 @@ function renderOutline () {
     item.style.setProperty('--depth', String(heading.level - top))
 
     const hasChildren = outlineHeadings[index + 1]?.level > heading.level
+    /** @type {HTMLButtonElement | null} */
     let toggle = null
     if (hasChildren) {
       toggle = document.createElement('button')
@@ -7403,6 +7523,7 @@ function markOutlinePlace () {
 
 /* Scrolling either view moves the mark. Coalesced onto a frame: a scroll fires
    far more often than the panel can usefully change. */
+/** @type {any} */
 let outlineTick = null
 function queueOutlineMark () {
   if (outlineTick || !outlineOpen()) return
@@ -7660,7 +7781,7 @@ async function openMention (path, hit) {
    a note the vault points at a lot. Bound once, here, to the container that
    outlives them. */
 el.linksList.addEventListener('click', async (e) => {
-  const row = e.target.closest?.('[data-link-open],[data-link-create],[data-link-mention],[data-link-more]')
+  const row = /** @type {any} */ (e.target).closest?.('[data-link-open],[data-link-create],[data-link-mention],[data-link-more]')
   if (!row) return
   const d = row.dataset
   if (d.linkMore) {
@@ -7684,6 +7805,7 @@ el.linksList.addEventListener('click', async (e) => {
 /* The panel is about a note, so it is redrawn when the note changes — and when
    the vault does, since a backlink is something another note did. Debounced:
    a save, its watcher tick and the tree reload behind it arrive together. */
+/** @type {any} */
 let linksTimer = null
 function queueLinks () {
   if (!paneOpen('links')) return
@@ -7718,6 +7840,7 @@ let spellingKeys = ''
 /* The document the last pass ran over, and whether the pane was open for it —
    both, because the pane's rows are drawn only when it is, so a pass skipped
    for an unchanged document must still happen when the pane opens over it. */
+/** @type {any} */
 let spellingDoc = null
 let spellingPaneWas = false
 /* Every word this session has had a verdict for, true when the dictionary does
@@ -7934,6 +8057,7 @@ async function renderSpelling () {
   el.spellingList.replaceChildren(frag)
 }
 
+/** @type {any} */
 let spellingTimer = null
 
 function queueSpelling () {
@@ -8002,7 +8126,9 @@ function memoRender (body, equations, cut) {
 const readingHighlightJobs = new Map()
 /* The root the state-change listener is on, so a second arming of the same
    page does not add a second listener. See `startReadingHighlights`. */
+/** @type {any} */
 let readingHighlightRoot = null
+/** @type {any} */
 let readingWarmup = null
 
 /**
@@ -8087,6 +8213,7 @@ const readingStamp = () => [
 ].join(' ')
 
 /** What the reading pane is showing, as the two things that decide it. */
+/** @type {any} */
 let shown = null
 
 /**
@@ -8372,7 +8499,8 @@ function dressCodeBlocks (root) {
       if (wrap.dataset.info) head.append(node('span', 'code-info', wrap.dataset.info))
       head.append(tools)
       wrap.prepend(head)
-      BLOCK_KINDS.find((kind) => kind.matches(lang)).attach(wrap, tools, source)
+      const kind = /** @type {any} */ (BLOCK_KINDS.find((kind) => kind.matches(lang)))
+      kind.attach(wrap, tools, source)
     } else {
       /* No language means no header — an empty bar is just a bar — so the
          copy control floats over the code's corner and appears on hover. */
@@ -8488,6 +8616,7 @@ function onReadingHighlightState (event) {
    Held until the reading view is rebuilt. Folds do not invalidate it: a folded
    section is `display: none`, which the bisection already handles, and its
    nodes are still in the list and still in document order. */
+/** @type {any} */
 let readingLines = null
 
 function invalidateReadingLines () { readingLines = null }
@@ -8680,7 +8809,7 @@ function updateViewControl () {
      reason a locked one is, and its editing view is barred the same way — an
      enabled button that only toasted was a switch that lied. */
   const held = heldHere()
-  for (const button of el.viewSwitch.querySelectorAll('.view-option')) {
+  for (const button of /** @type {NodeListOf<HTMLButtonElement>} */ (el.viewSwitch.querySelectorAll('.view-option'))) {
     const view = button.dataset.view
     const unavailable = view === 'raw' &&
       (viewingLanguageTable() || viewingData() || viewingNotebook() || viewingDocx() ||
@@ -8697,7 +8826,7 @@ function updateViewControl () {
         ? `${VIEW_NAMES[view]} view is unavailable for ${
             viewingData() ? 'CSV tables' : viewingNotebook() ? 'notebooks'
               : viewingHtml() ? 'HTML files' : 'language tables'}`
-        : `${VIEW_NAMES[view]} view (⌘${VIEWS.indexOf(view) + 1})`
+        : `${VIEW_NAMES[view]} view (⌘${VIEWS.indexOf(/** @type {string} */ (view)) + 1})`
   }
   el.lockMark.hidden = !locked
 }
@@ -8908,11 +9037,11 @@ el.reading.addEventListener('click', (e) => {
      `[!note]` is not a disclosure and should not behave like one. */
   const foldable = target.closest('.callout.is-foldable > .callout-head')
   if (foldable) {
-    foldable.parentElement.classList.toggle('is-collapsed')
+    /** @type {HTMLElement} */ (foldable.parentElement).classList.toggle('is-collapsed')
     return
   }
 
-  const box = target.closest('input.task')
+  const box = /** @type {HTMLInputElement} */ (target.closest('input.task'))
   if (box) {
     // The native toggle is left to stand — calling preventDefault here would
     // make the browser revert the tick after this handler runs, leaving the box
@@ -8950,7 +9079,6 @@ el.reading.addEventListener('click', (e) => {
 const COMMANDS = [
   { id: 'new-file', title: 'New file…', key: '›' },
   { id: 'getting-started', title: 'Open Getting Started' },
-  { id: 'setup', title: 'Getting started checklist…' },
   { id: 'backup-vault', title: 'Back up vault…' },
   { id: 'restore-vault', title: 'Restore vault…' },
   { id: 'fold-all-headings', title: 'Fold all headings', scope: 'markdown' },
@@ -9071,8 +9199,9 @@ function commandList () {
     language: () => viewingLanguageTable(),
     file: () => Boolean(state.current),
     // A page, and one that has actually arrived: neither command means
-    // anything over a website file still waiting to be told an address.
-    site: () => viewingSite() && Boolean(site.url()),
+    // anything over a website file still waiting to be told an address — or
+    // over one whose viewer is still mounting, where there is no page yet.
+    site: () => viewingSite() && Boolean(site?.url()),
     // The second window has no copilot to toggle — see `state.primary`.
     copilot: () => state.primary
   }
@@ -9353,7 +9482,8 @@ function paintSearchChips () {
   // Whole word and a hand-written pattern do not compose: the lookarounds
   // would argue with the pattern's own anchors, so main ignores the switch —
   // and a switch that does nothing has to look like it does nothing.
-  $('opt-word').disabled = searchOpts.regex
+  const optWord = /** @type {HTMLButtonElement} */ ($('opt-word'))
+  optWord.disabled = searchOpts.regex
   $('opt-replace').setAttribute('aria-pressed', String(replacing))
   $('opt-replace').setAttribute('aria-expanded', String(replacing))
 }
@@ -9406,6 +9536,7 @@ const WORD_EDGE = /[\s/\\_\-–—.,:;([{&]/
    and re-splitting it — thousands of times per keystroke for a string that is
    the one thing common to all of them. One entry is the whole cache this
    wants: the pass moves on when the query changes. */
+/** @type {any} */
 let termCache = { query: null, terms: [] }
 
 function queryTerms (query) {
@@ -9810,7 +9941,7 @@ let overlayHoverMuted = false
  */
 function nameActiveRow (row) {
   if (!row) { el.panelInput.removeAttribute('aria-activedescendant'); return }
-  if (!row.id) row.id = `panel-row-${row.dataset.index}`
+  if (!row.id) row.id = `panel-row-${/** @type {HTMLElement} */ (row).dataset.index}`
   el.panelInput.setAttribute('aria-activedescendant', row.id)
 }
 
@@ -9976,8 +10107,9 @@ function syncSelection () {
      layout, and doing that between two `setAttribute`s makes the engine settle
      a list it is halfway through being told about — once per painted row on a
      long result set. One row is being scrolled to either way. */
+  /** @type {any} */
   let selected = null
-  for (const li of el.panelList.querySelectorAll('[role="option"]')) {
+  for (const li of /** @type {NodeListOf<HTMLElement>} */ (el.panelList.querySelectorAll('[role="option"]'))) {
     const on = Number(li.dataset.index) === index
     li.setAttribute('aria-selected', String(on))
     if (on) selected = li
@@ -10067,6 +10199,7 @@ async function chooseOverlayItem (i) {
    list already in memory and answer on the keystroke. Even against the index,
    coalescing a burst of typing into one query keeps a long note from being
    scanned six times for prefixes nobody wanted results for. */
+/** @type {any} */
 let queryTimer = null
 
 function queueOverlayQuery (value) {
@@ -10079,7 +10212,7 @@ function queueOverlayQuery (value) {
   queryTimer = setTimeout(() => runOverlayQuery(value), 90)
 }
 
-el.panelInput.addEventListener('input', (e) => queueOverlayQuery(e.target.value))
+el.panelInput.addEventListener('input', (e) => queueOverlayQuery(/** @type {HTMLInputElement} */ (e.target).value))
 
 el.panelInput.addEventListener('keydown', (e) => {
   if (!state.overlay) return
@@ -10221,7 +10354,7 @@ function showIconMenu (event, paths) {
   const marks = new Set(paths.map((path) => state.marks[path] || ''))
   const current = marks.size === 1 ? [...marks][0] : ''
   const apply = (mark) => Promise.all(paths.map((path) => setMark(path, mark)))
-  const items = [{
+  const items = /** @type {any[]} */ ([{
     grid: MARK_CHOICES,
     on: current,
     // Picking the mark a row already wears takes it off, the way a toggle does.
@@ -10230,7 +10363,7 @@ function showIconMenu (event, paths) {
     field: 'Paste any emoji…',
     value: current,
     commit: (mark) => apply(mark)
-  }]
+  }])
   if (paths.some((path) => state.marks[path])) {
     items.push({ sep: true })
     items.push({ label: 'Remove icon', run: () => apply('') })
@@ -10310,7 +10443,7 @@ function showContextMenu (event, node) {
 /* The rows handle their own menus above. Everything else in the Files pane is
    the vault root, including the useful empty space below a short file list. */
 el.tree.addEventListener('contextmenu', (event) => {
-  if (event.target.closest('.row')) return
+  if (/** @type {HTMLElement} */ (event.target).closest('.row')) return
   event.preventDefault()
   clearPicked()
   renderContextMenu(explorerCreateItems(), event)
@@ -10357,7 +10490,8 @@ function renderContextMenu (items, event) {
      sentence to do nothing with it is worse than leaving it alone. */
   if (event.keyboard) {
     ctxReturn = document.activeElement
-    el.ctx.querySelector('button:not([disabled])')?.focus()
+    const first = /** @type {HTMLElement} */ (el.ctx.querySelector('button:not([disabled])'))
+    first?.focus()
   }
 }
 
@@ -10477,6 +10611,7 @@ async function removeMany (paths) {
 
 /* Where the focus was when the menu opened, so closing it puts the keyboard
    back where it came from rather than at the top of the document. */
+/** @type {any} */
 let ctxReturn = null
 
 function hideContextMenu () {
@@ -10494,9 +10629,9 @@ el.ctx.addEventListener('keydown', (event) => {
   /* Except in a field, where the arrows and Tab belong to the text being
      typed. Escape still leaves — it is the way out of every layer. */
   if (event.target instanceof HTMLInputElement && event.key !== 'Escape') return
-  const items = [...el.ctx.querySelectorAll('button:not([disabled])')]
+  const items = /** @type {HTMLElement[]} */ ([...el.ctx.querySelectorAll('button:not([disabled])')])
   if (!items.length) return
-  const at = items.indexOf(document.activeElement)
+  const at = items.indexOf(/** @type {any} */ (document.activeElement))
 
   if (event.key === 'Escape') { event.preventDefault(); hideContextMenu(); return }
   if (event.key === 'ArrowDown' || (event.key === 'Tab' && !event.shiftKey)) {
@@ -10513,7 +10648,7 @@ el.ctx.addEventListener('keydown', (event) => {
   if (event.key === 'End') { event.preventDefault(); items[items.length - 1].focus() }
 })
 window.addEventListener('mousedown', (e) => {
-  if (!el.ctx.hidden && !el.ctx.contains(e.target)) hideContextMenu()
+  if (!el.ctx.hidden && !el.ctx.contains(/** @type {any} */ (e.target))) hideContextMenu()
 })
 window.addEventListener('blur', hideContextMenu)
 
@@ -10622,7 +10757,7 @@ async function createWebsite (dir = '') {
  */
 async function clipPage () {
   if (!viewingSite()) return
-  const page = await site.text()
+  const page = await (await ensureSite()).text()
   if (!page?.text) { toast('There is nothing on this page to save.'); return }
 
   const dir = state.current?.path?.includes('/')
@@ -10896,7 +11031,7 @@ function paintLanding () {
 /* The rows are commands, so they run as commands — the same four ids the menu
    and the command palette reach, rather than a second set of call sites. */
 el.emptyActions.addEventListener('click', (e) => {
-  const button = e.target.closest('[data-command]')
+  const button = /** @type {any} */ (e.target).closest('[data-command]')
   if (button) runCommand(button.dataset.command)
 })
 
@@ -10914,7 +11049,9 @@ function closeCurrentNote () {
     texPdf?.close()
   }
   if (viewingPdf()) pdf?.close()
-  if (viewingSite()) site.close()
+  /* A viewer never mounted has no page to end — mounting one here only to
+     close it would be the eager import again, wearing a different spelling. */
+  if (viewingSite()) site?.close()
   if (viewingWhiteboard()) whiteboardInstance?.close()
   if (viewingData()) dataInstance?.close()
   if (viewingNotebook()) notebookInstance?.close()
@@ -11062,7 +11199,7 @@ function clearAllCodeBlockOutputs () {
 
 /** Keep the reading view's disclosure buttons in step with the editor folds. */
 function setReadingHeadingFolds (folded) {
-  for (const button of el.reading.querySelectorAll('.heading-fold')) {
+  for (const button of /** @type {NodeListOf<HTMLButtonElement>} */ (el.reading.querySelectorAll('.heading-fold'))) {
     const isFolded = button.getAttribute('aria-expanded') === 'false'
     if (isFolded !== folded) button.click()
   }
@@ -11268,8 +11405,10 @@ function runCommand (id, dir = state.current?.dir || '') {
       if (viewingPdf()) { pdfFind?.open(); break }
       /* A page's find is Chromium's own, run inside the guest and answered
          with a tally — the app never sees the text, which is what makes it
-         possible at all. See src/site-find.js. */
-      if (viewingSite()) { siteFind.open(); break }
+         possible at all. See src/site-find.js. Mounted on first use: a ⌘F that
+         lands while the viewer is still arriving waits on the same promise the
+         open holds, instead of missing the bar that asked for it. */
+      if (viewingSite()) { ensureSite().then(() => siteFind?.open()).catch(() => {}); break }
       if (viewingWhiteboard()) { whiteboardInstance?.find(); break }
       // A Word document's find walks its own pages, not the hidden editor.
       if (viewingDocx()) { docxInstance?.find(); break }
@@ -11327,7 +11466,6 @@ function runCommand (id, dir = state.current?.dir || '') {
     case 'redo': stepHistory(true); break
     case 'open-vault': connectVault(); break
     case 'settings': settings.open(); break
-    case 'setup': settings.open('start'); break
     case 'export-pdf': exportPdf(); break
     case 'export-html': exportHtml(); break
     case 'export-markdown': exportMarkdown(); break
@@ -11594,10 +11732,13 @@ async function importLanguageCsv () {
 /* ---------------------------------------------------------- flashcard form */
 
 let flashcardPreviousView = 'edit'
+/** @type {any} */
 let flashcardReturnFocus = null
 /** @type {{card: ReturnType<typeof parseFlashcards>[number], from: number,
  *  to: number, source: string} | null} */
+/** @type {any} */
 let flashcardEditTarget = null
+/** @type {any} */
 let flashcardImage = null
 
 const sizeFlashcardTextarea = (field) => {
@@ -11635,7 +11776,7 @@ async function attachFlashcardImage (files) {
 }
 
 const flashcardInputs = () =>
-  [...el.flashcardForm.querySelectorAll('.flashcard-choice input[type="text"]')]
+  /** @type {HTMLInputElement[]} */ ([...el.flashcardForm.querySelectorAll('.flashcard-choice input[type="text"]')])
 
 function resetFlashcardChoices () {
   for (const row of el.flashcardForm.querySelectorAll('.flashcard-choice.is-added')) row.remove()
@@ -11644,7 +11785,7 @@ function resetFlashcardChoices () {
 function renumberFlashcardChoices () {
   const rows = [...el.flashcardForm.querySelectorAll('.flashcard-choice')]
   rows.forEach((row, index) => {
-    const input = row.querySelector('input[type="text"]')
+    const input = /** @type {HTMLInputElement} */ (row.querySelector('input[type="text"]'))
     const remove = row.querySelector('.flashcard-remove-choice')
     if (input) input.placeholder = index === 0
       ? 'Correct answer'
@@ -11771,14 +11912,14 @@ async function addFlashcardFromForm () {
     return
   }
 
-  const markdown = flashcardMarkdown({
+  const markdown = flashcardMarkdown(/** @type {any} */ ({
     question,
     image: flashcardImage,
     tags: el.flashcardTags.value,
     options,
     correct: 0,
     explanation: el.flashcardExplanation.value
-  })
+  }))
   if (!markdown) {
     flashcardError('The flashcard could not be created.')
     return
@@ -11844,7 +11985,7 @@ el.flashcardForm.addEventListener('paste', (event) => {
   const files = [...(event.clipboardData?.files || [])].filter((file) =>
     /^image\//i.test(file.type || '') || isImageAsset(file.name || ''))
   if (!files.length) return
-  if ([...(event.clipboardData.types || [])].includes('text/plain')) return
+  if ([...(/** @type {DataTransfer} */ (event.clipboardData).types || [])].includes('text/plain')) return
   event.preventDefault()
   attachFlashcardImage(files)
 })
@@ -11858,7 +11999,7 @@ document.addEventListener('keydown', (event) => {
 })
 document.addEventListener('tulip:flashcard', () => openFlashcardComposer())
 document.addEventListener('tulip:bookmark', () => setBookmark())
-document.addEventListener('tulip:flashcard-edit', (event) => openFlashcardComposer(event.detail))
+document.addEventListener('tulip:flashcard-edit', (/** @type {CustomEvent} */ event) => openFlashcardComposer(event.detail))
 
 /**
  * ⌘Z, aimed at whichever history the reader is actually looking at.
@@ -12061,6 +12202,7 @@ function setSetting (key, value) {
  * Keeping its controls, model catalogue and dropdown machinery off the startup
  * path saves parsing work on every launch while preserving the same public
  * `settings.open()` surface used by commands and the drive harness. */
+/** @type {any} */
 let settingsLoading = null
 const loadSettings = () => (settingsLoading ??= Promise.all([
   import('./settings.js'),
@@ -12075,8 +12217,7 @@ const loadSettings = () => (settingsLoading ??= Promise.all([
     },
     api,
     values: () => state.cfg,
-    onChange: setSetting,
-    onCommand: runCommand
+    onChange: setSetting
   })
 ))
 
@@ -12088,6 +12229,7 @@ const settings = {
    studying, and a vault that studies nothing should never pay for it — the
    same reasoning that keeps the editor, the copilot and the whiteboard off the
    startup path. */
+/** @type {any} */
 let reviewStatsLoading = null
 const loadReviewStats = () => (reviewStatsLoading ??= import('./review-panel.js')
   .then(({ mountReviewStats }) => mountReviewStats({
@@ -12110,6 +12252,7 @@ const savedSearches = mountSavedSearches({
    a translation of already-laid-out content: the main column clips the edge
    instead, and the one real reflow happens at a single moment — when a close
    begins, or when an open settles. */
+/** @type {any} */
 let slideTimer = null
 
 /**
@@ -12122,7 +12265,7 @@ let slideTimer = null
  * on every frame.
  *
  * @param {boolean} opening  whether the panel is arriving
- * @param {Element} panel    the one whose width the stage is about to lose or
+ * @param {HTMLElement} panel the one whose width the stage is about to lose or
  *                           gain, measured before the attribute flips
  */
 function freezePanelSlide (opening, panel) {
@@ -12227,7 +12370,7 @@ let slideAnimations = []
  */
 function holdSidebarContents (px) {
   const width = px ? `${px}px` : ''
-  for (const child of el.sidebar.children) child.style.width = width
+  for (const child of el.sidebar.children) /** @type {HTMLElement} */ (child).style.width = width
 }
 
 /** The rail's width as the stylesheet currently has it — the width the
@@ -12553,7 +12696,7 @@ async function cycleTheme () {
  * at a picture — nothing is embedded as base64 and nothing lives only in the
  * app. The main process decides where they land; see `asset:write`.
  */
-async function attachFiles (files, insertIntoTable = null) {
+async function attachFiles (files, insertIntoTable = /** @type {any} */ (null)) {
   if (!state.current) { toast('Open a note first.'); return }
 
   const inserts = []
@@ -12638,12 +12781,24 @@ async function showOrphanedImages () {
     if (hit) referenced.add(hit)
   }
 
-  /* Every note in one call. Main is holding all of this text in the index it
+  /* Every note, one page at a time. Main is holding all of this text in the index it
      answers searches and backlinks from, so reading them back one at a time —
      an IPC round trip and a disk read per note — was asking it to fetch what it
      already had, a couple of thousand times over. The scanning stays here: what
      counts as a reference is the resolver the views themselves use. */
-  const notes = await api.vault.notes()
+  const notes = await (async () => {
+    const all = []
+    let offset = 0
+    for (;;) {
+      const page = await api.vault.notes({ offset, limit: 500 })
+      const list = Array.isArray(page) ? page : (page?.notes || [])
+      all.push(...list)
+      const total = Array.isArray(page) ? list.length : (page?.total ?? list.length)
+      offset += list.length
+      if (!list.length || all.length >= total) break
+    }
+    return all
+  })()
   let scanned = 0
   for (const note of notes) {
     if (!NOTE_EXT.test(note.path)) continue
@@ -12681,6 +12836,7 @@ async function showOrphanedImages () {
    the app does, so a wrong call here is a drag back out, not a loss.
    ================================================================== */
 
+/** @type {any} */
 let orphansOpen = null   // { returnTo } while the dialog is up
 
 function closeOrphansDialog () {
@@ -12834,7 +12990,7 @@ el.editorHost.addEventListener('paste', (e) => {
   // Only when there is nothing else on the clipboard: copying a region of a
   // web page carries both an image and its HTML, and the text is the useful
   // half of that.
-  if ([...(e.clipboardData.types || [])].some((t) => t === 'text/plain')) return
+  if ([...(/** @type {DataTransfer} */ (e.clipboardData).types || [])].some((t) => t === 'text/plain')) return
   const insertIntoTable = tableAttachmentInsertion(e.target)
   e.preventDefault()
   e.stopPropagation()
@@ -12970,6 +13126,7 @@ const TOAST_MS = 2600
    announced to nobody. Replacing the text of a live region is also how it is
    re-announced, so the queue is what stops two messages becoming one there. */
 const toastQueue = []
+/** @type {any} */
 let toastTimer = null
 
 function toast (message) {
@@ -13022,6 +13179,18 @@ function paintBootReady () {
      no-op on the Mac — see src/platform.js. */
   localiseShortcuts()
   api.painted()
+}
+
+/* styles-features.css after the first paint. It styles only surfaces that are
+   hidden or unmounted at boot — the saved searches, the AI doctor, the review
+   statistics — so holding it back moves no pixel the reader is looking at, and
+   the shell's own half of it already arrived with renderer.css. Fetched as a
+   link (see src/lazy-styles.js), never as a dynamic import: esbuild hoists CSS
+   reached through a dynamic import into the entry point's own stylesheet, so
+   importing it late would still compile it early. One promise per file, so
+   every path below schedules this freely and only the first one fetches. */
+function prefetchFeatureStyles () {
+  requestIdleCallback(() => { loadFeatureStyles('styles-features').catch(() => {}) }, { timeout: 500 })
 }
 
 function paintBootError (error) {
@@ -13121,7 +13290,7 @@ $('btn-new-folder').addEventListener('click', () => createFolder(state.current?.
 $('btn-search').addEventListener('click', () => openOverlay('search'))
 el.foldAll.addEventListener('click', toggleAllFolders)
 el.viewSwitch.addEventListener('click', (event) => {
-  const button = event.target.closest('.view-option')
+  const button = /** @type {any} */ (event.target).closest('.view-option')
   if (button && !button.disabled) setView(button.dataset.view)
 })
 
@@ -13184,7 +13353,7 @@ async function showSpellingMenu (at, event) {
    settings — the one setting you change while looking at the thing it changes.
    Inside a text field the system menu is the right one, so it is left alone. */
 el.stage.addEventListener('contextmenu', (e) => {
-  const image = e.target.closest('.embed-img[data-vault-image]')
+  const image = /** @type {any} */ (e.target).closest('.embed-img[data-vault-image]')
   if (image) {
     e.preventDefault()
     showImageContextMenu(image.dataset.vaultImage, e)
@@ -13194,7 +13363,7 @@ el.stage.addEventListener('contextmenu', (e) => {
   /* A word the app has underlined, before the native menu is left to it below:
      the platform's checker is off over the note (see setSpellcheck in
      src/editor.js), so its menu would offer nothing here. */
-  if (e.target.closest?.('.cm-misspelled')) {
+  if (/** @type {HTMLElement} */ (e.target).closest?.('.cm-misspelled')) {
     const pos = editor.posAtCoords({ x: e.clientX, y: e.clientY })
     const at = pos == null ? null : editor.misspellingAt(pos)
     if (at) {
@@ -13210,7 +13379,7 @@ el.stage.addEventListener('contextmenu', (e) => {
   // Dictionary" live — see the context-menu handler in electron/main.js. The
   // measure menu keeps the rest of the page: the margins and everything the
   // editor draws that is not text.
-  if (e.target.closest('input, textarea, [contenteditable="plaintext-only"], .cm-content')) return
+  if (/** @type {HTMLElement} */ (e.target).closest('input, textarea, [contenteditable="plaintext-only"], .cm-content')) return
 
   /* Every other kind shares this stage but not this menu. The measure sets the
      writing column — it is `--measure` on the reading view and on the editor,
@@ -13234,7 +13403,7 @@ el.stage.addEventListener('contextmenu', (e) => {
 /* Table widgets relay their image gesture explicitly because their nested
    contenteditable/CodeMirror event path can consume the native contextmenu
    before it reaches the stage. */
-el.stage.addEventListener('tulip:image-contextmenu', (event) => {
+el.stage.addEventListener('tulip:image-contextmenu', (/** @type {CustomEvent} */ event) => {
   event.stopPropagation()
   showImageContextMenu(event.detail?.path, {
     clientX: event.detail?.x ?? 0,
@@ -13245,7 +13414,7 @@ el.stage.addEventListener('tulip:image-contextmenu', (event) => {
 /* Table cells own their editing gestures in table.js, but the app owns the one
    context-menu surface. The custom event keeps those responsibilities apart
    while still making table actions look and dismiss like every other menu. */
-el.stage.addEventListener('tulip:table-contextmenu', (event) => {
+el.stage.addEventListener('tulip:table-contextmenu', (/** @type {CustomEvent} */ event) => {
   event.stopPropagation()
   const detail = event.detail
   const items = []
@@ -13568,8 +13737,9 @@ api.on('vault:opened', async (vault) => {
     closeSidePane()
     /* Every live page, ended. They are held by path, and a path means a
        different file in a different vault — a page kept across the switch
-       would be the old folder's site sitting in the new folder's tab. */
-    site.closeAll()
+       would be the old folder's site sitting in the new folder's tab. A viewer
+       never mounted holds no pages, so there is nothing to end for it. */
+    site?.closeAll()
     knownSitesAt = null
     closedTabs.length = 0
     state.tabs = [blankTab()]
@@ -13589,6 +13759,10 @@ api.on('vault:opened', async (vault) => {
       }
     } catch { /* a guide that cannot open is not a vault that cannot open */ }
     paintBootReady()
+    /* A vault switched into after launch never passed through boot's idle
+       prefetch, and the deferred stylesheet is per window, not per vault — one
+       schedule, deduplicated by the loader if boot already fetched it. */
+    prefetchFeatureStyles()
   } catch (error) {
     console.error('vault open failed', error)
     paintBootError(error)
@@ -13676,16 +13850,20 @@ function siteKeys (e) {
   if (!viewingSite() || !el.overlay.hidden) return
   if (e.target.closest?.('input, textarea, [contenteditable]')) return
 
+  /* The viewer mounts with the first site open, so by the time these keys can
+     fire it is either here or arriving — `?.` keeps a keypress landing in the
+     mount gap a silent no-op rather than a throw, and the page is not there to
+     answer it yet either way. */
   if (e.altKey && !e.metaKey && !e.ctrlKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
     e.preventDefault()
-    if (e.key === 'ArrowLeft') site.back()
-    else site.forward()
+    if (e.key === 'ArrowLeft') site?.back()
+    else site?.forward()
     return
   }
 
   if ((e.metaKey || e.ctrlKey) && e.key === 'r' && !e.shiftKey) {
     e.preventDefault()
-    site.reload()
+    site?.reload()
     return
   }
 
@@ -13694,7 +13872,7 @@ function siteKeys (e) {
      arrived it belongs to whatever else is on screen. */
   if (e.key === 'Escape' && el.siteReload.classList.contains('is-loading')) {
     e.preventDefault()
-    site.stop()
+    site?.stop()
   }
 
   /* ⌘L, which is where every browser puts the address bar. Worth having even
@@ -13768,9 +13946,13 @@ document.addEventListener('visibilitychange', async () => {
 })
 
 // Handle for the DevTools console and the scripts/drive.mjs test harness.
+// The harness handle below writes a property tsc cannot see on `window`.
+ // @ts-ignore — a DevTools/test-harness handle, not part of the DOM
 window.__tulip = {
   state, get editor () { return editor }, api, openNote, runCommand, openOverlay, showZoom,
-  get pdf () { return pdf }, site, copilot, copilotContext,
+  get pdf () { return pdf },
+  /* Null until the first website opens — see ensureSite. */
+  get site () { return site }, copilot, copilotContext,
   viewportLine, scrollToLine, goHistory,
   newTab, closeTab, selectTab, cycleTab, settings, toggleOutline, jumpToHeading,
   exportPdf
@@ -13821,19 +14003,22 @@ async function boot () {
   restorePanelWidths(cfg)
   restoreTexSplit(cfg)
   // The size the reader last read the web at. A preference of theirs rather
-  // than of any one site, so it is put back before the first page loads.
-  site.restoreZoom(cfg.siteZoom)
+  // than of any one site — but there is no viewer to tell yet, so it is kept
+  // and applied to the first mount instead; see pendingSiteZoom in ensureSite.
+  pendingSiteZoom = cfg.siteZoom
   fileRun.restoreRunSize(cfg)
   el.app.dataset.sidebar = cfg.sidebar || 'open'
   /* Closed unless it was left open: the copilot starts no process until the
      first message is sent, however the panel came to be showing.
 
-     Started here and awaited below rather than awaited here. Its settings half
-     is synchronous and has already run by the time this returns a promise, so
-     the panel is dressed at the same moment it was before; the half that waits
-     is the read of the stored conversations, which has nothing to do with the
-     vault walk it now runs beside. The note opened further down still finds its
-     own conversation in hand, because the barrier is above it. */
+     Started here and awaited after the paint, not beside the vault walk. Its
+     settings half is synchronous and has already run by the time this returns
+     a promise, so the panel is dressed at the same moment it was before; the
+     half that waits is the read of the stored conversations, which has nothing
+     to do with the vault walk and nothing the note needs from it. A note
+     opened below finds no conversation in hand if the read has not landed yet
+     — and needs none: `setNote` on a panel still arriving is a no-op, and the
+     mount hands the finished restore the note that is on screen by then. */
   const restoringCopilot = state.primary ? copilot.restoreAtBoot(cfg) : Promise.resolve()
   // Nothing to toggle where there is no copilot; the palette entry and the
   // menu command are turned away in the same breath, where each is handled.
@@ -13847,15 +14032,23 @@ async function boot () {
   if (!vault) {
     el.vaultLabel.textContent = 'No vault'
     paintLanding()
-    await restoringCopilot
     paintBootReady()
+    prefetchFeatureStyles()
+    /* In the background: the window is already up, and a transcript that will
+       not load must not take the landing page down with it — a failure here
+       used to end in the boot error card over a window that had opened fine. */
+    await restoringCopilot.catch((error) => {
+      console.error('Copilot conversations could not be restored', error)
+    })
     return
   }
 
   state.vault = vault
   el.vaultLabel.textContent = vault.name
   paintLanding()
-  await Promise.all([loadTree(), restoringCopilot])
+  /* The tree alone: the stored conversations arrive after the paint, so the
+     note is on screen before the history read lands rather than beside it. */
+  await loadTree()
 
   /* The strip comes back as it was left, minus any note that has since gone
      away — and each tab at the line it was left showing, which is what
@@ -13960,8 +14153,21 @@ async function boot () {
   /* The window is up and the note is readable. Now fetch the editing stack, so
      that switching view — or typing — does not wait on a download. Deliberately
      after the paint and off the critical path: awaited here it would simply be
-     the eager import again, wearing a different spelling. */
-  requestIdleCallback(() => { ensureEditor().catch(() => {}) }, { timeout: 500 })
+     the eager import again, wearing a different spelling. The deferred
+     stylesheet rides along in the same idle callback, for the same reason. */
+  requestIdleCallback(() => {
+    ensureEditor().catch(() => {})
+    loadFeatureStyles('styles-features').catch(() => {})
+  }, { timeout: 500 })
+
+  /* The stored conversations, after the paint. `openNote` above already ran
+     without them — `setNote` on a panel still arriving is a no-op, and the
+     mount hands the finished restore whichever note is on screen by then. A
+     transcript that will not load is logged, not shown: the note is already up
+     and the failure is not its news. */
+  await restoringCopilot.catch((error) => {
+    console.error('Copilot conversations could not be restored', error)
+  })
 
   // Last, and only if the previous session ended badly: see below. The app is
   // visible before this can ask its recovery question.

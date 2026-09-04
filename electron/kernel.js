@@ -97,7 +97,7 @@ function freePort () {
     const probe = net.createServer()
     probe.on('error', reject)
     probe.listen(0, '127.0.0.1', () => {
-      const { port } = probe.address()
+      const { port } = /** @type {any} */ (probe.address())
       probe.close(() => resolve(port))
     })
   })
@@ -146,7 +146,7 @@ function emptyConfigDir () {
 class KernelHost {
   /**
    * @param {{
-   *   pathFor?: () => string,
+   *   pathFor?: () => (string | undefined),
    *   rootDir?: string | null,
    *   onEvent?: (event: { path: string, kind: string, [key: string]: any }) => void
    * }} [options]
@@ -254,6 +254,7 @@ class KernelHost {
        it, and is what `IdentityProvider.token` defaults to. */
     const configDir = emptyConfigDir()
     this.configDir = configDir
+    /** @type {Record<string, string | undefined>} */
     const env = {
       ...process.env,
       PATH: this.pathFor(),
@@ -296,6 +297,7 @@ class KernelHost {
    *  execute. A missing `jupyter` is an ENOENT on spawn, which is the one
    *  failure worth falling through on. */
   async #spawnFirstThatStarts (args, env) {
+    /** @type {any} */
     let last = null
     for (const launcher of LAUNCHERS) {
       try {
@@ -314,14 +316,14 @@ class KernelHost {
 
   #spawnOne (launcher, args, env) {
     return new Promise((resolve, reject) => {
-      const child = spawn(launcher.cmd, [...launcher.args, ...args], {
+      const child = /** @type {import('node:child_process').ChildProcessByStdio<null, import('node:stream').Readable, import('node:stream').Readable> & { tail: () => string }} */ (spawn(launcher.cmd, [...launcher.args, ...args], {
         env,
         cwd: this.rootDir || undefined,
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
         // A process group, so a kernel that outlives its parent still goes.
         detached: process.platform !== 'win32'
-      })
+      }))
 
       /* The last of what it said, kept for the error message. Jupyter explains
          its own refusals — a bad root_dir, a taken port — on stderr, and
@@ -525,12 +527,16 @@ class KernelHost {
   /** The empty configuration directory this host made, taken away again. Ours
    *  alone and never written to, so there is nothing in it to lose — but it is
    *  a directory per server per run of the app, and leaving them is a tmpdir
-   *  that fills up over a machine's uptime. */
+   *  that fills up over a machine's uptime.
+   *
+   *  Removed without blocking: this runs on the dispose path, including the
+   *  synchronous quit path that cannot wait, so the removal is handed to the
+   *  promises API and left to land on its own. */
   #dropConfigDir () {
     const dir = this.configDir
     this.configDir = ''
     if (!dir) return
-    try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* it can stay */ }
+    fs.promises.rm(dir, { recursive: true, force: true }).catch(() => {})
   }
 
   /** Synchronous and best-effort, for `before-quit`, which does not wait. */
@@ -709,7 +715,7 @@ class Kernel {
     }
     const url = `ws://127.0.0.1:${this.host.port}/api/kernels/${this.id}/channels` +
       `?session_id=${this.session}&token=${this.host.token}`
-    return new Promise((resolve, reject) => {
+    return /** @type {Promise<void>} */ (new Promise((resolve, reject) => {
       const socket = new WebSocket(url)
       socket.onopen = () => { this.socket = socket; resolve() }
       socket.onerror = () => reject(new Error('Could not connect to the kernel.'))
@@ -728,6 +734,7 @@ class Kernel {
       /* Set only if a `Blob` ever does turn up, and then everything after it
          queues behind it: a kernel's messages mean nothing out of order — the
          `idle` that ends a cell would land before the line it printed. */
+      /** @type {Promise<void> | null} */
       let ordered = null
       socket.onmessage = (event) => {
         const data = event.data
@@ -741,7 +748,7 @@ class Kernel {
         if (ordered) ordered = ordered.then(() => this.#frame(data))
         else this.#frame(data)
       }
-    })
+    }))
   }
 
   /** One frame off the socket, whichever way it was sent. */
@@ -870,7 +877,11 @@ class Kernel {
     }
   }
 
-  /** One wire message, in the envelope every channel wants. */
+  /** One wire message, in the envelope every channel wants.
+   * @param {string} msgType
+   * @param {any} content
+   * @param {{ channel?: string, parent?: any, msgId?: (string | null) }} [options]
+   */
   #envelope (msgType, content, { channel = 'shell', parent = {}, msgId = null } = {}) {
     return {
       header: {
@@ -969,7 +980,7 @@ class Kernel {
         fail: (err) => { clearTimeout(timer); this.asks.delete(msgId); reject(err) }
       })
       try {
-        this.socket.send(JSON.stringify(this.#envelope(msgType, content, { msgId })))
+        /** @type {any} */ (this.socket).send(JSON.stringify(this.#envelope(msgType, content, { msgId })))
       } catch (err) {
         clearTimeout(timer)
         this.asks.delete(msgId)

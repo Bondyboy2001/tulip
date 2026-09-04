@@ -18,7 +18,6 @@
 
 const { ipcMain, shell } = require('electron')
 const fs = require('node:fs/promises')
-const fsSync = require('node:fs')
 const path = require('node:path')
 const { safeFileName } = require('./safe-name')
 const { forgetAll } = require('./path-store')
@@ -35,9 +34,9 @@ const {
  *   realSafeTargetPath: (relOrAbs: string) => Promise<string>,
  *   rel: (abs: string) => string,
  *   getVaultPath: () => string | null,
- *   freeName: (dir: string, base: string, ext?: string) => string,
+ *   freeName: (dir: string, base: string, ext?: string) => Promise<string>,
  *   noteSelfWrite: (abs: string, stamp?: string | null) => void,
- *   markIndexDirty: () => void,
+ *   markIndexDirty: (relPath?: string) => void,
  *   invalidateVaultSnapshot: () => void,
  *   getTrust: () => { creationTime: (p: string, at?: number) => number | null, record: (op: any) => any, forgetCreations: (p: string) => void } | null,
  *   languageHistory: { sync: (p: string, text: string, opts?: any) => Promise<any>, remove: (p: string) => Promise<any> },
@@ -70,7 +69,7 @@ function makeVaultWriteDomain (ctx) {
     isSnapshotFile, documentsChanged, touchIndex, touchDocumentIndex,
     touchWhiteboardIndex, getIndex, ensureIndex, getPythonEnvs, annotationFile,
     assertReal,
-    writeAtomic, readConfig, maxVersionedBytes, maxIndexBytes, ignoredDirs
+    writeAtomic, maxVersionedBytes, maxIndexBytes, ignoredDirs
   } = ctx
 
   const index = getIndex
@@ -83,7 +82,7 @@ function makeVaultWriteDomain (ctx) {
     /* The extension is the file's, not the name's: the tree shows a document
        without one, so a name typed back with `.pdf` or `.md` on it would other-
        wise be filed as `Paper.pdf.pdf`. */
-    let ext = fsSync.statSync(abs).isDirectory()
+    let ext = (await fs.stat(abs)).isDirectory()
       ? ''
       : path.extname(abs)
     /* Source and data files are the exception, because they are the one kind the
@@ -111,22 +110,26 @@ function makeVaultWriteDomain (ctx) {
     if (target === abs) return { path: rel(abs), links: 0 }
     // Unlike the other routes into the vault, a rename says what it wants to be
     // called — silently landing on "${clean} 2" would ignore that.
-    if (fsSync.existsSync(target)) {
+    if (await fs.stat(target).then(() => true).catch(() => false)) {
       /* On a case-insensitive volume, `Languages` and `languages` both find the
          source entry. That is a valid rename, not a collision. Compare directory
          entries rather than spellings so case-only (and Unicode-normalisation-
          only) renames pass while a genuinely different sibling is still refused.
          `lstat` matters for links: two distinct links to one target are still two
          occupied names. */
-      const sourceEntry = fsSync.lstatSync(abs)
-      const targetEntry = fsSync.lstatSync(target)
+      const sourceEntry = await fs.lstat(abs)
+      const targetEntry = await fs.lstat(target)
       const sameEntry = sourceEntry.dev === targetEntry.dev &&
         sourceEntry.ino === targetEntry.ino
       if (!sameEntry) throw new Error(`"${clean}" already exists here.`)
     }
 
     const result = await relocate(abs, target)
-    markIndexDirty()
+    /* Both names, so the targeted sync drops the old entry and reads the new
+       one rather than walking the vault. A folder rename is extension-less on
+       both ends and still falls back to the full walk, as before. */
+    markIndexDirty(rel(abs))
+    markIndexDirty(rel(target))
     invalidateVaultSnapshot()
     return result
   }
@@ -243,8 +246,11 @@ function makeVaultWriteDomain (ctx) {
       } else if (metadata?.bom) {
         payload = encodeText(content, { encoding: 'utf8', bom: true })
       }
+      /* Balanced durability: the write lands now and is checkpointed to the
+         disk's platters on a timer, on hide and on quit — fast everywhere,
+         including networked volumes. */
       const stamp = await writeAtomic(abs, payload, {
-        durable: readConfig().durability === 'full'
+        durable: false
       })
       /* The bytes on disk have moved. Said here as well as in `touchIndex` below,
          which only hears about Markdown: a TeX document saved from the editor is
@@ -264,9 +270,9 @@ function makeVaultWriteDomain (ctx) {
          from, and a website file put into it would answer a search for the site's
          own name with a row that is not a note — until the next walk of the vault
          quietly dropped it again, which is the worse half of the bug. */
-      if (isMarkdown) touchIndex(abs, content, stamp)
-      if (whiteboard) touchWhiteboardIndex(abs, content, stamp, metadata?.whiteboardText)
-      if (isCode(abs) || isData(abs) || isNotebook(abs)) touchDocumentIndex(abs, content, stamp)
+      if (isMarkdown) await touchIndex(abs, content, stamp)
+      if (whiteboard) await touchWhiteboardIndex(abs, content, stamp, metadata?.whiteboardText)
+      if (isCode(abs) || isData(abs) || isNotebook(abs)) await touchDocumentIndex(abs, content, stamp)
       if (isLanguageTable(abs)) {
         await languageHistory.sync(rel(abs), content).catch((err) => {
           console.error('language history sync failed', err)
@@ -287,7 +293,10 @@ function makeVaultWriteDomain (ctx) {
            so the root is a string here however the type has to say it. */
         : path.resolve(/** @type {string} */ (getVaultPath()))
 
-      if (!fsSync.existsSync(dir) || !fsSync.statSync(dir).isDirectory()) {
+      /* `stat` rather than `existsSync`: the check and the kind answer come
+         from one await instead of two blocking calls. */
+      const destStat = await fs.stat(dir).catch(() => null)
+      if (!destStat || !destStat.isDirectory()) {
         throw new Error('That destination is not a folder.')
       }
       // Moving a folder inside itself would detach the subtree from the vault.
@@ -297,15 +306,17 @@ function makeVaultWriteDomain (ctx) {
       if (path.dirname(src) === dir) return { path: rel(src), links: 0 }
 
       const ext = path.extname(src)
-      const result = await relocate(src, freeName(dir, path.basename(src, ext), ext))
-      markIndexDirty()
+      const target = await freeName(dir, path.basename(src, ext), ext)
+      const result = await relocate(src, target)
+      markIndexDirty(rel(src))
+      markIndexDirty(rel(target))
       invalidateVaultSnapshot()
       return result
     })
 
     ipcMain.handle('file:delete', async (_e, p) => {
       const abs = await realSafeTargetPath(p)
-      const deletingDirectory = fsSync.statSync(abs).isDirectory()
+      const deletingDirectory = (await fs.stat(abs)).isDirectory()
       /* Read while the notes are still there to be found: after the trash, the
          index no longer answers for what was under a deleted folder. */
       await ensureIndex()
@@ -327,8 +338,10 @@ function makeVaultWriteDomain (ctx) {
       /* Attachment removal is followed immediately by a renderer refresh. The
          watcher invalidates these caches too, but only after its debounce; without
          doing it here that immediate refresh reads the old asset list and redraws
-         the image Tulip just moved away. */
-      markIndexDirty()
+         the image Tulip just moved away. The deleted name, so the targeted sync
+         drops exactly that entry — a deleted folder is extension-less and still
+         falls back to the full walk. */
+      markIndexDirty(rel(abs))
       invalidateVaultSnapshot()
 
       /* A PDF's highlights follow it into the Trash, so restoring the document
@@ -337,7 +350,7 @@ function makeVaultWriteDomain (ctx) {
          Anything else has no sidecar and this finds nothing. */
       const stem = annotationFile(p).slice(0, -5)
       for (const sidecar of [annotationFile(p), stem + PDF_TEXT_SUFFIX, stem]) {
-        if (!fsSync.existsSync(sidecar)) continue
+        if (!await fs.stat(sidecar).then(() => true).catch(() => false)) continue
         try {
           /* Where the path really leads, before anything is thrown away. Both the
              test above and `shell.trashItem` follow symlinks, so a linked
@@ -374,6 +387,8 @@ function makeVaultWriteDomain (ctx) {
       let skipped = 0
       /** @type {string | null} */
       let first = null
+      /** Vault-relative paths this import laid down, for the targeted sync. */
+      const landed = []
 
       const copyInto = async (source, dir) => {
         let stat
@@ -385,7 +400,7 @@ function makeVaultWriteDomain (ctx) {
         if (stat.isDirectory()) {
           const name = path.basename(source)
           if (name.startsWith('.') || ignoredDirs.has(name)) return
-          const target = freeName(dir, name)
+          const target = await freeName(dir, name)
           await fs.mkdir(target, { recursive: true })
           let entries = []
           try { entries = await fs.readdir(source) } catch { /* unreadable */ }
@@ -412,7 +427,7 @@ function makeVaultWriteDomain (ctx) {
            report is for. */
         if (!isSnapshotFile(source)) { skipped++; return }
         const ext = path.extname(source)
-        const target = freeName(dir, path.basename(source, ext), ext)
+        const target = await freeName(dir, path.basename(source, ext), ext)
         noteSelfWrite(target)
         await fs.copyFile(source, target)
         /* The creation date is kept for the kinds whose history the trust store
@@ -424,6 +439,7 @@ function makeVaultWriteDomain (ctx) {
         }
         imported++
         if (!first) first = rel(target)
+        landed.push(rel(target))
       }
 
       for (const source of sources || []) {
@@ -434,7 +450,11 @@ function makeVaultWriteDomain (ctx) {
         await copyInto(path.resolve(source), root)
       }
 
-      markIndexDirty()
+      /* One mark per landed file, so the next sync stats those instead of
+         walking the vault. A name the targeted sync cannot place — a folder,
+         which arrives extension-less — still falls back to the full walk. */
+      for (const key of landed) markIndexDirty(key)
+      if (!landed.length) markIndexDirty()
       invalidateVaultSnapshot()
       return { imported, skipped, first }
     })

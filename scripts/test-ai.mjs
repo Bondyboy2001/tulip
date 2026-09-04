@@ -96,7 +96,7 @@ const briefing = systemPrompt('/tmp/example-vault')
 const promptMarkdown = readFileSync('electron/prompt.md', 'utf8')
 check('the Copilot prompt lives in Markdown',
       promptMarkdown.startsWith('# Tulip Copilot'))
-check('the system prompt stays compact', briefing.length < 6000,
+check('the system prompt stays compact', briefing.length < 7000,
       `${briefing.length.toLocaleString()} characters`)
 check('the vault boundary is explicit',
       briefing.includes('inside the vault at /tmp/example-vault'))
@@ -870,9 +870,13 @@ check('ask mode needs vault trust', untrustedAsk.ok === false)
 const untrustedRead = ai.start({ key: 'chat-r', provider: 'opencode', model: 'm', mode: 'read', turnId: 't-r' })
 check('read mode works untrusted', untrustedRead.ok === true)
 ai.setTrusted(() => true)
-const { isSecretPath } = ai.parsers
+const { isSecretPath, hasSecretContent, versionTooOld } = ai.parsers
 check('secret basenames are caught', isSecretPath('.env') && isSecretPath('notes/id_rsa'))
+check('key material is caught by suffix', isSecretPath('notes/deploy.key') && isSecretPath('notes/cert.pem'))
 check('ordinary notes pass', !isSecretPath('notes/tulip.md') && !isSecretPath('.attachments/photo.png'))
+check('private key content is caught', hasSecretContent('-----BEGIN PRIVATE KEY-----\nabc'))
+check('ordinary prose passes content', !hasSecretContent('hello, how are you?'))
+check('old CLIs are flagged', versionTooOld('opencode 1.2.3 (abc)') && !versionTooOld('opencode 1.18.26'))
 ai.stopAll()
 
 /* ----------------------------------------------------------------- report */

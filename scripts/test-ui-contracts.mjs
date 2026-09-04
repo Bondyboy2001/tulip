@@ -184,11 +184,17 @@ if (source) {
   assert.match(settings, /asOptions\(offeredModels\(modelCatalogue, values\(\)\.aiModels, chosen\)\)/)
   assert.match(settings, /name: 'Browse all models'/)
   assert.match(settings, /Run Copilot Doctor below to check/)
-  /* Setup guidance is discoverable without becoming a forced first-run tour.
-     The empty state and palette reach the same settings section. */
-  assert.match(html, /data-command="setup">Getting started checklist</)
-  assert.match(renderer, /id: 'setup', title: 'Getting started checklist…'/)
-  assert.match(renderer, /case 'setup': settings\.open\('start'\)/)
+  /* The guide is discoverable without becoming a forced first-run tour.
+     The empty state and the palette open the portable note directly; there is
+     no checklist section in Settings. Backups run from the palette and the
+     menu and still record their timestamp. */
+  assert.match(html, /data-command="getting-started">Open Getting Started</)
+  assert.doesNotMatch(html, /data-command="setup"/)
+  assert.match(renderer, /id: 'getting-started', title: 'Open Getting Started'/)
+  assert.doesNotMatch(renderer, /id: 'setup', title:/)
+  assert.doesNotMatch(renderer, /settings\.open\('start'\)/)
+  assert.doesNotMatch(settings, /id: 'start'/)
+  assert.doesNotMatch(settings, /id: 'files'/)
   assert.match(renderer, /setSetting\('lastBackupAt', Date\.now\(\)\)/)
   /* An empty bank has one creation action and cannot start a zero-card study. */
   assert.match(renderer, /const studyable = viewingLanguageTable\(\) \|\| bankCards\.length > 0/)
@@ -421,10 +427,10 @@ if (source) {
   /* A website tab keeps its live page while the reader is elsewhere — the
      whole point of the guest pool in src/site.js. `leave` hides it; only a
      closed tab ends it, and the last tab holding a file is what says so. */
-  assert.match(renderer, /else if \(viewingSite\(\)\) site\.leave\(\)/)
-  assert.match(renderer, /!state\.tabs\.some\(\(other\) => other\.path === tab\.path\)[\s\S]{0,60}site\.forget\(tab\.path\)/)
+  assert.match(renderer, /else if \(viewingSite\(\)\) site\?\.leave\(\)/)
+  assert.match(renderer, /!state\.tabs\.some\(\(other\) => other\.path === tab\.path\)[\s\S]{0,60}site\?\.forget\(tab\.path\)/)
   // ⌘F over a page is Chromium's own find, not a refusal.
-  assert.match(renderer, /if \(viewingSite\(\)\) \{ siteFind\.open\(\); break \}/)
+  assert.match(renderer, /if \(viewingSite\(\)\) \{ ensureSite\(\)\.then\(\(\) => siteFind\?\.open\(\)\)/)
   assert.doesNotMatch(renderer, /Find does not reach inside a web page/)
   /* A file a page offers has somewhere to land, and the guests are where the
      reader's right-click is answered. Both are main's, and both were missing
@@ -677,7 +683,7 @@ if (source) {
   assert.match(copilot, /run: \(\) => selectMention\(from, entry\.path\)/)
   assert.match(copilot, /box\.value = box\.value\.slice\(0, from\) \+ box\.value\.slice\(to\)/)
   assert.match(copilot, /addAttachments\(\[path\], true\)/)
-  assert.match(copilot, /function attachmentKind \(path\)/)
+  assert.match(read('src', 'copilot-attachments.js'), /function attachmentKind \(path\)/)
   /* Fenced code in a reply is coloured by the reading view's own painter, from
      the class markdown-it's fence rule leaves the language in — and on every
      path that writes prose into the panel, including the settled half of a

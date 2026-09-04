@@ -19,8 +19,11 @@ import { escapeHtml } from './dom.js'
 
 /* ---------------------------------------------------------------- render */
 
+/** @type {any} */
 let katex = null
+/** @type {Promise<any> | null} */
 let loadingKatex = null
+/** @type {Promise<any> | null} */
 let loadingStyles = null
 
 function loadStyles () {
@@ -55,6 +58,7 @@ function loadStyles () {
   return loadingStyles
 }
 
+/** @returns {Promise<any>} */
 function loadKatex () {
   if (katex) return Promise.resolve(katex)
   if (!loadingKatex) {
@@ -104,6 +108,10 @@ function indexEquations (spans) {
 }
 
 /* Exported for math-editor.js, which renders the same equation live. */
+/**
+ * @param {string} tex
+ * @param {Map<string, { label: string, tag: string }> | null} [equations]
+ */
 export function equationSource (tex, equations = null) {
   const found = LABEL.exec(tex)
   const label = found?.[1]?.trim() || ''
@@ -464,7 +472,8 @@ export function findMath (text) {
  * One entry is enough — the interesting case is many updates against one
  * document, not alternation between two.
  */
-let cache = { doc: null, text: '', spans: null, equations: null }
+/** @type {{ doc: any, text: string, spans: Array<{ from: number, to: number, tex: string, display: boolean }>, equations: Map<string, { label: string, tag: string }> | null }} */
+let cache = { doc: null, text: '', spans: /** @type {any} */ (null), equations: null }
 
 function fill (doc) {
   if (cache.doc !== doc) {

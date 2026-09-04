@@ -22,7 +22,7 @@ assert.equal(isRequestPath(`./${REQUEST_PATH}`), true)
 assert.equal(isRequestPath('.not-a-command.json'), false)
 assert.deepEqual(
   parseRequest('{"path":"Papers/Untitled.tex","name":"test123"}'),
-  { path: 'Papers/Untitled.tex', name: 'test123' }
+  { path: 'Papers/Untitled.tex', name: 'test123', turnId: null, at: null }
 )
 assert.throws(() => parseRequest('{"path":"Papers/Untitled.tex"}'), /both/)
 
@@ -91,9 +91,9 @@ assert.deepEqual(
   mergeChatHistory(older, { notes: { 'B.md': { at: 9, convos: [{ id: 'b2' }] } }, remove: [] }),
   {
     'A.md': { at: 3, convos: [{ id: 'a1' }] },
-    'B.md': { at: 9, convos: [{ id: 'b2' }] }
+    'B.md': { at: 9, convos: [{ id: 'b2' }, { id: 'b1' }] }
   },
-  'a note not mentioned by the write keeps what is on disk'
+  'a note write unions by conversation id so memory trims do not erase disk'
 )
 assert.deepEqual(
   Object.keys(mergeChatHistory(older, { notes: {}, remove: ['A.md'] })),

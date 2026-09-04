@@ -63,6 +63,13 @@ npm run app:win            # Windows — builds build/Tulip-win32-x64/
 Both are the release path, and only they advance the patch version. `npm start`
 and `npm run dev` leave the version alone.
 
+To ship fewer spelling dictionaries and a smaller download, set
+`TULIP_SPELL_LANGUAGES` before the build script — `fr,de` carries French and
+German, `none` carries none (English is built in either way). Unset carries all
+fifteen, which stays the default because the app works offline and cannot fetch
+a dictionary later; a language left out is shown as "not in this build" in
+Settings rather than offered.
+
 ### Updating
 
 There is no auto-updater, and Tulip never checks for one on its own. **Check for

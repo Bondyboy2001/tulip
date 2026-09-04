@@ -43,6 +43,7 @@ const { ATTACHMENT_DIR, isTex } = require('./vault-kinds')
  *   getVaultPath: () => string | null,
  *   readConfig: () => Record<string, any>,
  *   ensureLoginPath: () => Promise<void>,
+ *   ensureFallbackPaths: () => Promise<void>,
  *   runnerPath: () => string,
  *   pythonEnvs: { sharedDir: () => string, tool: (dir: string, name: string) => Promise<string|null>, install: (dir: string, name: string, opts?: any) => Promise<{ok: boolean, reason?: string}> },
  *   mayInstallPython: () => boolean,
@@ -59,7 +60,7 @@ const { ATTACHMENT_DIR, isTex } = require('./vault-kinds')
 function makeRenderDomain (ctx) {
   const {
     safePath, realSafePath, sha1, assertReal, rel, noteSelfWrite, invalidateVaultSnapshot,
-    getVaultPath, readConfig, ensureLoginPath, runnerPath, pythonEnvs,
+    getVaultPath, readConfig, ensureLoginPath, ensureFallbackPaths, runnerPath, pythonEnvs,
     mayInstallPython, toRun, ownRun, startRun, runTimeoutMs, nextRunId, cancelled,
     discard, texPreviewDir
   } = ctx
@@ -192,6 +193,7 @@ function makeRenderDomain (ctx) {
     // The probe is the first thing a render does, so it is also where the login
     // shell's PATH has to have arrived.
     await ensureLoginPath()
+    await ensureFallbackPaths()
 
     const shared = pythonEnvs.sharedDir()
     const mine = await pythonEnvs.tool(shared, 'manim')
@@ -464,6 +466,7 @@ function makeRenderDomain (ctx) {
 
       const finish = async () => {
         await ensureLoginPath()
+        await ensureFallbackPaths()
         await fs.writeFile(path.join(dir, 'figure.tex'), tikzDocument(code), 'utf8')
         const { latex, dvisvgm } = tikzCommands()
 

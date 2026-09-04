@@ -197,13 +197,13 @@ function fuzzed (days, random) {
 /**
  * Grade a card and say when it comes back.
  *
- * @param {object|null} card    the card's state, or null/new for a first sight
+ * @param {{ due?: number, stability?: number, difficulty?: number, reps?: number, lapses?: number, last?: number } | null} card    the card's state, or null/new for a first sight
  * @param {number} answer       AGAIN | HARD | GOOD | EASY
  * @param {number} now          epoch milliseconds; the caller owns the clock
  * @param {number} [retention]  the recall probability to aim at, 0.7–0.99
  * @param {() => number} [random]  0–1, for the interval fuzz; injected so a
  *   test can be deterministic
- * @returns {object} the card's new state, with `due` set
+ * @returns {{ due: number, stability: number, difficulty: number, reps: number, lapses: number, last: number }} the card's new state, with `due` set
  */
 export function grade (card, answer, now, retention = 0.9, random = Math.random) {
   const g = clamp(Math.round(answer), AGAIN, EASY)

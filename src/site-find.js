@@ -92,12 +92,12 @@ export function mountSiteFind ({ host, site, onClose }) {
      keeps, and for the same reason: a switch flipped on a phrase already in
      the box is one deliberate act. */
   function queue (value) {
-    clearTimeout(timer)
+    if (timer != null) clearTimeout(timer)
     timer = setTimeout(() => { timer = null; run(value) }, QUERY_WAIT)
   }
 
   function run (value) {
-    clearTimeout(timer)
+    if (timer != null) clearTimeout(timer)
     timer = null
     const query = String(value || '')
     if (!query.trim()) { forget(); return }
@@ -143,7 +143,7 @@ export function mountSiteFind ({ host, site, onClose }) {
 
   /** Nothing in flight, no highlight on the page, no tally in the box. */
   function forget () {
-    clearTimeout(timer)
+    if (timer != null) clearTimeout(timer)
     timer = null
     site.clearFind()
     tallyAt = 0

@@ -24,9 +24,16 @@ ok('the vault path cannot be set from the renderer', () => {
   assert.deepEqual(rejected, ['vaultPath'])
 })
 
-ok('the default vault path cannot be set either', () => {
-  const { accepted } = sanitizeConfigPatch({ defaultVaultPath: '/tmp/elsewhere' })
-  assert.deepEqual(accepted, {})
+ok('the default vault path is settable by shape — main re-checks the value', () => {
+  // Shape only: a string pins, undefined clears. Main's `config:set` handler
+  // additionally requires the open vault or a recent one that still exists, so
+  // an arbitrary folder named here never becomes the next launch's vault.
+  assert.deepEqual(
+    sanitizeConfigPatch({ defaultVaultPath: '/tmp/vault' }).accepted,
+    { defaultVaultPath: '/tmp/vault' })
+  const cleared = sanitizeConfigPatch({ defaultVaultPath: undefined })
+  assert.ok('defaultVaultPath' in cleared.accepted)
+  assert.deepEqual(sanitizeConfigPatch({ defaultVaultPath: 42 }).accepted, {})
 })
 
 ok('the spawned command strings cannot be set', () => {
@@ -146,12 +153,14 @@ ok('autosave is a delay in milliseconds, not a switch', () => {
 })
 
 ok('the keys main reads for itself are all settable or deliberately absent', () => {
-  // Read by main. The first group is settable; the second must never be.
+  // Read by main. The first group is settable; the second must never be. The
+  // default vault is the exception among paths: settable by shape here, with
+  // main's handler re-checking the value against the open and recent vaults.
   for (const key of ['zoom', 'pdfText', 'texEngine', 'historyInVault', 'manimQuality',
-    'autoInstallPythonDeps']) {
+    'autoInstallPythonDeps', 'defaultVaultPath']) {
     assert.ok(key in CONFIG_KEYS, `${key} should be settable`)
   }
-  for (const key of ['vaultPath', 'defaultVaultPath', 'tikzCommand', 'manimCommand', 'trustedVaults',
+  for (const key of ['vaultPath', 'tikzCommand', 'manimCommand', 'trustedVaults',
     'pythonInstaller']) {
     assert.ok(!(key in CONFIG_KEYS), `${key} must not be settable from the renderer`)
   }

@@ -78,6 +78,7 @@ const MARKS = {
 /* Manim is not in Simple Icons, so its mark ships as the project's own file —
    the sidebar logo from docs.manim.community, bundled at build time because
    the page's CSP forbids fetching anything. */
+// @ts-ignore: bundled by build.mjs as a string; tsc never sees the loader
 import manimLogoSource from './manim-logo.svg'
 
 function manimSvg () {
@@ -98,8 +99,15 @@ function manimSvg () {
    asset Lean draws at this size. Upstream ships a black and a white copy that
    differ only in stroke colour, so one file serves both themes with the
    stroke repainted in the theme's ink. */
+// @ts-ignore: bundled by build.mjs as a string; tsc never sees the loader
 import leanLogoSource from './lean-logo.svg'
 
+/**
+ * @param {string} source
+ * @param {string} extraClass
+ * @param {RegExp | null} [repaint]
+ * @returns {Element | null}
+ */
 function brandSvg (source, extraClass, repaint = null) {
   const doc = new DOMParser().parseFromString(source, 'image/svg+xml')
   const svg = doc.documentElement
@@ -114,9 +122,9 @@ function brandSvg (source, extraClass, repaint = null) {
   // `repaint` names the colour that should follow the theme; on elements that
   // carry it, whichever of fill/stroke is a real colour becomes the ink. A
   // mark drawn entirely in its own brand colours passes nothing and keeps them.
-  for (const el of repaint ? svg.querySelectorAll('[style]') : []) {
-    const style = el.getAttribute('style')
-    if (!repaint.test(style)) continue
+  for (const el of repaint ? /** @type {NodeListOf<HTMLElement>} */ (svg.querySelectorAll('[style]')) : []) {
+    const style = /** @type {string} */ (el.getAttribute('style'))
+    if (!repaint?.test(style)) continue
     if (/fill:\s*#/.test(style)) el.style.fill = 'var(--ink)'
     if (/stroke:\s*#/.test(style)) el.style.stroke = 'var(--ink)'
   }

@@ -162,6 +162,7 @@ function scanTables (state, first, last) {
      those cells wrote table edits into the body of the fence. Tracked the same
      way `headings` tracks it, and by the same rule: a fence closes only on its
      own character, so ``` does not end a ~~~ block. */
+  /** @type {string | null} */
   let fence = null
 
   for (let n = first; n < total; n++) {
@@ -242,6 +243,7 @@ const findTables = (state) => scanTables(state, 1, state.doc.lines).tables
  * document is unchanged, so the repeat callers within one version are free and
  * an edit still recomputes exactly once.
  */
+/** @type {{ doc: any, tables: any }} */
 let cache = { doc: null, tables: null }
 
 function tablesIn (state) {
@@ -293,6 +295,11 @@ const BREAK = /^<br\s*\/?>$/i
    a string that was only ever going to be text. */
 const MARKUP = /[*_`[\]($<]/
 
+/**
+ * @param {any} td
+ * @param {string} text
+ * @param {{ resolve?: any, onReady?: () => void, onResize?: ((embed: any, width: any) => void) | null }} [options]
+ */
 function renderCell (td, text, {
   resolve = () => null,
   onReady = () => {},
@@ -323,6 +330,7 @@ function renderCell (td, text, {
   let imageOnly = false
   /* The picture of a picture-only cell, kept for the width hint the cell is
      given at the end — see `fitImageCell`. */
+  /** @type {{ media: any, width: any } | null} */
   let onlyImage = null
   /* Decided before the picture is dressed rather than after it: a picture that
      is the whole cell fills the cell, and a filling picture is one that carries
@@ -383,7 +391,7 @@ function renderCell (td, text, {
                 media.style.height = ''
                 fitImageCell(td, media, width)
               }
-              onResize(embed, width)
+              /** @type {any} */ (onResize)(embed, width)
             }
           })
           shell.append(grip)
@@ -530,7 +538,7 @@ function anchorSelectionTo (view, cell) {
   const head = view.state.selection.main.head
   // Already in this table: leave it, so a click from one cell to the next does
   // not fill the history with selection-only transactions.
-  if (tableAt(view.state, head) === found.table) return
+  if (tableAt(view.state, head) === /** @type {any} */ (found).table) return
   view.dispatch({
     selection: { anchor: Math.min(at, view.state.doc.length) },
     // Not scrolled to: the table is already on screen — the reader just
@@ -557,7 +565,7 @@ function caretToEnd (cell) {
 
 /** Select-all inside a cell means that cell's text, not the note around it. */
 function selectCellContents (cell) {
-  const selection = window.getSelection()
+  const selection = /** @type {Selection} */ (window.getSelection())
   const range = document.createRange()
   range.selectNodeContents(cell)
   selection.removeAllRanges()
@@ -596,9 +604,34 @@ function selectionOffsets (cell) {
  * A grid's rows, header first, in the order their `data-row` numbers them.
  *
  * The `colgroup` a sized table carries is skipped for free: it holds `col`
- * elements and no `tr`.
+ * elements and no `tr`. Spacer rows a windowed table stands its hidden rows in
+ * for (see the windowing below) carry no `data-row` and are skipped the same
+ * way: they are room, not rows, and nothing may address a cell through one.
  */
-const gridRows = (wrap) => wrap?.querySelectorAll(':scope > table > * > tr') || []
+const gridRows = (wrap) => wrap?.querySelectorAll(':scope > table > * > tr[data-row]') || []
+
+/**
+ * One row out of that list, by its number rather than its position.
+ *
+ * A whole table numbers its rows by position, so the index used to be the
+ * answer. A windowed table only built a band of them, so the row is found by
+ * offset from the band's start instead, with a short walk of the band behind
+ * it for the rows a scroll has pinned outside it.
+ */
+function rowAt (rows, r) {
+  if (!rows.length) return null
+  /** @type {any} */
+  let tr = null
+  if (r === 0) tr = rows[0]
+  else if (rows.length > 1) tr = rows[r - Number(rows[1].dataset.row) + 1] || null
+  if (tr?.dataset?.row !== String(r)) {
+    tr = null
+    for (const candidate of rows) {
+      if (candidate.dataset.row === String(r)) { tr = candidate; break }
+    }
+  }
+  return tr
+}
 
 /**
  * One cell out of that list, by position.
@@ -610,17 +643,30 @@ const gridRows = (wrap) => wrap?.querySelectorAll(':scope > table > * > tr') || 
  * this question once per cell.
  */
 function cellAt (rows, r, c, editableOnly = true) {
-  const cell = rows[r]?.children[c]
+  const cell = rowAt(rows, r)?.children[c]
   if (!cell) return null
   return !editableOnly || cell.getAttribute('contenteditable') === 'plaintext-only'
     ? cell
     : null
 }
 
-const cellIn = (wrap, r, c, editableOnly = true) =>
-  cellAt(gridRows(wrap), r, c, editableOnly)
+const cellIn = (wrap, r, c, editableOnly = true) => {
+  const hit = cellAt(gridRows(wrap), r, c, editableOnly)
+  if (hit) return hit
+  /* Past the built band of a windowed table: grow the window to meet the row
+     and ask once more. A whole table answers the first time, so this is one
+     extra query only where the row genuinely was not there. */
+  if (wrap && Number.isInteger(r) && r >= 0) {
+    ensureWindowFor(wrap, r, r)
+    return cellAt(gridRows(wrap), r, c, editableOnly)
+  }
+  return null
+}
 
 function focusCell (wrap, r, c) {
+  /* The row may be one a windowed table has not built. The window grows first,
+     so landing past the band is still landing somewhere. */
+  if (wrap && Number.isInteger(r) && r >= 0) ensureWindowFor(wrap, r, r)
   const cell = cellIn(wrap, r, c, false)
   if (!cell) return false
   cell.focus()
@@ -632,7 +678,7 @@ function focusCell (wrap, r, c) {
  *  what makes a second ⌘A mean something wider than the first. */
 function cellFullySelected (cell) {
   const at = selectionOffsets(cell)
-  return Boolean(at) && at.from === 0 && at.to === (cell.textContent || '').length &&
+  return !!at && at.from === 0 && at.to === (cell.textContent || '').length &&
          at.to > at.from
 }
 
@@ -680,7 +726,7 @@ function insertIntoCell (view, cell, text) {
   const node = cell.firstChild || cell
   range.setStart(node, Math.min(at.from + text.length, (node.textContent || '').length))
   range.collapse(true)
-  const selection = window.getSelection()
+  const selection = /** @type {Selection} */ (window.getSelection())
   selection.removeAllRanges()
   selection.addRange(range)
 }
@@ -719,7 +765,7 @@ function watchForPressesAway () {
        multi-cell command with only the right-clicked cell to act on. */
     if (event.target instanceof Element && event.target.closest('#ctx')) return
     for (const wrap of document.querySelectorAll('.tk-table-wrap')) {
-      if (!wrap.contains(event.target)) clearCellSelection(wrap)
+      if (!wrap.contains(/** @type {Node | null} */ (event.target))) clearCellSelection(wrap)
     }
   }, true)
 }
@@ -752,6 +798,11 @@ function selectCellRectangle (wrap, from, to) {
   }
   const had = SELECTED_RECTANGLE.get(wrap)
   SELECTED_RECTANGLE.set(wrap, next)
+
+  /* A rectangle may reach past the rows a large table built — a whole column
+     of a windowed grid, most obviously. Grow the window to meet it first, so
+     every cell of the rectangle exists to be lit rather than only the band. */
+  if (wrap) ensureWindowFor(wrap, next.top, next.bottom)
 
   const rows = gridRows(wrap)
   const light = (r, c, on) =>
@@ -850,7 +901,7 @@ function caretInCellAt (cell, x, y) {
 /** Put the native contenteditable caret at a hit-tested position. */
 function placeCaret (caret) {
   if (!caret?.node?.isConnected) return false
-  const selection = window.getSelection()
+  const selection = /** @type {Selection} */ (window.getSelection())
   const range = document.createRange()
   range.setStart(caret.node, caret.offset)
   range.collapse(true)
@@ -868,17 +919,43 @@ function placeCaret (caret) {
  * below it, or off the bottom of the window entirely while the page scrolls.
  */
 function cellPointNear (wrap, x, y) {
-  const under = document.elementFromPoint(x, y)?.closest?.(
+  const under = /** @type {HTMLElement | null} */ (document.elementFromPoint(x, y)?.closest?.(
     '.tk-table [data-row][data-col][contenteditable="plaintext-only"]'
-  )
+  ))
   if (under && wrap.contains(under)) {
     return { r: Number(under.dataset.row), c: Number(under.dataset.col) }
   }
 
   const rows = gridRows(wrap)
   if (!rows.length) return null
-  const r = nearestIndex(rows, y, 'top', 'bottom')
-  return { r, c: nearestIndex(rows[r].children, x, 'left', 'right') }
+  /* A windowed grid only built its visible band, so a point past the band has
+     no element to hit-test against. Name the row arithmetically from the
+     band's edge instead, and let the selection grow the window to meet it —
+     which is what keeps a drag past the fold working the way it did when
+     every row existed. Above the table itself the old answer stands: the
+     header is still row zero. */
+  const total = fullRowCount(wrap)
+  if (rows.length > 1) {
+    const rowH = wrap._rowH || TABLE_ROW_HEIGHT_GUESS
+    const tableTop = wrap.getBoundingClientRect().top
+    const firstRow = rows[1]
+    const lastRow = rows[rows.length - 1]
+    const bodyFirst = Number(firstRow.dataset.row)
+    const bodyLast = Number(lastRow.dataset.row)
+    const firstTop = firstRow.getBoundingClientRect().top
+    const lastBottom = lastRow.getBoundingClientRect().bottom
+    if (y >= tableTop && y < firstTop && bodyFirst > 1) {
+      const r = Math.max(1, Math.round(bodyFirst - (firstTop - y) / rowH))
+      return { r, c: nearestIndex(firstRow.children, x, 'left', 'right') }
+    }
+    if (y > lastBottom && bodyLast >= 1 && bodyLast < total - 1) {
+      const r = Math.min(total - 1, Math.round(bodyLast + (y - lastBottom) / rowH))
+      return { r, c: nearestIndex(lastRow.children, x, 'left', 'right') }
+    }
+  }
+  const at = nearestIndex(rows, y, 'top', 'bottom')
+  const hit = rows[at]
+  return { r: Number(hit.dataset.row), c: nearestIndex(hit.children, x, 'left', 'right') }
 }
 
 /**
@@ -916,6 +993,7 @@ function nearestIndex (boxes, at, low, high) {
  * is held, so asking per frame was a style recalc and a layout read for nothing.
  */
 function dragBounds (wrap) {
+  /** @type {{ el: any, near: number, far: number } | null} */
   let pane = null
   for (let node = wrap.parentElement; node && !pane; node = node.parentElement) {
     if (node.scrollHeight <= node.clientHeight + 1) continue
@@ -928,6 +1006,7 @@ function dragBounds (wrap) {
       far: Math.min(box.bottom, window.innerHeight)
     }
   }
+  /** @type {{ el: any, near: number, far: number } | null} */
   let side = null
   if (wrap.scrollWidth > wrap.clientWidth + 1) {
     const box = wrap.getBoundingClientRect()
@@ -966,9 +1045,11 @@ function pullEdge (band, axis, at) {
 
 /** Drag rectangles and exchange them with spreadsheet apps as TSV. */
 function wireCellSelection (wrap, view) {
+  /** @type {any} */
   let drag = null
   let frame = 0
   let moveFrame = 0
+  /** @type {{ x: number, y: number } | null} */
   let pendingMove = null
   watchForPressesAway()
 
@@ -1100,6 +1181,7 @@ function wireCellSelection (wrap, view) {
        cell's Markdown now, then ask Chromium which character is under the
        pointer in that editable source. Previously mouse-up always called
        `caretToEnd`, making direct placement impossible. */
+    /** @type {{ node: any, offset: number } | null} */
     let pressedCaret = null
     if (!extended) {
       cell.focus({ preventScroll: true })
@@ -1325,7 +1407,7 @@ function pasteMatrix (view, wrap, active, matrix) {
   writeTable(view, table, cells)
 
   requestAnimationFrame(() => {
-    const grown = view.dom.querySelectorAll('.tk-table-wrap')[index]
+    const grown = wrapsOf(view)[index]
     if (!grown) return
     if (many) selectCellRectangle(grown, start, end)
     focusCell(grown, end.r, end.c)
@@ -1410,7 +1492,7 @@ function setColumnAlign (view, cell, align) {
     userEvent: 'input.table'
   })
   requestAnimationFrame(() => {
-    const wrap = view.dom.querySelectorAll('.tk-table-wrap')[tableIndex]
+    const wrap = wrapsOf(view)[tableIndex]
     focusCell(wrap, row, col)
   })
 }
@@ -1546,7 +1628,7 @@ function writeTable (view, table, cells, aligns = table.aligns, widths = table.w
  */
 function refocus (view, tableIndex, r, c) {
   requestAnimationFrame(() => {
-    const wrap = view.dom.querySelectorAll('.tk-table-wrap')[tableIndex]
+    const wrap = wrapsOf(view)[tableIndex]
     focusCell(wrap, r, c)
   })
 }
@@ -1665,7 +1747,7 @@ function sortRows (view, cell, direction, { restoreFocus = true } = {}) {
   body.sort((a, b) => {
     if (Boolean(a.key) !== Boolean(b.key)) return a.key ? -1 : 1
     const order = numeric
-      ? asNumber(a.key) - asNumber(b.key)
+      ? /** @type {number} */ (asNumber(a.key)) - /** @type {number} */ (asNumber(b.key))
       : collator.compare(a.key, b.key)
     return (sign * order) || a.at - b.at
   })
@@ -1769,7 +1851,7 @@ function insertColumn (view, cell, after) {
   rewriteColumns(view, found.table, col, true)
 
   requestAnimationFrame(() => {
-    const wrap = view.dom.querySelectorAll('.tk-table-wrap')[tableIndex]
+    const wrap = wrapsOf(view)[tableIndex]
     focusCell(wrap, 0, col)
   })
 }
@@ -1827,7 +1909,7 @@ function deleteRow (view, cell) {
   })
 
   requestAnimationFrame(() => {
-    const nextWrap = view.dom.querySelectorAll('.tk-table-wrap')[tableIndex]
+    const nextWrap = wrapsOf(view)[tableIndex]
     const nextRow = Math.max(0, Math.min(firstDeleted, remaining.length - 1))
     focusCell(nextWrap, nextRow, Number(cell.dataset.col))
   })
@@ -1844,7 +1926,7 @@ function deleteColumn (view, cell) {
   cell.blur()
   rewriteColumns(view, found.table, col, false)
   requestAnimationFrame(() => {
-    const wrap = view.dom.querySelectorAll('.tk-table-wrap')[tableIndex]
+    const wrap = wrapsOf(view)[tableIndex]
     focusCell(wrap, row, Math.max(0, col - 1))
   })
 }
@@ -2036,7 +2118,9 @@ function wire (cell, view, source) {
     const wrap = cell.closest('.tk-table-wrap')
     const row = Number(cell.dataset.row)
     const col = Number(cell.dataset.col)
-    const rows = wrap?.querySelectorAll('tr').length || 1
+    /* The table's own count, not the DOM's: a windowed grid only built its
+       band, and two spacer rows are not rows either. */
+    const rows = fullRowCount(wrap)
     if (!cell.classList.contains('tk-table-cell-selected')) clearCellSelection(wrap)
     const selection = selectedCells(wrap)
     const deleteRowCount = deletableRowCount(view, cell)
@@ -2121,10 +2205,11 @@ function wireGridKeys (wrap, view) {
     const cols = Number(wrap.dataset.cols || 1)
     const mod = event.metaKey || event.ctrlKey
 
-    // Both of these are DOM queries over the whole grid, and most keystrokes
-    // ask for neither.
+    // The table's own count, asked of the wrap rather than the DOM: a
+    // windowed grid only built its band, so the elements undercount it.
     let rowMemo = 0
-    const rowCount = () => rowMemo || (rowMemo = gridRows(wrap).length || 1)
+    const rowCount = () => rowMemo || (rowMemo = fullRowCount(wrap))
+    /** @type {any[] | null} */
     let cellMemo = null
     const selected = () => cellMemo || (cellMemo = selectedCells(wrap))
 
@@ -2269,6 +2354,302 @@ function wireGridKeys (wrap, view) {
   })
 }
 
+/* ------------------------------------------- windowing for large tables
+
+   A vocabulary table of a few hundred rows built every one of them on open
+   and visited every one on every keystroke — a thousand cells drawn to show
+   twenty, and the whole cost of editing it. Past a hundred body rows the body
+   is a window instead: the visible band with overscan either side, standing
+   between two spacer rows whose heights stand in for the rows that were not
+   built, so the widget still measures its full height and the lines below it
+   stay where the editor put them.
+
+   The window follows the editor's scroll, and it always covers what the grid
+   is doing: the focused cell and the selected rectangle pin their rows into
+   it, so focusing, selecting and copying never meet a row that is not there —
+   a select-all simply grows the window to the whole table. `updateDOM` keeps
+   its incremental path inside the band: rows the window kept are patched
+   cell by cell exactly as before, and only a moved window rebuilds.
+
+   Row heights are measured, not assumed: one read of a built row per
+   rewindow, with a guess until there is one. Cells that wrap or carry
+   pictures make the estimate inexact, and the overscan is what absorbs that.
+   ================================================================== */
+
+/* Body rows above this, the tbody holds a band rather than the table. */
+const TABLE_WINDOW_THRESHOLD = 100
+/* Rows built either side of what is visible, so a scroll has somewhere to go
+   before the next rewindow. */
+const TABLE_WINDOW_OVERSCAN = 40
+/* Rows built on open, before the first scroll has said where the table is. */
+const TABLE_WINDOW_BAND = 80
+/* Until a built row has been measured. */
+const TABLE_ROW_HEIGHT_GUESS = 30
+
+/** Room where unbuilt rows would be: counted for the scrollbar, hidden from
+ *  assistive technology, and skipped by every row query for carrying no
+ *  `data-row`. */
+function spacerRow (cols, height) {
+  const tr = document.createElement('tr')
+  tr.className = 'tk-table-spacer'
+  tr.setAttribute('aria-hidden', 'true')
+  const td = document.createElement('td')
+  td.colSpan = Math.max(cols, 1)
+  td.style.height = `${Math.max(0, Math.round(height))}px`
+  td.style.padding = '0'
+  td.style.border = '0'
+  tr.append(td)
+  return tr
+}
+
+/** A 53-bit hash over everything `eq` compares, mixed incrementally so no
+ *  join of the table is ever allocated to hash it. */
+function hashTableData (language, aligns, cols, widths, cells) {
+  let h1 = 0xdeadbeef
+  let h2 = 0x41c6ce57
+  const mix = (code) => {
+    h1 = Math.imul(h1 ^ code, 2654435761)
+    h2 = Math.imul(h2 ^ code, 1597334677)
+  }
+  mix(language ? 1 : 0)
+  mix(cols)
+  mix(cells.length)
+  mix(aligns.length)
+  for (const align of aligns) {
+    const s = String(align ?? '')
+    mix(s.length)
+    for (let i = 0; i < s.length; i++) mix(s.charCodeAt(i))
+  }
+  if (widths) {
+    mix(widths.length)
+    for (const width of widths) mix(Math.round(width || 0))
+  }
+  for (const row of cells) {
+    mix(row.length)
+    for (const cell of row) {
+      mix(cell.length)
+      for (let i = 0; i < cell.length; i++) mix(cell.charCodeAt(i))
+    }
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909)
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909)
+  return (h2 >>> 0) * 4294967296 + (h1 >>> 0)
+}
+
+/** Every grid in the editor, asked once per document version rather than once
+ *  per edit: the wrap elements survive `updateDOM`, so within one version the
+ *  list cannot change under it. Anything disconnected means a rebuild slipped
+ *  through, and the list is taken again. */
+const wrapListCache = new WeakMap() // EditorView -> { doc, dom, list }
+function wrapsOf (view) {
+  const cached = wrapListCache.get(view)
+  if (cached && cached.doc === view.state.doc && cached.dom === view.dom &&
+      cached.list.every((w) => w.isConnected)) return cached.list
+  const list = [...view.dom.querySelectorAll('.tk-table-wrap')]
+  wrapListCache.set(view, { doc: view.state.doc, dom: view.dom, list })
+  return list
+}
+
+/** The three elements `updateDOM` works on. The wrap, the table and the body
+ *  all survive it, so they are found once per widget element rather than once
+ *  per keystroke. */
+const domPartsCache = new WeakMap() // box -> { wrap, table, tbody }
+function domParts (dom) {
+  const cached = domPartsCache.get(dom)
+  if (cached && dom.isConnected && cached.wrap.isConnected) return cached
+  const wrap = dom.querySelector('.tk-table-wrap')
+  const table = wrap?.querySelector('table')
+  const tbody = table?.querySelector('tbody')
+  if (!wrap || !table || !tbody) return null
+  const parts = { wrap, table, tbody }
+  domPartsCache.set(dom, parts)
+  return parts
+}
+
+/** The band a wrap actually built, header excluded. Unset until a windowed
+ *  table says otherwise. */
+const windowOf = (wrap) => {
+  const first = Number(wrap.dataset.winFirst)
+  const last = Number(wrap.dataset.winLast)
+  return {
+    first: Number.isInteger(first) && first >= 1 ? first : 1,
+    last: Number.isInteger(last) && last >= 1 ? last : Infinity
+  }
+}
+
+/** How many rows the table holds, built or not. The DOM of a windowed table
+ *  only knows its band; the dataset knows the table. */
+const fullRowCount = (wrap) => Number(wrap?.dataset.totalRows) || gridRows(wrap).length || 1
+
+/** One row's height, measured from the band and remembered on the wrap. A
+ *  single read rather than one per row, and the guess until there is a row. */
+function measureRowHeight (wrap) {
+  const probe = wrap.querySelector('tbody tr[data-row]') || wrap.querySelector('thead tr')
+  const height = probe?.offsetHeight || 0
+  if (height > 0) wrap._rowH = height
+  return wrap._rowH || TABLE_ROW_HEIGHT_GUESS
+}
+
+/** Rows that must be built whatever the viewport says: the one being typed
+ *  in, and whatever the selection covers. Read off the live grid rather than
+ *  stored, so a window can never disagree with them. */
+function pinnedRows (wrap) {
+  const rows = []
+  const active = document.activeElement
+  if (active && wrap.contains(active)) {
+    const row = /** @type {HTMLElement | null} */ (active.closest?.('[data-row]'))
+    if (row) rows.push(Number(row.dataset.row))
+  }
+  const rect = SELECTED_RECTANGLE.get(wrap)
+  if (rect) rows.push(rect.top, rect.bottom)
+  return rows
+}
+
+/** The band that should exist, from where the wrap sits in the editor's
+ *  viewport. Approximate on purpose — the overscan absorbs the estimate — and
+ *  always widened to the pinned rows. */
+function bandForViewport (wrap) {
+  const data = wrap._widget
+  const scroll = wrap._scroll
+  if (!data || !scroll || !wrap.isConnected) return null
+  const total = data.cells.length
+  if (total - 1 <= TABLE_WINDOW_THRESHOLD) return null
+  const rowH = measureRowHeight(wrap)
+  const viewport = scroll.getBoundingClientRect()
+  const box = wrap.getBoundingClientRect()
+  const head = wrap.querySelector('thead')?.offsetHeight || rowH
+  const firstSeen = Math.max(1, Math.min(total - 1,
+    Math.floor((viewport.top - (box.top + head)) / rowH) + 1))
+  const lastSeen = Math.max(1, Math.min(total - 1,
+    Math.ceil((viewport.bottom - (box.top + head)) / rowH) + 1))
+  let first = Math.max(1, firstSeen - TABLE_WINDOW_OVERSCAN)
+  let last = Math.min(total - 1, lastSeen + TABLE_WINDOW_OVERSCAN)
+  for (const r of pinnedRows(wrap)) {
+    if (r >= 1 && r < total) {
+      if (r < first) first = r
+      if (r > last) last = r
+    }
+  }
+  return { first, last }
+}
+
+/** The band, on the next frame. Scroll events arrive faster than layouts, and
+ *  only the last band per frame can be seen. */
+function requestRewindow (wrap) {
+  if (!wrap || wrap._rewindowQueued) return
+  wrap._rewindowQueued = true
+  requestAnimationFrame(() => {
+    wrap._rewindowQueued = false
+    const band = bandForViewport(wrap)
+    if (!band) return
+    setWindow(wrap, wrap._view, band.first, band.last)
+  })
+}
+
+/** Rebuild the body's band, keeping the rows it already had — with their
+ *  marks, their selection and the cell being typed in — and building the rest.
+ *  Answers whether anything changed, so the typing path can tell a scroll
+ *  that moved nothing from one that did. */
+function setWindow (wrap, view, first, last) {
+  const data = wrap._widget
+  if (!data || !view) return false
+  const total = data.cells.length
+  if (total <= 1) return false
+  first = Math.max(1, Math.min(first, total - 1))
+  last = Math.max(first, Math.min(last, total - 1))
+  const cur = windowOf(wrap)
+  if (cur.first === first && cur.last === last) return false
+  const tbody = wrap.querySelector('tbody')
+  if (!tbody) return false
+  const rowH = measureRowHeight(wrap)
+  const keep = new Map()
+  for (const tr of tbody.querySelectorAll('tr[data-row]')) {
+    const r = Number(tr.dataset.row)
+    if (r >= first && r <= last) keep.set(r, tr)
+  }
+  const frag = document.createDocumentFragment()
+  if (first > 1) frag.append(spacerRow(data.cols, (first - 1) * rowH))
+  for (let r = first; r <= last; r++) {
+    frag.append(keep.get(r) ?? buildGridRow(view, data, r))
+  }
+  if (last < total - 1) frag.append(spacerRow(data.cols, (total - 1 - last) * rowH))
+  tbody.replaceChildren(frag)
+  wrap.dataset.winFirst = String(first)
+  wrap.dataset.winLast = String(last)
+  /* A rebuilt row arrives unlit. Rows the window kept carry their selection
+     with them, but rows built fresh for a rectangle drawn earlier would come
+     back blank while still selected — invisible, and missing from the next
+     copy. Light the band's share of the rectangle again. */
+  const rect = SELECTED_RECTANGLE.get(wrap)
+  if (rect) {
+    for (const tr of tbody.querySelectorAll('tr[data-row]')) {
+      const r = Number(tr.dataset.row)
+      if (r < rect.top || r > rect.bottom) continue
+      for (let c = rect.left; c <= rect.right && c < tr.children.length; c++) {
+        tr.children[c]?.classList.add('tk-table-cell-selected')
+      }
+    }
+  }
+  return true
+}
+
+/** Grow the band to cover two rows, for a focus or a selection that landed
+ *  past it. Only ever grows here: shrinking is the scroll's decision, made
+ *  with the pins in hand rather than against them. */
+function ensureWindowFor (wrap, top, bottom) {
+  if (!wrap || !wrap.isConnected) return
+  const data = wrap._widget
+  const view = wrap._view
+  if (!data || !view) return
+  const total = data.cells.length
+  if (total - 1 <= TABLE_WINDOW_THRESHOLD) return
+  const cur = windowOf(wrap)
+  const first = Math.max(1, Math.min(top, cur.first))
+  const last = Math.min(total - 1, Math.max(bottom, cur.last))
+  if (first === cur.first && last === cur.last) return
+  setWindow(wrap, view, first, last)
+}
+
+/** Watch the editor's scroll for a windowed table. One listener per wrap,
+ *  taken down with the widget; the scroll element outlives them all. */
+function ensureScrollWatch (wrap, view) {
+  if (!wrap || wrap._unwind || !view?.scrollDOM) return
+  const scroll = view.scrollDOM
+  wrap._scroll = scroll
+  const onScroll = () => requestRewindow(wrap)
+  scroll.addEventListener('scroll', onScroll, { passive: true })
+  wrap._unwind = () => scroll.removeEventListener('scroll', onScroll)
+}
+
+/** One grid row, header or body, from a widget's data. Shared by the widget
+ *  itself and by the window, which builds rows long after the widget that
+ *  drew the first band is gone. */
+function buildGridRow (view, data, r) {
+  const tr = document.createElement('tr')
+  tr.dataset.row = String(r)
+  for (let c = 0; c < data.cols; c++) {
+    const cell = document.createElement(r === 0 ? 'th' : 'td')
+    cell.contentEditable = 'plaintext-only'
+    cell.spellcheck = false
+    cell.dataset.row = String(r)
+    cell.dataset.col = String(c)
+    if (r === 0) cell.scope = 'col'
+    cell.setAttribute('aria-rowindex', String(r + 1))
+    cell.setAttribute('aria-colindex', String(c + 1))
+    if (data.aligns[c]) cell.style.textAlign = data.aligns[c]
+    renderTableCell(view, cell, decode(data.cells[r]?.[c] ?? ''))
+    if (r === 0) {
+      cell.title = 'Double-click to sort · right-click for the column\u2019s menu'
+      wireHeaderSort(cell, view)
+    }
+    // The source is read at focus time, not captured here: by then the widget
+    // may be several edits old.
+    wire(cell, view, () => currentText(view, cell))
+    tr.append(cell)
+  }
+  return tr
+}
+
 /* ---------------------------------------------------------- the widget */
 
 class TableWidget extends WidgetType {
@@ -2283,17 +2664,25 @@ class TableWidget extends WidgetType {
     // Ragged rows pad out — the same grid the rewrites work on, so the widget
     // and the writer cannot disagree about what the table holds.
     this.cells = tableMatrix(table)
+    /* Everything `eq` compares, hashed once here rather than compared field by
+       field on every document change. Building the widget already walks every
+       cell, so mixing one more number per cell is the cheap half; the compare
+       it feeds answers "nothing changed" — the edit-elsewhere case — without
+       touching a string. */
+    this.hash = hashTableData(language, this.aligns, this.cols, this.widths, this.cells)
   }
 
-  /* Compared field by field rather than through a serialised key. The widget is
-     rebuilt on every document change, so building the key was a string the size
-     of the table per keystroke — and the comparison it fed stops at the first
-     cell that differs anyway. */
+  /* Compared by hash first, then field by field. The widget is rebuilt on
+     every document change, and the comparison used to walk the whole grid to
+     learn that an edit elsewhere had changed nothing in it. Equal hashes mean
+     an equal table; only a mismatch takes the field-by-field walk, which
+     stops at the first cell that differs anyway. */
   eq (other) {
     if (other.language !== this.language ||
         other.cols !== this.cols) return false
     if (other.aligns.length !== this.aligns.length) return false
     if (other.cells.length !== this.cells.length) return false
+    if (other.hash === this.hash) return true
     for (let c = 0; c < this.aligns.length; c++) {
       if (other.aligns[c] !== this.aligns[c]) return false
     }
@@ -2318,6 +2707,7 @@ class TableWidget extends WidgetType {
     const box = document.createElement('div')
     box.className = 'tk-table-box'
 
+    /** @type {any} */
     const wrap = document.createElement('div')
     wrap.className = 'tk-table-wrap'
     wrap.contentEditable = 'false'
@@ -2339,41 +2729,45 @@ class TableWidget extends WidgetType {
     table.append(thead)
 
     const tbody = document.createElement('tbody')
-    for (let r = 1; r < this.cells.length; r++) tbody.append(this.buildRow(view, r))
+    const bodyRows = this.cells.length - 1
+    if (bodyRows > TABLE_WINDOW_THRESHOLD) {
+      /* A large table opens as a window: the first band, with a spacer
+         standing in for the rest until the scroll says where the table is. */
+      const last = Math.min(bodyRows, TABLE_WINDOW_BAND)
+      for (let r = 1; r <= last; r++) tbody.append(buildGridRow(view, this, r))
+      tbody.append(spacerRow(this.cols, (bodyRows - last) * TABLE_ROW_HEIGHT_GUESS))
+      wrap.dataset.winFirst = '1'
+      wrap.dataset.winLast = String(last)
+    } else {
+      for (let r = 1; r < this.cells.length; r++) tbody.append(buildGridRow(view, this, r))
+    }
     table.append(tbody)
 
     wrap.append(table)
     wireCellSelection(wrap, view)
     wireGridKeys(wrap, view)
 
+    wrap._widget = this
+    wrap._view = view
+    wrap.dataset.totalRows = String(this.cells.length)
+    if (bodyRows > TABLE_WINDOW_THRESHOLD) {
+      ensureScrollWatch(wrap, view)
+      /* Open scrolled — restoring a note mid-table, most often — the first
+         band is the wrong one until a scroll says so, and a restored scroll
+         does not always send one. Ask once, after layout. */
+      requestAnimationFrame(() => {
+        if (!wrap.isConnected) return
+        const band = bandForViewport(wrap)
+        if (band) setWindow(wrap, view, band.first, band.last)
+      })
+    }
+
     box.append(wrap)
     return box
   }
 
   buildRow (view, r) {
-    const tr = document.createElement('tr')
-    tr.dataset.row = String(r)
-    for (let c = 0; c < this.cols; c++) {
-      const cell = document.createElement(r === 0 ? 'th' : 'td')
-      cell.contentEditable = 'plaintext-only'
-      cell.spellcheck = false
-      cell.dataset.row = String(r)
-      cell.dataset.col = String(c)
-      if (r === 0) cell.scope = 'col'
-      cell.setAttribute('aria-rowindex', String(r + 1))
-      cell.setAttribute('aria-colindex', String(c + 1))
-      if (this.aligns[c]) cell.style.textAlign = this.aligns[c]
-      renderTableCell(view, cell, decode(this.cells[r]?.[c] ?? ''))
-      if (r === 0) {
-        cell.title = 'Double-click to sort · right-click for the column\u2019s menu'
-        wireHeaderSort(cell, view)
-      }
-      // The source is read at focus time, not captured here: by then the widget
-      // may be several edits old.
-      wire(cell, view, () => currentText(view, cell))
-      tr.append(cell)
-    }
-    return tr
+    return buildGridRow(view, this, r)
   }
 
   /**
@@ -2390,14 +2784,35 @@ class TableWidget extends WidgetType {
        made CodeMirror replace the whole widget after every character. That
        detached the active contenteditable cell, so only the first character
        survived. Keep the existing grid when its shape and mode still match. */
-    const wrap = dom.querySelector('.tk-table-wrap')
+    const parts = domParts(dom)
+    const wrap = parts?.wrap
     if (!wrap ||
         wrap.dataset.cols !== String(this.cols) ||
         wrap.dataset.language !== String(this.language)) return false
 
-    const table = wrap.querySelector('table')
-    const tbody = table?.querySelector('tbody')
-    if (!table || !tbody) return false
+    const { table, tbody } = parts
+    wrap._widget = this
+    wrap._view = view
+
+    /* A table past the threshold stays a window: the band is ensured and its
+       kept rows patched, and only a moved window rebuilds. */
+    if (this.cells.length - 1 > TABLE_WINDOW_THRESHOLD) {
+      return this.updateWindowed(view, wrap, table, tbody)
+    }
+    wrap.dataset.totalRows = String(this.cells.length)
+    /* ... while a table that shrank back under it goes back to whole, and
+       stops watching the scroll. */
+    if (wrap.dataset.winFirst != null || wrap._unwind) {
+      wrap._unwind?.()
+      wrap._unwind = null
+      wrap._scroll = null
+      delete wrap.dataset.winFirst
+      delete wrap.dataset.winLast
+      /* The band may hold fewer rows than the table does now, or stale spacers
+         beside them: rebuild whole below. */
+      tbody.replaceChildren()
+      for (let r = 1; r < this.cells.length; r++) tbody.append(this.buildRow(view, r))
+    }
 
     while (tbody.children.length > this.cells.length - 1) tbody.lastElementChild.remove()
     while (tbody.children.length < this.cells.length - 1) {
@@ -2413,21 +2828,57 @@ class TableWidget extends WidgetType {
       table.setAttribute('aria-rowcount', String(this.cells.length))
     }
 
-    const rows = [table.querySelector('thead tr'), ...tbody.children]
-    rows.forEach((tr, r) => {
-      /* Where a row sits only changes when rows were added or taken away just
-         above it, and the bail-out above means a cell never changes column. One
-         string compare per row keeps the numbering — and the aria attributes,
-         which the accessibility tree subscribes to — off the typing path. */
-      const moved = tr.dataset.row !== String(r)
-      if (moved) tr.dataset.row = String(r)
+    this.patchTableCells(view, [table.querySelector('thead tr'), ...tbody.children])
+    return true
+  }
+
+  /** Bring a windowed table up to date: the band for what changed, patched the
+   *  same cell-by-cell way a whole table is. */
+  updateWindowed (view, wrap, table, tbody) {
+    const total = this.cells.length
+    syncColumnWidths(table, this.widths)
+    if (table.getAttribute('aria-rowcount') !== String(total)) {
+      table.setAttribute('aria-rowcount', String(total))
+    }
+    ensureScrollWatch(wrap, view)
+
+    /* Rows came or went: the spacers standing in for them are for the old
+       table, so the window is forgotten and built again below — over the same
+       range, with the rows it already had kept. */
+    if (wrap.dataset.totalRows !== String(total)) {
+      delete wrap.dataset.winFirst
+      delete wrap.dataset.winLast
+    }
+    wrap.dataset.totalRows = String(total)
+
+    const cur = windowOf(wrap)
+    let first = Math.max(1, Math.min(cur.first, total - 1))
+    let last = Number.isFinite(cur.last)
+      ? Math.max(first, Math.min(cur.last, total - 1))
+      : Math.min(total - 1, TABLE_WINDOW_BAND)
+    /* Whatever moved on screen, the typing and the selection stay built. */
+    for (const r of pinnedRows(wrap)) {
+      if (r >= 1 && r < total) {
+        if (r < first) first = r
+        if (r > last) last = r
+      }
+    }
+    setWindow(wrap, view, first, last)
+
+    this.patchTableCells(view, [table.querySelector('thead tr'), ...tbody.querySelectorAll('tr[data-row]')])
+    return true
+  }
+
+  /** Patch rather than rebuild, row by row. Every keystroke changes the
+   *  document, which makes a new widget, and swapping the DOM would take the
+   *  caret with it. Each row is read by its own number rather than its
+   *  position, which is the same thing for a whole table and the only thing
+   *  that works for a band of one. */
+  patchTableCells (view, rows) {
+    rows.forEach((tr) => {
+      if (!tr) return
+      const r = Number(tr.dataset.row)
       ;[...tr.children].forEach((cell, c) => {
-        if (moved) {
-          cell.dataset.row = String(r)
-          cell.dataset.col = String(c)
-          cell.setAttribute('aria-rowindex', String(r + 1))
-          cell.setAttribute('aria-colindex', String(c + 1))
-        }
         cell.style.textAlign = this.aligns[c] || ''
         /* Typing one character rebuilds the widget, but only the cell that was
            typed in has changed. Redrawing the rest tore down and rebuilt their
@@ -2440,7 +2891,14 @@ class TableWidget extends WidgetType {
         if (stale) renderTableCell(view, cell, source)
       })
     })
-    return true
+  }
+
+  /** Take down the scroll watch with the widget. A widget the editor throws
+   *  away without this keeps a listener on a scroller that outlives it. */
+  destroy (dom) {
+    try {
+      dom.querySelector?.('.tk-table-wrap')?._unwind?.()
+    } catch {}
   }
 
   /* Everything inside the widget is handled here; CodeMirror must not read the
@@ -2642,7 +3100,7 @@ export function fitAllColumns (view) {
   /* Which grid on screen is which table, asked of the document rather than of
      the order the two lists happen to be in. */
   const drawn = new Map()
-  for (const wrap of view.dom.querySelectorAll('.tk-table-wrap')) {
+  for (const wrap of wrapsOf(view)) {
     const table = tableAt(view.state, view.posAtDOM(wrap))
     if (table) drawn.set(table.from, wrap)
   }
@@ -2813,6 +3271,7 @@ function rebuiltTable (tr, tables) {
   const before = tr.startState.doc
   const doc = tr.state.doc
 
+  /** @type {any} */
   let table = null
   let ok = true
   tr.changes.iterChanges((fromA, toA) => {

@@ -39,6 +39,27 @@ function findSpots (text, terms) {
      note has to hold all of them, so the one that is absent should stop the
      work rather than come after it — a common first word would otherwise be
      walked end to end only for a rare second word to discard the note. */
+  if (terms.length === 1) {
+    /* One scan, not two, for the commonest query there is. `has` stops at the
+       first hit and `find` then walks the note again from the top, so a note
+       that matches paid for the walk twice. The loop below answers both at
+       once — null when nothing matched — with the same spots and total. */
+    const { find } = terms[0]
+    /* The whole kept budget belongs to the one term: the multi-term split
+       below divides SPOTS_KEPT between terms, and one term keeps all of it. */
+    const budget = SPOTS_KEPT
+    const spots = []
+    let found = 0
+    find.lastIndex = 0
+    for (let m = find.exec(text); m; m = find.exec(text)) {
+      found++
+      if (found <= budget) spots.push(m.index)
+      // A pattern that can match nothing — `x*` — would otherwise spin here.
+      if (m[0] === '') find.lastIndex++
+      if (found >= SPOT_CAP) break
+    }
+    return found ? { spots, total: found } : null
+  }
   for (const term of terms) if (!term.has.test(text)) return null
 
   const budget = Math.max(SPOTS_MIN_PER_TERM, Math.floor(SPOTS_KEPT / terms.length))

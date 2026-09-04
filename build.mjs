@@ -382,7 +382,13 @@ const options = {
   entryPoints: {
     renderer: 'src/renderer.js',
     katex: 'node_modules/katex/dist/katex.min.css',
-    whiteboard: `node_modules/@excalidraw/excalidraw/dist/${watch ? 'dev' : 'prod'}/index.css`
+    whiteboard: `node_modules/@excalidraw/excalidraw/dist/${watch ? 'dev' : 'prod'}/index.css`,
+    /* The feature-owned surfaces in src/styles-features.css. Static-imported it
+       would be hoisted into renderer.css and sit on the render-blocking <link>
+       in index.html; as a named sibling it lands at `dist/styles-features.css`
+       and the renderer fetches it after the first paint — see
+       prefetchFeatureStyles in src/renderer.js. */
+    'styles-features': 'src/styles-features.css'
   },
   bundle: true,
   outdir: output,
@@ -448,10 +454,18 @@ const featureStyleBundles = Object.keys(FEATURE_STYLE_SECTIONS).map((feature) =>
   }]
 }))
 
-/* pdf.js parses documents in a worker, which has to be a file of its own: the
-   page hands it a URL, not a function. Built separately, and beside the bundle
-   so the page's own origin serves it — a worker from anywhere else would be
-   cross-origin and refused. */
+/* pdf.js ships three times — the page's worker beside the bundle, the page's
+   own chunk behind `loadPdfjs` in src/pdf.js, and main's extractor compiled
+   into pdf-text.cjs — and that is deliberate rather than deduplicated. The
+   worker is a browser IIFE served over the app's scheme to a `Worker`
+   constructor that takes a URL, not a module; the extractor is CommonJS for
+   node, `require`d out of dist in a process with no window, and it bundles
+   the *legacy* build (see src/pdf-text.js) where the page builds the modern
+   one. Different formats, different entry points, different platforms — no
+   one file can serve both, and `--external:pdfjs-dist` is not an alternative
+   either, because the packaged app carries no node_modules to resolve it
+   against. Both bundles minify in prod: the worker inherits `minify: !watch`
+   through `...options` below, and pdf-text sets it outright. */
 const worker = {
   ...options,
   entryPoints: ['node_modules/pdfjs-dist/build/pdf.worker.mjs'],
@@ -620,11 +634,52 @@ if (watch) {
       console.log('wrote build/meta.json')
     }
 
+  /* The eager bundle is what every launch compiles before the first paint, so
+     the heaviest surfaces stay behind dynamic imports: the whiteboard, mermaid
+     and pdf.js are a megabyte-plus each and cost nothing until they are opened.
+     This fails the build if one of them ever goes eager again. A static import
+     of any of them inlines hundreds of kilobytes into renderer.js, and the size
+     check below is what notices even when the import brings no marker string
+     with it — bytes have twice turned out not to predict launch time here (see
+     README), but a megabyte of freshly eager code predicts it just fine. */
+  {
+    const eagerPath = path.join(output, 'renderer.js')
+    const eager = await readFile(eagerPath, 'utf8')
+    /* Dynamic `import("./chunks/…")` paths name lazy surfaces without loading
+       them — the mermaid editor's chunk is one — so they are set aside before
+       looking for bundled code. A static import compiles to `from "…"`, never
+       to `import("…")`, so nothing eager is hidden by this. */
+    const bundled = eager.replace(/import\(\s*['"][^'"]+['"]\s*\)/g, '')
+    for (const marker of ['excalidraw', 'pdfjs', 'mermaid']) {
+      if (bundled.includes(marker)) {
+        throw new Error(`renderer.js eagerly bundles ${marker}; keep it behind a dynamic import.`)
+      }
+    }
+    if (built[0]?.metafile) {
+      const rendererKey = Object.keys(built[0].metafile.outputs)
+        .find((name) => /(?:^|\/)renderer\.js$/.test(name))
+      const heavy = rendererKey
+        ? Object.keys(built[0].metafile.outputs[rendererKey].inputs || {})
+          .filter((input) => /node_modules\/(?:@excalidraw\/[^/]+|mermaid|@mermaid-js\/[^/]+|pdfjs-dist|katex)(?=\/)/.test(input))
+        : []
+      if (heavy.length) {
+        throw new Error(`renderer.js eagerly bundles ${heavy.join(', ')}; keep them behind dynamic imports.`)
+      }
+    }
+    const gz = gzipSync(await readFile(eagerPath)).length
+    const budget = 400 * 1024
+    if (gz > budget) {
+      throw new Error(`renderer.js is ${Math.round(gz / 1024)}KB gz, over the ${budget / 1024}KB budget; `
+        + 'something heavy went eager — check the metafile (`node build.mjs --metafile`).')
+    }
+  }
+
   /** A production tree is complete before it can replace the last known-good
    *  one. This catches a successful-looking partial build and makes stale maps
    *  impossible to carry into the packaged app. */
   const required = [
     'index.html', 'renderer.js', 'renderer.css', 'katex.css', 'whiteboard.css',
+    'styles-features.css',
     ...Object.keys(FEATURE_STYLE_SECTIONS).map((feature) => `${feature}.css`),
     'pdf.worker.js', 'pdf-text.cjs', ...(mac ? ['pdf-ocr'] : []), 'lint.cjs', 'three.js',
     'pdfjs/standard_fonts', 'pdfjs/cmaps', 'pdfjs/iccs', 'pdfjs/wasm',

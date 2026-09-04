@@ -188,7 +188,11 @@ async function checks () {
   /* What the index holds, for a failure message: on a runner the watcher
      either delivered the file or it did not, and the path each note was read
      under is the whole of the evidence. */
-  const indexed = async () => (await call('vault:notes')).map((n) => [n.path, n.text?.length ?? null])
+  const indexed = async () => {
+    const page = await call('vault:notes')
+    const list = Array.isArray(page) ? page : (page?.notes || [])
+    return list.map((n) => [n.path, n.text?.length ?? null])
+  }
 
   await check('search finds a word in a note that was never opened', async () => {
     const found = await call('search:vault', 'pomegranate', {})

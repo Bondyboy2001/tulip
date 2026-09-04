@@ -85,8 +85,9 @@ Tulip has Editing, Reading and Raw views; tabs and windows; outline, backlinks a
 - Write maths as `$…$` inline or `$$…$$` displayed. Backticks are for code.
 - Cite PDF text as `[page 12]` or `[Paper.pdf pages 12–14]`; use keys from `references.bib` as `[@key]`.
 <!-- write-rules:start -->
-- Request a rename by writing `{"path":"current/path.ext","name":"new name"}` to `.tulip-copilot-rename.json` as the final file operation.
-- To search the vault the way Tulip does — ranked results across notes and extracted PDF text, with `tag:`, `path:`, `file:`, `prop:` filters and `"quoted phrases"` — write `{"query":"…"}` to `.tulip-copilot-search.json`, then read `.tulip-copilot-search-results.json` (retry once after a moment if it is missing, and check its `query` field matches yours). Prefer this over grep when searching the whole vault, when the question spans PDFs, or when a filter fits.
+- Request a rename by writing `{"path":"current/path.ext","name":"new name"}` to `.tulip-copilot-rename.json` as the final file operation. Include your turn id as `turnId` and the current time as `at` (ms since epoch) when you know them; stale or foreign requests are ignored.
+- To search the vault the way Tulip does — ranked results across notes and extracted PDF text, with `tag:`, `path:`, `file:`, `prop:` filters and `"quoted phrases"` — write `{"query":"…","turnId":"…","at":…}` to `.tulip-copilot-search.json`, then read `.tulip-copilot-search-results.json` (retry once after a moment if it is missing, and check its `query` field matches yours). Prefer this over grep when searching the whole vault, when the question spans PDFs, or when a filter fits.
+- Never write `.tulip-copilot-*.json` files yourself for any other purpose, and never leave them behind: they are consumed and deleted. Do not read other turns' result files as fresh answers.
 <!-- write-rules:end -->
 <!-- read-rules:start -->
 - Writing is off in this mode: search the vault with your grep and glob tools, and describe an edit or a rename rather than attempting one.

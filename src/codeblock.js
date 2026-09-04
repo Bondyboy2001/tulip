@@ -26,6 +26,7 @@ const PAIRS = { '{': '}', '[': ']', '(': ')' }
 
 /** The fenced block containing pos, or null when the caret is in prose. */
 function fenceAt (state, pos) {
+  /** @type {import('@lezer/common').SyntaxNode | null} */
   let node = syntaxTree(state).resolveInner(pos, -1)
   while (node) {
     if (node.name === 'FencedCode' || node.name === 'CodeBlock') return node
@@ -54,7 +55,7 @@ function newlineInCode (view) {
 
   const before = line.text.slice(0, range.from - line.from)
   const after = line.text.slice(range.from - line.from)
-  const indent = /^[ \t]*/.exec(line.text)[0]
+  const indent = (/^[ \t]*/.exec(line.text)?.[0] || '')
   const unit = state.facet(indentUnit) || '  '
 
   const opener = before.trimEnd().slice(-1)
@@ -249,7 +250,7 @@ class CodeFormWidget extends WidgetType {
 }
 
 export const codeAiForm = StateField.define({
-  create: () => null,
+  create: () => /** @type {{ form: any, pos: number } | null} */ (null),
 
   update (open, tr) {
     for (const effect of tr.effects) if (effect.is(setCodeAiForm)) return effect.value

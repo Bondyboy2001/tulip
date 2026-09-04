@@ -6,21 +6,19 @@ import { when } from './time.js'
 import { mathPlugin } from './math.js'
 import { citePlugin } from './cite.js'
 import { routeAnchor, revealAnchorTarget } from './links.js'
-import { assetKind, assetUrl } from './assets.js'
-import { isLanguageTablePath } from './vault-paths.js'
+import { assetUrl } from './assets.js'
 import {
   DEFAULT_CATALOGUE,
   effortLabel, effortsFor, modelByKey, modelFromConfig, nearestEffort,
   offeredModels, providerGrant, providerLabel, searchModels, splitKey,
   COPILOT_MODES, COPILOT_MODE_ORDER, CONTEXT_MODES, copilotModeFromConfig, copilotModeLabel
 } from './models.js'
-import {
-  NOTE_EXT, isChatAttachment, isTexPath, isPdfPath, isSitePath, isWhiteboardPath,
-  noteName
-} from './vault-paths.js'
+import { isChatAttachment, noteName } from './vault-paths.js'
 import { fileIcon } from './file-icons.js'
 import { highlightInto } from './highlight.js'
 import { newTurnId, ownsTurn } from './copilot-turns.js'
+import { LIVE_TAIL_LIMIT, settledCut } from './copilot-stream.js'
+import { attachmentKind, attachmentName, attachmentType } from './copilot-attachments.js'
 
 /**
  * The copilot panel.
@@ -208,7 +206,7 @@ export function mountCopilot ({
     /* The question the Edit button lifted into the composer, so the next send
        can stand in its place rather than repeat it at the foot. { msg, convo },
        held only until something is sent. */
-    editing: null,
+    editing: /** @type {{msg: any, convo: any} | null} */ (null),
     contextMode: null
   }
   const persistConfig = (patch) =>
@@ -299,11 +297,13 @@ export function mountCopilot ({
   attachmentDialogFigure.append(attachmentDialogImage, attachmentDialogCaption)
   attachmentDialog.append(attachmentDialogFigure, attachmentDialogClose)
   document.body.append(attachmentDialog)
+  /** @type {HTMLElement | null} */
   let attachmentPreviewFocus = null
 
   /* One timer for the panel, not one per turn: it repaints the strip on screen,
      and there is only ever one of those however many turns are running. */
-  let busyTick = 0
+  /** @type {ReturnType<typeof setInterval> | null} */
+  let busyTick = null
 
   function paintBusy () {
     const run = visibleRun()
@@ -340,10 +340,13 @@ export function mountCopilot ({
    */
   function paintWorking () {
     const run = visibleRun()
-    // The button is never disabled — while a turn runs it is the stop button,
-    // which is exactly when you are most likely to want it.
+    // The button is the stop button while a turn runs, Send otherwise. Send
+    // with no model is disabled up front rather than failing after the fact —
+    // see `sendTurn` — but Stop must stay available while busy.
     el.panel.dataset.busy = run.busy ? 'yes' : 'no'
     el.send.setAttribute('aria-label', run.busy ? 'Stop' : 'Send')
+    el.send.disabled = !run.busy && !state.model
+    el.send.title = !run.busy && !state.model ? 'Pick a model first — /model' : ''
     busyRow.hidden = !run.busy
     if (run.busy) paintBusy()
 
@@ -363,13 +366,21 @@ export function mountCopilot ({
       }))
       elsewhereRow.prepend(element('span', 'ai-elsewhere-label',
         others.length === 1 ? 'Also working on' : `Also working on ${others.length} files:`))
+      // One control to stop every background turn: Stop beside the composer
+      // only ever reaches the conversation on screen.
+      const stopAll = element('button', 'ai-elsewhere-stop')
+      stopAll.type = 'button'
+      stopAll.textContent = 'Stop all'
+      stopAll.title = 'Stop all background turns'
+      stopAll.addEventListener('click', () => haltAll().catch(() => {}))
+      elsewhereRow.append(stopAll)
     }
 
     /* The counter ticks for as long as anything is running, because the reader
        may be watching any one of them. */
     const anyone = run.busy || others.length
     if (anyone && !busyTick) busyTick = setInterval(paintBusy, 1000)
-    if (!anyone && busyTick) { clearInterval(busyTick); busyTick = 0 }
+    if (!anyone && busyTick) { clearInterval(busyTick); busyTick = null }
   }
 
   /* How long a turn has to have run before its ending is worth saying out loud.
@@ -620,7 +631,11 @@ export function mountCopilot ({
   }
 
   /** Add a message to a conversation — the open one, unless a running turn
-   *  says otherwise — and draw it only if that conversation is on screen. */
+   *  says otherwise — and draw it only if that conversation is on screen.
+   *
+   * @param {any} msg
+   * @param {{path: any, convo: any} | null} [to]
+   */
   function push (msg, to = null) {
     const path = to?.path ?? state.notePath
     const convo = to?.convo ?? chat(path)
@@ -747,64 +762,8 @@ export function mountCopilot ({
     return true
   }
 
-  const FENCE = /^\s*(?:```|~~~)/
-
-  /**
-   * Where the settled part of a streaming reply ends: the last blank line that
-   * is not inside an open fence or an open `$$` block, since cutting inside
-   * either would render half of it as prose.
-   *
-   * One forward pass, resumed where the last frame left off. The reply only
-   * ever grows, so the fences and `$$` before the cut cannot change — but the
-   * scan used to run backwards from the end and re-count every fence in a fresh
-   * copy of the prefix at each candidate blank line. On a reply whose code block
-   * is longer than the prose above it, that is quadratic work per frame, for as
-   * long as the block streams, on the thread the rest of the window lives on.
-   *
-   * The state rides on the node rather than the message because it describes the
-   * text that has been drawn, and the node is what holds the drawing.
-   */
-  function settledCut (node, text) {
-    let scan = node.streamScan
-    // A reply that shrank is a reply that was replaced: start the scan over.
-    if (!scan || scan.at > text.length) {
-      scan = node.streamScan = { at: 0, cut: -1, fenced: false, maths: false }
-    }
-    for (;;) {
-      const stop = text.indexOf('\n', scan.at)
-      // The last line is still being typed. Its fences are not counted until it
-      // is whole, and nothing after this point can be cut at anyway.
-      if (stop === -1) return scan.cut
-      const line = text.slice(scan.at, stop)
-      if (FENCE.test(line)) {
-        scan.fenced = !scan.fenced
-      } else if (!scan.fenced) {
-        // `$$…$$` on one line toggles twice and so leaves the block closed.
-        for (let at = line.indexOf('$$'); at !== -1; at = line.indexOf('$$', at + 2)) {
-          scan.maths = !scan.maths
-        }
-        // A blank line outside both is the seam: the `\n\n` ends one character
-        // before this empty line begins.
-        if (!line && !scan.maths && scan.at) scan.cut = scan.at - 1
-      }
-      scan.at = stop + 1
-    }
-  }
-
-  /**
-   * How long the unsettled tail may get before it stops being re-rendered as
-   * markdown on every frame.
-   *
-   * `settledCut` will not cut inside a fence, which is right — half a code
-   * block set as prose is worse than no seam at all. But it means a reply that
-   * is *one long fence* has no seam anywhere, so the whole accumulated block
-   * was parsed and rendered again per frame for as long as it streamed: exactly
-   * the quadratic the seam exists to prevent, in the case where replies run
-   * longest. Past this the tail is appended as plain text — which is what a
-   * fence's contents are — and `settleStream` gives the finished reply the one
-   * clean render that turns it back into a code block.
-   */
-  const LIVE_TAIL_LIMIT = 4000
+  /* Streaming seam lives in ./copilot-stream.js: `settledCut` and
+     `LIVE_TAIL_LIMIT` are pure and shared, so the panel holds no copy. */
 
   /**
    * The markdown of a reply still being streamed.
@@ -849,6 +808,7 @@ export function mountCopilot ({
     if (tail.length > LIVE_TAIL_LIMIT) {
       if (!live.plain) {
         live.plain = true
+        live.renderedTail = null
         live.replaceChildren(element('pre', 'stream-plain'))
         live.shown = 0
       }
@@ -859,7 +819,16 @@ export function mountCopilot ({
       return
     }
     live.plain = false
+    /* The tail is re-rendered once per frame at most — the dirty set above
+       already coalesces every chunk in a frame into one paint — and not even
+       then when it is the tail that was last drawn. Paints with no new text
+       behind them (a settle rescanning the seam, a redraw the stream did not
+       ask for) used to pay a fresh parse of the whole tail each time, which
+       over a long reply is the quadratic per-frame cost the seam exists to
+       avoid. */
+    if (live.renderedTail === tail) return
     live.innerHTML = md.render(tail)
+    live.renderedTail = tail
   }
 
   /** The reply is no longer being streamed into: give the finished text the
@@ -1050,41 +1019,8 @@ export function mountCopilot ({
     return node
   }
 
-  /** A filename, kept intact for the attachment card rather than shortened to
-   *  the extensionless document titles used elsewhere in the panel. */
-  const attachmentName = (path) => String(path || '').split('/').pop() || 'Attachment'
-  const attachmentExtension = (path) => {
-    const name = attachmentName(path)
-    const dot = name.lastIndexOf('.')
-    return dot > 0 ? name.slice(dot + 1).toLowerCase() : ''
-  }
-
-  function attachmentKind (path) {
-    if (isLanguageTablePath(path)) return 'language'
-    if (isTexPath(path)) return 'tex'
-    if (isPdfPath(path)) return 'pdf'
-    if (isSitePath(path)) return 'site'
-    if (isWhiteboardPath(path)) return 'whiteboard'
-    if (NOTE_EXT.test(path || '')) return 'note'
-    return assetKind(path)
-  }
-
-  const ATTACHMENT_TYPES = {
-    note: 'Markdown',
-    language: 'Language table',
-    pdf: 'PDF',
-    tex: 'TeX',
-    site: 'Website',
-    whiteboard: 'Whiteboard',
-    video: 'Video',
-    audio: 'Audio'
-  }
-
-  function attachmentType (kind, path) {
-    if (ATTACHMENT_TYPES[kind]) return ATTACHMENT_TYPES[kind]
-    const suffix = attachmentExtension(path)
-    return suffix ? suffix.toUpperCase() : 'File'
-  }
+  /* Attachment naming lives in ./copilot-attachments.js: `attachmentName`,
+     `attachmentExtension`, `attachmentKind`, `attachmentType` are pure. */
 
   /** The compact visual representation shared by the composer and the sent
    *  message. Images are their own preview; PDFs and other files retain their
@@ -1256,6 +1192,7 @@ export function mountCopilot ({
         diff.classList.remove('is-open')
         return
       }
+      /** @type {any} */
       let detail = null
       try {
         detail = await api.trust.operation(operation.id)
@@ -1339,6 +1276,11 @@ export function mountCopilot ({
     if (following) el.log.scrollTop = el.log.scrollHeight
   }
 
+  /**
+   * @param {string} text
+   * @param {string} [t]
+   * @param {{path: any, convo: any} | null} [to]
+   */
   const note = (text, t = 'note', to = null) => push({ t, text }, to)
 
   /**
@@ -1351,6 +1293,9 @@ export function mountCopilot ({
    * its hands. So the row carries a button that asks it again, and the next
    * message starts a fresh process because every one of those paths has already
    * let go of the old one.
+   *
+   * @param {string} text
+   * @param {{path: any, convo: any} | null} [to]
    */
   const failed = (text, to = null) => push({ t: 'warn', text, retry: true }, to)
 
@@ -1376,6 +1321,10 @@ export function mountCopilot ({
     return convo.steps
   }
 
+  /**
+   * @param {any} event
+   * @param {{path: any, convo: any} | null} [to]
+   */
   function step (event, to = null) {
     const convo = to?.convo ?? chat()
     const steps = stepsIn(convo)
@@ -1609,6 +1558,7 @@ export function mountCopilot ({
      few lines, short enough that it is plainly a glance and not a panel the
      reader now has to close. The fade is CSS; this only has to outlast it. */
   const STEP_DIFF_MS = 4000
+  /** @type {ReturnType<typeof setTimeout> | null} */
   let stepDiffTimer = null
 
   /**
@@ -1618,10 +1568,11 @@ export function mountCopilot ({
    * transcript as it found it, not three diffs deep.
    */
   async function flashStepDiff (row, path, operationId) {
-    clearTimeout(stepDiffTimer)
+    if (stepDiffTimer) clearTimeout(stepDiffTimer)
     for (const old of el.log.querySelectorAll('.step-diff')) old.remove()
     if (!operationId || !path) return
 
+    /** @type {any} */
     let detail = null
     try {
       detail = await api.trust.operation(operationId)
@@ -1713,6 +1664,7 @@ export function mountCopilot ({
      800ms for as long as a reply streams. The deltas are picked up at the
      turn's end, at each tool call, and when the window blurs or the note
      switches. */
+  /** @type {ReturnType<typeof setTimeout> | null} */
   let saveTimer = null
   let saveSince = 0
   let unsaved = false
@@ -1747,7 +1699,7 @@ export function mountCopilot ({
     unsaved = true
     dirtyNotes.add(chatKey(path))
     if (!saveSince) saveSince = Date.now()
-    clearTimeout(saveTimer)
+    if (saveTimer) clearTimeout(saveTimer)
     const left = saveSince + SAVE_CEILING - Date.now()
     saveTimer = setTimeout(flush, Math.max(0, Math.min(SAVE_WAIT, left)))
   }
@@ -1776,7 +1728,7 @@ export function mountCopilot ({
   }
 
   function flush () {
-    clearTimeout(saveTimer)
+    if (saveTimer) clearTimeout(saveTimer)
     saveTimer = null
     saveSince = 0
 
@@ -1908,6 +1860,13 @@ export function mountCopilot ({
         phase(run, 'Thinking')
         break
 
+      case 'progress':
+        // stderr heartbeat from a long tool call (see `launch` in ai.js).
+        // The strip is the line being read while nothing else moves, so the
+        // latest log line lands there rather than as transcript noise.
+        if (event.text) phase(run, String(event.text).slice(0, 44))
+        break
+
       case 'preparing-pdf':
         phase(run, 'Preparing PDF')
         break
@@ -1934,6 +1893,11 @@ export function mountCopilot ({
           onEditing?.(event.path, event.needle || '', event.name, event.turnId)
         }
         step({ ...event, done: false }, to)
+        // A tool running outside the vault (auto mode) is said as such: the
+        // grant difference between Ask and Auto is exactly this extent.
+        if (event.outside) {
+          note(`Running outside the vault: ${event.path}`, 'note', to)
+        }
         // A tool running is the quietest part of a turn and the one that most
         // looks like a hang, so the strip says which tool and on what rather
         // than leaving a timer to answer that on its own.
@@ -2075,6 +2039,11 @@ export function mountCopilot ({
     run.stale = false
     run.settings = state.settings
     if (!result?.ok) failed(result?.error || 'The copilot could not start.', run.turn)
+    // Main evicts idle copilots past MAX_SESSIONS; the evicted chat restarts
+    // silently on resend, but the transcript should say why the thread is new.
+    else if (result?.evicted && run.turn) {
+      note('An idle copilot was closed to make room; this chat restarted.', 'note', run.turn)
+    }
     return run.started
   }
 
@@ -2376,6 +2345,7 @@ export function mountCopilot ({
   /* The list floating above the message box: either the commands matching what
      has been typed, or the conversations `/history` offers. One thing at a
      time, so the keys that drive it never have to ask which. */
+  /** @type {{rows: {label: string, hint: string, run: () => void}[], at: number} | null} */
   let menu = null   // { rows: [{ label, hint, run }], at }
 
   function showMenu (rows) {
@@ -2394,9 +2364,11 @@ export function mountCopilot ({
   }
 
   function paintMenu () {
-    el.menu.replaceChildren(...menu.rows.map((row, at) => {
+    const current = menu
+    if (!current) return
+    el.menu.replaceChildren(...current.rows.map((row, at) => {
       const node = element('button', 'ai-menu-row')
-      const on = at === menu.at
+      const on = at === current.at
       node.type = 'button'
       node.id = `ai-menu-opt-${at}`
       node.setAttribute('role', 'option')
@@ -2409,13 +2381,14 @@ export function mountCopilot ({
     }))
     el.menu.hidden = false
     el.input.setAttribute('aria-expanded', 'true')
-    el.input.setAttribute('aria-activedescendant', `ai-menu-opt-${menu.at}`)
-    el.menu.children[menu.at]?.scrollIntoView({ block: 'nearest' })
+    el.input.setAttribute('aria-activedescendant', `ai-menu-opt-${current.at}`)
+    el.menu.children[current.at]?.scrollIntoView({ block: 'nearest' })
   }
 
   /** Move the highlight without rebuilding the rows — this runs per arrow
    *  key, and nothing about the rows changed, only which of them is lit. */
   function moveMenu (by) {
+    if (!menu) return
     const count = menu.rows.length
     const was = el.menu.children[menu.at]
     menu.at = (menu.at + by + count) % count
@@ -2429,8 +2402,8 @@ export function mountCopilot ({
     on.scrollIntoView({ block: 'nearest' })
   }
 
-  function pickMenu (at = menu.at) {
-    const row = menu.rows[at]
+  function pickMenu (at = menu?.at ?? 0) {
+    const row = menu?.rows[at]
     hideMenu()
     row?.run()
   }
@@ -2499,10 +2472,11 @@ export function mountCopilot ({
      renderer hands over, which it replaces wholesale whenever the tree changes,
      so its identity is exactly the right question. Same arrangement as
      `allModels` in models.js. */
+  /** @type {{of: any, list: any[]}} */
   let mentions = { of: null, list: [] }
 
   function mentionable () {
-    const list = files()
+    const list = /** @type {any[]} */ (files())
     if (mentions.of === list) return mentions.list
 
     mentions = {
@@ -2641,7 +2615,7 @@ export function mountCopilot ({
    * the window, and a new chat, or a switch to Auto and back, asks again.
    */
   async function permissionFor (path, convo = chat(path)) {
-    if (state.mode !== COPILOT_MODES.ASK || !state.model) return true
+    if (/** @type {string} */ (state.mode) !== COPILOT_MODES.ASK || !state.model) return true
     if (convo?.granted === state.mode) return true
     try {
       const allowed = await onPermission?.({
@@ -2707,6 +2681,10 @@ export function mountCopilot ({
            and the opposite of what just happened to them. */
         save(item.path)
       }
+      // Said once, in the conversation the batch goes out as: joining is a
+      // delivery optimisation, and without the line the transcript reads as
+      // one question asked and two ignored.
+      note(`Sent ${batch.length} queued questions together as one turn.`, 'note', { path: first.path, convo: first.convo })
     }
     const contextMode = batch.every((item) => item.contextMode === CONTEXT_MODES.CODE_TASK)
       ? CONTEXT_MODES.CODE_TASK
@@ -2738,6 +2716,10 @@ export function mountCopilot ({
    * `carrying` is the queued case: rows already filed in the old conversation,
    * which have to travel to the new one rather than be left behind in a
    * transcript nobody is looking at any more.
+   *
+   * @param {any} path
+   * @param {any} contextMode
+   * @param {any[] | null} [carrying]
    */
   function convoFor (path, contextMode, carrying = null) {
     const rows = (carrying || []).map((item) => item.msg).filter(Boolean)
@@ -2838,7 +2820,7 @@ export function mountCopilot ({
        taken it in the meantime, and then there is nothing to stand in for. */
     const editing = state.editing
     state.editing = null
-    if (editing?.convo === convo) {
+    if (editing && editing.convo === convo) {
       const at = convo.messages.indexOf(editing.msg)
       /* Spliced in one go and then let go of one at a time: `drop` is given the
          message it has already removed, so it is only the index and the node
@@ -2855,6 +2837,15 @@ export function mountCopilot ({
    * Split from `submit` because a queued follow-up arrives here too, minutes
    * later and possibly with the reader looking at another note — so everything
    * this needs is passed in rather than read off what happens to be on screen.
+   *
+   * @param {object} args
+   * @param {string} args.text
+   * @param {any[]} args.attachments
+   * @param {string} args.path
+   * @param {any} args.convo
+   * @param {any} args.msg
+   * @param {string | null} [args.contextMode]
+   * @param {boolean} [args.approved]
    */
   async function deliver ({ text, attachments, path, convo, msg, contextMode = null, approved = false }) {
     if (!approved && !await permissionFor(path, convo)) {
@@ -2896,7 +2887,15 @@ export function mountCopilot ({
     }
   }
 
-  /** The body of a turn — everything `deliver` guards. */
+  /** The body of a turn — everything `deliver` guards.
+   *
+   * @param {any} to
+   * @param {object} opts
+   * @param {string} opts.text
+   * @param {any[]} opts.attachments
+   * @param {any} opts.convo
+   * @param {string | null} [opts.contextMode]
+   */
   async function sendTurn (to, { text, attachments, convo, contextMode = null }) {
     const run = to.run
     /* No model — never chosen, or everything unticked in Settings — is not a
@@ -3083,7 +3082,7 @@ export function mountCopilot ({
   function addAttachments (paths, allowVaultFiles = false) {
     const next = [...pendingAttachments]
     for (const path of paths || []) {
-      const isVaultFile = allowVaultFiles && files().some((entry) => entry?.path === path)
+      const isVaultFile = allowVaultFiles && /** @type {any[]} */ (files()).some((entry) => entry?.path === path)
       if ((isChatAttachment(path) || isVaultFile) && !next.includes(path)) next.push(path)
     }
     pendingAttachments = next
@@ -3167,6 +3166,16 @@ export function mountCopilot ({
       : 'Stopped.', 'note', to)
   }
 
+  /** Stop every running turn, on screen or behind it. The per-chat Stop above
+   *  only ever reaches the visible conversation; with one copilot per note a
+   *  vault worked in all day can have several going, and "Stop all" is the
+   *  one control that means all of them. */
+  async function haltAll () {
+    const busy = allRuns().filter((run) => run.busy && run.turn)
+    if (!busy.length) return
+    await Promise.allSettled(busy.map((run) => halt(run)))
+  }
+
   /* ------------------------------------------------------------ settings */
 
   /** The models on offer, and the one chosen among them. */
@@ -3212,6 +3221,8 @@ export function mountCopilot ({
    * browsed away from; said with a bare `note()` they landed in whichever
    * transcript happened to be on screen, telling the wrong conversation it was
    * nearly full.
+   *
+   * @param {{path: any, convo: any} | null} [to]
    */
   function paintContext (to = null) {
     const model = currentModel()
@@ -3483,6 +3494,7 @@ export function mountCopilot ({
     settleEffort()
     paintWrite()
     paintConfig()
+    paintWorking()
   }
 
   /* Chosen files are copied into the vault, then represented by compact cards
@@ -3531,6 +3543,7 @@ export function mountCopilot ({
   /* The conversation whose nodes are in the log. Remembered so the one leaving
      the screen can be stripped of them — a rendered subtree per message, kept
      across every note switch, is most of a transcript's weight. */
+  /** @type {any} */
   let shown = null
 
   /* How many rows a repaint draws. A chat at the cap is a hundred and fifty

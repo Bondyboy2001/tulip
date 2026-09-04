@@ -23,6 +23,12 @@ IDENTIFIER=com.hb.tulip
 echo "› bundling the renderer"
 # `--release` is what advances the patch version, and this script is the only
 # caller that passes it: packaging is the release boundary, `npm start` is not.
+# Trimmed dictionaries: `TULIP_SPELL_LANGUAGES=fr,de ./scripts/build-app.sh`
+# (or `=none`) shrinks the ~16MB of Hunspell dictionaries to the named
+# languages. Unset builds all fifteen, which stays the default because the app
+# runs offline and cannot fetch a dictionary later. The variable needs no
+# forwarding here — the environment passes it to build.mjs untouched; see
+# SPELL_LANGUAGE_IDS there.
 node build.mjs --release
 
 # Read after the build, not before: the build has just advanced the version, and

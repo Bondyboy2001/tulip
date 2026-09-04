@@ -41,6 +41,7 @@ function linesFromItems (items) {
   const rows = []
 
   for (const run of runs.sort((a, b) => b.y - a.y || a.x - b.x)) {
+    /** @type {{ y: number, height: number, runs: Array<{ text: string, x: number, y: number, height: number, width: number }> } | null} */
     let row = null
     /* Runs are sorted from the top down, so only the newest few rows can share
        this baseline. Avoid an all-rows search for every glyph on dense pages. */

@@ -30,7 +30,7 @@ import { assetUrl, assetKind } from './assets.js'
 import { fileSize } from './units.js'
 
 const extensionOf = (path) => {
-  const name = String(path || '').split('/').pop()
+  const name = /** @type {string} */ (String(path || '').split('/').pop())
   const dot = name.lastIndexOf('.')
   return dot <= 0 ? '' : name.slice(dot + 1).toUpperCase()
 }
@@ -44,17 +44,20 @@ const when = (ms) => (ms
  * Mount the viewer into `host`. One instance for the life of the window, like
  * every other viewer here: `open` points it at a file and `close` lets go.
  *
- * @param host      the pane this draws into
- * @param file      the renderer's `api.file` — `probe`, `reveal`, `openDefault`
- * @param onStatus  told what the status bar should say about the open file
- * @param onWarn    told when something the user asked for did not happen
+ * @param {object} opts
+ * @param {any} opts.host      the pane this draws into
+ * @param {any} opts.file      the renderer's `api.file` — `probe`, `reveal`, `openDefault`
+ * @param {(msg: string) => void} [opts.onStatus]  told what the status bar should say about the open file
+ * @param {(msg: string) => void} [opts.onWarn]    told when something the user asked for did not happen
  */
 export function mountFileView ({ host, file, onStatus = () => {}, onWarn = () => {} }) {
+  /** @type {{path: any, kind: any, size: any, modified: any} | null} */
   let current = null   // { path, kind, size, modified }
   /* The element showing the file, kept so `close` can stop it. A <video> left
      in the DOM with its source set goes on downloading and, worse, goes on
      *playing* — switching tabs away from a recording and still hearing it is
      the bug this variable exists to prevent. */
+  /** @type {HTMLAudioElement | HTMLVideoElement | null} */
   let playing = null
 
   host.classList.add('fileview')

@@ -19,7 +19,13 @@
  */
 
 const path = require('node:path')
-const fs = require('node:fs')
+const fs = require('node:fs/promises')
+/* `accessSync` and the constants below stay synchronous deliberately: resolving
+   a command is a couple of existence probes on the spawn path, and making it
+   async would turn every spawn helper in this file — `resolveCommand`,
+   `invocation`, `ask`, `probe` — async with it. The vault sweep and the
+   catalogue cache beside it are the blocking reads, and those are async. */
+const fsSync = require('node:fs')
 const { spawn, execFile } = require('node:child_process')
 const { killTree } = require('./kill-tree.js')
 const { systemPrompt, promptFor, nothingSent } = require('./prompt.js')
@@ -111,6 +117,9 @@ const TOOL_POLICY = {
  * `OPENCODE_CONFIG_CONTENT` is the inline config, so a user's own
  * `opencode.json` still applies and only these keys are stated on top. A name
  * that is not a mode states nothing and passes the variable through untouched.
+ * A user config that is not an object, or whose `permission` is not an object,
+ * is left alone rather than extended: merging onto an array or string would
+ * silently produce a config neither side wrote.
  */
 function policyEnv (mode) {
   const permission = TOOL_POLICY[mode]
@@ -118,7 +127,15 @@ function policyEnv (mode) {
   let base = {}
   try {
     const had = process.env.OPENCODE_CONFIG_CONTENT
-    if (had) base = JSON.parse(had) || {}
+    if (had) {
+      const parsed = JSON.parse(had)
+      base = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+      if (base.permission != null && (typeof base.permission !== 'object' || Array.isArray(base.permission))) {
+        console.warn('Tulip copilot: ignoring unmergeable OPENCODE_CONFIG_CONTENT.permission')
+        const { permission: _drop, ...rest } = base
+        base = rest
+      }
+    }
   } catch { /* an inline config we cannot read is one we do not extend */ }
   return {
     OPENCODE_CONFIG_CONTENT: JSON.stringify({
@@ -164,7 +181,9 @@ function detailOf (value) {
     : trimmed
 }
 
+/** @type {(event: any) => void} */
 let emit = () => {}
+/** @type {string | null} */
 let vault = null
 /* Main sets this to its `executionTrusted()` check. Ask/auto modes can run
    shell and edit files, so they require the same vault trust as run blocks;
@@ -173,14 +192,32 @@ let isTrusted = () => false
 function setTrusted (fn) { if (typeof fn === 'function') isTrusted = fn }
 
 /* File names the copilot must never be handed, even if the vault holds them.
-   Checked in `send` against attachment/context paths before a turn starts. */
+   Checked in `send` against attachment/context paths before a turn starts.
+   Two tiers: hard secrets are always refused; suspect key material is refused
+   with a naming hint so a legitimately-named note can be renamed rather than
+   silently blocked. */
 const SECRET_BASENAMES = new Set(['.env', '.env.local', 'id_rsa', 'id_ed25519', 'credentials.json', 'secrets.json'])
-const SECRET_RE = /(^|\/)\.env(\.|$)|(^|\/)(id_rsa|id_ed25519)(_|$|\.)|(^|\/)(credentials|secrets?|.*_rsa|.*\.pem|.*\.key)$/i
+const HARD_SECRET_RE = /(^|\/)\.env(\.|$)|(^|\/)(id_rsa|id_ed25519)(_|$|\.)|(^|\/)(credentials|secrets?)(_|$|\.)/i
+const SUSPECT_KEY_RE = /(^|\/).*\.(pem|key)$/i
+const PRIVATE_KEY_RE = /-----BEGIN (?:RSA |DSA |EC |OPENSSH )?PRIVATE KEY-----/
 const isSecretPath = (p) => {
   const base = String(p || '').split('/').pop()
   if (!base) return false
   if (SECRET_BASENAMES.has(base)) return true
-  return SECRET_RE.test(String(p || ''))
+  const full = String(p || '')
+  return HARD_SECRET_RE.test(full) || SUSPECT_KEY_RE.test(full)
+}
+/** Private key material pasted or quoted into the prompt itself. */
+const hasSecretContent = (value) => {
+  if (!value) return false
+  if (typeof value === 'string') return PRIVATE_KEY_RE.test(value)
+  if (Array.isArray(value)) return value.some(hasSecretContent)
+  if (typeof value === 'object') {
+    return Object.values(value).some((v) => typeof v === 'string'
+      ? PRIVATE_KEY_RE.test(v)
+      : Array.isArray(v) ? hasSecretContent(v) : false)
+  }
+  return false
 }
 
 /**
@@ -423,7 +460,7 @@ function commandCandidates (file, windows = WINDOWS, suffixes = executableSuffix
 function runnableAt (file) {
   for (const candidate of commandCandidates(file)) {
     try {
-      fs.accessSync(candidate, fs.constants.X_OK)
+      fsSync.accessSync(candidate, fsSync.constants.X_OK)
       return candidate
     } catch { /* keep looking */ }
   }
@@ -432,18 +469,30 @@ function runnableAt (file) {
 
 /** Where the command actually lives, walked over the same PATH the spawn
  *  uses. Empty when it is nowhere — which the caller treats as "spawn the
- *  name as given and let ENOENT tell the story". */
+ *  name as given and let ENOENT tell the story".
+ *  Cached per PATH value: every turn spawns, and walking the PATH per turn
+ *  is stat calls for an answer that has not changed. */
+const resolvedCommands = new Map()
 function resolveCommand (command) {
+  const pathValue = String(resolvePath() || '')
+  const cacheKey = `${process.platform}\u0000${pathValue}\u0000${command}`
+  if (resolvedCommands.has(cacheKey)) return resolvedCommands.get(cacheKey)
+  let found = ''
   if (command.includes(path.sep) || (WINDOWS && command.includes('/'))) {
-    return runnableAt(command)
+    found = runnableAt(command)
+  } else {
+    for (const dir of pathValue.split(path.delimiter)) {
+      if (!dir) continue
+      const hit = runnableAt(path.join(dir, command))
+      if (hit) { found = hit; break }
+    }
   }
-  for (const dir of String(resolvePath() || '').split(path.delimiter)) {
-    if (!dir) continue
-    const found = runnableAt(path.join(dir, command))
-    if (found) return found
-  }
-  return ''
+  // Bounded: PATH values churn across vaults and login-shell refreshes.
+  if (resolvedCommands.size > 50) resolvedCommands.clear()
+  resolvedCommands.set(cacheKey, found)
+  return found
 }
+function clearResolvedCommands () { resolvedCommands.clear() }
 
 /**
  * The command and arguments, as this platform can actually run them.
@@ -547,8 +596,8 @@ function reap (proc, signal = 'SIGTERM') {
 
 function launch (provider, args, onMessage, { self, prompt = null, isRetry = false }) {
   const run = invocation(PROVIDERS[provider].command, args)
-  const proc = spawn(run.file, run.args, {
-    cwd: vault,
+  const proc = /** @type {import('node:child_process').ChildProcessWithoutNullStreams & { ending?: boolean }} */ (spawn(run.file, run.args, {
+    cwd: /** @type {any} */ (vault),
     stdio: ['pipe', 'pipe', 'pipe'],
     /* Its own process group, so `stop` can take the CLI's tool subprocesses
        with it rather than leaving them orphaned. Unix only: Windows has no
@@ -561,7 +610,7 @@ function launch (provider, args, onMessage, { self, prompt = null, isRetry = fal
     // fenced the same way the mode it was started in says it should be.
     env: { ...process.env, PATH: resolvePath(), ...policyEnv(self?.mode) },
     ...run.options
-  })
+  }))
 
   const mine = () => sessions.get(self.key) === self && self.proc === proc
 
@@ -603,7 +652,7 @@ function launch (provider, args, onMessage, { self, prompt = null, isRetry = fal
     if (!mine()) return
     publish({
       k: 'error',
-      message: err.code === 'ENOENT'
+      message: /** @type {any} */ (err).code === 'ENOENT'
         ? `The \`${PROVIDERS[provider].command}\` command is not on your PATH. Install it and sign in with your subscription.`
         : err.message
     }, self)
@@ -612,9 +661,17 @@ function launch (provider, args, onMessage, { self, prompt = null, isRetry = fal
 
   // Only the tail is kept, because a turn against a long document can put a
   // great deal down this pipe and none of it is worth more than its last words.
+  // The last line is also forwarded as progress: a long shell command that
+  // opencode only reports on completion still logs while it runs, and a strip
+  // that names that log line is the difference between waiting and wondering.
   let stderr = ''
   proc.stderr.setEncoding('utf8')
-  proc.stderr.on('data', (chunk) => { stderr = (stderr + chunk).slice(-4096) })
+  proc.stderr.on('data', (chunk) => {
+    stderr = (stderr + chunk).slice(-4096)
+    if (!mine() || !self.busy) return
+    const line = String(chunk).split(/\r?\n/).map((s) => s.trim()).filter(Boolean).pop()
+    if (line) publish({ k: 'progress', text: line.slice(0, 160) }, self)
+  })
 
   /* The watchdog, for a CLI that neither answers nor exits. Nothing else here
      can end that turn: `stop` waits on a button nobody may be at, and every
@@ -626,17 +683,26 @@ function launch (provider, args, onMessage, { self, prompt = null, isRetry = fal
      many chunks a second, and each would have cancelled and rebuilt a
      ten-minute timer that all but never fires. */
   let lastHeard = Date.now()
+  let warned = false
   const alive = () => { lastHeard = Date.now() }
   const starved = setInterval(() => {
     if (!mine()) { clearInterval(starved); return }
-    if (Date.now() - lastHeard < TURN_WATCHDOG_MS) return
+    const quietFor = Date.now() - lastHeard
+    // Half-way notice so a legitimately long command names itself before the
+    // kill does: the strip can say "still running" while there is still time.
+    if (!warned && quietFor >= TURN_WATCHDOG_MS / 2 && quietFor < TURN_WATCHDOG_MS) {
+      warned = true
+      publish({ k: 'progress', text: 'Still working — no output for a while.' }, self)
+      return
+    }
+    if (quietFor < TURN_WATCHDOG_MS) return
     clearInterval(starved)
     publish({
       k: 'error',
       message: `The copilot went quiet for ${Math.round(TURN_WATCHDOG_MS / 60000)} minutes and was stopped.`
     }, self)
     stop(self.key)
-  }, 30000)
+  }, 15000)
   starved.unref?.()
   proc.stdout.on('data', alive)
   proc.stderr.on('data', alive)
@@ -722,16 +788,22 @@ function onOpencodeMessage (msg, self) {
   }
 
   const part = msg.part || {}
+  const textOf = part.text ?? part.delta ?? part.content ?? ''
   switch (msg.type) {
     case 'reasoning':
-      account(self, part.text)
-      publish({ k: 'thinking', text: part.text || '', tokens: 0 }, self)
+    case 'reasoning_delta':
+    case 'thinking':
+      account(self, textOf)
+      publish({ k: 'thinking', text: textOf || '', tokens: 0 }, self)
       break
 
     case 'text':
-      // Delivered whole rather than in deltas.
-      account(self, part.text)
-      publish({ k: 'text', text: part.text || '' }, self)
+    case 'text_delta':
+    case 'message_delta':
+      // opencode currently delivers whole blocks; delta names are handled the
+      // same way so a future CLI shape streams instead of jumping.
+      account(self, textOf)
+      if (textOf) publish({ k: 'text', text: textOf }, self)
       break
 
     case 'tool_use': {
@@ -741,7 +813,11 @@ function onOpencodeMessage (msg, self) {
       const where = input.filePath || input.pattern || input.command || input.path || ''
       const needle = input.oldString || input.old_string || ''
       const id = part.callID || part.id
-      publish({ k: 'tool', id, name, path: relative(where), needle }, self)
+      // `relative` returns the absolute path when it escapes the vault; the
+      // panel uses the flag rather than re-deriving it per row.
+      const rel = relative(where)
+      const outside = !!where && rel === where && path.isAbsolute(String(where))
+      publish({ k: 'tool', id, name, path: rel, needle, ...(outside ? { outside: true } : {}) }, self)
       // A tool call is announced already finished in the common case; the
       // guard is for the builds that report it running first.
       if (state.status === 'completed' || state.status === 'error') {
@@ -767,6 +843,14 @@ function onOpencodeMessage (msg, self) {
     case 'step_finish': {
       const usage = usageOf(part.tokens)
       if (usage) self.used = usage.used
+      // A CLI-side compaction rewrites what the resumed thread holds: the
+      // prompt memo (quoted note, ranked pages, rules) describes a thread
+      // that no longer exists. Drop the memo's claim so the next turn
+      // re-briefs whole rather than naming copies the model no longer has.
+      if (part.compacted === true || part.compaction === true ||
+          /compact/i.test(String(part.reason || part.message || ''))) {
+        Object.assign(self.sent, nothingSent())
+      }
       /* Two figures the CLI publishes and nothing here used to read. The
          cost is per step and adds up over the turn; the panel shows the
          running total beside the context ring. The reasoning count is what
@@ -799,6 +883,17 @@ function onOpencodeMessage (msg, self) {
       const proc = self.proc
       self.proc = null
       if (proc) reap(proc)
+      break
+    }
+
+    default: {
+      // Future CLI event shapes (compaction notices, session notices) must
+      // not be silently absorbed when they invalidate the prompt memo.
+      const hay = `${msg.type || ''} ${part.reason || ''} ${part.message || ''}`
+      if (/compact/i.test(hay)) {
+        Object.assign(self.sent, nothingSent())
+        publish({ k: 'progress', text: 'The copilot compacted its thread; context will be re-sent.' }, self)
+      }
       break
     }
   }
@@ -858,25 +953,35 @@ function readLines (stream, onMessage) {
 const SWEEP_AGE_MS = 30 * 60 * 1000
 
 function sweepProtocolFiles () {
-  if (!vault) return
-  let names
-  try { names = fs.readdirSync(vault) } catch { return }
-  const floor = Date.now() - SWEEP_AGE_MS
-  const someTurnBusy = [...sessions.values()].some((self) => self.busy)
-  for (const name of names) {
-    if (!name.startsWith('.tulip-copilot-') || !name.endsWith('.json')) continue
-    const file = path.join(vault, name)
-    if (someTurnBusy) {
-      try { if (fs.statSync(file).mtimeMs > floor) continue } catch { continue }
-    }
-    try { fs.unlinkSync(file) } catch { /* already gone */ }
-  }
+  if (!vault) return Promise.resolve()
+  const root = vault
+  return (async () => {
+    let names
+    try { names = await fs.readdir(root) } catch { return }
+    const floor = Date.now() - SWEEP_AGE_MS
+    const someTurnBusy = [...sessions.values()].some((self) => self.busy)
+    /* Protocol litter is a file or two, so these go out together rather than
+       one at a time. */
+    await Promise.all(names.map(async (name) => {
+      if (!name.startsWith('.tulip-copilot-') || !name.endsWith('.json')) return
+      const file = path.join(root, name)
+      if (someTurnBusy) {
+        const stat = await fs.stat(file).catch(() => null)
+        if (!stat || stat.mtimeMs > floor) return
+      }
+      await fs.unlink(file).catch(() => {})
+    }))
+  })()
 }
 
 function setVault (dir) {
   if (dir !== vault) stopAll()
   vault = dir
-  sweepProtocolFiles()
+  /* Not awaited by callers attaching a vault: attaching must not wait on the
+     sweep, and a turn already running owns only files newer than the busy
+     window, which the sweep leaves alone. Returned, so the sweep can still be
+     joined where it matters (the tests join it). */
+  return sweepProtocolFiles().catch(() => {})
 }
 
 function attach (fn, pathFn, cacheFile = '') {
@@ -940,7 +1045,7 @@ function parseOpencode (stdout) {
       id: line,
       label: line.slice(cut + 1),
       group: line.slice(0, cut),
-      efforts: [],
+      efforts: /** @type {string[]} */ ([]),
       effort: '',
       context: 0
     }
@@ -958,10 +1063,13 @@ function parseOpencode (stdout) {
     }
     try {
       const spec = JSON.parse(block.join('\n'))
-      const efforts = Object.keys(spec.variants || {})
+      // Variants arrive as an object in --verbose; tolerate an array or a
+      // single string from future CLI shapes rather than dropping the dial.
+      const raw = spec.variants ?? spec.efforts ?? spec.reasoningLevels
+      const efforts = Array.isArray(raw) ? raw.filter((v) => typeof v === 'string') : Object.keys(raw || {})
       model.efforts = efforts
       model.effort = efforts.includes('high') ? 'high' : (efforts[0] || '')
-      model.context = spec.limit?.context || 0
+      model.context = Number(spec.limit?.context ?? spec.context ?? spec.contextWindow ?? 0) || 0
     } catch { /* a block we cannot read is a model without variants */ }
   }
   return models
@@ -980,6 +1088,7 @@ function parseOpencode (stdout) {
  * the app to notice.
  */
 const CATALOGUE_TTL = 5 * 60 * 1000
+/** @type {{ at: number, promise: Promise<any> } | null} */
 let held = null      // { at, promise }
 
 /**
@@ -1000,25 +1109,32 @@ let held = null      // { at, promise }
 const CATALOGUE_DISK_TTL = 24 * 60 * 60 * 1000
 
 function readCatalogueFile () {
-  if (!catalogueFile) return null
-  try {
-    const saved = JSON.parse(fs.readFileSync(catalogueFile, 'utf8'))
-    if (!saved || typeof saved !== 'object') return null
-    if (!(Date.now() - Number(saved.at) < CATALOGUE_DISK_TTL)) return null
-    // An empty answer is one the renderer already substitutes a built-in list
-    // for, and is not worth a launch's worth of trust.
-    return Array.isArray(saved.models?.opencode) && saved.models.opencode.length
-      ? saved.models
-      : null
-  } catch { return null }
+  if (!catalogueFile) return Promise.resolve(null)
+  const file = catalogueFile
+  return (async () => {
+    try {
+      const saved = JSON.parse(await fs.readFile(file, 'utf8'))
+      if (!saved || typeof saved !== 'object') return null
+      if (!(Date.now() - Number(saved.at) < CATALOGUE_DISK_TTL)) return null
+      // An empty answer is one the renderer already substitutes a built-in list
+      // for, and is not worth a launch's worth of trust.
+      return Array.isArray(saved.models?.opencode) && saved.models.opencode.length
+        ? saved.models
+        : null
+    } catch { return null }
+  })()
 }
 
 function writeCatalogueFile (models) {
   if (!catalogueFile || !models?.opencode?.length) return
-  try {
-    fs.mkdirSync(path.dirname(catalogueFile), { recursive: true })
-    fs.writeFileSync(catalogueFile, JSON.stringify({ at: Date.now(), models }))
-  } catch { /* a catalogue that cannot be cached is simply asked for again */ }
+  /* Fire-and-forget: the caller has the answer in hand, and a cache that
+     cannot be written is simply asked for again. Sequenced inside itself so a
+     burst of catalogue answers does not interleave a mkdir with a write. */
+  const file = catalogueFile
+  const body = JSON.stringify({ at: Date.now(), models })
+  fs.mkdir(path.dirname(file), { recursive: true })
+    .then(() => fs.writeFile(file, body))
+    .catch(() => {})
 }
 
 /** Ask the CLI, and remember what it said. */
@@ -1044,23 +1160,25 @@ function models ({ fresh = false } = {}) {
      that side, and was once two. An empty answer — a CLI that is not installed,
      or one whose output has changed shape — leaves the renderer to fall back to
      what this file's catalogue already said the provider offers. */
-  const saved = fresh ? null : readCatalogueFile()
-  if (saved) {
-    /* Served now, refreshed behind. The refresh replaces the held answer rather
-       than being awaited by anyone, so the caller that arrived at launch gets
-       the saved list at once and the one that opens ⌘, a minute later gets the
-       real one. Its failure is the saved list's to absorb. */
-    const promise = Promise.resolve(saved)
-    held = { at: Date.now(), promise }
-    askCatalogue().then((models) => {
-      if (held?.promise === promise) held = { at: Date.now(), promise: Promise.resolve(models) }
-    }).catch(() => {})
-    return promise
-  }
+  const saved = fresh ? Promise.resolve(null) : readCatalogueFile()
+  return saved.then((cached) => {
+    if (cached) {
+      /* Served now, refreshed behind. The refresh replaces the held answer rather
+         than being awaited by anyone, so the caller that arrived at launch gets
+         the saved list at once and the one that opens ⌘, a minute later gets the
+         real one. Its failure is the saved list's to absorb. */
+      const promise = Promise.resolve(cached)
+      held = { at: Date.now(), promise }
+      askCatalogue().then((models) => {
+        if (held?.promise === promise) held = { at: Date.now(), promise: Promise.resolve(models) }
+      }).catch(() => {})
+      return promise
+    }
 
-  const promise = askCatalogue()
-  held = { at: Date.now(), promise }
-  return promise
+    const promise = askCatalogue()
+    held = { at: Date.now(), promise }
+    return promise
+  })
 }
 
 function probe (command, args) {
@@ -1095,6 +1213,16 @@ function onPath (command) {
 /** A redacted readiness check: only availability, version and whether the
  * provider reports credentials. Account names, tokens and command output never
  * cross IPC. */
+const MIN_OPENCODE_VERSION = [1, 10, 0]
+function versionTooOld (text) {
+  const m = /(\d+)\.(\d+)\.(\d+)/.exec(String(text || ''))
+  if (!m) return false
+  const got = [Number(m[1]), Number(m[2]), Number(m[3])]
+  for (let i = 0; i < 3; i++) {
+    if (got[i] !== MIN_OPENCODE_VERSION[i]) return got[i] < MIN_OPENCODE_VERSION[i]
+  }
+  return false
+}
 function doctor () {
   return Promise.all(CATALOGUE.providers.map(async (provider) => {
     const installed = onPath(provider.command)
@@ -1108,19 +1236,24 @@ function doctor () {
     const signedIn = auth.ok && provider.id === 'opencode'
       ? !/(?:0 credentials|no credentials)/i.test(auth.text)
       : auth.ok
+    const versionText = version.ok ? version.text.split(/\r?\n/, 1)[0].slice(0, 100) : ''
+    const old = provider.id === 'opencode' && version.ok && versionTooOld(versionText)
     return {
       id: provider.id,
       label: provider.label,
       installed,
       // Said only when the CLI answered; one that will not say is still
       // installed, and a blank version is the honest way to put that.
-      version: version.ok ? version.text.split(/\r?\n/, 1)[0].slice(0, 100) : '',
+      version: versionText,
       signedIn: installed && signedIn,
-      status: !installed ? 'CLI not found' : (signedIn ? 'Ready' : 'Sign in required')
+      status: !installed ? 'CLI not found' : old ? `Update opencode (>= ${MIN_OPENCODE_VERSION.join('.')})` : (signedIn ? 'Ready' : 'Sign in required')
     }
   }))
 }
 
+/**
+ * @param {{ key?: string, provider?: string, model?: string, effort?: string, mode?: (string | null), write?: (boolean | null), resume?: (string | null), used?: number, turnId?: (string | null) }} [options]
+ */
 function start ({
   key = '', provider = 'opencode', model, effort = '', mode = null, write = null,
   resume = null, used = 0, turnId = null
@@ -1131,14 +1264,14 @@ function start ({
      running, which is exactly what made the panel single-file: the second note
      asked a question and the first note's turn died for it. */
   stop(id)
-  evictIdleSessions()
+  const evicted = evictIdleSessions()
   /* Taken at its word. The catalogue is an account property this file cannot
      check a name against, so a model the renderer offers is a model this
      spawns, and a name it does not know is the CLI's to refuse. */
   const selectedModel = model || ''
   /* Older renderer callers sent only `write`; migrate those requests to Ask,
      while a missing permission entirely is now safely read-only. */
-  const selectedMode = PERMISSION_MODES.has(mode)
+  const selectedMode = PERMISSION_MODES.has(/** @type {any} */ (mode))
     ? mode
     : write === true ? 'ask' : 'read'
   /* Ask/auto can execute and edit: same trust as run blocks. Read mode is
@@ -1169,18 +1302,21 @@ function start ({
   // to say.
   publish({ k: 'ready', thread: session.thread }, session)
   return { ok: true, provider, model: selectedModel, effort,
-    mode: selectedMode, turnId: session.turnId }
+    mode: selectedMode, turnId: session.turnId, ...(evicted.length ? { evicted: evicted.length } : {}) }
 }
 
 /** Room for the one about to be made. A session with a process on it is a turn
  *  in flight and is never taken; the rest are a few fields each, and the oldest
- *  of them is the conversation least likely to be spoken in next. */
+ *  of them is the conversation least likely to be spoken in next. Returns the
+ *  evicted keys so the caller can say so rather than silently restarting. */
 function evictIdleSessions () {
   const idle = allSessions().filter((one) => !one.busy && !one.proc)
   const spare = sessions.size - MAX_SESSIONS + 1
-  if (spare <= 0) return
+  if (spare <= 0) return []
   idle.sort((a, b) => a.at - b.at)
-  for (const one of idle.slice(0, spare)) sessions.delete(one.key)
+  const evicted = idle.slice(0, spare)
+  for (const one of evicted) sessions.delete(one.key)
+  return evicted.map((one) => one.key)
 }
 
 /** Each CLI by the function that starts a turn against it. One, now; the map is
@@ -1189,6 +1325,12 @@ const TURN_STARTERS = {
   opencode: startOpencodeTurn
 }
 
+/**
+ * @param {string} key
+ * @param {string} text
+ * @param {any} context
+ * @param {string | null} [turnId]
+ */
 function send (key, text, context, turnId = null) {
   // Deliberately not started here: only the panel knows which copilot, which
   // effort and which write mode the user picked, so an implicit start would
@@ -1216,7 +1358,11 @@ function send (key, text, context, turnId = null) {
       }
     }
     pushPaths(context)
-    if (paths.some(isSecretPath)) return { ok: false, error: 'That attachment looks like a secret and was not sent.' }
+    pushPaths(text)
+    if (paths.some(isSecretPath)) return { ok: false, error: 'That attachment looks like a secret and was not sent. Rename the file if it is not one.' }
+    if (hasSecretContent(context) || hasSecretContent(text)) {
+      return { ok: false, error: 'That message looks like it contains a private key and was not sent.' }
+    }
   } catch { /* a context we cannot read is one we do not filter */ }
   /* Per conversation, which is the whole of the rule: two notes may be answered
      at once, one note may not be asked twice at once — the second question is a
@@ -1314,6 +1460,6 @@ module.exports = {
   parsers: {
     detailOf, tokensIn, tokensOf, usageOf, readLines, parseOpencode,
     policyEnv, commandCandidates, escapeForCmd, invocation, lostThread,
-    isSecretPath
+    isSecretPath, hasSecretContent, versionTooOld, clearResolvedCommands
   }
 }

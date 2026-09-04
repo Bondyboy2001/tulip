@@ -74,15 +74,22 @@ function makeDraftDomain (ctx) {
      */
     ipcMain.handle('draft:list', async () => {
       if (!getVaultPath()) return []
+      /* Resolved once: the directory is one string per vault, and rebuilding it
+         per draft was a join per file for a value that never moves mid-list. */
+      const dir = DRAFT_DIR()
       let names
-      try { names = await fs.readdir(DRAFT_DIR()) } catch { return [] }
+      try { names = await fs.readdir(dir) } catch { return [] }
 
       const out = []
       for (const name of names) {
         if (!name.endsWith('.json')) continue
-        const file = path.join(DRAFT_DIR(), name)
+        const file = path.join(dir, name)
+        /* Read once: the parse, the shape check and the comparison below all
+           reuse this text rather than reading the file again. */
+        let raw
+        try { raw = await fs.readFile(file, 'utf8') } catch { continue }
         let draft
-        try { draft = JSON.parse(await fs.readFile(file, 'utf8')) } catch { draft = null }
+        try { draft = JSON.parse(raw) } catch { draft = null }
         if (!draft || typeof draft.path !== 'string' || typeof draft.text !== 'string') {
           await fs.unlink(file).catch(() => {})
           continue

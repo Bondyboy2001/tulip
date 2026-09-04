@@ -26,7 +26,7 @@ import { renderTransclusion } from './transclude.js'
 const KIND_BY_EXT = new Map(
   Object.entries(KINDS)
     .filter(([kind]) => !kind.startsWith('_'))
-    .flatMap(([kind, exts]) => exts.map((ext) => [ext, kind]))
+    .flatMap(([kind, exts]) => (/** @type {string[]} */ (exts)).map((ext) => [ext, kind]))
 )
 
 const baseName = (path) => path.split('/').pop()
@@ -281,6 +281,9 @@ export function embedResizeGrip () {
  * once per frame; `commit` is handed the value the drag landed on, `restore`
  * puts back what was there when nothing was written, and `settle` runs at the
  * end of every gesture either way.
+ *
+ * @param {HTMLElement} handle
+ * @param {{ begin: (start: PointerEvent) => { from: number, min?: number, max?: number, read: (dx: number, dy: number) => number } | null | undefined, paint: (value: number) => void, commit: (value: number | null) => void, restore?: () => void, reset?: (() => void) | null, settle?: () => void }} opts
  */
 function wireResizeHandle (handle, {
   begin,
@@ -369,6 +372,9 @@ function wireResizeHandle (handle, {
  * the caller is what knows how to write that into its own corner of the
  * document. `settle` runs once when the drag is over, whether or not anything
  * was written — the moment for a re-measure.
+ *
+ * @param {HTMLElement} grip
+ * @param {{ image: HTMLImageElement, host: HTMLElement, limit?: () => number, commit: (width: number | null) => void, settle?: () => void }} opts
  */
 export function wireEmbedResize (grip, {
   image,
@@ -379,7 +385,8 @@ export function wireEmbedResize (grip, {
 }) {
   /* What the picture was wearing before the drag, so a cancelled one can put
      it back — an inline width from an earlier drag, or nothing at all. */
-  let was = null
+  /** @type {{ width: string, height: string, sized: boolean }} */
+  let was = /** @type {any} */ (null)
 
   wireResizeHandle(grip, {
     begin: () => {
@@ -633,6 +640,9 @@ function remoteSpec (src, { alt, size, writtenAsImage }) {
  * two views reach differently — while building the element does not. Every
  * *decision* (which kinds get a player, what a missing file says, how a size
  * applies) is made here, so neither view is in a position to disagree.
+ *
+ * @param {string} src
+ * @param {{ alt?: string, size?: { width: number, height: number | null } | null, resolve?: ((target: string, dir: string) => string | null) | null, resolveNote?: ((name: string) => string | null) | null, dir?: string, writtenAsImage?: boolean }} [opts]
  */
 export function embedSpec (src, {
   alt = '', size = null, resolve, resolveNote = null, dir = '', writtenAsImage = false
@@ -652,7 +662,9 @@ export function embedSpec (src, {
      part of the name, so it comes off before the vault is asked. Only for a
      local target: a URL keeps its fragment, which belongs to the site. */
   let target = String(src || '')
+  /** @type {number | null} */
   let page = null
+  /** @type {number | null} */
   let start = null
   if (!/^https?:\/\//i.test(target)) {
     const hash = target.indexOf('#')
@@ -846,7 +858,11 @@ function youtubePlayer (spec, onReady) {
   spinner.setAttribute('aria-hidden', 'true')
   cover.append(poster, spinner)
 
-  view.addEventListener('did-finish-load', () => {
+  /* Heard as an HTMLElement for one call: Electron's <webview> typing only
+     offers the boolean form of addEventListener's third argument, while the
+     engine honours the options object. */
+  const listenable = /** @type {HTMLElement} */ (view)
+  listenable.addEventListener('did-finish-load', () => {
     cover.classList.add('is-done')
     // Removed rather than left transparent: it sits over the controls.
     setTimeout(() => cover.remove(), 260)
@@ -892,7 +908,9 @@ function webEmbed (spec, onReady) {
   view.setAttribute('src', spec.url)
   if (spec.height) view.style.height = `${spec.height}px`
 
-  view.addEventListener('did-finish-load', onReady, { once: true })
+  /* As above: the options object needs the HTMLElement's addEventListener. */
+  const pageView = /** @type {HTMLElement} */ (view)
+  pageView.addEventListener('did-finish-load', onReady, { once: true })
   view.addEventListener('did-fail-load', (e) => {
     if (e.errorCode === -3 || !e.isMainFrame) return
     /* The page would not load. Say so in the frame rather than leaving white,

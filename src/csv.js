@@ -194,7 +194,7 @@ const closesQuoted = (source, at, delimiter) => {
  *
  * @returns {{rows: string[][], shape: {
  *   newline: string, finalNewline: boolean, quoteAll: boolean,
- *   quoteColumns: Set<number>, bom: boolean
+ *   quoteColumns: boolean[], bom: boolean
  * }}}
  */
 export function readSeparated (text, delimiter = ',', { strictQuotes = false } = {}) {
@@ -349,6 +349,8 @@ const quoteField = (value, delimiter, wasQuoted = false) =>
  * the bytes rather than of the text, and `api.file.write` is what turns text
  * into bytes; emitting it here would put a literal U+FEFF into a UTF-16 file
  * that then got a real mark in front of it as well.
+ *
+ * @param {{ quoteAll?: boolean, quoteColumns?: boolean[], finalNewline?: boolean } | null} [shape]
  */
 export function formatSeparated (rows, delimiter = ',', newline = '\n', shape = null) {
   const quoteAll = !!shape?.quoteAll
@@ -419,6 +421,7 @@ export function sniffDelimiter (text, fallback = ',') {
   }
 
   const order = [fallback, ...DELIMITER_CANDIDATES.filter((d) => d !== fallback)]
+  /** @type {{ delimiter: string, score: number, fields: number } | null} */
   let best = null
   for (const candidate of order) {
     const rows = parseSeparated(head, candidate).slice(0, SNIFF_ROWS)
@@ -620,6 +623,7 @@ const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})([T ].*)?$/
  *
  *  Asked once. `formatToParts` builds a formatter, and a comparison sort would
  *  otherwise ask this question a few million times for one click. */
+/** @type {string | null} */
 let localeOrder = null
 const localeDateOrder = () => {
   if (localeOrder) return localeOrder
@@ -1329,14 +1333,16 @@ export function restoredFilters (place) {
  * Mount the grid into `host`. One instance for the life of the window; `open`
  * points it at a file and `close` lets go of one.
  *
- * @param file       the renderer's `api.file` — `read` and `write`
- * @param layout     where column widths are kept, since the file cannot keep
+ * @param {object} args         what the grid is mounted into and talks to
+ * @param {any} args.host      the element the grid is mounted into
+ * @param {any} args.file      the renderer's `api.file` — `read` and `write`
+ * @param {any} [args.layout]  where column widths are kept, since the file cannot keep
  *                   them itself — `api.tableWidths`, or nothing, in which case
  *                   the columns are measured afresh every time as they were
- * @param onDirty    told whenever the unsaved state changes
- * @param onSaved    told when a save lands clean
- * @param onStatus   told when something worth a line of status happened
- * @param onSelection told when the selection settles on something new, so the
+ * @param {(dirty: boolean) => void} args.onDirty    told whenever the unsaved state changes
+ * @param {() => void} args.onSaved    told when a save lands clean
+ * @param {(message: string) => void} args.onStatus   told when something worth a line of status happened
+ * @param {() => void} args.onSelection told when the selection settles on something new, so the
  *                   status line can ask what it adds up to
  */
 export function mountCsv ({
@@ -1379,14 +1385,14 @@ export function mountCsv ({
      rather than in a menu, and it is a control rather than a label because a
      guess that went wrong has to be correctable by the person who can see it
      went wrong. */
-  const delimiterPick = dropdown({
+  const delimiterPick = dropdown(/** @type {any} */ ({
     label: 'Delimiter',
     className: 'csv-delimiter',
     options: DELIMITER_CANDIDATES.map((candidate) => ({
       value: candidate, label: delimiterName(candidate)
     })),
     onChange: (candidate) => { useDelimiter(candidate) }
-  })
+  }))
   delimiterPick.root.title = 'What separates the values in this file'
   delimiterPick.root.hidden = true
 
@@ -1400,10 +1406,10 @@ export function mountCsv ({
      controls stay on the bar only while there is somewhere to move. */
   const scrollBack = button('‹', 'scroll-left', 'Show earlier columns')
   const scrollForward = button('›', 'scroll-right', 'Show later columns')
-  for (const [control, label] of [
+  for (const [control, label] of /** @type {[HTMLButtonElement, string][]} */ ([
     [scrollBack, 'Scroll to earlier columns'],
     [scrollForward, 'Scroll to later columns']
-  ]) {
+  ])) {
     control.classList.add('is-column-scroll')
     control.setAttribute('aria-label', label)
   }
@@ -1566,6 +1572,7 @@ export function mountCsv ({
      a box you can type into without meaning to lose your place. */
   let onlyMatches = false
   /* Compiled once per keystroke rather than once per cell. */
+  /** @type {any} */
   let matcher = null
   let replacing = false
   /* Whether the file's first row is its headings. True for very nearly every
@@ -1575,6 +1582,7 @@ export function mountCsv ({
      properly. */
   let hasHeader = true
   let dirty = false
+  /** @type {Promise<any> | null} */
   let saving = null
   let flushRequested = false
   /* Counts edits rather than describing them. A write is not instant and a
@@ -1592,17 +1600,20 @@ export function mountCsv ({
      picks up where the selection was rather than jumping back to A1. Anything
      that puts the cursor somewhere shows it again; see `showCursor`. */
   let shown = true
+  /** @type {any} */
   let editing = null          // { r, c, input } while a cell is open
   let firstBuilt = -1
   let lastBuilt = -1
   let firstColBuilt = -1
   let lastColBuilt = -1
+  /** @type {string | null} */
   let dragging = null         // 'cells' | 'rows' while a drag-select is on
   let history = []
   let future = []
   /* What the sort was before the click that may turn out to be a double one —
      see the heading's `dblclick`, which has to put back the sort its own first
      click performed. */
+  /** @type {any} */
   let sortBeforeClick = null
 
   /** The key on one column, or nothing. Most of the grid only ever asks about
@@ -1620,11 +1631,14 @@ export function mountCsv ({
   /* What the selection adds up to, and the rectangle it was worked out for.
      Held rather than computed on demand because the status line asks for it on
      every repaint, and a whole-column selection is a hundred thousand cells. */
+  /** @type {any} */
   let stats = null
   /* The rectangle the totals were worked out for: a key while they hold, and
      null when there is no answer yet — which is both "nothing has been
      selected" and "what was selected has been edited under us". */
+  /** @type {string | null} */
   let statsFor = null
+  /** @type {any} */
   let statsTimer = null
 
   /* Reading or Editing — the same two views a note has, for the one document
@@ -1647,6 +1661,7 @@ export function mountCsv ({
      different things and because this one has to survive the view switch: a
      ⌘2 into Editing view must not hand somebody an editable preview of the
      first fifty thousand rows of a file with a million in it. */
+  /** @type {{ why: string } | null} */
   let lock = null             // { why } or null
 
   /** The one guard, on every path that would change the file. It says why
@@ -1753,7 +1768,7 @@ export function mountCsv ({
     if (charWidth) return charWidth
     try {
       const style = getComputedStyle(scroller)
-      const probe = document.createElement('canvas').getContext('2d')
+      const probe = /** @type {CanvasRenderingContext2D} */ (document.createElement('canvas').getContext('2d'))
       probe.font = `${style.fontSize} ${style.fontFamily}`
       // Over a run, so the result is an advance and not one glyph's bearings.
       charWidth = probe.measureText('0'.repeat(40)).width / 40
@@ -2045,13 +2060,31 @@ export function mountCsv ({
     if (!count) return { firstCol: 0, lastCol: 0 }
     const from = Math.max(0, scroller.scrollLeft - GUTTER)
     const to = from + (scroller.clientWidth || 800)
-    let firstCol = 0
-    while (firstCol < count - 1 && colLeft[firstCol + 1] <= from) firstCol++
-    let lastCol = firstCol
-    while (lastCol < count && colLeft[lastCol] < to) lastCol++
+    /* `colLeft` is a running total, so both edges are binary searches rather
+       than walks: on a two-hundred-column export the walks ran the whole
+       offset array twice per scroll tick. `colLeft[0]` is zero, which is never
+       past `from`, so the first search always has an answer. */
+    let lo = 0
+    let hi = count - 1
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1
+      if (colLeft[mid] <= from) lo = mid
+      else hi = mid - 1
+    }
+    const firstCol = lo
+    /* The first offset at or past `to`, or `count` when the row runs out
+       first — which is exactly where the walk below used to stop, since it
+       never looked at `colLeft[count]`. */
+    lo = firstCol
+    hi = count
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1
+      if (mid < count && colLeft[mid] < to) lo = mid + 1
+      else hi = mid
+    }
     return {
       firstCol: Math.max(0, firstCol - OVERSCAN_COLS),
-      lastCol: Math.min(count, lastCol + OVERSCAN_COLS)
+      lastCol: Math.min(count, lo + OVERSCAN_COLS)
     }
   }
 
@@ -2375,8 +2408,40 @@ export function mountCsv ({
     }
     if (!changed) return
     paint()
-    decorate()
+    requestDecorate()
     rememberWidths()
+  }
+
+  /** Selection, cursor and search-match classes, coalesced across a frame.
+   *
+   *  Every cursor move repaints the band, and a held arrow or a drag sends
+   *  several moves per frame — each of which used to walk every built cell for
+   *  a paint only the last one could show. The first touch in a frame still
+   *  paints at once, so a single step answers synchronously exactly as before;
+   *  the rest collapse into one trailing paint. The trailer is a timed task
+   *  rather than a frame callback on purpose: a frame can land after whatever
+   *  is waiting on the paint, while tasks run first-in first-out. */
+  let decorateQueued = false
+  let decorateSynced = false
+  let decorateSyncArmed = 0
+  const requestDecorate = () => {
+    if (decorateQueued) return
+    if (!decorateSynced) {
+      decorateSynced = true
+      decorate()
+      if (!decorateSyncArmed) {
+        decorateSyncArmed = requestAnimationFrame(() => {
+          decorateSyncArmed = 0
+          decorateSynced = false
+        })
+      }
+      return
+    }
+    decorateQueued = true
+    setTimeout(() => {
+      decorateQueued = false
+      decorate()
+    }, 0)
   }
 
   /** Selection, cursor and search-match classes over whatever is built. Cheap
@@ -2384,7 +2449,7 @@ export function mountCsv ({
   function decorate () {
     const boxes = ranges()
     const picked = (r, c) => shown && inSelection(r, c, boxes)
-    for (const cell of frame.querySelectorAll('.csv-cell')) {
+    for (const cell of /** @type {NodeListOf<HTMLElement>} */ (frame.querySelectorAll('.csv-cell'))) {
       const r = Number(cell.dataset.row)
       const c = Number(cell.dataset.col)
       const inside = picked(r, c)
@@ -2414,12 +2479,12 @@ export function mountCsv ({
     /* The heading and the line number light up to say which column and which
        row the selection is in — so with nothing selected there is nothing for
        them to say either. */
-    for (const cell of frame.querySelectorAll('.csv-gutter')) {
+    for (const cell of /** @type {NodeListOf<HTMLElement>} */ (frame.querySelectorAll('.csv-gutter'))) {
       const r = Number(cell.dataset.row)
       cell.classList.toggle('is-active',
         shown && boxes.some((box) => r >= box.r0 && r <= box.r1))
     }
-    for (const cell of headRow.querySelectorAll('.csv-th')) {
+    for (const cell of /** @type {NodeListOf<HTMLElement>} */ (headRow.querySelectorAll('.csv-th'))) {
       const c = Number(cell.dataset.col)
       cell.classList.toggle('is-active',
         shown && boxes.some((box) => c >= box.c0 && c <= box.c1))
@@ -2615,8 +2680,12 @@ export function mountCsv ({
       found.classList.remove('is-empty')
     } else {
       const hits = countMatches()
-      found.textContent = hits ? `${hits.toLocaleString()} matching ${hits === 1 ? 'row' : 'rows'}` : 'no matches'
-      found.classList.toggle('is-empty', !hits)
+      found.textContent = hits.capped
+        ? `${MATCH_COUNT_LIMIT.toLocaleString()}+ matching rows`
+        : hits.count
+          ? `${hits.count.toLocaleString()} matching ${hits.count === 1 ? 'row' : 'rows'}`
+          : 'no matches'
+      found.classList.toggle('is-empty', !hits.count)
     }
   }
 
@@ -2626,30 +2695,97 @@ export function mountCsv ({
      million rows, twenty cells each, `toLowerCase` on every one. A plain
      needle can only lose rows as it grows: a row holding "revenue" held
      "revenu", so the rows to look at are the ones the shorter needle kept.
-     A pattern or a whole-cell match cannot narrow and is done from scratch.
-     Keyed on the rows and the revision, both of which every edit moves. */
+     A pattern grown by typing narrows the same way, as long as it only gained
+     a suffix: any match of the longer pattern begins with a match of the
+     shorter one, so a row the shorter one missed cannot match. An end anchor
+     breaks that — `$` can succeed mid-pattern before a newline — as does a
+     whole-cell match, so those are done from scratch.
+     Keyed on the rows and the revision, both of which every edit moves.
+
+     A scan also remembers how far it got. The count in the bar stops early —
+     see `countMatches` — and the rows it never reached are unknown rather
+     than clear, so the next scan tests those while still skipping the ones
+     the shorter needle ruled out. */
+  /* Past this many matches the bar says "5000+" instead of counting the file:
+     the number is a shape, not an answer, and the rows past it cost a full
+     scan to name. */
+  const MATCH_COUNT_LIMIT = 5000
+  /** @type {any} */
   let finding = null
-  const matchFlags = () => {
-    const plain = !!matcher && !matcher.regex && !matcher.whole
-    const fresh = finding && finding.rows === rows && finding.revision === revision
-    if (fresh && finding.query === query) return finding.flags
-    const flags = new Uint8Array(rows.length)
-    const narrow = fresh && finding.plain && plain &&
-      query.toLowerCase().includes(finding.query.toLowerCase())
-    for (let i = 0; i < rows.length; i++) {
-      if (narrow && !finding.flags[i]) continue
-      const row = rows[i] || []
-      for (const cell of row) {
-        if (matcher.test(cell)) { flags[i] = 1; break }
-      }
+  /* Whether the rows `prev` ruled out can be skipped for `query`: the previous
+     scan's needle, grown rather than changed. */
+  const narrows = (prev) => {
+    if (!prev || prev.query === query) return true
+    if (prev.regex !== matcher.regex || prev.whole !== matcher.whole || matcher.whole) return false
+    if (matcher.regex) {
+      return query.length > prev.query.length &&
+        query.startsWith(prev.query) &&
+        !prev.query.includes('$')
     }
-    finding = { rows, revision, query, plain, flags }
+    return query.toLowerCase().includes(prev.query.toLowerCase())
+  }
+  const freshFinding = () => (finding && finding.rows === rows && finding.revision === revision &&
+    finding.regex === matcher?.regex && finding.whole === matcher?.whole)
+    ? finding
+    : null
+  const matchFlags = () => {
+    if (!matcher) return new Uint8Array(rows.length)
+    const prev = freshFinding()
+    if (prev && prev.query === query && prev.tested >= rows.length) return prev.flags
+    const reuse = !!prev && narrows(prev)
+    const flags = reuse ? prev.flags : new Uint8Array(rows.length)
+    const tested = reuse ? prev.tested : 0
+    for (let i = 0; i < rows.length; i++) {
+      /* Rows the previous scan tested keep their answer when the query did
+         not change; when it only grew, the ones it cleared stay clear. A row
+         tested again gets its answer written either way — a longer needle can
+         unmatch what the shorter one kept. */
+      if (i < tested && (prev.query === query || !flags[i])) continue
+      const row = rows[i] || []
+      let hit = 0
+      for (const cell of row) {
+        if (matcher.test(cell)) { hit = 1; break }
+      }
+      flags[i] = hit
+    }
+    finding = { rows, revision, query, regex: matcher.regex, whole: matcher.whole, flags, tested: rows.length }
     return flags
   }
-  const countMatches = () => {
+  /* How many rows match, stopping once the answer is "more than the bar
+     says". Shares the scan above — including its narrowing — and leaves what
+     it tested behind for the "only matches" filter to resume, so capping the
+     count never costs a second full scan. */
+  const countMatches = (limit = MATCH_COUNT_LIMIT) => {
+    if (!matcher) return { count: 0, capped: false }
+    const prev = freshFinding()
+    if (prev && prev.query === query && prev.tested >= rows.length) {
+      let n = 0
+      for (const flag of prev.flags) {
+        n += flag
+        if (n > limit) return { count: n, capped: true }
+      }
+      return { count: n, capped: false }
+    }
+    const reuse = !!prev && narrows(prev)
+    const flags = reuse ? prev.flags : new Uint8Array(rows.length)
+    const tested = reuse ? prev.tested : 0
     let n = 0
-    for (const flag of matchFlags()) n += flag
-    return n
+    let i = 0
+    for (; i < rows.length; i++) {
+      if (i < tested && (prev.query === query || !flags[i])) n += flags[i]
+      else {
+        const row = rows[i] || []
+        let hit = 0
+        for (const cell of row) {
+          if (matcher.test(cell)) { hit = 1; break }
+        }
+        flags[i] = hit
+        n += hit
+      }
+      if (n > limit) { i++; break }
+    }
+    finding = { rows, revision, query, regex: matcher.regex, whole: matcher.whole, flags, tested: Math.max(tested, i) }
+    return { count: n, capped: i < rows.length }
   }
 
   /* Bring the cursor into view, vertically by row arithmetic and horizontally
@@ -2698,7 +2834,7 @@ export function mountCsv ({
     if (!extend) anchor = { ...cursor }
     revealCursor()
     paintRows()
-    decorate()
+    requestDecorate()
   }
 
   const selectAll = () => {
@@ -2707,7 +2843,7 @@ export function mountCsv ({
     anchor = { r: -1, c: 0 }
     cursor = { r: viewRows() - 1, c: Math.max(0, columns() - 1) }
     paintRows()
-    decorate()
+    requestDecorate()
   }
 
   const selectColumn = (c, { add = false } = {}) => {
@@ -2717,7 +2853,7 @@ export function mountCsv ({
     cursor = { r: Math.max(-1, viewRows() - 1), c }
     revealCursor()
     paintRows()
-    decorate()
+    requestDecorate()
   }
 
   const selectRow = (r, { add = false } = {}) => {
@@ -2727,7 +2863,7 @@ export function mountCsv ({
     cursor = { r, c: Math.max(0, columns() - 1) }
     revealCursor()
     paintRows()
-    decorate()
+    requestDecorate()
   }
 
   /**
@@ -2758,7 +2894,7 @@ export function mountCsv ({
     anchor = { r: live.r0, c: live.c0 }
     cursor = { r: live.r1, c: live.c1 }
     paintRows()
-    decorate()
+    requestDecorate()
     return true
   }
 
@@ -2932,6 +3068,7 @@ export function mountCsv ({
     input.style.height = `${Math.min(input.scrollHeight + edges, ROW_HEIGHT * EDIT_LINES)}px`
   }
 
+  /** @param {string | null} [seed] */
   function beginEdit (seed = null) {
     if (!editable()) return
     if (editing) commitEdit()
@@ -2993,12 +3130,13 @@ export function mountCsv ({
        reassembling one cell by hand, and there are only ever a few columns. */
     if (r === -1) paintHead()
     else repaintCell(r, c)
-    decorate()
+    requestDecorate()
     if (!cancel) queueSave()
   }
 
   /* --------------------------------------------------------------- saving */
 
+  /** @type {any} */
   let saveTimer = null
   const queueSave = () => {
     /* Nothing to queue on a locked file: `editable` already refused the edit
@@ -3484,7 +3622,7 @@ export function mountCsv ({
       return
     }
     paintBar()
-    decorate()
+    requestDecorate()
   }
 
   const openFindReplace = () => {
@@ -3804,7 +3942,7 @@ export function mountCsv ({
     record({ kind: 'cells', edits })
     setDirty(true)
     if (sorts.length) { rebuildOrder(); paint() } else paintRows({ force: true })
-    decorate()
+    requestDecorate()
     queueSave()
   }
 
@@ -4160,6 +4298,7 @@ export function mountCsv ({
 
   /* ------------------------------------------------------------ resizing */
 
+  /** @type {{ c: number, x: number, from: number } | null} */
   let resize = null
 
   const startResize = (event, c) => {
@@ -4206,7 +4345,7 @@ export function mountCsv ({
   }, { passive: true })
 
   bar.addEventListener('click', (event) => {
-    const act = event.target.closest?.('.csv-btn')?.dataset.act
+    const act = (/** @type {any} */ (event.target)).closest?.('.csv-btn')?.dataset.act
     switch (act) {
       case 'undo': stepHistory(false); break
       case 'redo': stepHistory(true); break
@@ -4265,6 +4404,7 @@ export function mountCsv ({
      all of them. A small one answers at once, as it always did. */
   const FIND_DEBOUNCE_ROWS = 5000
   const FIND_DEBOUNCE_MS = 80
+  /** @type {any} */
   let findTimer = null
   search.addEventListener('input', () => {
     clearTimeout(findTimer)
@@ -4296,18 +4436,18 @@ export function mountCsv ({
   })
 
   headRow.addEventListener('mousedown', (event) => {
-    const grip = event.target.closest?.('.csv-grip')
+    const grip = (/** @type {any} */ (event.target)).closest?.('.csv-grip')
     if (grip) { startResize(event, Number(grip.dataset.grip)); return }
     /* Before the sort, and swallowing the click: the funnel sits inside the
        heading, and a click on it that also cycled the sort would reorder the
        table every time somebody went to filter it. */
-    const funnel = event.target.closest?.('.csv-funnel')
+    const funnel = (/** @type {any} */ (event.target)).closest?.('.csv-funnel')
     if (funnel) {
       event.preventDefault()
       filterColumn(Number(funnel.dataset.funnel))
       return
     }
-    const cell = event.target.closest?.('.csv-th')
+    const cell = (/** @type {any} */ (event.target)).closest?.('.csv-th')
     if (!cell) return
     const c = Number(cell.dataset.col)
     event.preventDefault()
@@ -4348,10 +4488,11 @@ export function mountCsv ({
      press performed is owed an undoing — a drag is not a click, and reordering
      the rows on the way to reordering the columns would be doing both halves
      of an ambiguous gesture. */
+  /** @type {{ c: number, x: number, active: boolean, to: number | null } | null} */
   let headerDrag = null
 
   const paintColumnDrop = (to) => {
-    for (const cell of headRow.querySelectorAll('.csv-th')) {
+    for (const cell of /** @type {NodeListOf<HTMLElement>} */ (headRow.querySelectorAll('.csv-th'))) {
       const c = Number(cell.dataset.col)
       cell.classList.toggle('is-col-drop', to !== null && c === to && c !== headerDrag?.c)
       cell.classList.toggle('is-col-lifted', headerDrag?.active === true && c === headerDrag?.c)
@@ -4391,7 +4532,7 @@ export function mountCsv ({
   }
 
   headRow.addEventListener('dblclick', (event) => {
-    const grip = event.target.closest?.('.csv-grip')
+    const grip = (/** @type {any} */ (event.target)).closest?.('.csv-grip')
     if (grip) { fitColumn(Number(grip.dataset.grip)); return }
     const cell = eventTarget(event, '.csv-th')
     if (!cell) return
@@ -4420,10 +4561,10 @@ export function mountCsv ({
 
   scroller.addEventListener('mousedown', (event) => {
     if (event.button !== 0) return
-    if (event.target.tagName === 'INPUT') return
-    const corner = event.target.closest?.('.csv-corner')
+    if ((/** @type {any} */ (event.target)).tagName === 'INPUT') return
+    const corner = (/** @type {any} */ (event.target)).closest?.('.csv-corner')
     if (corner) { selectAll(); scroller.focus({ preventScroll: true }); return }
-    const gutter = event.target.closest?.('.csv-gutter')
+    const gutter = (/** @type {any} */ (event.target)).closest?.('.csv-gutter')
     if (gutter) {
       const r = Number(gutter.dataset.row)
       if (addsToSelection(event)) {
@@ -4437,7 +4578,7 @@ export function mountCsv ({
       scroller.focus({ preventScroll: true })
       return
     }
-    const cell = event.target.closest?.('.csv-cell')
+    const cell = (/** @type {any} */ (event.target)).closest?.('.csv-cell')
     if (!cell) return
     const r = Number(cell.dataset.row)
     const c = Number(cell.dataset.col)
@@ -4468,8 +4609,8 @@ export function mountCsv ({
     }
     if (!dragging) return
     const target = dragging === 'rows'
-      ? event.target.closest?.('.csv-gutter, .csv-cell')
-      : event.target.closest?.('.csv-cell')
+      ? (/** @type {any} */ (event.target)).closest?.('.csv-gutter, .csv-cell')
+      : (/** @type {any} */ (event.target)).closest?.('.csv-cell')
     if (!target) return
     const r = Number(target.dataset.row)
     if (Number.isNaN(r)) return
@@ -4481,13 +4622,13 @@ export function mountCsv ({
   window.addEventListener('mouseup', () => { dragging = null; endResize(); endHeaderDrag() })
 
   scroller.addEventListener('dblclick', (event) => {
-    if (event.target.closest?.('.csv-gutter')) return
+    if ((/** @type {any} */ (event.target)).closest?.('.csv-gutter')) return
     if (eventTarget(event, '.csv-cell')) beginEdit()
   })
 
   scroller.addEventListener('contextmenu', (event) => {
-    const cell = event.target.closest?.('.csv-cell')
-    const gutter = event.target.closest?.('.csv-gutter')
+    const cell = (/** @type {any} */ (event.target)).closest?.('.csv-cell')
+    const gutter = (/** @type {any} */ (event.target)).closest?.('.csv-gutter')
     if (gutter) {
       const r = Number(gutter.dataset.row)
       /* Right-clicking outside the selection moves it there first, the way
@@ -4509,12 +4650,12 @@ export function mountCsv ({
   })
 
   frame.addEventListener('mousedown', (event) => {
-    if (!menu.hidden && !event.target.closest?.('.csv-menu')) closeMenu()
+    if (!menu.hidden && !(/** @type {any} */ (event.target)).closest?.('.csv-menu')) closeMenu()
     /* The panel outlives a click inside itself and a click on the funnel that
        would only reopen it; anything else is the reader going back to the
        table, which is what closes it. */
-    if (!filterPanel.hidden && !event.target.closest?.('.csv-filter') &&
-        !event.target.closest?.('.csv-funnel')) closeFilter()
+    if (!filterPanel.hidden && !(/** @type {any} */ (event.target)).closest?.('.csv-filter') &&
+        !(/** @type {any} */ (event.target)).closest?.('.csv-funnel')) closeFilter()
   }, true)
 
   /* Keys on the frame rather than on each cell: the cells come and go with the
@@ -4522,13 +4663,13 @@ export function mountCsv ({
      million of them. */
   frame.addEventListener('keydown', (event) => {
     // The find box is a text field and owns everything typed into it.
-    if (event.target.closest?.('.csv-bar')) return
+    if ((/** @type {any} */ (event.target)).closest?.('.csv-bar')) return
 
     /* So does the filter panel's box — without this, typing `TV` into it would
        reach the grid below and be taken for typing over a cell. Escape is the
        one key the panel hands back, because closing it is what Escape means
        everywhere else in here too. */
-    if (event.target.closest?.('.csv-filter')) {
+    if ((/** @type {any} */ (event.target)).closest?.('.csv-filter')) {
       if (event.key === 'Escape') {
         event.preventDefault()
         closeFilter()
@@ -4678,7 +4819,7 @@ export function mountCsv ({
      arrives as an event rather than as a keystroke, so both paths are wired
      and both end in the same place. */
   frame.addEventListener('copy', (event) => {
-    if (editing || event.target.closest?.('.csv-bar')) return
+    if (editing || (/** @type {any} */ (event.target)).closest?.('.csv-bar')) return
     event.preventDefault()
     /* The data goes on the clipboard either way — setting it twice with the
        same text is harmless. The guard is on the *effect*: cut clearing the
@@ -4687,14 +4828,14 @@ export function mountCsv ({
   })
 
   frame.addEventListener('cut', (event) => {
-    if (editing || event.target.closest?.('.csv-bar')) return
+    if (editing || (/** @type {any} */ (event.target)).closest?.('.csv-bar')) return
     event.preventDefault()
     event.clipboardData?.setData('text/plain', gridToClipboard(selectionValues()))
     unlessKey('cut', () => clearSelection())
   })
 
   frame.addEventListener('paste', (event) => {
-    if (editing || event.target.closest?.('.csv-bar')) return
+    if (editing || (/** @type {any} */ (event.target)).closest?.('.csv-bar')) return
     const text = event.clipboardData?.getData('text/plain')
     if (!text) return
     event.preventDefault()
@@ -4705,7 +4846,7 @@ export function mountCsv ({
      has to take the open cell with it, or the edit is lost with the element. */
   frame.addEventListener('focusout', (event) => {
     if (!editing) return
-    if (frame.contains(event.relatedTarget)) return
+    if (frame.contains(/** @type {any} */ (event.relatedTarget))) return
     commitEdit()
   })
 
@@ -4718,7 +4859,7 @@ export function mountCsv ({
      * Point the grid at a file.
      *
      * @param path   what to open
-     * @param place  where the reader was — the scroll offsets, and, since an
+     * @param {any} [place]  where the reader was — the scroll offsets, and, since an
      *               external change reopens the file through here, the whole
      *               of how they were looking at it: the sort, the filters, the
      *               find box. A file rewritten under the reader by a sync
@@ -4941,7 +5082,7 @@ export function mountCsv ({
       scroller.scrollLeft = Number(place?.left) || 0
       syncHeadScroll()
       paintRows({ force: true })
-      decorate()
+      requestDecorate()
       requestAnimationFrame(paintColumnScroll)
     },
 

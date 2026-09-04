@@ -26,6 +26,7 @@
  * async checks `dead` before touching the DOM.
  */
 export function renderPdfEmbed (spec, onReady = () => {}, fileChip) {
+  /** @type {any} */
   const box = document.createElement('figure')
   box.className = 'embed-pdf'
   if (spec.width) box.style.width = `${spec.width}px`
@@ -57,6 +58,13 @@ export function renderPdfEmbed (spec, onReady = () => {}, fileChip) {
 
   box.append(head, pages)
 
+  /**
+   * @type {{dead: boolean, doc: any, loading: any,
+   *         watcher: IntersectionObserver | null, sizer: ResizeObserver | null,
+   *         opening: boolean, base: any, width: number, scale: number,
+   *         drawing: boolean, queue: {wrap: any, n: number}[],
+   *         queued: Set<any>, visible: Set<any>, runtime: any, inFlight: any}}
+   */
   const state = {
     dead: false,
     doc: null,
@@ -73,7 +81,9 @@ export function renderPdfEmbed (spec, onReady = () => {}, fileChip) {
     drawing: false,
     queue: [],
     queued: new Set(),
-    visible: new Set()
+    visible: new Set(),
+    runtime: null,    // set when the document opens — see below
+    inFlight: null    // the draw currently awaited, if any
   }
 
   const releaseCanvas = (canvas) => {
@@ -148,7 +158,7 @@ export function renderPdfEmbed (spec, onReady = () => {}, fileChip) {
     state.scale = Math.max(0.1, width / state.base.width)
 
     const fallback = state.base.height / state.base.width
-    for (const wrap of pages.children) {
+    for (const wrap of /** @type {HTMLElement[]} */ ([...pages.children])) {
       const ratio = Number(wrap.dataset.ratio) || fallback
       wrap.style.height = `${Math.round(width * ratio)}px`
       if (wrap.firstChild && state.visible.has(wrap) && !state.queued.has(wrap)) {
@@ -161,7 +171,7 @@ export function renderPdfEmbed (spec, onReady = () => {}, fileChip) {
 
   async function open () {
     const [source, runtime] = await Promise.all([
-      window.tulip.pdf.source(spec.path),
+      /** @type {any} */ (window).tulip.pdf.source(spec.path),
       import('./pdf.js')
     ])
     const pdfjs = await runtime.loadPdfjs()
@@ -198,7 +208,7 @@ export function renderPdfEmbed (spec, onReady = () => {}, fileChip) {
        root, so a PDF far down the note costs nothing until it is looked at. */
     state.watcher = new IntersectionObserver((entries) => {
       for (const entry of entries) {
-        const wrap = entry.target
+        const wrap = /** @type {HTMLElement} */ (entry.target)
         if (entry.isIntersecting) {
           state.visible.add(wrap)
           if (!wrap.firstChild && !state.queued.has(wrap)) {

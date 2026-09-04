@@ -112,7 +112,7 @@ function caretOffset (cell) {
   const range = selection.getRangeAt(0).cloneRange()
   if (!cell.contains(range.startContainer) && range.startContainer !== cell) return null
   range.selectNodeContents(cell)
-  range.setEnd(selection.anchorNode, selection.anchorOffset)
+  range.setEnd(/** @type {Node} */ (selection.anchorNode), selection.anchorOffset)
   return range.toString().length
 }
 
@@ -135,6 +135,7 @@ function selectOffsets (cell, from, to) {
   range.setStart(startNode, startAt)
   range.setEnd(endNode, endAt)
   const selection = window.getSelection()
+  if (!selection) return
   selection.removeAllRanges()
   selection.addRange(range)
 }
@@ -153,6 +154,7 @@ export function mountKeyboard (dom) {
   let entries = []
   let roman = new Map()
   let conversionOn = false
+  /** @type {{ cell: HTMLElement | null, source: string, output: string, end: number }} */
   let conversion = { cell: null, source: '', output: '', end: -1 }
   const resetConversion = () => { conversion = { cell: null, source: '', output: '', end: -1 } }
 
@@ -168,6 +170,7 @@ export function mountKeyboard (dom) {
      the mousedown below — but a click anywhere else can, and coming back to the
      window at all can, so the strip remembers where it was last useful and puts
      the caret back rather than doing nothing. */
+  /** @type {HTMLElement | null} */
   let lastCell = null
 
   document.addEventListener('focusin', () => {
@@ -204,7 +207,7 @@ export function mountKeyboard (dom) {
     dom.shift.classList.toggle('is-on', capital)
     dom.shift.setAttribute('aria-pressed', String(capital))
     for (const button of dom.keys.querySelectorAll('.lang-key-face')) {
-      const entry = entries[Number(button.parentElement.dataset.at)]
+      const entry = entries[Number(/** @type {HTMLElement} */ (button.parentElement).dataset.at)]
       button.textContent = (capital && entry.upper) || entry.key
     }
   }

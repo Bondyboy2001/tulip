@@ -268,6 +268,7 @@ export function importCards (markdown, rows) {
      rules the cards are. */
   const lines = src.split('\n')
   const options = frontmatterOf(src)
+  /** @type {{ header: string[], columns: { front: number, back: number, example: number, notes: number }, last: number } | null} */
   let table = null
   for (let at = 0; at < lines.length - 1; at++) {
     if (!delimiter(lines[at + 1])) continue
@@ -286,9 +287,9 @@ export function importCards (markdown, rows) {
 
   const escapeCell = (value) => String(value ?? '').replace(/\|/g, '\\|')
   const width = table ? table.header.length : cells(LANGUAGE_TABLE_TEMPLATE.split('\n')[0]).length
-  const columns = table
+  const columns = /** @type {{ front: number, back: number, example: number, notes: number }} */ (table
     ? table.columns
-    : columnsFor(cells(LANGUAGE_TABLE_TEMPLATE.split('\n')[0]))
+    : columnsFor(cells(LANGUAGE_TABLE_TEMPLATE.split('\n')[0])))
 
   /* Already-known words, so a re-import is a no-op rather than a duplicate. */
   const known = new Set()
@@ -671,16 +672,20 @@ const blank = () => ({ typed: '', revealed: false, verdict: null, matched: '' })
  * already given.
  *
  * @param {object} arg
- * @param {object} arg.el       the overlay's elements, from index.html
+ * @param {any} arg.el       the overlay's elements, from index.html
  * @param {() => string} arg.source    the open note's text
  * @param {() => string} arg.notePath  the open note's vault-relative path
- * @param {object} arg.speech   from src/speech.js
- * @param {() => object} arg.settings  `{newPerDay, retention, speaking}`
- * @param {() => Promise<object[]>} arg.decks  every language deck in the vault
+ * @param {any} arg.speech   from src/speech.js
+ * @param {() => any} arg.settings  `{newPerDay, retention, speaking}`
+ * @param {(() => Promise<object[]>) | null} [arg.decks]  every language deck in the vault
+ * @param {any} arg.api
+ * @param {(message: string) => void} arg.onEmpty
+ * @param {() => void} [arg.onDone]
  */
 export function mountLanguageStudy ({
   el, source, notePath, decks = null, api, speech, settings = () => ({}), onEmpty, onDone
 }) {
+  /** @type {any} */
   const state = {
     queue: [], done: 0, states: {}, pending: [], open: false,
     firstTrySeen: new Set(), firstTryCorrect: 0, firstTryWrong: 0,
@@ -960,7 +965,9 @@ export function mountLanguageStudy ({
      awaits, and a second pass entered meanwhile would hand the store a batch
      the first one is still writing. Chained instead, so an answer given during
      a write is carried by the pass after it. */
+  /** @type {Promise<any> | null} */
   let flushing = null
+  /** @type {any} */
   let flushTimer = null
 
   const FLUSH_DELAY = 400

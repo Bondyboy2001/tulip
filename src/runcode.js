@@ -14,7 +14,7 @@ import { copyButton, renderedBlock } from './blocks.js'
 import { el, reason, svgIcon } from './dom.js'
 import { runners as RUNNERS } from '../electron/runnable-languages.json'
 
-const api = window.tulip
+const api = /** @type {any} */ (window).tulip
 
 /* The languages the main process will accept, read from the one list both
    sides read — see electron/runnable-languages.json. The reading view decides
@@ -115,6 +115,7 @@ api.on('run:out', ({ id, stream, text }) => {
    can see. `run:done` still paints immediately below, so the last frame cannot
    lag behind the verdict. */
 const pendingRenders = new Set()
+/** @type {number | null} */
 let renderFrame = null
 
 function scheduleRender (state) {
@@ -414,9 +415,9 @@ function stateFor (lang, code) {
  * start is reported. `start` returns whatever the main process said; the `id`
  * in it is the run, and the rest is the caller's.
  *
- * @param {object} state          from runState()
- * @param {() => Promise<{id: number}>} start
- * @returns {Promise<object|null>}  what start() said, or null if it threw
+ * @param {RunState} state        from runState()
+ * @param {() => Promise<any>} start
+ * @returns {Promise<any>}  what start() said, or null if it threw
  */
 async function launch (state, start) {
   let allowed = false
@@ -424,7 +425,7 @@ async function launch (state, start) {
   if (!allowed) return null
 
   Object.assign(state, blankRun('running'))
-  state.render()
+  state.render?.()
 
   try {
     const result = await start()
@@ -439,7 +440,7 @@ async function launch (state, start) {
     return result
   } catch (err) {
     Object.assign(state, { status: 'done', error: reason(err, 'That could not be run.'), ms: 0, stopRequested: false })
-    state.render()
+    state.render?.()
     settleRun(state)
     return null
   }
@@ -565,8 +566,8 @@ function lastLine (text) {
  * that raises exits non-zero with nothing in `error`.
  *
  * @param {HTMLElement} status  the panel to fill
- * @param {object} state        from runState()
- * @param {{busy: string, keep: number, silent: string, transcript?: boolean}} words
+ * @param {RunState} state        from runState()
+ * @param {{busy: string, keep: number, silent: (s: any) => string, transcript?: boolean}} words
  * @param {HTMLElement|null} stop  a Stop control for a transcript that replaces its source
  */
 function drawArtefactStatus (status, state, { busy, keep, silent, transcript }, stop) {
@@ -655,15 +656,15 @@ function artefactStatus (className) {
  * @param {string} spec.statusClass          the status panel's own class
  * @param {{busy: string, keep: number, silent: (s) => string, transcript?: boolean}} spec.words
  * @param {{stop: string, again: string, first: string}} spec.titles
- * @param {() => Promise<object>} spec.start   what running it is
- * @param {() => Promise<object>} spec.lookup  what is already on disk
+ * @param {() => Promise<any>} spec.start   what running it is
+ * @param {() => Promise<any>} spec.lookup  what is already on disk
  * @param {(path: string|null) => void} spec.onPath  an artefact arrived, or went
  * @param {() => boolean} [spec.alive]     is the caller's DOM still on the page
  * @param {() => void} [spec.willStart]    about to run
- * @param {(started: object|null) => void} [spec.didStart]  it started
- * @param {(hit: object) => void} [spec.onHit]  the lookup found one
+ * @param {(started: any) => void} [spec.didStart]  it started
+ * @param {(hit: any) => void} [spec.onHit]  the lookup found one
  * @param {() => void} [spec.onMiss]  the lookup found nothing on disk
- * @param {(state: object) => void} [spec.onPaint]  the status changed shape; re-measure
+ * @param {(state: RunState) => void} [spec.onPaint]  the status changed shape; re-measure
  * @returns {{button: HTMLElement, status: HTMLElement, begin: () => Promise<void>}}
  */
 export function artefactRun (runs, key, {
@@ -808,8 +809,8 @@ function queueAuto (begin) {
  * @param {string} spec.kind   the figure's class; its stage and status follow it
  * @param {(path: string) => Element} spec.make  the artefact, as something to show
  * @param {boolean} [spec.auto]  render it when the note is read, not when asked
- * @param {Record<string, any>} spec.words
- * @param {Record<string, string>} spec.titles
+ * @param {{busy: string, keep: number, silent: (s: any) => string, transcript?: boolean}} spec.words
+ * @param {{stop: string, again: string, first: string}} spec.titles
  * @param {() => Promise<any>} spec.start
  * @param {() => Promise<any>} spec.lookup
  * @param {(started: any) => void} [spec.onStarted]
@@ -831,7 +832,9 @@ export function attachArtefactBlock (wrap, head, {
     lookup,
     onPath: (path) => {
       if (path) {
-        view.stage.replaceChildren(make(path))
+        /* The default options always build one — see renderedBlock in
+           blocks.js, whose own call site casts the same way. */
+        /** @type {HTMLElement} */ (view.stage).replaceChildren(make(path))
         view.settle(true)
         return
       }
@@ -897,6 +900,7 @@ function verdict (state) {
  * copilot is — it hands over a finished question and lets the panel decide what
  * to do with it — and until something registers, the button is not drawn at all.
  */
+/** @type {((prompt: string) => unknown) | null} */
 let askToFix = null
 
 export function onAskToFix (handler) {
@@ -963,7 +967,7 @@ function fixButton (lang, code, state) {
     ),
     el('span', '', 'Fix with Copilot')
   )
-  button.addEventListener('click', () => askToFix(fixPrompt(lang, code, state)))
+  button.addEventListener('click', () => askToFix?.(fixPrompt(lang, code, state)))
   return button
 }
 
@@ -1033,7 +1037,9 @@ function incrementalOutput (panel, state, lang, code) {
   let status = null
   let outAt = 0
   let errAt = 0
+  /** @type {Element | null} */
   let outNode = null
+  /** @type {Element | null} */
   let errNode = null
 
   const rebuild = () => {
@@ -1058,7 +1064,7 @@ function incrementalOutput (panel, state, lang, code) {
         outNode = el('pre', 'run-out-stream')
         panel.insertBefore(outNode, errNode)
       }
-      outNode.append(document.createTextNode(out.slice(outAt)))
+      outNode?.append(document.createTextNode(out.slice(outAt)))
       outAt = out.length
     }
     if (err.length > errAt) {
@@ -1066,7 +1072,7 @@ function incrementalOutput (panel, state, lang, code) {
         errNode = el('pre', 'run-out-stream is-stderr')
         panel.append(errNode)
       }
-      errNode.append(document.createTextNode(err.slice(errAt)))
+      errNode?.append(document.createTextNode(err.slice(errAt)))
       errAt = err.length
     }
   }
@@ -1123,8 +1129,9 @@ export function painter (state, node, draw) {
  */
 export function retirePainters (root) {
   if (!(root instanceof Element)) return
-  root.tkRetire?.()
-  for (const node of root.querySelectorAll('[data-painter]')) node.tkRetire?.()
+  const retired = /** @type {any} */ (root)
+  retired.tkRetire?.()
+  for (const node of root.querySelectorAll('[data-painter]')) /** @type {any} */ (node).tkRetire?.()
 }
 
 /**
@@ -1294,7 +1301,8 @@ function ppmToCanvas (text) {
   ctx.putImageData(img, 0, 0)
   // A truncated stream ends on a frame missing its tail; the animation player
   // wants to drop that frame rather than flash its black fill every loop.
-  canvas._partial = pixels < w * h
+  const partialCanvas = /** @type {any} */ (canvas)
+  partialCanvas._partial = pixels < w * h
   return canvas
 }
 
@@ -1316,7 +1324,7 @@ function ppmToAnimated (text) {
     if (c) canvases.push(c)
   }
   // Only the last frame can be cut off; a loop that includes it flashes black.
-  if (canvases.length > 1 && canvases[canvases.length - 1]._partial) canvases.pop()
+  if (canvases.length > 1 && /** @type {any} */ (canvases[canvases.length - 1])._partial) canvases.pop()
   if (canvases.length < 2) return null
   // Reuse first canvas size for the player.
   const w = canvases[0].width, h = canvases[0].height
@@ -1326,7 +1334,9 @@ function ppmToAnimated (text) {
   player.append(view)
   const ctx = view.getContext('2d')
   const datas = canvases.map(c => c.getContext('2d').getImageData(0,0,w,h))
-  let idx = 0, raf = null, playing = true
+  let idx = 0, playing = true
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let raf = null
   const tick = () => {
     if (!playing || !view.isConnected) return
     idx = (idx + 1) % datas.length
@@ -1338,9 +1348,10 @@ function ppmToAnimated (text) {
   if (typeof requestAnimationFrame === 'function') requestAnimationFrame(start)
   else setTimeout(start, 0)
   // Expose a retire hook so mountFileRun can stop it.
-  player._stop = () => { playing = false; clearTimeout(raf) }
+  const retiredPlayer = /** @type {any} */ (player)
+  retiredPlayer._stop = () => { playing = false; if (raf != null) clearTimeout(raf) }
   // For drawRunImage's caption: the size and how many frames came back.
-  player.width = w; player.height = h; player._frames = datas.length
+  retiredPlayer.width = w; retiredPlayer.height = h; retiredPlayer._frames = datas.length
   return player
 }
 
@@ -1425,9 +1436,12 @@ function legalRunSize (w, h, box) {
 /**
  * The toolbar Run for the file on screen.
  *
- * @param {HTMLButtonElement} button   the strip's own control
- * @param {HTMLElement} host           the popup the output panel goes in
- * @param {() => {lang: string, code: string}} source  the file as it is now
+ * @param {object} spec
+ * @param {HTMLButtonElement & {tkRetire?: () => void}} spec.button   the strip's own control
+ * @param {HTMLElement} spec.host           the popup the output panel goes in
+ * @param {() => {lang: string, code: string}} spec.source  the file as it is now
+ * @param {any} [spec.artefact]  the render bargain when the file is a scene —
+ *   matches/make/lookup/start, always together; see the call site in renderer.js
  */
 export function mountFileRun ({ button, host, source, artefact = null }) {
   /* Null until the first Run, and never read before then — `watch` sets it and
@@ -1657,7 +1671,7 @@ export function mountFileRun ({ button, host, source, artefact = null }) {
     /* The grip and the close are the popup's own furniture and outlive any one
        run; they are put back with each because the panel inside is new. */
     host.replaceChildren(panel, copy, close, grip)
-    state.render()
+    state.render?.()
   }
 
   button.addEventListener('click', async () => {
@@ -1716,7 +1730,7 @@ export function mountFileRun ({ button, host, source, artefact = null }) {
     reset () {
       retirePainters(host)
       button.tkRetire?.()
-      state = null
+      state = /** @type {any} */ (null)
       /* Back to the dragged shape here too, and not at the next run: the panel
          reopens at whatever the style still says, so leaving a picture's shape
          on it would flash a transcript into a frame cut for a render. */

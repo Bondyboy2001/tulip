@@ -34,6 +34,9 @@ const TICK = 'm3.5 8.3 3 3 6-6.4'
  * Guarded on there being a document at all, because the modules that hold a
  * menu also hold the file formats — a notebook, a `.csv` — and the tests import
  * those under Node to read one, where nothing here has anything to listen to.
+ *
+ * @type {{close: (opts?: {focus?: boolean}) => void, place: () => void,
+ *         keys: Record<string, () => void>, holds: (node: Node) => boolean} | null}
  */
 let live = null
 
@@ -78,37 +81,7 @@ if (typeof document !== 'undefined') {
 
 const icon = (path, size) => svgIcon(`<path d="${path}"/>`, { size, stroke: 1.6 })
 
-/**
- * A menu of named values.
- *
- * @param options   [{ value, label, icon }] — values are compared with ===, so
- *                  a numeric setting keeps its numbers and hands them back.
- *                  `icon` is a function returning a node, called afresh for the
- *                  button and for each row: one node cannot be in two places,
- *                  and the chosen option is drawn in both at once.
- * @param value     the one currently chosen
- * @param onChange  (value) => void, only for a value that is actually new
- * @param label     what the control is called, for a screen reader
- * @param className extra classes for the button, for callers that size it
- * @param search    force the filter box on or off; by default it appears once
- *                  the list is longer than a screenful is worth scanning
- * @param placeholder what the button says while nothing is chosen — and the
- *                  caller may hand `''` back as a choice, so a selection that
- *                  disappears can stay gone rather than turning into the first
- *                  entry. The empty string is the only value treated this way.
- * @param onClose called once the menu has actually closed — Escape, an outside
- *                  click, or a pick. A caller that built the control around a
- *                  transient anchor (the embed picker stands on an invisible
- *                  button at the chip's position) takes it down here.
- * @param onOpen  called as the menu opens, for a list that costs something to
- *                  learn — the notebook's kernels are a question for a Jupyter
- *                  server that is not running until someone asks. It may fill
- *                  the list in later with `set`, which re-filters and re-places
- *                  a menu that is already up.
- *
- * @returns { root, set, value } — `set` replaces the options and the choice at
- *          once, which is what a catalogue arriving late needs.
- */
+/* How many rows a list holds before the filter box appears above it. */
 const FILTER_FROM = 12
 
 /** Nothing matched, said the same way wherever a list can come up empty. */
@@ -130,6 +103,47 @@ export function matcher (query) {
   }
 }
 
+/**
+ * A menu of named values.
+ *
+ * @param {object} [opts]
+ * @param {any[]} [opts.options]
+ *                  [{ value, label, icon }] — values are compared with ===, so
+ *                  a numeric setting keeps its numbers and hands them back.
+ *                  `icon` is a function returning a node, called afresh for the
+ *                  button and for each row: one node cannot be in two places,
+ *                  and the chosen option is drawn in both at once.
+ * @param {any} [opts.value]
+ *                  the one currently chosen
+ * @param {(value: any) => void} [opts.onChange]
+ *                  (value) => void, only for a value that is actually new
+ * @param {string} [opts.label]
+ *                  what the control is called, for a screen reader
+ * @param {string} [opts.className]
+ *                  extra classes for the button, for callers that size it
+ * @param {boolean} [opts.search]
+ *                  force the filter box on or off; by default it appears once
+ *                  the list is longer than a screenful is worth scanning
+ * @param {string} [opts.placeholder]
+ *                  what the button says while nothing is chosen — and the
+ *                  caller may hand `''` back as a choice, so a selection that
+ *                  disappears can stay gone rather than turning into the first
+ *                  entry. The empty string is the only value treated this way.
+ * @param {() => void} [opts.onClose]
+ *                  called once the menu has actually closed — Escape, an outside
+ *                  click, or a pick. A caller that built the control around a
+ *                  transient anchor (the embed picker stands on an invisible
+ *                  button at the chip's position) takes it down here.
+ * @param {() => void} [opts.onOpen]
+ *                  called as the menu opens, for a list that costs something to
+ *                  learn — the notebook's kernels are a question for a Jupyter
+ *                  server that is not running until someone asks. It may fill
+ *                  the list in later with `set`, which re-filters and re-places
+ *                  a menu that is already up.
+ *
+ * @returns {{root: any, set: (next?: any, selected?: any) => any, value: () => any}} — `set` replaces the options and the choice at
+ *          once, which is what a catalogue arriving late needs.
+ */
 export function dropdown ({ options = [], value, onChange, label, className = '', search = false, placeholder = '', onClose, onOpen } = {}) {
   let items = options
   /* What the menu is actually showing — `items` until something is typed. Every
@@ -141,9 +155,10 @@ export function dropdown ({ options = [], value, onChange, label, className = ''
      used to re-split the query and re-lowercase several hundred labels:
      `refilter` asks twice over and `place` a third time, and the arrow keys ask
      again for a list that has not changed at all. */
+  /** @type {{query: string | null, items: any[] | null, list: any[] | null}} */
   let filtered = { query: null, items: null, list: null }
   const shown = () => {
-    if (filtered.query === query && filtered.items === items) return filtered.list
+    if (filtered.query === query && filtered.items === items) return /** @type {any[]} */ (filtered.list)
     const list = query ? items.filter(matching(matcher(query))) : items
     filtered = { query, items, list }
     return list
@@ -233,6 +248,7 @@ export function dropdown ({ options = [], value, onChange, label, className = ''
 
   /* The highlight moves between two nodes rather than being re-toggled across
      every row — the arrow keys walk this one row at a time. */
+  /** @type {Element | null} */
   let marked = null
   function markAt () {
     const row = list.children[at]

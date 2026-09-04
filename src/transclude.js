@@ -33,6 +33,7 @@ import { attachSvg, isSvg } from './svg.js'
 import { routeFragmentClick } from './links.js'
 import { noteName } from './vault-paths.js'
 
+/** @type {any} */
 let deps = null
 
 /** Handed the app's own machinery once, at startup — see renderer.js. */
@@ -99,6 +100,7 @@ function dressFragmentCode (root) {
   for (const wrap of root.querySelectorAll('.code-wrap[data-lang]')) {
     const lang = wrap.dataset.lang
     const chip = languageChip(lang)
+    /** @type {HTMLDivElement | null} */
     let head = null
     if (chip) {
       head = document.createElement('div')
@@ -219,6 +221,8 @@ const live = new Set()
  * No list means "something changed but not which" — the fallback the watcher
  * uses after it has been re-armed and cannot say what it missed. Everything is
  * redrawn then, because anything might have.
+ *
+ * @param {string[] | null} [paths]
  */
 export function refreshTransclusions (paths = null) {
   const moved = paths?.length ? new Set(paths) : null
@@ -234,6 +238,10 @@ export function refreshTransclusions (paths = null) {
  * The element a note embed becomes, in either view. `ancestors` is the chain
  * of notes already open above this one — absent for a top-level embed, where
  * the chain starts at the note being read.
+ *
+ * @param {any} spec
+ * @param {() => void} [onReady]
+ * @param {string[] | null} [ancestors]
  */
 export function renderTransclusion (spec, onReady = () => {}, ancestors = null) {
   const chain = ancestors || [deps.currentPath()]
@@ -350,6 +358,7 @@ export function renderTransclusion (spec, onReady = () => {}, ancestors = null) 
        stopping at the viewport cap where scrolling takes over. A deliberate
        drag of the native resize corner becomes the new floor, so typing after
        making the box larger does not snap it small again. */
+    /** @type {number | null} */
     let manualHeight = null
     const fitSource = () => {
       field.style.height = '0px'
@@ -439,15 +448,19 @@ export function renderTransclusion (spec, onReady = () => {}, ancestors = null) 
 const SHOW_AFTER = 420
 const HIDE_AFTER = 240
 
+/** @type {HTMLElement | null} */
 let pop = null
+/** @type {Element | null} */
 let popFor = null           // the element the popover is standing for
+/** @type {ReturnType<typeof setTimeout> | null} */
 let showTimer = null
+/** @type {ReturnType<typeof setTimeout> | null} */
 let hideTimer = null
 let showTicket = 0          // a slow fill must not outlive the hover it served
 
 function hidePreview () {
-  clearTimeout(showTimer)
-  clearTimeout(hideTimer)
+  if (showTimer) clearTimeout(showTimer)
+  if (hideTimer) clearTimeout(hideTimer)
   showTimer = hideTimer = null
   showTicket++
   if (pop) pop.remove()
@@ -457,12 +470,13 @@ function hidePreview () {
 
 /** Also the popover's own grace: leaving the link for the popover is staying. */
 function scheduleHide () {
-  clearTimeout(hideTimer)
+  if (hideTimer) clearTimeout(hideTimer)
   hideTimer = setTimeout(hidePreview, HIDE_AFTER)
 }
 
 /** Below the link where there is room, above it where there is not. */
 function place (rect) {
+  if (!pop) return
   const pad = 12
   const x = Math.min(Math.max(pad, rect.left), window.innerWidth - pop.offsetWidth - pad)
   let y = rect.bottom + 8
@@ -499,7 +513,7 @@ async function showPreview (link) {
     // Going anywhere dismisses the popover it was going from.
     after: hidePreview
   }))
-  card.addEventListener('pointerenter', () => clearTimeout(hideTimer))
+  card.addEventListener('pointerenter', () => { if (hideTimer) clearTimeout(hideTimer) })
   card.addEventListener('pointerleave', scheduleHide)
 
   /* The measurement is honest only once the content is in, so the card fills
@@ -522,8 +536,8 @@ export function installNotePreview () {
   document.addEventListener('pointerover', (e) => {
     const link = e.target instanceof Element ? e.target.closest('[data-wikilink]') : null
     if (!link) return
-    if (link === popFor) { clearTimeout(hideTimer); return }
-    clearTimeout(showTimer)
+    if (link === popFor) { if (hideTimer) clearTimeout(hideTimer); return }
+    if (showTimer) clearTimeout(showTimer)
     showTimer = setTimeout(() => showPreview(link), SHOW_AFTER)
   })
 
@@ -532,7 +546,7 @@ export function installNotePreview () {
     if (!link) return
     const into = e.relatedTarget instanceof Element ? e.relatedTarget : null
     if (into && (link.contains(into) || pop?.contains(into))) return
-    clearTimeout(showTimer)
+    if (showTimer) clearTimeout(showTimer)
     showTimer = null
     if (pop) scheduleHide()
   })

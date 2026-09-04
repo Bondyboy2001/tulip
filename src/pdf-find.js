@@ -42,13 +42,14 @@ const LIMIT = 500
 /**
  * @param {object} deps
  * @param {HTMLElement} deps.host   where the bar is docked — the stage
- * @param {object} deps.pdf         the viewer: `find`, `goToPage`, `markHit`, `clearHit`
+ * @param {{ find: (query: string, opts: { limit: number, caseSensitive: boolean }) => Promise<Array<{ page: number, y: number }>>, page: () => number, goToPage: (page: number, y: number) => void, markHit: (page: number, y: number) => void, clearHit: () => void, stopFind?: () => void }} deps.pdf         the viewer: `find`, `goToPage`, `markHit`, `clearHit`
  * @param {() => void} [deps.onClose]  run after the bar closes, to put focus back
  * @returns {{ open: () => void, close: () => void, reset: () => void }}
  */
 export function mountPdfFind ({ host, pdf, onClose }) {
   let hits = []
   let index = -1
+  /** @type {ReturnType<typeof setTimeout> | null} */
   let timer = null
   /* Every query answers asynchronously, and a slow one for `th` must not land
      after the quick one for `there` and overwrite it. */
@@ -112,12 +113,12 @@ export function mountPdfFind ({ host, pdf, onClose }) {
      the debounce would read as the app hesitating over a decision it was handed
      whole. */
   function queue (value) {
-    clearTimeout(timer)
+    if (timer != null) clearTimeout(timer)
     timer = setTimeout(() => { timer = null; run(value) }, QUERY_WAIT)
   }
 
   async function run (value) {
-    clearTimeout(timer)
+    if (timer != null) clearTimeout(timer)
     timer = null
     const mine = ++generation
     const query = String(value || '').trim()
@@ -186,7 +187,7 @@ export function mountPdfFind ({ host, pdf, onClose }) {
    *  the same four assignments out again and risking a fifth being added to one
    *  of them. */
   function forget () {
-    clearTimeout(timer)
+    if (timer != null) clearTimeout(timer)
     timer = null
     generation++          // nothing in flight belongs to a search nobody made
     /* And the viewer's own walk of the pages, which the generation does not

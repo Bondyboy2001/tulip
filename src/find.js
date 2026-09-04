@@ -40,6 +40,15 @@ import { chip, icon, tallyText, wrap } from './find-bar.js'
    exact number — it needs the readout to stay cheap on every keystroke. */
 const LIMIT = 1000
 
+/* `input` commits the query, and committing scans the note plus repaints the
+   match table — synchronously, per keystroke. On a long note that is a jank
+   per character, so the keystroke commit waits for a pause, the way the
+   csv view's find already does (see FIND_DEBOUNCE_MS in src/csv.js). Stepping
+   with Enter, flipping an option chip, and replacing stay immediate: those are
+   deliberate acts, not runs of characters. The tally keeps its own animation
+   frame below. */
+const FIND_DEBOUNCE_MS = 80
+
 /* Whether the replace row is showing. Deliberately module-level: within a
    session, opening find again should give you back the panel you were last
    using, and this is not worth writing to disk. */
@@ -59,6 +68,7 @@ class FindPanel {
   constructor (view) {
     this.view = view
     this.frame = 0
+    this.pending = 0
 
     /* Where the search started. Reset whenever the cursor is moved by
        something other than the search itself. */
@@ -127,9 +137,11 @@ class FindPanel {
     /* `input` rather than `keyup`: a paste from the menu, a drag of text into
        the field and a dictated word all produce the first and none of them the
        second, and every one of those left the stock panel showing a query it
-       was no longer searching for. */
-    this.input.oninput = () => this.commit({ jump: true })
-    this.replaceInput.oninput = () => this.commit({ jump: false })
+       was no longer searching for. Debounced (see FIND_DEBOUNCE_MS): without
+       the wait, each character of a fast run synchronously rescanned the note
+       and repainted the table. */
+    this.input.oninput = () => this.scheduleCommit({ jump: true })
+    this.replaceInput.oninput = () => this.scheduleCommit({ jump: false })
 
     this.count()
   }
@@ -206,6 +218,9 @@ class FindPanel {
    *
    * Both go in one transaction on purpose. Dispatched separately they are two
    * updates, and every decoration in the document is rebuilt for each.
+   *
+   * Reached two ways: at once, for a deliberate act (Enter, a chip, a replace
+   * button), and after a pause, for typing (see scheduleCommit).
    */
   commit ({ jump }) {
     const q = this.query()
@@ -226,6 +241,15 @@ class FindPanel {
     }
 
     this.view.dispatch(spec)
+  }
+
+  /* Typing's way in: the commit above, held for a trailing pause so a run of
+     characters settles into one scan rather than one per character. A later
+     keystroke replaces the wait, so only the finished query is ever searched.
+     Kept on the panel (not the module): two panes find independently. */
+  scheduleCommit ({ jump }) {
+    window.clearTimeout(this.pending)
+    this.pending = window.setTimeout(() => { this.pending = 0; this.commit({ jump }) }, FIND_DEBOUNCE_MS)
   }
 
   /* ------------------------------------------------------------- the tally */
@@ -320,6 +344,7 @@ class FindPanel {
 
   destroy () {
     if (this.frame) cancelAnimationFrame(this.frame)
+    window.clearTimeout(this.pending)
   }
 }
 

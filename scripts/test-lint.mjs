@@ -115,6 +115,18 @@ lints('the heading under frontmatter is still numbered',
   '---\ntitle: One\n---\n\n### Three\n',
   '---\ntitle: One\n---\n\n# Three\n')
 
+/* -------------------------------------------- rule 5: trailing whitespace */
+
+lints('trailing spaces go', '1. 🌟 \n', '1. 🌟\n')
+lints('trailing tabs go', 'text\t\n', 'text\n')
+lints('the kept blank line is emptied', 'a\n   \n\nb\n', 'a\n\nb\n')
+lints('a hard break is trailing space too', 'one  \ntwo\n', 'one\ntwo\n')
+lints('three spaces go the same way', 'one   \ntwo\n', 'one\ntwo\n')
+untouched('code keeps its trailing spaces', '```\nx  \n```\n')
+untouched('maths keeps its trailing spaces', '$$\nx  \n$$\n')
+untouched('frontmatter keeps its trailing spaces',
+  '---\nkey: a  \n---\n\ntext\n')
+
 /* ------------------------------------------------------------ the edits */
 
 /* The editor applies these to a live document, where an overlapping or
@@ -130,6 +142,9 @@ const overlaps = (text) => {
 
 const messy = '\n\n\n## Setup\ntext\n#### Deps\n```\n# not a heading\n```\n### Build\n\n\n\ntext\n\n\n'
 check('edits are sorted and never overlap', !overlaps(messy), overlaps(messy))
+check('edits still line up with trailing space everywhere',
+  !overlaps('## Setup  \ntext \t \n#### Deps   \n```\nx  \n```\ntext  \n'),
+  overlaps('## Setup  \ntext \t \n#### Deps   \n```\nx  \n```\ntext  \n'))
 /* `#### Deps` and `### Build` both hang off `## Setup` — the level between them
    is never written, so they are siblings, and both come out one under Setup. */
 lints('the messy note comes out whole', messy,

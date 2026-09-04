@@ -69,6 +69,7 @@ import {
   LanguageDescription
 } from '@codemirror/language'
 import { closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete'
+import { multiCursor } from './multicursor.js'
 
 /* highlight.js cannot import this class without pulling the editing stack into
    the reading view, so whoever holds it hands it over — the editor does the
@@ -251,7 +252,7 @@ function writtenOutput (output) {
   let split = null
   for (const [mime, value] of Object.entries(data)) {
     if (mime === 'application/json' || typeof value !== 'string') continue
-    split = split || { ...data }
+    split = split || /** @type {Record<string, any>} */ ({ ...data })
     split[mime] = sourceLines(value)
   }
   return split ? { ...output, data: split } : output
@@ -1129,6 +1130,8 @@ const EXPORT_CSS = `
  *                        written by whatever the notebook ran and is going into
  *                        a file somebody will double-click, which is the one
  *                        moment it stops being sandboxed by this app.
+ * @param {{ title?: string, renderMarkdown?: ((source: string) => string) | null,
+ *            sanitize?: (markup: string) => string }} [options]
  */
 export function notebookToHtml (shell, cells, {
   title = 'Notebook',
@@ -1222,6 +1225,9 @@ const OUTPUT_COUNT_LIMIT = 200
  * Mount the notebook viewer into `host`. One instance for the life of the
  * window, like every other viewer here.
  *
+ * @param {{ host?: any, file?: any, markdown?: any, kernel?: any, ask?: any,
+ *            beforeRun?: any, notify?: any, onDirty?: any, onSaved?: any,
+ *            onStatus?: any }} options
  * @param host        the pane this draws into
  * @param file        the renderer's `api.file` — `read` and `write`
  * @param markdown    how a markdown cell is rendered: `{ prepare, render }`,
@@ -1253,13 +1259,16 @@ export function mountNotebook ({
 }) {
   /** @type {any} */
   let current = null          // { path }
+  /** @type {any} */
   let shell = null            // the file, as parsed
   let cells = []              // the working model
   let language = ''
   let dirty = false
   let readonly = false
+  /** @type {Promise<any> | null} */
   let saving = null
   let flushRequested = false
+  /** @type {any} */
   let saveTimer = null
   /* How many times this notebook has been changed, which is what a save
      compares against to know whether the file it wrote is still the notebook
@@ -1300,14 +1309,19 @@ export function mountNotebook ({
      it. `runs` is keyed by the cell *object* rather than its index, because a
      cell that is running can be moved or deleted while it runs and an index
      would then point at somebody else's output. */
+  /** @type {any} */
   let kernelInfo = null        // { kernel, name, state } once started
+  /** @type {any} */
   let kernelStarting = null    // the in-flight start, so two clicks start one
+  /** @type {any} */
   let permissionCheck = null
   let kernelNotice = ''        // something the kernel wants said, e.g. a substitution
   /* Every kernel this machine can offer, asked for once and kept. Asking spawns
      the Jupyter server, which is the same cost as running a cell — so it is not
      asked on open, only when someone opens the picker. */
+  /** @type {any} */
   let kernelSpecs = null       // [{ name, displayName, language }] once asked
+  /** @type {any} */
   let specsAsked = null        // the in-flight ask, so an impatient click is one
   const SPECS_FAILED = 'Could not list the kernels on this machine:'
   const runs = new Map()       // cell -> { msgId, state: {outputs, clearWhenNext} }
@@ -1346,20 +1360,20 @@ export function mountNotebook ({
   const stateText = el('span', 'nb-shape-state')
   stateText.setAttribute('role', 'img')
   const kernelName = el('span', 'nb-kernel-name')
-  const kernelPick = dropdown({
+  const kernelPick = dropdown(/** @type {any} */ ({
     label: 'Kernel',
     className: 'nb-kernel-pick',
     placeholder: 'Kernel',
     onOpen: () => loadKernelSpecs(),
     onChange: (name) => { useKernel(name) }
-  })
+  }))
   barShape.append(kernelSlot, stateText)
 
   /* Two menus rather than five more buttons. Each holds the commands that are
      one deliberate decision each — which is what makes them wrong as buttons,
      since a button is what you press without deciding. Built once and refilled
      by `paintBar`, so a repaint mid-run does not close an open menu. */
-  const runPick = dropdown({
+  const runPick = dropdown(/** @type {any} */ ({
     label: 'Run',
     className: 'nb-run-pick',
     placeholder: 'Run…',
@@ -1372,8 +1386,8 @@ export function mountNotebook ({
       else if (what === 'below') runBelow()
       else if (what === 'restart-all') restartAndRunAll()
     }
-  })
-  const exportPick = dropdown({
+  }))
+  const exportPick = dropdown(/** @type {any} */ ({
     label: 'Export',
     className: 'nb-export-pick',
     placeholder: 'Export…',
@@ -1381,7 +1395,7 @@ export function mountNotebook ({
       exportPick.set(null, '')
       exportAs(what)
     }
-  })
+  }))
 
   /* ⌘F over a notebook. What is searched is the cells, because that is what
      the pane holds — there is no buffer here for the editor's find panel to
@@ -1561,6 +1575,7 @@ export function mountNotebook ({
    *  elements' styling per keypress to move one ring by one place. `atNode` is
    *  the one wearing it, and `paint` — which draws the ring itself — hands this
    *  the section it drew it on. */
+  /** @type {any} */
   let atNode = null
   /* The sections wearing the multi-select tint, remembered so growing or
      collapsing the pick touches the rows that changed and not every cell. */
@@ -1816,6 +1831,46 @@ export function mountNotebook ({
 
   /* ---------------------------------------------------------- the outputs */
 
+  /* How many rendered markdown sources are remembered. A paint that redraws
+     every cell from unchanged sources — KaTeX arriving, a kernel connecting —
+     hits this instead of the parser for each one. */
+  const PROSE_CACHE_LIMIT = 50
+
+  /** A short hash of a source text, so the cache key is small. Collisions only
+   *  cost a re-render: the text itself is compared before a cached render is
+   *  reused. */
+  function hashText (text) {
+    let h1 = 0xdeadbeef
+    let h2 = 0x41c6ce57
+    for (let i = 0; i < text.length; i++) {
+      const code = text.charCodeAt(i)
+      h1 = Math.imul(h1 ^ code, 2654435761)
+      h2 = Math.imul(h2 ^ code, 1597334677)
+    }
+    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909)
+    h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909)
+    return (h2 >>> 0).toString(36) + (h1 >>> 0).toString(36)
+  }
+
+  const proseCache = new Map() // `${length}:${hash}` -> { text, html }, LRU
+  function renderProse (text) {
+    const key = `${text.length}:${hashText(text)}`
+    const had = proseCache.get(key)
+    if (had && had.text === text) {
+      proseCache.delete(key)
+      proseCache.set(key, had)
+      return had.html
+    }
+    const html = markdown.render(text)
+    proseCache.set(key, { text, html })
+    while (proseCache.size > PROSE_CACHE_LIMIT) {
+      const oldest = proseCache.keys().next()
+      if (oldest.done) break
+      proseCache.delete(oldest.value)
+    }
+    return html
+  }
+
   /**
    * Prose into a node, the way the reading view puts prose into one.
    *
@@ -1824,9 +1879,17 @@ export function mountNotebook ({
    * whatever the link turned out to point at. A notebook that called `render`
    * alone drew markdown cells with holes where their images should be, which
    * is every notebook with a screenshot in it.
+   *
+   * Rendered once per source: a node asked for the prose it already holds is
+   * left alone, and a source rendered before is taken from the cache rather
+   * than parsed again. Only the dressing runs per node — attachment links
+   * resolve against the cell's own files, so those stay live.
    */
   function setProse (node, text, attachments = null) {
-    node.innerHTML = markdown.render(text)
+    const known = node.__prose
+    if (known && known.text === text && known.attachments === (attachments ?? null)) return node
+    node.innerHTML = renderProse(text)
+    node.__prose = { text, attachments: attachments ?? null }
     /* The cell's own images first, and before `dress` rather than after: an
        `attachment:` is a name inside this cell, not a path in the vault, so
        the app's resolver can only answer "not found in this vault" — which is
@@ -2148,6 +2211,7 @@ export function mountNotebook ({
      with the square of the output — chunk 900 redrawing chunks 1 to 899 again.
      The same bargain src/runcode.js makes, for the same reason. */
   const dirtyCells = new Set()
+  /** @type {number | null} */
   let repaintFrame = null
 
   function scheduleRepaint (cell) {
@@ -2361,8 +2425,8 @@ export function mountNotebook ({
 
     const run = {
       msgId: null,
-      state: { outputs: [], clearWhenNext: false },
-      settle: null,
+      state: /** @type {{ outputs: any[], clearWhenNext: boolean }} */ ({ outputs: [], clearWhenNext: false }),
+      settle: /** @type {(value: any) => void | null} */ (/** @type {any} */ (null)),
       /* Set when the kernel says it has begun, not here — see the `count`
          event. Null until then, and a run that never began records no time. */
       startedAt: 0,
@@ -2758,7 +2822,7 @@ export function mountNotebook ({
     ? new IntersectionObserver((entries) => {
         for (const entry of entries) {
           if (!entry.isIntersecting) continue
-          viewport.unobserve(entry.target)
+          ;/** @type {IntersectionObserver} */ (viewport).unobserve(entry.target)
           const run = waitingToColour.get(entry.target)
           waitingToColour.delete(entry.target)
           run?.()
@@ -2819,6 +2883,7 @@ export function mountNotebook ({
     box.append(list, doc)
     host.append(box)
 
+    /** @type {any} */
     let open = null   // { view, matches, at, from, to } while completing
     let token = 0     // which ask is the current one, so a slow reply cannot win
 
@@ -3132,6 +3197,7 @@ export function mountNotebook ({
       cmHistory(),
       closeBrackets(),
       bracketMatching(),
+      multiCursor,
       indentOnInput(),
       indentUnit.of('    '),
       numComp.of(numbersShown(key) ? lineNumbers() : []),
@@ -4435,7 +4501,19 @@ export function mountNotebook ({
       tail.addEventListener('click', () => addCell(cells.length))
       built.push(tail)
     }
-    column.replaceChildren(...built)
+    /* Reconciled rather than replaced: every section the paint kept is already
+       standing in the column in order, and `replaceChildren` tore those down
+       and remade them — KaTeX, plots and all — for a change to one cell. What
+       is already where it belongs is left where it is; the rest is moved or
+       inserted into place, and whatever is left over — a deleted cell, the old
+       tail — is taken away. */
+    let slot = 0
+    for (const node of built) {
+      const cur = column.children[slot]
+      if (cur !== node) column.insertBefore(node, cur ?? null)
+      slot++
+    }
+    while (column.children.length > built.length) column.lastElementChild.remove()
     /* The ring, which `drawCell` draws on a section it built and a kept section
        is still wearing from last time. Either way `paintSelection` moves it to
        the one cell that should have it — but only once it has let go of a
@@ -4466,6 +4544,9 @@ export function mountNotebook ({
      * A file that will not parse throws rather than opening empty: the tab has
      * to go back to what it was showing, and a blank notebook pane that
      * autosaves is a blank notebook pane that overwrites the file.
+     *
+     * @param {string} path
+     * @param {any} [place]
      */
     async open (path, place = null) {
       const text = await file.read(path)

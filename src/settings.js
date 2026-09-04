@@ -32,6 +32,23 @@ import {
 import { fileSize } from './units.js'
 
 const SECTIONS = [
+  /* Which folder the app opens. The default is pinned here and wins over the
+     last-open vault on every launch, so a temporary switch to another folder
+     does not move where the next launch lands. Clearing it returns to reopening
+     whatever was last open. */
+  {
+    id: 'vault',
+    group: 'Options',
+    label: 'Vault',
+    rows: [
+      {
+        key: 'defaultVaultPath',
+        type: 'default-vault',
+        name: 'Default vault',
+        hint: 'The vault Tulip opens on launch. Switching vaults from the sidebar does not change it.'
+      }
+    ]
+  },
   /* What the window looks like, and nothing else. Everything that used to sit
      here — how wide a line runs, whether the outline shows — turned out to be a
      question about reading a note rather than about the app, and notes have a
@@ -54,72 +71,6 @@ const SECTIONS = [
         // "Default", because this is the size Tulip opens at: ⌘+ and ⌘− move
         // the window you are in, and this is where they come back to.
         hint: 'The size Tulip opens at — ⌘+ and ⌘− move the window you are in.'
-      }
-    ]
-  },
-  /* The three settings that decide what happens to a note on its way to disk.
-     Two of them — durability and where history lives — were read by main and
-     settable over IPC, but reachable only by editing the config file by hand. */
-  {
-    id: 'files',
-    group: 'Options',
-    label: 'Files',
-    rows: [
-      {
-        key: 'autosave',
-        type: 'select',
-        name: 'Autosave',
-        hint: 'How long after you stop typing a note is written to disk.',
-        options: [
-          { value: 300, label: 'Promptly — 0.3s' },
-          { value: 600, label: 'Soon — 0.6s' },
-          { value: 1500, label: 'After a pause — 1.5s' },
-          { value: 3000, label: 'After a longer pause — 3s' }
-        ],
-        fallback: 600
-      },
-      {
-        key: 'durability',
-        type: 'select',
-        name: 'Durability',
-        hint: 'Balanced writes notes immediately and flushes them to the disk’s platters on a timer; Full flushes every save before it returns, which is safer through a power cut and slower on a networked volume.',
-        options: [
-          { value: 'balanced', label: 'Balanced' },
-          { value: 'full', label: 'Full — fsync every save' }
-        ],
-        fallback: 'balanced'
-      },
-      {
-        key: 'historyInVault',
-        type: 'toggle',
-        name: 'Keep version history in the vault',
-        hint: 'Store each note’s history in the vault’s own .tulip folder, so it travels with the notes through Git or a sync client, instead of in this app’s data folder.',
-        fallback: false
-      }
-    ]
-  },
-  {
-    id: 'start',
-    group: 'Help',
-    label: 'Getting started',
-    rows: [
-      {
-        name: 'Learn the essentials',
-        hint: 'Open Tulip’s portable Getting Started note for views, links, search, study and safe code execution.',
-        action: { id: 'getting-started', label: 'Open guide' }
-      },
-      {
-        name: 'Check optional tools',
-        hint: 'See whether Copilot providers, TeX, Python and related tools are ready on this Mac.',
-        action: { id: 'readiness', label: 'Check setup' }
-      },
-      {
-        key: 'lastBackupAt',
-        name: 'Last verified backup',
-        hint: (cfg) => cfg.lastBackupAt
-          ? `Completed ${new Date(cfg.lastBackupAt).toLocaleString()}.`
-          : 'No verified backup has been recorded yet.',
-        action: { id: 'backup', label: 'Back up now' }
       }
     ]
   },
@@ -410,11 +361,6 @@ const SECTIONS = [
          model in the panel does not take. */
     ]
   }
-  /* There is no Vault section, and no "default vault" setting behind it. The
-     vault Tulip has open *is* the one it reopens; connecting another — from
-     the landing page, the vault's name in the sidebar, or ⇧⌘O — is the whole
-     of changing it. A pane offering a second, separately-configured folder
-     only ever raised the question of which of the two you were looking at. */
 ]
 
 /* A keydown, as the accelerator string Electron's menu takes. Letters and
@@ -471,9 +417,8 @@ function chordLabel (accel) {
  * @param api       window.tulip
  * @param values    () => the current config object
  * @param onChange  (key, value) => void — persist it and put it into effect
- * @param onCommand run an app command outside the settings pane
  */
-export function mountSettings ({ el, api, values, onChange, onCommand }) {
+export function mountSettings ({ el, api, values, onChange }) {
   let active = SECTIONS[0].id
   let modelCatalogue = DEFAULT_CATALOGUE
   /* The rebindable commands, from the menu itself — see hotkeys:list. */
@@ -483,6 +428,7 @@ export function mountSettings ({ el, api, values, onChange, onCommand }) {
      there": the ordinary build has all of them, and a grid that greyed itself
      out for the moment before the answer came back would flicker on every
      open. */
+  /** @type {string[] | null} */
   let spellInstalled = null
   /** @type {Array<{id:string, label:string, signedIn:boolean, version?:string, status:string}>|null} */
   let doctorState = null
@@ -533,6 +479,7 @@ export function mountSettings ({ el, api, values, onChange, onCommand }) {
      context menu while this pane is closed. The one field both searches and
      adds — typing narrows the chips to what matches, and Add takes whatever
      is typed in whole. */
+  /** @type {any} */
   let dictDialog = null
 
   function openDictionary () {
@@ -809,6 +756,7 @@ export function mountSettings ({ el, api, values, onChange, onCommand }) {
       /* One recording at a time, on the window and in capture, so the chord
          being pressed reaches nothing else — not the editor, and not the
          pane's own Escape-to-close. */
+      /** @type {{command: any, chip: any} | null} */
       let recording = null
       const stopRecording = () => {
         if (!recording) return
@@ -822,14 +770,14 @@ export function mountSettings ({ el, api, values, onChange, onCommand }) {
         event.stopPropagation()
         if (event.key === 'Escape') { stopRecording(); return }
         if (event.key === 'Backspace' || event.key === 'Delete') {
-          const { command } = recording
+          const { command } = /** @type {{command: any, chip: any}} */ (recording)
           stopRecording()
           saveHotkey(command, '')
           return
         }
         const chord = chordOf(event)
         if (!chord) return
-        const { command } = recording
+        const { command } = /** @type {{command: any, chip: any}} */ (recording)
         stopRecording()
         saveHotkey(command, chord)
       }
@@ -1292,6 +1240,54 @@ export function mountSettings ({ el, api, values, onChange, onCommand }) {
       return list
     },
 
+    /**
+     * The vault Tulip opens on launch. Three moves and nothing typed: pin the
+     * open vault, pick a folder through the native dialog, or clear back to
+     * reopening whatever was last open. The dialog pick goes through main's
+     * `vault:pick-default`, which enters the folder into the recent list — the
+     * value check in `config:set` only accepts the open vault or a recent one,
+     * so the write that follows is one main will keep.
+     */
+    'default-vault' (row) {
+      const wrap = node('div', 'ai-doctor')
+      const results = node('div', 'ai-doctor-results')
+      const current = values().vaultPath || ''
+      const pinned = values()[row.key] || ''
+      const lines = []
+      lines.push(current ? `Open now: ${current}` : 'No vault is open.')
+      lines.push(pinned ? `Opens on launch: ${pinned}` : 'Opens on launch: the last vault open.')
+      for (const text of lines) results.append(node('span', 'settings-hint', text))
+      const actions = node('div', 'env-actions')
+      const use = node('button', 'model-refresh', 'Use open vault')
+      use.type = 'button'
+      use.title = 'Open this vault on every launch'
+      use.disabled = !current || current === pinned
+      use.addEventListener('click', () => change(row, current))
+      const pick = node('button', 'model-refresh', 'Choose…')
+      pick.type = 'button'
+      pick.title = 'Choose the vault Tulip opens on launch'
+      pick.addEventListener('click', async () => {
+        pick.disabled = true
+        try {
+          const chosen = await api.vault.pickDefault?.().catch(() => null)
+          if (chosen) change(row, chosen)
+          else renderBody()
+        } finally {
+          pick.disabled = false
+        }
+      })
+      actions.append(use, pick)
+      if (pinned) {
+        const clear = node('button', 'ghost is-compact', 'Clear')
+        clear.type = 'button'
+        clear.title = 'Reopen whatever vault was last open instead'
+        clear.addEventListener('click', () => change(row, undefined))
+        actions.append(clear)
+      }
+      wrap.append(results, actions)
+      return wrap
+    },
+
     /* Zoom is the window's, so the row steps through the same stops the menu
        does rather than inventing a second scale. */
     zoom () {
@@ -1325,14 +1321,7 @@ export function mountSettings ({ el, api, values, onChange, onCommand }) {
   const ROW_ACTIONS = {
     // Every tick off, and it stays off: the pane reads an empty list as a
     // choice, not as an absence, so this is not undone the next time it opens.
-    'clear-models': () => { onChange('aiModels', []); renderBody() },
-    'getting-started': () => { close(); onCommand('getting-started') },
-    readiness: () => { active = 'copilot'; renderRail(); renderBody() },
-    backup: async () => {
-      const result = await api.vault.backup().catch(() => null)
-      if (result?.ok) onChange('lastBackupAt', Date.now())
-      renderBody()
-    }
+    'clear-models': () => { onChange('aiModels', []); renderBody() }
   }
 
   function renderRail () {
@@ -1340,6 +1329,7 @@ export function mountSettings ({ el, api, values, onChange, onCommand }) {
     /* Obsidian's arrangement: the sections run under small group headings —
        Options, then the document kinds, then the features — so the rail reads
        as three short lists rather than one long one. */
+    /** @type {string | null} */
     let group = null
     for (const section of SECTIONS) {
       if (section.group && section.group !== group) {
@@ -1371,11 +1361,11 @@ export function mountSettings ({ el, api, values, onChange, onCommand }) {
         name.append(act)
       }
       label.append(name)
-      const hint = typeof row.hint === 'function' ? row.hint(values()) : row.hint
+      const hint = typeof row.hint === 'function' ? /** @type {any} */ (row.hint)(values()) : row.hint
       if (hint) label.append(node('div', 'settings-hint', hint))
       line.append(label)
 
-      const control = CONTROLS[row.type]?.(row)
+      const control = /** @type {any} */ (CONTROLS[row.type])?.(row)
       if (control) {
         const holder = node('div', 'settings-control')
         holder.append(control)
@@ -1386,7 +1376,7 @@ export function mountSettings ({ el, api, values, onChange, onCommand }) {
       // beside it — the theme grid and the model list are both of those.
       if (row.type === 'themes' || row.type === 'catalogue' || row.type === 'doctor' ||
           row.type === 'hotkeys' || row.type === 'languages' ||
-          row.type === 'environments') line.classList.add('is-stacked')
+          row.type === 'environments' || row.type === 'default-vault') line.classList.add('is-stacked')
       el.body.append(line)
     }
   }
@@ -1512,6 +1502,7 @@ export function mountSettings ({ el, api, values, onChange, onCommand }) {
 
   /* What had the keyboard before Settings took it, so shutting the pane gives
      it back rather than dropping the reader at the top of the document. */
+  /** @type {Element | null} */
   let openedFrom = null
 
   function open (section) {
@@ -1548,7 +1539,7 @@ export function mountSettings ({ el, api, values, onChange, onCommand }) {
     el.root.hidden = true
     const back = openedFrom
     openedFrom = null
-    if (back?.isConnected) back.focus()
+    if (back?.isConnected) /** @type {HTMLElement} */ (back).focus()
   }
 
   el.close.addEventListener('click', close)
@@ -1562,6 +1553,7 @@ export function mountSettings ({ el, api, values, onChange, onCommand }) {
      re-clamped on open in case the window shrank in the meantime. */
   const box = el.root.querySelector('.settings-box')
   const head = el.root.querySelector('.settings-head')
+  /** @type {{x: number, y: number} | null} */
   let placed = null
 
   function place (x, y) {

@@ -1,14 +1,14 @@
 /* ================================================================ lint
    The house style for a markdown file, applied rather than complained about.
 
-   Four rules. Three about vertical space:
+   Five rules. Three about vertical space:
 
      1. A run of blank lines is a single blank line. None at the top of the
         file, none at the bottom, and the file ends with exactly one newline.
      2. A fenced code block has one blank line above it and one below it.
      3. A heading has one blank line above it and one below it.
 
-   and one about the shape of the outline:
+   one about the shape of the outline:
 
      4. Heading levels descend one at a time. `#` may be followed by `##` and
         `##` by `###`, but `#` followed by `###` is a level that was skipped,
@@ -16,9 +16,16 @@
         free — `###` to `#` is a new section, not a mistake — and the top of a
         note is `#`, so a note whose headings start at `##` is pulled up.
 
+   and one about line ends:
+
+     5. No trailing spaces or tabs, full stop. (Two trailing spaces are a
+        Markdown hard break, and this rule removes those too — a break worth
+        keeping is written as a backslash at the end of the line instead.)
+
    No rule ever reaches inside a code block or a maths block, which is
-   what most of this file is about: finding those regions is the hard part, and
-   the rules themselves are a dozen lines at the bottom.
+   what most of this file is about: finding those regions is the hard part.
+   The frontmatter is left to rule 5 for the same reason — inside a YAML
+   literal block a trailing space is data, not dirt.
 
    The answer is a list of edits rather than a rewritten string. The editor
    applies them to the open note as an ordinary change, so the caret, the
@@ -123,7 +130,18 @@ function scan (lines) {
 
   let i = 0
   while (i < lines.length) {
-    const fence = fenceOpen(lines[i])
+    const text = lines[i]
+    /* The state machine only cares about a fence run, a maths opener or four
+       spaces of indent in the first columns. Count the leading spaces once and
+       let both regexes sleep for ordinary prose: neither can match without its
+       opening character in those columns, so gating on it decides nothing, it
+       just decides it sooner. */
+    let lead = 0
+    while (lead < 4 && lead < text.length && text.charCodeAt(lead) === 32) lead++
+    const head = lead < text.length ? text.charCodeAt(lead) : -1
+    const fence = lead < 4 && (head === 96 /* ` */ || head === 126 /* ~ */)
+      ? fenceOpen(text)
+      : null
     if (fence) {
       let j = i + 1
       while (j < lines.length && !fenceClose(lines[j], fence)) j++
@@ -137,7 +155,9 @@ function scan (lines) {
       continue
     }
 
-    const math = mathEnd(lines, i)
+    const math = lead < 4 && (head === 36 /* $ */ || head === 92 /* \ */)
+      ? mathEnd(lines, i)
+      : -1
     if (math >= 0) { hold(i, math); i = math + 1; continue }
 
     /* The other kind of code block: four spaces of indent, opening where a
@@ -195,9 +215,6 @@ export function lintEdits (text) {
      linter that empties files is not one anybody would leave switched on. */
   if (lines.every((line, i) => BLANK.test(line) && !held[i])) return []
 
-  /** A blank line the rules are allowed to move. */
-  const blank = (i) => BLANK.test(lines[i]) && !held[i]
-
   const edits = []
 
   /* Rule 2, as a set of gaps that need a blank line and have none — recorded
@@ -217,11 +234,44 @@ export function lintEdits (text) {
 
   /* Every heading the rules may speak for: outside code, outside maths, and
      outside the frontmatter. Rules 3 and 4 both work from this one list. */
+  const fmEnd = frontmatterEnd(lines)
+
+  /* One walk classifies every line, so the rules below read arrays instead of
+     re-testing every line with a fresh regex of their own. `isBlank` marks the
+     blank lines no rule holds; `tailLen` is the length of the trailing run
+     rule 5 cuts, or 0. */
+  const n = lines.length
+  const isBlank = new Uint8Array(n)
+  const tailLen = new Uint32Array(n)
   const heads = []
-  for (let line = frontmatterEnd(lines) + 1; line < lines.length; line++) {
+  for (let line = 0; line < n; line++) {
     if (held[line]) continue
-    const heading = headingAt(lines[line])
-    if (heading) heads.push({ line, ...heading })
+    const text = lines[line]
+    /* The trailing run and the blankness in one backward walk: a run that
+       reaches the head of the line is the whole line being whitespace, which
+       is all `BLANK` ever said, and anything shorter is the run rule 5 cuts.
+       One pass of char codes replaces a `BLANK` scan down the line and a tail
+       scan back up it — two regex setups per line for what is usually decided
+       by the last character alone. */
+    let tail = 0
+    while (tail < text.length) {
+      const c = text.charCodeAt(text.length - 1 - tail)
+      if (c !== 32 /* space */ && c !== 9 /* tab */) break
+      tail++
+    }
+    if (tail === text.length) { isBlank[line] = 1; continue }
+    if (line <= fmEnd) continue
+    /* A heading needs its first `#` inside the first four columns, so most
+       lines are refused by a few char codes without ever waking the regex. */
+    let col = 0
+    while (col < 3 && text.charCodeAt(col) === 32) col++
+    if (text.charCodeAt(col) !== 35 /* # */) {
+      if (tail) tailLen[line] = tail
+      continue
+    }
+    const heading = headingAt(text)
+    if (heading) heads.push({ line, indent: heading.indent, level: heading.level })
+    if (tail) tailLen[line] = tail
   }
 
   /* Rule 3, into the same set of gaps rule 2 fills, so a heading sitting under
@@ -238,6 +288,12 @@ export function lintEdits (text) {
      cannot also need rule 2's blank line — the fence it would sit against has
      a blank line above it already, which is the test rule 2 makes — so the two
      never both fire on one gap. */
+  /** A blank line the rules are allowed to move. */
+  const blank = (i) => isBlank[i] === 1
+  /* Lines rule 1 deletes outright, which rule 5 must then leave alone: its
+     edits sit inside the deleted span, and two edits over the same ground is
+     the overlap a ChangeSet throws on. */
+  const gone = new Set()
   let i = 0
   while (i < lines.length) {
     if (!blank(i)) { i++; continue }
@@ -256,6 +312,7 @@ export function lintEdits (text) {
       } else {
         edits.push({ from: starts[i + keep], to: starts[j], insert: '' })
       }
+      for (let k = i + keep; k < j; k++) gone.add(k)
     }
     i = j
   }
@@ -280,6 +337,22 @@ export function lintEdits (text) {
     if (open.length === level) continue
     const from = starts[line] + indent
     edits.push({ from, to: from + level, insert: '#'.repeat(open.length) })
+  }
+
+  /* Rule 5. Trailing spaces and tabs go — a kept blank line is emptied, a
+     content line is cut back to its last visible character — with two
+     exceptions, both about not changing what code means rather than how prose
+     reads. A code or maths line may mean its whitespace, and the frontmatter
+     may hold a YAML literal block that does, so both are left alone. The runs
+     were measured in the walk above, so this pass is array reads, not regex. */
+  for (let line = 0; line < lines.length; line++) {
+    if (held[line] || gone.has(line) || line <= fmEnd) continue
+    if (isBlank[line]) {
+      edits.push({ from: starts[line], to: lineEnd(line), insert: '' })
+      continue
+    }
+    const cut = tailLen[line]
+    if (cut) edits.push({ from: lineEnd(line) - cut, to: lineEnd(line), insert: '' })
   }
 
   /* One newline at the end of the file. Not while the last line is held: inside

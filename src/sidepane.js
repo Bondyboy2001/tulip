@@ -21,7 +21,9 @@ import { renderTransclusion } from './transclude.js'
 import { renderEmbed, destroyEmbeds } from './assets.js'
 import { routeFragmentClick } from './links.js'
 
+/** @type {any} */
 let deps = null
+/** @type {string | null} */
 let showing = null          // the vault-relative path on show, or null
 
 /** The path the pane is showing, or null — for the places that must follow a
@@ -96,14 +98,15 @@ export function closeSidePane ({ persist = true } = {}) {
  * note the pane happens to be showing repaints it once at the end instead of
  * re-reading and re-rendering the whole document at every pause in the typing.
  */
+/** @type {ReturnType<typeof setTimeout> | null} */
 let repaintTimer = null
 export function refreshSidePane (savedPath) {
   if (savedPath !== showing || deps.isPdf(showing)) return
-  clearTimeout(repaintTimer)
+  if (repaintTimer) clearTimeout(repaintTimer)
   repaintTimer = setTimeout(() => {
     // Skip while its Edit source field is open — a repaint would discard it.
     if (savedPath !== showing) return
     if (deps.el.body.querySelector('.transclude.is-editing')) return
-    openToSide(showing, { persist: false, keepScroll: true })
+    openToSide(/** @type {string} */ (showing), { persist: false, keepScroll: true })
   }, 600)
 }

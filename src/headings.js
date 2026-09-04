@@ -37,6 +37,7 @@ export function headings (text) {
   const lines = String(text || '').split('\n')
   const out = []
 
+  /** @type {string | null} */
   let fence = null                        // the character a fence opened with
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]
@@ -69,8 +70,15 @@ export function headings (text) {
    asks on every decoration rebuild — every keystroke, and every scroll — and
    the scan is a split and two regular expressions per line of the note. One
    entry is enough; the case that matters is many asks about one document. */
-let headingCache = { doc: null, found: null }
+/** @type {{ doc: any, found: Array<{ level: number, text: string, line: number, slug: string }> }} */
+let headingCache = { doc: null, found: /** @type {any} */ (null) }
 
+/**
+ * One document's headings, held so that repeated asking is free.
+ *
+ * @param {any} doc  CodeMirror's `Text` for the document to scan
+ * @returns {Array<{ level: number, text: string, line: number, slug: string }>} the headings, in document order
+ */
 export function headingsFor (doc) {
   if (headingCache.doc !== doc) {
     headingCache = { doc, found: headings(doc.toString()) }
@@ -168,6 +176,7 @@ export function blockReferences (text) {
   const lines = String(text || '').split('\n')
   const out = []
 
+  /** @type {string | null} */
   let fence = null
   for (let i = 0; i < lines.length; i++) {
     const marker = /^ {0,3}(`{3,}|~{3,})/.exec(lines[i])
@@ -301,6 +310,7 @@ const HEADING_TAG = /^H([1-6])$/
    most of which is text scanning with no DOM in it — never needs a `document`.
    The chevron comes from `svgIcon` so that one module owns what an icon is,
    and so this one gets its parse cache rather than keeping a second. */
+/** @type {HTMLButtonElement | null} */
 let foldTemplate = null
 
 function foldButton () {
@@ -314,7 +324,7 @@ function foldButton () {
     foldTemplate.setAttribute('aria-label', 'Fold section')
     foldTemplate.title = 'Fold section'
   }
-  return foldTemplate.cloneNode(true)
+  return /** @type {HTMLButtonElement} */ (foldTemplate.cloneNode(true))
 }
 
 /**

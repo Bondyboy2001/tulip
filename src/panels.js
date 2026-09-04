@@ -19,8 +19,8 @@ const GRIP_WIDTH = 12
 
 /**
  * @param {object} deps
- * @param {object} deps.el   the DOM registry — grips, hosts, and the app shell
- * @param {object} deps.api  the preload bridge, for persisting a width
+ * @param {any} deps.el   the DOM registry — grips, hosts, and the app shell
+ * @param {any} deps.api  the preload bridge, for persisting a width
  * @param {() => void} deps.onResize
  *   Run whenever the columns have been refitted. Narrowing the main column is
  *   one of the ways the tab strip starts to overflow, and only the caller knows

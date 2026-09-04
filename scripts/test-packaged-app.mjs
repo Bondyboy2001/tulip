@@ -130,9 +130,9 @@ try {
     const after = await window.tulip.file.read('Smoke.md')
     await window.tulip.durability.flush()
     if (!window.__tulip) throw new Error('renderer test handle did not arrive')
-    await window.__tulip.runCommand('setup')
+    await window.__tulip.runCommand('settings')
     while ((document.querySelector('#settings')?.hidden ||
-      document.querySelector('#settings-title')?.textContent !== 'Getting started') && Date.now() < deadline) {
+      document.querySelector('#settings-title')?.textContent !== 'Vault') && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 50))
     }
     const setupTitle = document.querySelector('#settings-title')?.textContent
@@ -147,8 +147,7 @@ try {
       writeOk: write?.ok !== false,
       readBack: after.endsWith('After.\\n'),
       setupTitle,
-      setupHasBackupHealth: setupText.includes('Last verified backup') &&
-        setupText.includes('No verified backup has been recorded yet.')
+      setupHasVaultDefault: setupText.includes('Opens on launch')
     }
   })()`)
 
@@ -159,10 +158,10 @@ try {
   assert.equal(result.landingHidden, true)
   assert.equal(result.writeOk, true)
   assert.equal(result.readBack, true)
-  assert.equal(result.setupTitle, 'Getting started')
-  assert.equal(result.setupHasBackupHealth, true)
+  assert.equal(result.setupTitle, 'Vault')
+  assert.equal(result.setupHasVaultDefault, true)
   assert.match(await readFile(path.join(vault, 'Smoke.md'), 'utf8'), /After\.\n$/)
-  console.log(`packaged app smoke: ${result.version}, renderer/preload/vault write/setup guidance passed`)
+  console.log(`packaged app smoke: ${result.version}, renderer/preload/vault write/settings passed`)
 } catch (error) {
   if (output.length) console.error(output.join('').slice(-8000))
   throw error

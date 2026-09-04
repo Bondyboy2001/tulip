@@ -28,6 +28,7 @@ function scratch () {
 
 /* A request and its answer, left behind by a turn that never got to clean up.
    Both go; a note beside them does not. */
+;(async () => {
 {
   const vault = scratch()
   const request = path.join(vault, '.tulip-copilot-search.json')
@@ -39,7 +40,7 @@ function scratch () {
   writeFileSync(rename, '{"to":"Renamed.md"}')
   writeFileSync(note, '# Note\n')
 
-  ai.setVault(vault)
+  await ai.setVault(vault)
 
   assert.strictEqual(existsSync(request), false, 'a leftover search request is swept')
   assert.strictEqual(existsSync(results), false, 'a leftover results file is swept')
@@ -58,7 +59,7 @@ function scratch () {
   writeFileSync(stranger, 'keep me')
   writeFileSync(other, '{}')
 
-  ai.setVault(vault)
+  await ai.setVault(vault)
 
   assert.strictEqual(existsSync(stranger), true, 'a near-miss name is kept')
   assert.strictEqual(existsSync(other), true, 'another tool\'s hidden file is kept')
@@ -75,13 +76,14 @@ function scratch () {
   const old = new Date(Date.now() - 60 * 60 * 1000)   // an hour old
   utimesSync(stale, old, old)
 
-  ai.setVault(vault)
-  ai.sweepProtocolFiles()
+  await ai.setVault(vault)
+  await ai.sweepProtocolFiles()
 
   // The sweep is safe to repeat and idempotent: nothing left to sweep,
   // nothing thrown.
-  ai.sweepProtocolFiles()
+  await ai.sweepProtocolFiles()
   console.log('ok - sweeping twice sweeps once')
 }
 
 console.log('ai sweep tests passed')
+})().catch((err) => { console.error(err); process.exit(1) })

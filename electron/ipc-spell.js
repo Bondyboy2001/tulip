@@ -19,7 +19,9 @@
    ================================================================== */
 
 const { app, ipcMain, session } = require('electron')
-const fsSync = require('node:fs')
+const fs = require('node:fs/promises')
+const { promisify } = require('node:util')
+const gunzipAsync = promisify(require('node:zlib').gunzip)
 
 /**
  * @param {{
@@ -69,18 +71,48 @@ function makeSpellDomain (ctx) {
      and appAsset refuses to leave dist, but the shape check keeps a stray value
      to a missing-file miss rather than a path error. A pair that is not there —
      an id from a newer config under an older build — returns null, and the
-     checker simply goes without that language. */
-  function loadSpellDictionary (id) {
-    if (!/^[a-z]{2,3}(-[a-z0-9]{2,8})?$/.test(String(id || ''))) return null
-    try {
-      const { gunzipSync } = require('node:zlib')
-      return {
-        aff: gunzipSync(fsSync.readFileSync(appAsset(`dict/${id}.aff.gz`))),
-        dic: gunzipSync(fsSync.readFileSync(appAsset(`dict/${id}.dic.gz`)))
-      }
-    } catch {
-      return null
+     checker simply goes without that language.
+
+     Read with `fs/promises` and gunzipped off the synchronous path: the old
+     form did both reads and both inflates with blocking calls on the first
+     spell check of the session. The promise is cached per language, so two
+     first-checks arriving together share one load rather than reading and
+     inflating the same pair twice.
+
+     `createSpeller` (see src/spellcheck.js) asks for its dictionaries
+     synchronously at construction, so the warmer below awaits every configured
+     language *before* the checker is built, and the getter handed over reads
+     the settled cache. A language that failed to load resolves to null, which
+     is the same answer the old form gave by returning it. */
+  const spellDictionaries = new Map() // id -> Promise<{ aff, dic } | null>
+
+  function loadSpellDictionaryAsync (id) {
+    if (!/^[a-z]{2,3}(-[a-z0-9]{2,8})?$/.test(String(id || ''))) return Promise.resolve(null)
+    if (!spellDictionaries.has(id)) {
+      spellDictionaries.set(id, (async () => {
+        try {
+          const [affGz, dicGz] = await Promise.all([
+            fs.readFile(appAsset(`dict/${id}.aff.gz`)),
+            fs.readFile(appAsset(`dict/${id}.dic.gz`))
+          ])
+          const [aff, dic] = await Promise.all([gunzipAsync(affGz), gunzipAsync(dicGz)])
+          return { aff, dic }
+        } catch {
+          return null
+        }
+      })())
     }
+    return spellDictionaries.get(id)
+  }
+
+  /* The settled answer for a warmed language, or null where there is none —
+     the synchronous shape `createSpeller` asks for. Pending means "not warmed",
+     which only happens for a language nobody configured at build time; it is
+     answered as missing rather than waited on, because the construction asking
+     cannot wait. */
+  const spellDictionaryStore = new Map() // id -> { aff, dic } | null
+  function loadSpellDictionary (id) {
+    return spellDictionaryStore.has(id) ? spellDictionaryStore.get(id) : null
   }
 
   /* Which of the optional dictionaries this build actually carries.
@@ -96,6 +128,33 @@ function makeSpellDomain (ctx) {
    * running. */
   /** @type {string[] | null} */
   let spellInstalled = null
+  /** @type {Promise<string[]> | null} */
+  let spellInstalledLoading = null
+
+  /* Which of the optional dictionaries this build actually carries, read with
+     one async `readdir` instead of the blocking one this used to do on the
+     Settings path — and read once, because the folder is inside the app
+     bundle and cannot change while it is running. The promise is shared, so
+     two opens of Settings together pay for one listing. */
+  function spellInstalledNow () {
+    if (spellInstalled) return Promise.resolve(spellInstalled)
+    if (spellInstalledLoading) return spellInstalledLoading
+    spellInstalledLoading = (async () => {
+      let names = []
+      try { names = await fs.readdir(appAsset('dict')) } catch { names = [] }
+      const held = new Set(names)
+      /* Both halves or neither: nspell needs the affix rules and the word list, and
+         half a pair is a language that would fail at the moment it was used. */
+      spellInstalled = [...held]
+        .filter((name) => name.endsWith('.dic.gz'))
+        .map((name) => name.slice(0, -'.dic.gz'.length))
+        .filter((id) => held.has(`${id}.aff.gz`))
+        .sort()
+      return spellInstalled
+    })()
+    spellInstalledLoading.catch(() => {}).finally(() => { spellInstalledLoading = null })
+    return spellInstalledLoading
+  }
 
   function spellerNow () {
     if (speller) return Promise.resolve(speller)
@@ -107,8 +166,14 @@ function makeSpellDomain (ctx) {
          underlines do. */
       const taught = await session.defaultSession.listWordsInSpellCheckerDictionary().catch(() => [])
       const languages = readConfig().spellLanguages
+      const ids = Array.isArray(languages) ? languages : []
+      /* Warmed before construction, because the construction asks synchronously
+         and the disk does not answer synchronously any more. */
+      await Promise.all(ids.map(async (id) => {
+        spellDictionaryStore.set(id, await loadSpellDictionaryAsync(id))
+      }))
       speller = createSpeller(variantForLocale(app.getLocale()), taught, {
-        languages: Array.isArray(languages) ? languages : [],
+        languages: ids,
         loadDictionary: loadSpellDictionary
       })
       return speller
@@ -199,20 +264,7 @@ function makeSpellDomain (ctx) {
       return done
     })
 
-    ipcMain.handle('spell:installed', () => {
-      if (spellInstalled) return spellInstalled
-      let names = []
-      try { names = fsSync.readdirSync(appAsset('dict')) } catch { names = [] }
-      const held = new Set(names)
-      /* Both halves or neither: nspell needs the affix rules and the word list, and
-         half a pair is a language that would fail at the moment it was used. */
-      spellInstalled = [...held]
-        .filter((name) => name.endsWith('.dic.gz'))
-        .map((name) => name.slice(0, -'.dic.gz'.length))
-        .filter((id) => held.has(`${id}.aff.gz`))
-        .sort()
-      return spellInstalled
-    })
+    ipcMain.handle('spell:installed', () => spellInstalledNow())
 
     ipcMain.handle('spell:check', async (_e, words) => {
       if (!Array.isArray(words) || !words.length) return []

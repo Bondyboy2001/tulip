@@ -24,7 +24,14 @@ function parseRequest (source) {
   if (!path || !name) {
     throw new Error('The Copilot rename request needs both "path" and "name".')
   }
-  return { path, name }
+  const turnId = typeof value.turnId === 'string' && value.turnId.length <= 120 ? value.turnId : null
+  const at = Number(value.at) > 0 ? Number(value.at) : null
+  return { path, name, turnId, at }
 }
 
-module.exports = { REQUEST_PATH, isRequestPath, parseRequest }
+const REQUEST_TTL_MS = 10 * 60 * 1000
+function isStaleRequest (request, now = Date.now()) {
+  return !!request?.at && (now - request.at > REQUEST_TTL_MS)
+}
+
+module.exports = { REQUEST_PATH, isRequestPath, parseRequest, isStaleRequest, REQUEST_TTL_MS }

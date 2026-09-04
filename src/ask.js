@@ -10,11 +10,12 @@
    ================================================================== */
 
 /**
- * @param {object} el  the DOM registry — the dialog, its two buttons and its
+ * @param {{ askTitle: HTMLElement, askDetail: HTMLElement, askGo: HTMLElement, askCancel: HTMLElement, ask: HTMLElement }} el  the DOM registry — the dialog, its two buttons and its
  *                     two lines of text
  * @returns {{ask: (q: object) => Promise<boolean>, answer: (yes: boolean) => void}}
  */
 export function mountAsk (el) {
+  /** @type {{ settle: (yes: boolean) => void } | null} */
   let asking = null   // { settle } while a question is on screen
 
   /**

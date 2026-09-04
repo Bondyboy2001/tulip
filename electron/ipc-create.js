@@ -33,12 +33,12 @@ const {
 
 /**
  * @param {{
- *   freeName: (dir: string, base: string, ext?: string) => string,
+ *   freeName: (dir: string, base: string, ext?: string) => Promise<string>,
  *   realSafePath: (relOrAbs: string) => Promise<string>,
  *   noteSelfWrite: (abs: string, stamp?: string | null) => void,
  *   rel: (abs: string) => string,
  *   getTrust: () => { creationTime: (p: string, at: number) => void } | null,
- *   markIndexDirty: () => void,
+ *   markIndexDirty: (relPath?: string) => void,
  *   invalidateVaultSnapshot: () => void
  * }} ctx
  */
@@ -72,7 +72,7 @@ function makeCreateDomain (ctx) {
          failure though: "new note" with nothing typed is how most of them start. */
       const asked = safeFileName(name || 'Untitled', { strip: [NOTE_EXT] })
       if (!asked.ok) throw new Error(asked.error)
-      const target = freeName(
+      const target = await freeName(
         await realSafePath(dir || ''),
         asked.name,
         '.md'
@@ -81,13 +81,13 @@ function makeCreateDomain (ctx) {
       noteSelfWrite(target)
       await fs.writeFile(target, '', 'utf8')
       getTrust()?.creationTime(rel(target), Date.now())
-      markIndexDirty()
+      markIndexDirty(rel(target))
       invalidateVaultSnapshot()
       return rel(target)
     })
 
     ipcMain.handle('tex:create', async (_e, dir, name) => {
-      const target = freeName(await realSafePath(dir || ''), askedName(name), TEX_EXT)
+      const target = await freeName(await realSafePath(dir || ''), askedName(name), TEX_EXT)
       await fs.mkdir(path.dirname(target), { recursive: true })
       noteSelfWrite(target)
       await fs.writeFile(target, EMPTY_TEX_DOCUMENT, 'utf8')
@@ -101,7 +101,7 @@ function makeCreateDomain (ctx) {
        better way to say where it points than a modal that has to be answered
        before anything exists. */
     ipcMain.handle('site:create', async (_e, dir, name) => {
-      const target = freeName(await realSafePath(dir || ''), askedName(name), SITE_EXT)
+      const target = await freeName(await realSafePath(dir || ''), askedName(name), SITE_EXT)
       await fs.mkdir(path.dirname(target), { recursive: true })
       noteSelfWrite(target)
       await fs.writeFile(target, '', 'utf8')
@@ -110,7 +110,7 @@ function makeCreateDomain (ctx) {
     })
 
     ipcMain.handle('whiteboard:create', async (_e, dir, name) => {
-      const target = freeName(
+      const target = await freeName(
         await realSafePath(dir || ''),
         askedName(name),
         WHITEBOARD_EXT
@@ -127,7 +127,7 @@ function makeCreateDomain (ctx) {
        grammar are all the reader's own content, and seeding them would be guessing
        at what this language needs said about it. */
     ipcMain.handle('language:create', async (_e, dir, name) => {
-      const folder = freeName(await realSafePath(dir || ''), askedName(name, 'New language'))
+      const folder = await freeName(await realSafePath(dir || ''), askedName(name, 'New language'))
       noteSelfWrite(folder)
       await fs.mkdir(folder, { recursive: true })
 
@@ -136,7 +136,7 @@ function makeCreateDomain (ctx) {
       await fs.writeFile(vocabulary, LANGUAGE_TABLE_TEMPLATE, 'utf8')
       getTrust()?.creationTime(rel(vocabulary), Date.now())
 
-      markIndexDirty()
+      markIndexDirty(rel(vocabulary))
       invalidateVaultSnapshot()
       return { folder: rel(folder), vocabulary: rel(vocabulary) }
     })
@@ -145,7 +145,7 @@ function makeCreateDomain (ctx) {
        Vocabulary, but starts neutral: editable COL1/COL2/COL3 headings and enough
        blank rows for its row add/delete controls to be useful immediately. */
     ipcMain.handle('table:create', async (_e, dir, name) => {
-      const target = freeName(
+      const target = await freeName(
         await realSafePath(dir || ''),
         askedName(name),
         LANGUAGE_TABLE_SUFFIX
@@ -154,7 +154,7 @@ function makeCreateDomain (ctx) {
       noteSelfWrite(target)
       await fs.writeFile(target, CUSTOM_TABLE_TEMPLATE, 'utf8')
       getTrust()?.creationTime(rel(target), Date.now())
-      markIndexDirty()
+      markIndexDirty(rel(target))
       invalidateVaultSnapshot()
       return rel(target)
     })
@@ -180,7 +180,7 @@ function makeCreateDomain (ctx) {
          is opened in Word. See electron/docx.js. */
       if (wanted === DOCX_EXT) {
         const { blankDocxBuffer } = require('./docx')
-        const made = freeName(await realSafePath(dir || ''), askedName(name), wanted)
+        const made = await freeName(await realSafePath(dir || ''), askedName(name), wanted)
         await fs.mkdir(path.dirname(made), { recursive: true })
         noteSelfWrite(made)
         await fs.writeFile(made, blankDocxBuffer())
@@ -188,7 +188,7 @@ function makeCreateDomain (ctx) {
         invalidateVaultSnapshot()
         return rel(made)
       }
-      const target = freeName(await realSafePath(dir || ''), askedName(name), wanted)
+      const target = await freeName(await realSafePath(dir || ''), askedName(name), wanted)
       await fs.mkdir(path.dirname(target), { recursive: true })
       noteSelfWrite(target)
       /* A CSV with no header row opens as a grid with nothing to label its one
@@ -229,7 +229,7 @@ function makeCreateDomain (ctx) {
     })
 
     ipcMain.handle('folder:create', async (_e, dir, name) => {
-      const target = freeName(await realSafePath(dir || ''), askedName(name, 'New folder'))
+      const target = await freeName(await realSafePath(dir || ''), askedName(name, 'New folder'))
       noteSelfWrite(target)
       await fs.mkdir(target, { recursive: true })
       invalidateVaultSnapshot()

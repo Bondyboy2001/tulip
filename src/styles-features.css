@@ -1,5 +1,10 @@
 /* Feature-owned surfaces extracted from the shell stylesheet. New modules put
- * their layout here so styles.css remains the shared frame, not every feature. */
+ * their layout here so styles.css remains the shared frame, not every feature.
+ *
+ * Loaded lazily, after the first paint — see prefetchFeatureStyles in
+ * renderer.js — so nothing here may move the boot frame. The sidebar's second
+ * panel used to live here and does not: it sizes the shell itself, and is in
+ * styles.css instead. */
 
 .saved-searches {
   flex: none;
@@ -196,66 +201,3 @@
 
 .stats-foot { display: flex; justify-content: flex-end; gap: 8px; padding-top: 2px; }
 
-/* ======================================================= the second panel
-   The optional lower half of the sidebar — see setPaneBelow in renderer.js.
-
-   The panel bodies are flex children of `.sidebar` with `flex: 1`, so the file
-   tree fills whatever is left. When one of the four is opened below it, that
-   one is given a share of the sidebar's height and the tree takes the rest;
-   `--pane-below` is that share, a number between 0 and 1 rather than a length,
-   because the sidebar is as tall as the window and a panel fixed at 240px is
-   most of a short one and a strip of a tall one. */
-
-.sidebar { --pane-below: 40%; }
-
-.pane-split {
-  display: flex;
-  flex-direction: column;
-  flex: none;
-}
-
-/* The divider is a hairline with a comfortable grab area around it: a 1px
-   target is a target you miss, and the padding is what the pointer actually
-   lands on. */
-.pane-split-grip {
-  position: relative;
-  flex: none;
-  height: 9px;
-  margin: 2px 0 0;
-  cursor: row-resize;
-}
-.pane-split-grip::after {
-  content: '';
-  position: absolute;
-  right: 0;
-  left: 0;
-  top: 4px;
-  height: 1px;
-  background: var(--line);
-}
-.pane-split-grip:hover::after,
-.pane-split-grip.is-dragging::after,
-.pane-split-grip:focus-visible::after { background: var(--accent); }
-.pane-split-grip:focus-visible { outline: none; }
-
-/* The sidebar's only strip, sitting under the divider and naming what is in
-   the panel below it. It was shrunk when there was a second strip above the
-   tree for it to defer to; there is not one now. */
-.pane-tabs.is-lower {
-  padding-top: 0;
-}
-.pane-tabs.is-lower .pane-tab { padding-top: 4px; padding-bottom: 6px; }
-
-/* The lower body: a fixed share of the height, scrolling within itself, so the
-   panel above keeps its own scroll position rather than the two sharing one. */
-.sidebar > .pane-split ~ .pane {
-  flex: none;
-  height: var(--pane-below);
-  min-height: 0;
-  overflow-y: auto;
-}
-
-/* The control that opens and shuts the lower panel is one of the header's
-   icon buttons and is styled as one — including the pressed state, which
-   `.icon-btn[aria-pressed="true"]` already carries. It had rules of its own
-   while it lived in a row beside a tab strip; there is no such row now. */

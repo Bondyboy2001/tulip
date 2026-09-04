@@ -41,16 +41,6 @@ const { parseFrontmatter, propsOf, propValues, tagsFromProps } = require('./fron
    for "this is a tag" is the only way those can agree with the search. */
 const HASHTAG = /(^|\s)#([\p{L}\p{N}][\p{L}\p{N}/_-]*)/gu
 
-/** Whether a note's prose says `#wanted`, or anything nested under it. */
-function hasTag (text, wanted) {
-  HASHTAG.lastIndex = 0
-  for (let m = HASHTAG.exec(text); m; m = HASHTAG.exec(text)) {
-    const tag = m[2].toLowerCase()
-    if (tag === wanted || tag.startsWith(`${wanted}/`)) return true
-  }
-  return false
-}
-
 /**
  * The tags a note's prose carries, found once and held against the entry —
  * the same arrangement as `entryProps` and `entryHeadTags` below, and for the
@@ -121,15 +111,50 @@ const listHasTag = (tags, wanted) =>
  * worth of writes into a long-lived cache to carry one query's worth of state
  * — and the state leaked, far enough that `index-cache.js` has to strip both
  * fields back out before it is allowed to write the cache to disk.
+ *
+ * The lowercased name and key are held against the entry the way its
+ * properties are: the entry is replaced wholesale when the note changes, so a
+ * cached lowercase cannot go stale — and `key` is pinned beside it, so a
+ * renamed entry carrying an old object under a new key re-derives once rather
+ * than answering for the wrong path. `index-cache.js` strips unknown fields
+ * before writing (see the four fields it keeps), so these never reach disk.
  */
+function lowerNameOf (key, entry) {
+  if (entry.cacheKey !== key || entry.lowerName === undefined) {
+    entry.cacheKey = key
+    entry.lowerName = entry.name.toLowerCase()
+    entry.lowerKey = key.toLowerCase()
+  }
+  return entry.lowerName
+}
+
+function lowerKeyOf (key, entry) {
+  if (entry.cacheKey !== key || entry.lowerKey === undefined) {
+    entry.cacheKey = key
+    entry.lowerName = entry.name.toLowerCase()
+    entry.lowerKey = key.toLowerCase()
+  }
+  return entry.lowerKey
+}
+
+/* A literal term answered without the regex engine. `termRegex` in main
+   escapes the term and adds only a case flag, so for ASCII text a lowercased
+   `includes` is the same answer — and a name is a few dozen characters the
+   engine would otherwise be entered for. Non-ASCII keeps the regex, whose `i`
+   folding and `toLowerCase` do not always agree. */
+function nameHas (term, lowerName, name) {
+  if (term.literalFold !== undefined) return lowerName.includes(term.literalFold)
+  if (term.literal !== undefined) return name.includes(term.literal)
+  return term.has.test(name)
+}
 function passesFilters (key, entry, filters, facts = entry) {
   if (filters.type.length && !filters.type.every((kind) => kind === facts.kind)) return false
   if (filters.path.length) {
-    const where = key.toLowerCase()
+    const where = lowerKeyOf(key, entry)
     if (!filters.path.every((p) => where.includes(p))) return false
   }
   if (filters.file.length) {
-    const named = entry.name.toLowerCase()
+    const named = lowerNameOf(key, entry)
     if (!filters.file.every((f) => named.includes(f))) return false
   }
   if (filters.tag.length) {
@@ -218,7 +243,12 @@ async function scanKind ({
       }
     }
 
-    const facts = factsFor(key, entry)
+    /* `factsFor` is one closure call plus one object per note per keystroke,
+       and the only readers of what it returns are the `type` and `tag` tests
+       above. A plain text query — the common case — asks neither, so the facts
+       are built lazily and never at all for it. */
+    const needsFacts = query.filters.type.length > 0 || query.filters.tag.length > 0
+    const facts = needsFacts ? factsFor(key, entry) : entry
     if (!narrowed && !passesFilters(key, entry, query.filters, facts)) continue
 
     /* A filter on its own is a query: `tag:book` asks for the notes carrying
@@ -249,7 +279,8 @@ async function scanKind ({
        the title is the strongest signal a vault offers — it is what someone
        typing two words is usually reaching for — and, in a note, a term in a
        heading says there is a section about it rather than a passing mention. */
-    const named = query.terms.filter((term) => term.has.test(entry.name)).length
+    const lowerName = lowerNameOf(key, entry)
+    const named = query.terms.filter((term) => nameHas(term, lowerName, entry.name)).length
     const score = found.total + named * 8 +
       (rankHeadings ? hits.filter((hit) => hit.heading).length * 3 : 0)
 
@@ -262,12 +293,9 @@ async function scanKind ({
 
 module.exports = {
   HASHTAG,
-  hasTag,
   entryProps,
   entryHeadTags,
-  listHasTag,
+  nameHas,
   passesFilters,
-  scanKind,
-  breathe,
-  SLICE_MS
+  scanKind
 }
