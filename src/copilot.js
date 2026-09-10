@@ -167,6 +167,18 @@ export function mountCopilot ({
    * something pressable. The button is a real one, so Enter and Space arrive
    * without being written out by hand.
    */
+  /* The one thing to press when the thing that answers cannot answer: the
+     Doctor, where the command that fixes it is. Beside the model readout
+     because the caveat is the readout's, and out of the transcript because it
+     is a fact about the install rather than about the conversation. Hidden
+     until the doctor has actually said something is wrong. */
+  const setupChip = element('button', 'ai-setup', 'Set up')
+  setupChip.type = 'button'
+  setupChip.hidden = true
+  setupChip.setAttribute('aria-label', 'Set up Copilot')
+  setupChip.addEventListener('click', () => { api.settings?.open?.('copilot') })
+  el.config.after(setupChip)
+
   const busyRow = element('div', 'ai-busy')
   busyRow.hidden = true
   /* The panel's live region — see the note on `#ai-log`. `polite` because none
@@ -2822,6 +2834,10 @@ export function mountCopilot ({
     el.config.title = caveat
       ? `Model: ${modelName} · ${about} · ${providerLabel(provider())}: ${caveat} (Settings → Copilot Doctor)`
       : `Model: ${modelName} · ${about}`
+    setupChip.hidden = !caveat
+    setupChip.title = caveat
+      ? `${providerLabel(provider())}: ${caveat}. Open Settings → Copilot Doctor for the command that fixes it.`
+      : ''
     paintContext()
   }
 
@@ -3143,12 +3159,19 @@ export function mountCopilot ({
   /** Said once per note, and only into an empty transcript. */
   function greet () {
     if (chat().messages.length) return
+    /* Readiness may already be known from an earlier open — the doctor's
+       answer is cached for minutes — and a starter that asks the reader to
+       type into a panel that cannot answer is the wrong first instruction. */
+    const caveat = providerCaveat(provider())
+    const setup = caveat
+      ? ` ${providerLabel(provider())} is not ready (${caveat}) — choose Set up beside the model name.`
+      : ''
     push({
       t: 'note',
       starter: true,
-      text: state.notePath
+      text: (state.notePath
         ? `Ask about ${displayName(state.notePath)}, or anything else in the vault. The permission control below decides whether Copilot may change the vault. Type @ for a file, / for commands.`
-        : `${providerLabel(provider())} has your vault open. Open a note to start a conversation about it.`
+        : `${providerLabel(provider())} has your vault open. Open a note to start a conversation about it.`) + setup
     })
   }
 

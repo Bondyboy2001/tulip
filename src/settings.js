@@ -327,6 +327,28 @@ function chordLabel (accel) {
 }
 
 /**
+ * The command that fixes a provider the doctor found not ready.
+ *
+ * Tulip cannot install software for the reader, and a row that says "CLI not
+ * found" without saying what to run leaves them to find the README. The
+ * install script is the one opencode recommends for macOS and Linux; on
+ * Windows npm is the path that needs nothing but Node already being there.
+ * The command is the part that leaves for a terminal, so it is copyable.
+ */
+function doctorFix (provider, platform) {
+  if (!provider.installed) {
+    return {
+      said: 'Install it with',
+      command: platform === 'win32'
+        ? 'npm install -g opencode-ai'
+        : 'curl -fsSL https://opencode.ai/install | bash'
+    }
+  }
+  if (!provider.signedIn) return { said: 'Sign in with', command: `${provider.id || 'opencode'} auth login` }
+  return null
+}
+
+/**
  * @param el        the shell from index.html
  * @param api       window.tulip
  * @param values    () => the current config object
@@ -493,6 +515,7 @@ export function mountSettings ({ el, api, values, onChange }) {
       run.type = 'button'
 
       if (doctorState?.length) {
+        let needsSetup = false
         for (const provider of doctorState) {
           const row = node('div', `ai-doctor-provider is-${provider.signedIn ? 'ready' : 'problem'}`)
           row.append(
@@ -500,7 +523,34 @@ export function mountSettings ({ el, api, values, onChange }) {
             node('span', 'ai-doctor-version', provider.version || 'Not installed'),
             node('span', 'ai-doctor-status', provider.status)
           )
+          /* A diagnosis without the command is a dead end: the fix happens in
+             a terminal Tulip cannot open for the reader, so the command is the
+             one part of this row that has to leave it. */
+          const fix = doctorFix(provider, api.platform)
+          if (fix) {
+            needsSetup = true
+            const hint = node('div', 'ai-doctor-hint')
+            const command = node('code', 'ai-doctor-command', fix.command)
+            const copy = node('button', 'ghost is-compact', 'Copy')
+            copy.type = 'button'
+            copy.setAttribute('aria-label', `${fix.said}: ${fix.command}. Copy command`)
+            copy.addEventListener('click', async () => {
+              try {
+                await api.copy(fix.command)
+                copy.textContent = 'Copied'
+              } catch {
+                copy.textContent = 'Could not copy'
+              }
+              setTimeout(() => { if (copy.isConnected) copy.textContent = 'Copy' }, 1500)
+            })
+            hint.append(node('span', 'ai-doctor-hint-label', fix.said), command, copy)
+            row.append(hint)
+          }
           results.append(row)
+        }
+        if (needsSetup) {
+          results.append(node('p', 'settings-hint ai-doctor-about',
+            'Copilot runs the opencode command-line tool on this machine; Tulip never holds a provider key.'))
         }
       }
 

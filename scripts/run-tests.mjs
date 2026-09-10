@@ -55,6 +55,7 @@ const WINDOWED = new Set([
   'test:footnote-flash',
   'test:research-app',
   'test:command-palette',
+  'test:copilot-setup',
   'test:multicursor',
   'test:agent-diff',
   'test:docx-view',

@@ -393,7 +393,7 @@ contextBridge.exposeInMainWorld('tulip', {
     to: (p) => ipcRenderer.invoke('links:to', p)
   },
 
-  settings: { open: () => ipcRenderer.invoke('settings:open') },
+  settings: { open: (section) => ipcRenderer.invoke('settings:open', section || '') },
   config: {
     get: () => ipcRenderer.invoke('config:get'),
     set: (patch) => ipcRenderer.invoke('config:set', patch)
@@ -528,7 +528,7 @@ contextBridge.exposeInMainWorld('tulip', {
 
   on: (channel, fn) => {
     const allowed = [
-      'vault:changed', 'vault:opened', 'menu', 'zoom', 'zoom:will-change', 'settings:changed', 'settings:refresh',
+      'vault:changed', 'vault:opened', 'menu', 'zoom', 'zoom:will-change', 'settings:changed', 'settings:refresh', 'settings:section',
       'run:out', 'run:done', 'ai:event', 'app:flush', 'kernel:event',
       // A word was taught or untaught — the open note's spelling is one word
       // out of date, wherever the asking happened.

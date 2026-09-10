@@ -3211,11 +3211,16 @@ function createWindow ({ open = null, saved = null } = {}) {
 // Settings is a utility window, separate from document sessions and their geometry.
 /** @type {Electron.BrowserWindow | null} */
 let settingsWindow = null
-ipcMain.handle('settings:open', async () => {
+ipcMain.handle('settings:open', async (_event, section) => {
+  const wanted = typeof section === 'string' ? section : ''
   if (settingsWindow && !settingsWindow.isDestroyed()) {
     if (settingsWindow.isMinimized()) settingsWindow.restore()
     settingsWindow.show()
     settingsWindow.focus()
+    /* An already-open Settings is told which pane is wanted rather than being
+       recreated: focusing the window is the ordinary case, and the caller
+       (a copilot that cannot answer, say) wants the Doctor, not Appearance. */
+    if (wanted) settingsWindow.webContents.send('settings:section', wanted)
     return true
   }
   const win = new BrowserWindow({
@@ -3237,6 +3242,7 @@ ipcMain.handle('settings:open', async () => {
   win.webContents.on('will-navigate', (event) => event.preventDefault())
   if (useAppScheme()) await win.loadURL('tulip-app://settings/settings-window.html')
   else await win.loadFile(path.join(__dirname, '..', 'dist', 'settings-window.html'))
+  if (wanted) win.webContents.send('settings:section', wanted)
   if (process.env.TULIP_TEST_WINDOW_HIDDEN !== '1') win.show()
   return true
 })

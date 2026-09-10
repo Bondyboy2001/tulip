@@ -26,4 +26,8 @@ async function refresh () {
   pane.open()
 }
 api.on('settings:refresh', refresh)
+/* Opened for a particular pane — the copilot's "Set up" arrives here — and
+   opened without one, which is the ordinary case and leaves the last pane
+   where the reader left it. */
+api.on('settings:section', (section) => { if (section) pane.open(section) })
 pane.open()
