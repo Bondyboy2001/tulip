@@ -42,7 +42,16 @@ fi
 VERSION=$(node -p "require('./package.json').version")
 
 echo "› drawing the icon"
-"$ROOT/node_modules/.bin/electron" scripts/make-icon.cjs > /dev/null
+# The drawing program is the icon's only source, so its mtime is the cache
+# key: redrawing an unchanged picture was a second of every packaging build.
+# A cleaned build/ still draws it.
+if [ ! -f "$BUILD/icon.png" ] || [ ! -f "$BUILD/icon.ico" ] \
+   || [ "$ROOT/scripts/make-icon.cjs" -nt "$BUILD/icon.png" ] \
+   || [ "$ROOT/scripts/make-icon.cjs" -nt "$BUILD/icon.ico" ]; then
+  "$ROOT/node_modules/.bin/electron" scripts/make-icon.cjs > /dev/null
+else
+  echo "  (unchanged — keeping build/icon.png)"
+fi
 
 echo "› building the iconset"
 ICONSET=$BUILD/Tulip.iconset
@@ -245,6 +254,9 @@ if [ "${1:-}" = "--no-install" ]; then
 fi
 
 echo "› installing to /Applications"
+# rm + cp, not rsync: copying the bundle to APFS is well under a second
+# (the filesystem clones what it can), where rsync's walk over every
+# framework file to compare metadata measured four times as long.
 rm -rf /Applications/Tulip.app
 cp -R "$APP" /Applications/Tulip.app
 
