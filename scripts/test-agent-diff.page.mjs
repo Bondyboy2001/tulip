@@ -148,6 +148,7 @@ export async function run () {
   /* Fenced code keeps the same compact mono metrics on both halves of the
      diff, and its added marker must sit above the sticky line-number gutter. */
   const codeHost = document.createElement('div')
+  codeHost.style.cssText = 'height: 280px; overflow: hidden'
   document.body.append(codeHost)
   const codeView = createEditor({
     parent: codeHost,
@@ -176,6 +177,59 @@ export async function run () {
     addedMarker: codeAdded ? getComputedStyle(codeAdded, '::before').content : null,
     addedMarkerZIndex: codeAdded ? getComputedStyle(codeAdded, '::before').zIndex : null
   }
+
+  /* Vertical scrolling recycles CodeMirror line elements. The number widgets
+     and live-preview frame are maintained by separate plugins, so inspect the
+     invariant the user sees: every visible number remains inside a line that
+     is still painted as fenced code after repeated viewport swaps. */
+  const scrollDoc = Array.from({ length: 36 }, (_, index) => [
+    `## Example ${index + 1}`,
+    '',
+    '```rust',
+    'fn main() {',
+    `    let value: u16 = ${index} + 8;`,
+    '    println!("{}", value);',
+    '}',
+    '```',
+    '',
+    'A sentence between blocks.',
+    ''
+  ].join('\n')).join('\n')
+  codeView.setDoc(scrollDoc)
+  const settleScroll = () => new Promise((resolve) =>
+    requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 50))))
+  await settleScroll()
+  const scrollChecks = []
+  for (const share of [1, 0, 0.55, 1, 0.2]) {
+    codeView.scrollDOM.scrollTop = share * codeView.scrollDOM.scrollHeight
+    codeView.scrollDOM.dispatchEvent(new Event('scroll'))
+    await settleScroll()
+    const numbers = [...codeHost.querySelectorAll('.tk-linenum')]
+    scrollChecks.push({
+      numbers: numbers.length,
+      outsideFrame: numbers.filter((number) =>
+        !number.closest('.cm-line')?.classList.contains('tk-code-block')).length
+    })
+  }
+
+  /* Window zoom changes the editor viewport in CSS pixels. The source at its
+     midpoint must remain there rather than moving with the old scrollTop. */
+  codeView.scrollDOM.scrollTop = codeView.scrollDOM.scrollHeight * 0.55
+  await settleScroll()
+  const zoomAnchor = codeView.zoomAnchor()
+  codeHost.style.height = '190px'
+  codeView.requestMeasure()
+  await settleScroll()
+  codeView.scrollDOM.scrollTop = Math.min(codeView.scrollDOM.scrollHeight,
+    codeView.scrollDOM.scrollTop + 700)
+  for (let frame = 0; frame < 4; frame++) {
+    codeView.restoreZoomAnchor(zoomAnchor)
+    await settleScroll()
+  }
+  const restoredZoomAnchor = codeView.zoomAnchor()
+  const zoomAnchorDrift = Math.abs(codeView.state.doc.lineAt(restoredZoomAnchor.pos).number -
+    codeView.state.doc.lineAt(zoomAnchor.pos).number)
+  const zoomOffsetDrift = Math.abs(restoredZoomAnchor.offset - zoomAnchor.offset)
   codeView.destroy()
   codeHost.remove()
 
@@ -191,6 +245,9 @@ export async function run () {
     rejected,
     inEditView,
     inRawView,
-    codeStyle
+    codeStyle,
+    scrollChecks,
+    zoomAnchorDrift,
+    zoomOffsetDrift
   }
 }

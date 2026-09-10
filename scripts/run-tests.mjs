@@ -15,11 +15,11 @@
    chain had to be edited in a second place, and a script left out of it was
    a test that silently never ran again.
 
-   The window-driven tests take turns. Four of them drive a real Chromium
-   window and assert what its layout came out as; Chromium throttles frames in
-   a window that is not in front, so two of them racing is two tests measuring
-   a paused window. They run one at a time in a lane of their own, alongside
-   the rest rather than after them.
+   The window-driven tests take turns. They drive real Chromium windows and
+   assert what their layout came out as. The windows stay hidden by default so
+   a verification run does not steal focus; background throttling is disabled
+   in each harness, and serialising them keeps their paint timing stable. Set
+   TULIP_SHOW_TEST_WINDOWS=1 when debugging one visually.
 */
 
 import { spawn } from 'node:child_process'
@@ -39,19 +39,29 @@ const NOT_A_TEST = new Set([
      tests should queue behind — a slow resolve holds a ten-minute timeout open
      while everything else waits for a core. Run it on its own when the
      installing itself is what changed. */
-  'test:python-env:net'
+  'test:python-env:net',
+  /* Drives the real app for minutes and installs real Rust packages over the
+     network when it is given a build. In the suite it arrives with neither a
+     build nor TULIP_NET_TESTS and skips immediately, which is a test that
+     proves nothing taking a slot in the pool; run it on its own when the
+     packages panel or environment install is what changed. See its header. */
+  'test:packages-app'
 ])
 
-/* One at a time. Each of these drives a window that is deliberately shown —
-   see the note above. test:reading-list drives an offscreen one and is not
-   here: with nothing to paint there is nothing for the compositor to take
-   away, and it runs in the pool with the rest. */
+/* One at a time. Each drives a rendered window, hidden unless explicitly
+   requested for visual debugging — see the note above. */
 const WINDOWED = new Set([
+  'test:document-recovery',
+  'test:footnote-flash',
+  'test:research-app',
+  'test:command-palette',
+  'test:multicursor',
   'test:agent-diff',
   'test:docx-view',
   'test:flashcards-render',
   'test:grid',
   'test:notebook-view',
+  'test:settings-width',
   'test:table'
 ])
 

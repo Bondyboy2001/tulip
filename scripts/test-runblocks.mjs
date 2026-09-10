@@ -86,6 +86,7 @@ class FakeNode {
 }
 
 globalThis.document = {
+  documentElement: { style: {} },
   createElement: (tag) => new FakeNode(tag),
   createElementNS: (_ns, tag) => new FakeNode(tag),
   createTextNode: (text) => Object.assign(new FakeNode('#text'), { textContent: text })
@@ -227,5 +228,39 @@ assert.equal(rerun.code, 'print(1)', 'clearing did not lose the block')
 settle(rerun.id)
 assert.deepEqual(await again, { ran: 1, failed: 0, stopped: false, denied: false })
 assert.equal(panel.hidden, false, 'the old panel is drawing the new run')
+
+/* Editing a real CodeMirror fence must retain its output and run new text. */
+const { EditorState } = await import('@codemirror/state')
+const { markdown } = await import('@codemirror/lang-markdown')
+const { runBlocks } = await import('../src/runblocks.js')
+const originalCode = 'print("retained-result")'
+let editor = EditorState.create({
+  doc: '```py\n' + originalCode + '\n```\n\n```py\nprint("neighbor")\n```',
+  extensions: [markdown(), runBlocks]
+})
+const initial = runBlocksInOrder([{ lang: 'py', code: originalCode }])
+await tick()
+const initialId = started.at(-1).id
+emit('run:out', { id: initialId, stream: 'stdout', text: 'retained-result\n' })
+settle(initialId)
+await initial
+const editedCode = 'print("replacement-result")\nprint("second line")'
+editor = editor.update({ changes: { from: 6, to: 6 + originalCode.length, insert: editedCode } }).state
+const retained = runPanelUI('py', editedCode)
+assert.equal(retained.hidden, false, 'editing keeps the previous output visible')
+assert.ok(retained.textContent.includes('retained-result'))
+assert.equal(runPanelUI('py', 'print("neighbor")').hidden, true, 'neighbor stays untouched')
+editor = editor.update({ changes: { from: 0, insert: 'Intro\n\n' } }).state
+assert.ok(editor.doc.toString().startsWith('Intro'))
+assert.ok(retained.textContent.includes('retained-result'), 'moving the fence keeps output')
+const replacement = runBlocksInOrder([{ lang: 'py', code: editedCode }])
+await tick()
+const replacementRun = started.at(-1)
+assert.equal(replacementRun.code, editedCode)
+assert.ok(!retained.textContent.includes('retained-result'), 'rerun replaces the old output')
+emit('run:out', { id: replacementRun.id, stream: 'stdout', text: 'replacement-result\n' })
+settle(replacementRun.id)
+await replacement
+assert.ok(retained.textContent.includes('replacement-result'))
 
 console.log('runblocks: ok')

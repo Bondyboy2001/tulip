@@ -5,6 +5,7 @@ const path = require('node:path')
 const { spawnSync } = require('node:child_process')
 const electron = require('electron')
 const { app, ipcMain } = electron
+if (process.platform === 'darwin') app.setActivationPolicy('prohibited')
 
 /* Handed in by scripts/test-ipc.mjs, which makes both directories. */
 const VAULT = process.env.TULIP_IPC_VAULT
@@ -78,6 +79,110 @@ app.whenReady().then(async () => {
 })
 
 async function checks () {
+  await check('simultaneous guarded saves accept only one version', async () => {
+    fs.writeFileSync(path.join(VAULT, 'Concurrent.md'), 'base')
+    const base = await call('file:read', 'Concurrent.md', { stamp: true })
+    const replies = await Promise.all([
+      from(201, 'file:write', 'Concurrent.md', 'first edit', { expect: base.stamp }),
+      from(202, 'file:write', 'Concurrent.md', 'second edit', { expect: base.stamp })
+    ])
+    assert.equal(replies.filter((r) => r.ok).length, 1)
+    assert.equal(replies.filter((r) => r.stale).length, 1)
+  })
+  await check('drafts survive another window saving or clearing the same note', async () => {
+    await from(201, 'draft:save', 'Concurrent.md', 'window one')
+    await from(202, 'draft:save', 'Concurrent.md', 'window two')
+    await from(201, 'draft:clear', 'Concurrent.md')
+    const drafts = await call('draft:list')
+    assert.ok(drafts.some((d) => d.text === 'window two'))
+    assert.ok(!drafts.some((d) => d.text === 'window one'))
+    const draft = drafts.find((d) => d.text === 'window two')
+    const original = fs.readFileSync(path.join(VAULT, 'Concurrent.md'), 'utf8')
+    const restored = await call('draft:restore', draft.id)
+    assert.equal(fs.readFileSync(path.join(VAULT, restored.path), 'utf8'), 'window two')
+    assert.equal(fs.readFileSync(path.join(VAULT, 'Concurrent.md'), 'utf8'), original)
+    assert.ok(!(await call('draft:list')).some((d) => d.id === draft.id))
+  })
+  await check('draft write failures report failure and remain retryable', async () => {
+    const blocker = path.join(VAULT, 'Blocked.md')
+    fs.mkdirSync(blocker)
+    await assert.rejects(() => call('file:write', 'Blocked.md', 'never replace this directory'))
+    assert.ok(fs.statSync(blocker).isDirectory())
+    assert.ok(!fs.readdirSync(VAULT).some((name) => name.startsWith('.Blocked.md.')))
+    await call('file:write', 'After failure.md', 'still writable')
+  })
+  await check('recovery reminders persist, deduplicate and dismiss', async () => {
+    await call('recovery:record', { kind: 'save', path: 'Concurrent.md' })
+    await call('recovery:record', { kind: 'save', path: 'Concurrent.md' })
+    assert.equal((await call('recovery:list')).filter((r) => r.path === 'Concurrent.md').length, 1)
+    await call('recovery:dismiss', 'save:Concurrent.md')
+    assert.equal((await call('recovery:list')).length, 0)
+    await refused('recovery outside vault', () => call('recovery:record', { kind: 'save', path: '../escape' }))
+  })
+
+  await check('windows retain independent tabs and Copilot transcripts', async () => {
+    const first = BrowserWindow.getAllWindows()[0]
+    await call('window:new', null)
+    const second = BrowserWindow.getAllWindows().find((win) => win !== first)
+    const invoke = (win, channel, ...args) => handlers.get(channel)({ sender: win.webContents }, ...args)
+    try {
+      await invoke(first, 'config:set', { tabs: ['First.md'], tabPlaces: [31] })
+      await invoke(second, 'config:set', { tabs: ['Second.md'], tabPlaces: [72] })
+      assert.deepEqual((await invoke(first, 'config:get')).tabs, ['First.md'])
+      assert.deepEqual((await invoke(second, 'config:get')).tabs, ['Second.md'])
+      await invoke(first, 'ai:history:save', { independent: 'first' })
+      await invoke(second, 'ai:history:save', { independent: 'second' })
+      assert.equal((await invoke(first, 'ai:history:load')).independent, 'first')
+      assert.equal((await invoke(second, 'ai:history:load')).independent, 'second')
+    } finally { second.destroy() }
+  })
+  await check('Copilot output and CLI keys belong to the window that started each turn', async () => {
+    const ai = require('../electron/ai')
+    const originalAttach = ai.attach
+    const originalStart = ai.start
+    let emit
+    ai.attach = (...args) => { emit = args[0]; return originalAttach(...args) }
+    const keys = []
+    ai.start = (opts) => { keys.push(opts.key); emit({ k: 'ready', turnId: opts.turnId }); return { ok: true } }
+    const first = BrowserWindow.getAllWindows()[0]
+    await call('window:new', null)
+    const second = BrowserWindow.getAllWindows().find((win) => win !== first)
+    const seen = [[], []]
+    const sends = [first.webContents.send, second.webContents.send]
+    first.webContents.send = (channel, payload) => { if (channel === 'ai:event') seen[0].push(payload) }
+    second.webContents.send = (channel, payload) => { if (channel === 'ai:event') seen[1].push(payload) }
+    try {
+      await handlers.get('ai:start')({ sender: first.webContents }, { key: 'same-chat', turnId: 'window-first' })
+      await handlers.get('ai:start')({ sender: second.webContents }, { key: 'same-chat', turnId: 'window-second' })
+      assert.notEqual(keys[0], keys[1])
+      assert.deepEqual(seen[0].map((event) => event.turnId), ['window-first'])
+      assert.deepEqual(seen[1].map((event) => event.turnId), ['window-second'])
+      await assert.rejects(handlers.get('ai:start')({ sender: second.webContents }, { key: 'same-chat', turnId: 'window-first' }), /another window/)
+    } finally {
+      ai.attach = originalAttach
+      ai.start = originalStart
+      first.webContents.send = sends[0]
+      second.webContents.send = sends[1]
+      second.destroy()
+    }
+  })
+
+  await check('rapid zoom requests coalesce to the latest scale', async () => {
+    const win = BrowserWindow.getAllWindows()[0]
+    const contents = win.webContents
+    const originalSend = contents.send
+    const originalSet = contents.setZoomFactor
+    const applied = []
+    contents.send = (channel, payload) => {
+      if (channel === 'zoom:stage') listeners.get('zoom:staged')({ sender: contents }, payload.id)
+    }
+    contents.setZoomFactor = (factor) => { applied.push(factor) }
+    try {
+      await Promise.all([1.25, 1.5, 1.75, 1.25].map((factor) => call('zoom:set', factor)))
+      assert.deepEqual(applied, [1.25], 'obsolete intermediate scales should not be painted')
+    } finally { contents.send = originalSend; contents.setZoomFactor = originalSet }
+  })
+
   await check('vault:current names the vault main was pointed at', async () => {
     const now = await call('vault:current')
     assert.equal(now.path, VAULT)

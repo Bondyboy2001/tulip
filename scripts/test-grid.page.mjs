@@ -1069,6 +1069,10 @@ export async function run () {
   await wait()
   result.wholeFileNoticeGone = noticeOf().hidden
   fakeSize = 0
+  onDisk = 'name,status\n' + Array.from({ length: 120 }, (_, i) => `row${i + 1},${i % 2 ? 'closed' : 'open'}`).join('\n') + '\n'
+  await grid.open('Data/people.csv', { filters: [[1, ['closed']]], onlyMatches: true, query: 'row' })
+  await wait()
+  result.sampleContext = grid.context()
 
   return result
 }

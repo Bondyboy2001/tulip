@@ -70,14 +70,16 @@ await writeFile('node_modules/.cache/notebook-page.html', `<!doctype html>
 await writeFile('node_modules/.cache/notebook-main.mjs', `
 import electron from 'electron'
 const { app, BrowserWindow } = electron
+if (process.platform === 'darwin' && process.env.TULIP_SHOW_TEST_WINDOWS !== '1') {
+  app.setActivationPolicy('prohibited')
+}
 const say = (payload) => { console.log(JSON.stringify(payload)); app.exit(payload.error ? 1 : 0) }
 app.whenReady().then(async () => {
-  /* backgroundThrottling off for the same reason the grid's harness turns it
-     off: the suite runs in parallel, and Chromium stops servicing rAF in a
-     window that is behind another. This viewer coalesces its repaints into a
-     rAF, so a throttled window is one where no output is ever drawn. */
+  const visible = process.env.TULIP_SHOW_TEST_WINDOWS === '1'
+  /* Keep the renderer live while the ordinary suite leaves this window hidden.
+     Set TULIP_SHOW_TEST_WINDOWS=1 to watch it while debugging. */
   const win = new BrowserWindow({
-    width: 940, height: 640, show: true, webPreferences: { backgroundThrottling: false }
+    width: 940, height: 640, show: visible, webPreferences: { backgroundThrottling: false }
   })
   /* Anything the page says out loud, kept for the failure message. A scenario
      that wedges says nothing at all otherwise, and "timed out" is not a
@@ -89,8 +91,10 @@ app.whenReady().then(async () => {
   win.webContents.on('did-fail-load', (_e, code, desc) => said.push('load failed: ' + code + ' ' + desc))
   try {
     await win.loadFile(${JSON.stringify(path.resolve('node_modules/.cache/notebook-page.html'))})
-    app.focus({ steal: true })
-    win.focus()
+    if (visible) {
+      app.focus({ steal: true })
+      win.focus()
+    }
     win.webContents.focus()
     for (let wait = 0; wait < 200; wait++) {
       const probe = await win.webContents.executeJavaScript(\`

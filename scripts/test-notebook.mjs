@@ -23,6 +23,7 @@ import {
   notebookLanguage,
   notebookShape,
   outputParts,
+  copilotOutput,
   OUTPUT_LIMIT,
   ansiSpans,
   stripAnsi,
@@ -833,6 +834,22 @@ ok('the vault knows an .ipynb from everything else it holds', () => {
   // Not a source file, and not one of the kinds with no viewer: it has its own.
   assert.equal(isCodePath('Analysis.ipynb'), false)
   assert.equal(isViewedFilePath('Analysis.ipynb'), false)
+})
+
+
+ok('Copilot receives bounded notebook errors and plain output, without rich payloads', () => {
+  const result = copilotOutput([
+    { output_type: 'stream', text: 'recent log\n' },
+    { output_type: 'display_data', data: { 'image/png': 'SECRET_BASE64', 'text/html': '<script>bad</script>' } },
+    { output_type: 'error', ename: 'ValueError', evalue: 'invalid value', traceback: ['\u001b[31mValueError: invalid value\u001b[0m'] }
+  ])
+  assert.match(result.outputText, /ValueError: invalid value/)
+  assert.match(result.outputText, /recent log/)
+  assert.doesNotMatch(result.outputText, /SECRET_BASE64|<script>|\u001b/)
+  const long = copilotOutput([{ output_type: 'stream', text: 'x'.repeat(8000) + 'THE END' }], 200)
+  assert.equal(long.outputText.length, 200)
+  assert.equal(long.outputTruncated, true)
+  assert.ok(long.outputText.endsWith('THE END'))
 })
 
 console.log(`\n${passed} checks passed`)

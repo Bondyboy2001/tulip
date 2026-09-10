@@ -18,6 +18,6 @@ assert.doesNotMatch(settings, /id: 'files'/)
 assert.doesNotMatch(settings, /historyInVault/)
 assert.doesNotMatch(settings, /'getting-started': \(\)/)
 assert.doesNotMatch(settings, /onChange\('lastBackupAt'/)
-assert.match(settings, /'clear-models': \(\) => \{ onChange\('aiModels', \[\]\); renderBody\(\) \}/)
+assert.doesNotMatch(settings, /clear-models|Clear selection/)
 
 console.log('settings contracts: all checks passed')

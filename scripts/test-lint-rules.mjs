@@ -16,6 +16,7 @@ import { createRequire } from 'node:module'
 const require = createRequire(import.meta.url)
 const noLayoutThrash = require('../eslint-rules/no-layout-thrash.js')
 const consistentOptionalChaining = require('../eslint-rules/consistent-optional-chaining.js')
+const noModuleInitUseBeforeDefine = require('../eslint-rules/no-module-init-use-before-define.js')
 
 const tester = new RuleTester({
   languageOptions: { ecmaVersion: 'latest', sourceType: 'module' }
@@ -167,6 +168,47 @@ check('consistent-optional-chaining exemptions', consistentOptionalChaining, {
     `function f () { editor.focus(); later(() => editor?.focus()) }`
   ],
   invalid: []
+})
+
+check('no-module-init-use-before-define', noModuleInitUseBeforeDefine, {
+  valid: [
+    `const ask = () => true
+     mountHistory({ confirm: ask })`,
+    `button.onclick = () => ask()
+     const ask = () => true`,
+    `ready.then(() => ask())
+     const ask = () => true`,
+    `function restore () { return ask() }
+     const ask = () => true`,
+    `const recurse = () => recurse()`
+  ],
+  invalid: [
+    {
+      /* The real defect this rule replaces the noisy stock rule to retain. */
+      code: `mountHistory({ confirm: ask })
+             const ask = () => true`,
+      errors: [{ messageId: 'before', data: { name: 'ask' } }]
+    },
+    {
+      code: `const restore = ask
+             const ask = () => true`,
+      errors: [{ messageId: 'before', data: { name: 'ask' } }]
+    },
+    {
+      code: `const value = value`,
+      errors: [{ messageId: 'before', data: { name: 'value' } }]
+    },
+    {
+      code: `(() => ask())()
+             const ask = () => true`,
+      errors: [{ messageId: 'before', data: { name: 'ask' } }]
+    },
+    {
+      code: `(async () => ask())()
+             const ask = () => true`,
+      errors: [{ messageId: 'before', data: { name: 'ask' } }]
+    }
+  ]
 })
 
 console.log(`lint rules: ${ran} cases`)

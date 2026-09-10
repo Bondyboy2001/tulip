@@ -66,20 +66,23 @@ await writeFile('node_modules/.cache/grid-page.html', `<!doctype html>
 await writeFile('node_modules/.cache/grid-main.mjs', `
 import electron from 'electron'
 const { app, BrowserWindow } = electron
+if (process.platform === 'darwin' && process.env.TULIP_SHOW_TEST_WINDOWS !== '1') {
+  app.setActivationPolicy('prohibited')
+}
 const say = (payload) => { console.log(JSON.stringify(payload)); app.exit(payload.error ? 1 : 0) }
 app.whenReady().then(async () => {
-  /* backgroundThrottling off because this window will not always be the one in
-     front: the suite runs in parallel now (scripts/run-tests.mjs), and Chromium
-     stops servicing rAF and clamps timers in a window that is behind another.
-     A grid measuring its own layout in a throttled window measures a paused
-     one — it does not fail cleanly, it waits out the poll below. */
+  const visible = process.env.TULIP_SHOW_TEST_WINDOWS === '1'
+  /* backgroundThrottling keeps this hidden renderer live during the suite.
+     Set TULIP_SHOW_TEST_WINDOWS=1 to watch it while debugging. */
   const win = new BrowserWindow({
-    width: 760, height: 460, show: true, webPreferences: { backgroundThrottling: false }
+    width: 760, height: 460, show: visible, webPreferences: { backgroundThrottling: false }
   })
   try {
     await win.loadFile(${JSON.stringify(path.resolve('node_modules/.cache/grid-page.html'))})
-    app.focus({ steal: true })
-    win.focus()
+    if (visible) {
+      app.focus({ steal: true })
+      win.focus()
+    }
     win.webContents.focus()
     for (let wait = 0; wait < 120; wait++) {
       const probe = await win.webContents.executeJavaScript(\`
@@ -674,6 +677,17 @@ ok('a file too large to open becomes a read-only head, with the way out named', 
   assert.ok(r.previewSummary.includes('read-only'), r.previewSummary)
   assert.equal(r.previewEditorOpen, false, 'a preview let a cell open')
   assert.ok(r.wholeFileNoticeGone, 'opening the whole file left the notice up')
+})
+
+
+ok('Copilot samples retain original row numbers and exact filter exclusions', () => {
+  assert.equal(r.sampleContext.rows, 120)
+  assert.equal(r.sampleContext.shownRows, 60)
+  assert.equal(r.sampleContext.sampleRows, 50)
+  assert.equal(r.sampleContext.truncated, true)
+  assert.match(r.sampleContext.filteredBy.join(' '), /rows matching search/)
+  assert.deepEqual(r.sampleContext.sampleRowNumbers.slice(0, 3), [1, 3, 5])
+  assert.match(r.sampleContext.filteredBy.join(' '), /"status" excludes \["closed"\]/)
 })
 
 console.log(`\n${passed} checks passed`)

@@ -26,6 +26,8 @@ const main = read('electron', 'main.js')
 const ai = read('electron', 'ai.js')
 const preload = read('electron', 'preload.js')
 const buildApp = source ? read('scripts', 'build-app.sh') : ''
+const packagedAppSmoke = source ? read('scripts', 'test-packaged-app.mjs') : ''
+const updateCheck = source ? read('electron', 'update-check.js') : main
 
 assert.match(main, /app\.on\('open-file'/,
   'Finder document opens are accepted by the main process')
@@ -38,6 +40,45 @@ if (source) {
     'the macOS bundle declares CSV documents')
   assert.match(buildApp, /<string>public\.pdf<\/string>/,
     'the macOS bundle declares PDF documents')
+  assert.match(main, /const \{ checkForUpdate \} = require\('\.\/update-check'\)/,
+    'the release API contract is outside the main-process monolith')
+  assert.match(updateCheck, /function downloadAsset \(release, platform, arch\)/,
+    'the update check selects a platform download')
+  assert.match(buildApp, /TULIP_NO_VERSION_BUMP/,
+    'CI can package an already-versioned tag without advancing it')
+  assert.match(packagedAppSmoke,
+    /env:\s*\{ \.\.\.process\.env, TULIP_TEST_WINDOW_HIDDEN: '1' \}/,
+    'the installed-app smoke test never flashes a window or steals focus')
+  assert.match(main,
+    /TULIP_TEST_WINDOW_HIDDEN === '1'[\s\S]{0,120}app\.setActivationPolicy\('prohibited'\)/,
+    'hidden launches make Electron a non-activating macOS application')
+  assert.match(main,
+    /backgroundThrottling: process\.env\.TULIP_TEST_WINDOW_HIDDEN !== '1'/,
+    'hidden readiness probes retain foreground frame cadence without activating')
+  assert.match(main,
+    /offscreen: process\.env\.TULIP_TEST_WINDOW_HIDDEN === '1'/,
+    'hidden launches paint into an offscreen compositor rather than a desktop window')
+  for (const file of [
+    'bench/dom-bench-entry.mjs',
+    'bench/reading-bench.mjs',
+    'bench/table-bench.mjs',
+    'scripts/make-icon.cjs',
+    'scripts/test-agent-diff.mjs',
+    'scripts/test-copilot-view.mjs',
+    'scripts/test-docx-view.mjs',
+    'scripts/test-flashcards-render.mjs',
+    'scripts/test-grid.mjs',
+    'scripts/test-ipc.harness.cjs',
+    'scripts/test-notebook-view.mjs',
+    'scripts/test-reading-list.mjs',
+    'scripts/test-responsive-layout.mjs',
+    'scripts/test-table.mjs'
+  ]) {
+    assert.match(read(...file.split('/')), /app\.setActivationPolicy\('prohibited'\)/,
+      `${file} cannot activate or take focus while its test window is hidden`)
+  }
+  assert.match(read('scripts', 'package-dmg.sh'), /notarytool submit[\s\S]*stapler staple/,
+    'the distributable disk image is notarised and stapled when configured')
 }
 
 assert.match(main,
@@ -62,10 +103,25 @@ assert.match(main, /delete context\.contextBudget/,
   'the internal budget is removed before context reaches the model prompt')
 assert.match(main, /await stageZoom\(win, clamped \/ current\)[\s\S]{0,200}setZoomFactor\(clamped\)[\s\S]{0,100}sendTo\(win, 'zoom:unstage'\)[\s\S]{0,100}scheduleWindowRepaint\(win\)/,
   'window zoom swaps from a painted destination-scale frame before its settle repaint')
+assert.match(main, /sendTo\(win, 'zoom:will-change',[\s\S]{0,220}await stageZoom/,
+  'window zoom lets the renderer capture its document position before staging')
+if (source) {
+  /* These contracts name local renderer functions. The installed bundle
+     minifies those names; its behavior is covered by the responsive runtime
+     test, while applying a source regex to minified output only tests the
+     minifier's spelling choices. */
+  assert.match(renderer, /api\.on\('zoom:will-change', rememberWindowZoomAnchor\)[\s\S]{0,180}restoreWindowZoomAnchor\(\)/,
+    'the renderer restores the captured document position after window zoom')
+  assert.match(renderer, /anchor\.view === 'edit'[\s\S]{0,900}if \(editor\?\.restoreZoomAnchor\?\.\(anchor\)\) return[\s\S]{0,180}requestAnimationFrame\(settle\)/,
+    'the editor anchor follows CodeMirror settling and stops after the first stable paint')
+}
 assert.match(preload, /ipcRenderer\.on\('zoom:stage'[\s\S]{0,1800}requestAnimationFrame\(\(\) => globalThis\.requestAnimationFrame\([\s\S]{0,300}ipcRenderer\.send\('zoom:staged', id\)/,
   'the zoom staging frame is laid out and painted before main changes the native scale')
+assert.doesNotMatch(preload, /function clearStagedZoom \(\)[\s\S]{0,600}void root\.offsetWidth/,
+  'unstaging coalesces with the native zoom instead of forcing a half-swapped paint')
 
-for (const id of ['saved-searches', 'panel-save-search', 'ai-write']) {
+for (const id of ['saved-searches', 'panel-save-search', 'panel-filter-toggle',
+  'panel-filter-presets', 'sidebar-open', 'ai-write']) {
   assert.match(html, new RegExp(`id=["']${id}["']`), `${id} is part of the installed shell`)
 }
 for (const id of ['tex-divider', 'tex-preview', 'tex-pdf']) {
@@ -137,6 +193,19 @@ if (source) {
   /* The primary editing and overlay textboxes have explicit names; a
      placeholder is a visual hint, not an accessible label. */
   assert.match(editor, /EditorView\.contentAttributes\.of\(\{ 'aria-label': 'Document editor' \}\)/)
+  /* A picture in the editing view has one overlay: reveal the Markdown that
+     produced it. The second `</>` used to open the embed picker and looked
+     identical, so both are gone in favour of this one chip. */
+  assert.match(editor, /aria-label', 'Show raw Markdown'/)
+  assert.doesNotMatch(editor, /tk-embed-change|openEmbedPicker|Choose what to embed/)
+  assert.match(read('src', 'controls.css'), /\.tk-embed-control\)/)
+  /* A figure with no written size still occupies a 3:2 box until it decodes,
+     so a note of remote photographs cannot collapse then clamp the scroller
+     to the bottom on the way back up. */
+  assert.match(editor, /get estimatedHeight \(\)/)
+  assert.match(read('src', 'assets.js'), /img\.classList\.add\('is-ready'\)/)
+  assert.match(flashcardStyles, /aspect-ratio: 3 \/ 2/)
+  assert.match(flashcardStyles, /contain-intrinsic-block-size: auto 22rem/)
   assert.match(renderer, /panelInput\.setAttribute\('aria-label', OVERLAY_LABEL\[mode\]/)
   /* View state is readable without decoding three neighbouring glyphs. */
   for (const label of ['Read', 'Edit', 'Raw']) {
@@ -150,30 +219,40 @@ if (source) {
   assert.doesNotMatch(html, /id="pane-size-toggle"/)
   assert.match(renderer, /function fitPaneBelow \(\)/)
   assert.match(renderer, /paneBelowHeights/)
-  /* The resting palette is grouped and consumes each command only once. */
-  assert.match(renderer, /function paletteCommands \(\)/)
-  assert.doesNotMatch(renderer, /Suggested for this file/)
-  assert.match(renderer, /if \(contextCommand\(command\)\) take\(command\)/)
-  assert.match(renderer, /for \(const group of \['File', 'Appearance', 'Tools', 'App & Help'\]\)/)
-  assert.match(renderer, /className = 'panel-group'/)
-  assert.match(renderer, /rememberPaletteCommand\(item\.id\)/)
+  /* Commands are a flat list; search uses the same availability rules. */
+  assert.doesNotMatch(renderer, /paletteCommands|rememberPaletteCommand|className = 'panel-group'/)
+  assert.match(renderer, /keywords: 'preferences options configuration'/)
+  /* Search leaves the query field useful at large zoom, while common query
+     syntax is discoverable through controls that write into the real field. */
+  assert.match(renderer, /function paintSearchPresets \(\)/)
+  assert.match(renderer, /dataSearchFilter|dataset\.searchFilter/)
+  assert.match(flashcardStyles, /@media \(max-width: 620px\)[\s\S]{0,500}\.panel-filter-toggle \{ display: inline-flex;/)
   /* Zooming can push a desktop window through the drawer breakpoint while
      macOS's native traffic lights remain fixed. The narrow titlebar must keep
      the same left-side clearance instead of placing navigation beneath them. */
-  assert.match(flashcardStyles, /@media \(max-width: 760px\)[\s\S]{0,1200}\.doc-head \{ padding-left: 92px; \}/)
-  assert.doesNotMatch(flashcardStyles, /@media \(max-width: 760px\)[\s\S]{0,1200}\.doc-head \{ padding-left: 18px; \}/)
-  /* Zooming through the side-document drawer breakpoint must leave Copilot in
-     the grid. Its column then narrows the document instead of covering it. */
+  assert.match(flashcardStyles, /@media \(max-width: 760px\)[\s\S]{0,3000}\.doc-head \{ padding-left: 92px; \}/)
+  assert.doesNotMatch(flashcardStyles, /@media \(max-width: 760px\)[\s\S]{0,3000}\.doc-head \{ padding-left: 18px; \}/)
+  /* The side document becomes a drawer first; at the smaller breakpoint the
+     file rail and Copilot both become drawers so the note keeps its width. */
   const narrowRightPanelCss = flashcardStyles.slice(
     flashcardStyles.indexOf('@media (max-width: 1040px)'),
     flashcardStyles.indexOf('@media (max-width: 760px)'))
   assert.match(narrowRightPanelCss, /\.app \{\s*--col-side: 0px;\s*\}/)
   assert.match(narrowRightPanelCss, /\.sidepane \{[\s\S]{0,180}position: fixed;/)
-  assert.doesNotMatch(narrowRightPanelCss, /--col-chat|\.sidepane,\s*\.ai|\[data-ai="open"\] \.ai/)
-  assert.doesNotMatch(flashcardStyles, /body:has\(\.app\[data-(?:ai|side)="open"\]\) \.drawer-scrim/)
+  const smallestPanelCss = flashcardStyles.slice(flashcardStyles.indexOf('@media (max-width: 760px)'))
+  assert.match(smallestPanelCss, /\.app \{ --col-rail: 0px; --col-chat: 0px; \}/)
+  assert.match(smallestPanelCss, /\.ai \{[\s\S]{0,180}position: fixed;/)
+  assert.match(smallestPanelCss, /\.app\[data-ai="open"\] \.ai/)
+  assert.match(smallestPanelCss, /body:has\(\.app\[data-sidebar="open"\], \.app\[data-ai="open"\]\) \.drawer-scrim/)
   assert.match(renderer, /function closeNarrowDrawer \(\)[\s\S]{0,360}dataset\.side === 'open'/)
-  assert.doesNotMatch(renderer, /function closeNarrowDrawer \(\)[\s\S]{0,500}dataset\.ai/)
-  assert.match(renderer, /drawerScrim\.addEventListener\('click', \(\) => \{[\s\S]{0,180}dataset\.sidebar === 'open'/)
+  assert.match(renderer, /function closeNarrowDrawer \(\)[\s\S]{0,500}dataset\.ai === 'open'/)
+  assert.match(renderer, /drawerScrim\.addEventListener\('click', \(\) => \{[\s\S]{0,220}dataset\.ai === 'open'/)
+  /* A closed desktop rail has a pointer-visible route back, and Settings
+     reflows to a horizontal section strip instead of crushing its labels. */
+  assert.match(html, /id="sidebar-open"[^>]*aria-controls="sidebar"/)
+  assert.match(renderer, /sidebarOpen\.addEventListener\('click', \(\) => toggleSidebar\(\)\)/)
+  assert.match(settings, /row\.type === 'models'/)
+  assert.match(flashcardStyles, /@media \(max-width: 620px\)[\s\S]{0,1000}\.settings-box \{[\s\S]{0,160}grid-template-columns: minmax\(0, 1fr\);/)
   assert.match(flashcardStyles, /@media \(max-width: 820px\)[\s\S]{0,160}\.view-option \{ width: 28px; padding: 0; justify-content: center; \}/)
   /* Empty space in the tab row drags the window; real tabs remain interactive
      and retain their own tab-reordering drag. */
@@ -182,15 +261,14 @@ if (source) {
   /* The default model picker is the deliberate shortlist; the complete
      catalogue remains one named browse surface. */
   assert.match(settings, /asOptions\(offeredModels\(modelCatalogue, values\(\)\.aiModels, chosen\)\)/)
-  assert.match(settings, /name: 'Browse all models'/)
-  assert.match(settings, /Run Copilot Doctor below to check/)
+  assert.match(settings, /name: 'Available models'/)
   /* The guide is discoverable without becoming a forced first-run tour.
      The empty state and the palette open the portable note directly; there is
      no checklist section in Settings. Backups run from the palette and the
      menu and still record their timestamp. */
   assert.match(html, /data-command="getting-started">Open Getting Started</)
   assert.doesNotMatch(html, /data-command="setup"/)
-  assert.match(renderer, /id: 'getting-started', title: 'Open Getting Started'/)
+  assert.match(renderer, /case 'getting-started'/)
   assert.doesNotMatch(renderer, /id: 'setup', title:/)
   assert.doesNotMatch(renderer, /settings\.open\('start'\)/)
   assert.doesNotMatch(settings, /id: 'start'/)
@@ -228,8 +306,9 @@ if (source) {
   assert.match(build, /splitFeatureStyles/)
   assert.doesNotMatch(renderer, /import \{ mountSettings \} from ['"]\.\/settings\.js['"]/)
   assert.match(renderer, /import\(['"]\.\/settings\.js['"]\)/)
-  /* The thinking level has no control of its own any more — ⌃T is the whole
-     of it, so the chord and the readout it flashes are the contract. */
+  /* The thinking level has no popover control of its own any more — ⌃T is the
+     whole of it in the panel (Settings carries the default), so the chord and
+     the readout it flashes are the contract. */
   assert.match(copilot, /event\.code !== 'KeyT'/)
   assert.match(copilot, /cycleEffort\(event\.shiftKey \? -1 : 1\)/)
   assert.doesNotMatch(copilot, /effortRange|effortStops/)
@@ -241,11 +320,11 @@ if (source) {
   /* A tree click beside a real document opens a tab, but the empty tab already
      on screen is itself the place for the first file. Always passing true here
      stranded a permanent "New tab" at the left of the strip. */
-  assert.match(renderer, /openNote\(path, \{ newTab: !!state\.tabs\[state\.tabIndex\]\?\.path \}\)/)
+  assert.match(renderer, /openNote\(path, \{ newTab: !!\(activeTab\(\)\?\.path \|\| activeTab\(\)\?\.memory\) \}\)/)
   for (const id of ['fold-all-headings', 'unfold-all-headings', 'lint-file', 'export-pdf', 'set-bookmark', 'go-to-bookmark']) {
     assert.match(renderer, new RegExp(`id: '${id}', title: [^\\n]+scope: 'markdown'`), `${id} is limited to Markdown files`)
   }
-  assert.match(renderer, /id: 'note-history', title: [^\n]+scope: 'text'/)
+  assert.match(renderer, /case 'note-history'/)
   assert.match(renderer, /COMMANDS\.filter\(\(\{ scope \}\)/)
   /* A locked file is held in its reading view, and the hold is written in one
      place each: `setView` refuses to leave reading, and `applyPanes` puts a
@@ -288,7 +367,7 @@ if (source) {
      open. Both are scopes rather than checks inside the handler, so the row
      itself disappears. */
   assert.match(renderer, /id: 'review-stats', title: [^\n]+scope: 'language'/)
-  assert.match(renderer, /id: 'move-file', title: [^\n]+scope: 'file'/)
+  assert.match(renderer, /case 'move-file'/)
   assert.match(renderer, /id: 'toggle-spellcheck', title: [^\n]+scope: 'markdown'/)
   /* The overlay's selection: the ends are ends, and a row arriving under a
      still mouse is not a hover. Both regressions are one line each to
@@ -297,10 +376,13 @@ if (source) {
   assert.doesNotMatch(renderer, /state\.overlay\.index [+-] 1( \+ count)?\) % count/)
   assert.match(renderer, /mouseenter[\s\S]{0,60}if \(overlayHoverMuted\) return/)
   assert.match(renderer, /el\.panelList\.addEventListener\('mousemove'/)
+  /* The zoom badge was moved out of the document header and into the tab
+     strip's footer — view controls and Copilot share the top bar now. The
+     contract follows the placement rather than the old one. */
   assert.ok(
-    html.indexOf('id="zoom"') > html.indexOf('class="doc-tools"') &&
-    html.indexOf('id="zoom"') < html.indexOf('<!-- A PDF'),
-    'the zoom badge lives in the document header'
+    html.indexOf('id="zoom"') > html.indexOf('<footer class="status">') &&
+    html.indexOf('id="zoom"') < html.indexOf('</footer>', html.indexOf('<footer class="status">')),
+    'the zoom badge lives in the status footer'
   )
   assert.doesNotMatch(html, /class="status-end"/)
   const newFileCommands = /const NEW_FILE_COMMANDS = \[([\s\S]*?)\n\]/.exec(renderer)?.[1] || ''
@@ -354,9 +436,11 @@ if (source) {
   assert.doesNotMatch(copilot, /tokens processed this turn/)
   /* The copilots Tulip no longer runs. Their threads cannot be resumed and
      their context readings are about conversations nothing here can reopen, so
-     a restored chat of theirs must come back with its gauge cleared. */
-  assert.match(copilot, /const gone = new Set\(\['codex', 'claude', 'devin'\]\)/)
-  assert.match(copilot, /const stale = gone\.has\(convo\.threadOf\)/)
+     a restored chat of theirs must come back with its gauge cleared. The
+     retired names are the conversation module's; the clearing is the store's
+     read-back. */
+  assert.match(read('src', 'copilot-chat.js'), /const gone = new Set\(\['codex', 'claude', 'devin'\]\)/)
+  assert.match(read('src', 'copilot-store.js'), /const stale = gone\.has\(c\.threadOf\)/)
   /* Through `docIcon`, not `fileIcon` directly: the tint a source file's row
      is drawn with comes from its path, and a call site that skipped the helper
      would show every language in the same grey. */
@@ -390,7 +474,7 @@ if (source) {
      viewer is told which of the two views it is in. Without the lines that
      follow, the control would move and the document would not. */
   assert.match(renderer,
-    /el\.viewSwitch\.hidden = flashcardOpen \|\| \(!text && !dataOpen && !notebookOpen && !docxOpen\) \|\| sourceOnly/)
+    /el\.viewSwitch\.hidden = Boolean\(state\.tabs\[state\.tabIndex\]\?\.memory\) \|\| flashcardOpen \|\| \(!text && !dataOpen && !notebookOpen && !docxOpen\) \|\| sourceOnly/)
   assert.match(renderer, /if \(dataOpen\) dataInstance\?\.setReadonly\(state\.view === 'read' \|\| readOnlyHere\(\)\)/)
   assert.match(renderer, /if \(notebookOpen\) notebookInstance\?\.setReadonly\(state\.view === 'read' \|\| readOnlyHere\(\)\)/)
   assert.match(renderer,
@@ -519,7 +603,7 @@ if (source) {
   assert.match(main, /label: 'Keyboard Shortcuts'[^\n]*'shortcuts'/, 'Help offers the sheet')
   assert.match(main, /role: 'help'/, 'and there is a Help menu to offer it in')
   assert.match(renderer, /case 'shortcuts': openShortcuts\(\); break/, 'the renderer answers it')
-  assert.match(renderer, /function openShortcuts \(\)[\s\S]{0,1200}el\.shortcuts\.hidden = false/,
+  assert.match(source ? read('src', 'shortcuts.js') : renderer, /function openShortcuts \(\)[\s\S]{0,1200}el\.shortcuts\.hidden = false/,
     'and opening it shows the sheet')
   assert.match(html, /id="shortcuts-body"/, 'which has somewhere to be drawn')
   assert.match(html, /id="shortcuts"[\s\S]{0,200}aria-modal="true"/, 'and says it is modal')
@@ -534,7 +618,8 @@ if (source) {
      this reads every row out of the sheet itself and insists each one is
      answered somewhere — no list here to keep in step, which is the failure the
      old hand-written half-list of ten claims allowed. */
-  const sheetBlock = renderer.slice(renderer.indexOf('const SHORTCUTS = ['))
+  const shortcutSource = source ? read('src', 'shortcuts.js') : renderer
+  const sheetBlock = shortcutSource.slice(shortcutSource.indexOf('const SHORTCUTS = ['))
   const sheetRows = [...sheetBlock.slice(0, sheetBlock.indexOf('\n]\n'))
     .matchAll(/\['([^']+)', '([^']+)'\]/g)].map((m) => [m[1], m[2]])
   assert.ok(sheetRows.length > 30, 'the sheet was found and read')
@@ -689,11 +774,11 @@ if (source) {
      path that writes prose into the panel, including the settled half of a
      reply still streaming. A block dressed on one of them and not the others is
      a reply whose colours come and go as the log is rebuilt. */
-  assert.match(copilot, /import \{ highlightInto \} from '\.\/highlight\.js'/)
-  assert.match(copilot,
+  assert.match(read('src', 'copilot-render.js'), /import \{ highlightInto \} from '\.\/highlight\.js'/)
+  assert.match(read('src', 'copilot-render.js'),
     /querySelectorAll\('pre > code\[class\*="language-"\]'\)[\s\S]{0,220}highlightInto\(code, code\.textContent, lang\)/)
   // The four call sites: repaint, first draw, a question's own copy, and the
-  // settled head of a stream. (The definition writes `dressCode (root)`.)
+  // settled head of a stream. (The definition lives in copilot-render.js.)
   assert.equal(copilot.match(/\bdressCode\(/g)?.length, 4)
   assert.match(copilot, /preview\.append\(fileIcon\(kind\)\)/)
   assert.match(copilot, /element\('button', 'icon-btn ai-attachment-remove'\)/)
@@ -721,8 +806,13 @@ if (source) {
   assert.match(baseStyles, /\.tex-pdf\s*\{[\s\S]{0,100}cursor:\s*text/)
   assert.match(baseStyles, /\.file-tags-editor \.tag-input\s*\{[\s\S]{0,80}flex:\s*none/)
   assert.match(baseStyles, /\.file-tags-editor\s*\{[\s\S]{0,100}padding:\s*2px 8px 4px/)
-  assert.match(baseStyles, /\.pane-tabs\s*\{[\s\S]{0,300}overflow-x:\s*auto/)
-  assert.match(baseStyles, /\.pane-tab\s*\{[\s\S]{0,100}flex:\s*none/)
+  /* The pane tabs divide their strip equally and never scroll: natural-width
+     tabs once slid under a hidden scrollbar, cutting the last label off
+     mid-word with nothing on screen to say so. An over-long label now
+     ellipsizes inside its own share instead. */
+  assert.match(baseStyles, /\.pane-tab\s*\{[\s\S]{0,120}flex:\s*1 1 0/)
+  assert.match(baseStyles, /\.pane-tab\s*\{[\s\S]{0,400}text-overflow:\s*ellipsis/)
+  assert.doesNotMatch(baseStyles, /\.pane-tabs\s*\{[\s\S]{0,300}overflow-x:\s*auto/)
   assert.match(baseStyles, /\.ai\s*\{[\s\S]{0,360}overflow:\s*visible;/)
   assert.match(baseStyles, /\.app\[data-ai="closed"\] \.ai\s*\{\s*overflow:\s*hidden;/)
   assert.match(baseStyles, /\.ai-menu\s*\{[\s\S]{0,300}max-height:\s*260px/)
@@ -858,31 +948,33 @@ if (source) {
   )
 }
 
-/* A note's merge base follows every successful save, not only the ones no
-   keystroke interrupted. With the base one save behind, a watcher event that
-   changed nothing merged the buffer against Tulip's own previous autosave and
-   called the result a conflict. And a disk that still matches the base is not
-   merged at all. */
-assert.match(renderer, /holdNoteStamp\(wrote, wroteReply\?\.stamp\)[\s\S]{0,900}if \(tab && tab\.path === wrote\) tab\.base = text[\s\S]{0,1400}if \(editor\.state\.doc === doc && state\.current\?\.path === wrote\)/,
-  'the tab base is updated after every successful write, before the dirty-flag identity test')
-assert.match(renderer, /if \(disk === buffer\) \{ mergeOpen = false; return true \}[\s\S]{0,600}if \(disk === base\) \{[\s\S]{0,120}mergeOpen = false/,
-  'a disk that still matches the base skips the merge')
+if (source) {
+  /* A note's merge base follows every successful save, not only the ones no
+     keystroke interrupted. With the base one save behind, a watcher event that
+     changed nothing merged the buffer against Tulip's own previous autosave and
+     called the result a conflict. And a disk that still matches the base is not
+     merged at all. */
+  assert.match(renderer, /holdNoteStamp\(wrote, wroteReply\?\.stamp\)[\s\S]{0,900}if \(tab && tab\.path === wrote\) tab\.base = text[\s\S]{0,1400}if \(editor\.state\.doc === doc && state\.current\?\.path === wrote\)/,
+    'the tab base is updated after every successful write, before the dirty-flag identity test')
+  assert.match(renderer, /if \(disk === buffer\) \{ mergeOpen = false; return true \}[\s\S]{0,600}if \(disk === base\) \{[\s\S]{0,120}mergeOpen = false/,
+    'a disk that still matches the base skips the merge')
 
-/* A bookmark is one comment line in the note; a fresh open of the note lands on
-   it, a return to its tab does not; the second bookmark replaces the first. */
-assert.match(read('src', 'bookmark.js'), /export const BOOKMARK_LINE = '<!-- bookmark -->'/)
-assert.match(renderer, /bookmark = place == null \} = \{\}\) \{/, 'a fresh open honours the bookmark, a tab return keeps its own place')
-assert.match(renderer, /place: tabPlace\(state\.tabs\[state\.tabIndex\]\),[\s\S]{0,200}bookmark: true/, 'launch reopens the last note at its bookmark')
-assert.match(renderer, /const had = bookmarkLineOf\(doc\.toString\(\)\)[\s\S]{0,700}changes\.push\(\{ from: at\.from, insert: BOOKMARK_LINE \+ '\\n' \}\)/, 'setting a bookmark removes the old one in the same edit')
+  /* A bookmark is one comment line in the note; a fresh open of the note lands
+     on it, a return to its tab does not; the second bookmark replaces the first. */
+  assert.match(read('src', 'bookmark.js'), /export const BOOKMARK_LINE = '<!-- bookmark -->'/)
+  assert.match(renderer, /bookmark = place == null \} = \{\}\) \{/, 'a fresh open honours the bookmark, a tab return keeps its own place')
+  assert.match(renderer, /place: tabPlace\(state\.tabs\[state\.tabIndex\]\),[\s\S]{0,200}bookmark: true/, 'launch reopens the last note at its bookmark')
+  assert.match(renderer, /bookmarkInsertion\(doc\.toString\(\), at\.number\)/, 'bookmark insertion uses the shared spacing rule')
 
-assert.match(read('src', 'markdown.js'), /md\.block\.ruler\.before\('html_block', 'bookmark'/, 'the reading view claims the bookmark ahead of raw HTML')
-/* `/bookmark` in the slash menu is the palette's "Bookmark this place": the
-   slash text is cleared first, then the renderer's own setBookmark runs. */
-assert.match(read('src', 'slash.js'), /action\('Bookmark', \[[^\]]*\], BLOCKS,\s*\(view\) => view\.dom\.dispatchEvent\(new CustomEvent\('tulip:bookmark'/, 'the slash menu offers Bookmark as an action')
-assert.match(renderer, /document\.addEventListener\('tulip:bookmark', \(\) => setBookmark\(\)\)/, 'the renderer answers /bookmark with setBookmark')
-assert.match(read('src', 'editor.js'), /const RENDERED = \[bookmarkPreview,/, 'the editing view draws the bookmark widget')
-assert.match(renderer, /editor\.scrollToLine\(marker, \{ center: true \}\)[\s\S]{0,80}restoreReadingPlace\(marker, \{ center: true \}\)/, 'the bookmark is centred in both views')
-assert.match(renderer, /if \(place && !marked\) \{/, 'the bookmark takes the remembered place\'s turn rather than racing it')
-assert.match(read('src', 'styles.css'), /\.bookmark-mark, \.tk-bookmark \{/, 'both views share the ribbon styles')
+  assert.match(read('src', 'markdown.js'), /md\.block\.ruler\.before\('html_block', 'bookmark'/, 'the reading view claims the bookmark ahead of raw HTML')
+  /* `/bookmark` in the slash menu is the palette's "Bookmark this place": the
+     slash text is cleared first, then the renderer's own setBookmark runs. */
+  assert.match(read('src', 'slash.js'), /action\('Bookmark', \[[^\]]*\], BLOCKS,\s*\(view\) => view\.dom\.dispatchEvent\(new CustomEvent\('tulip:bookmark'/, 'the slash menu offers Bookmark as an action')
+  assert.match(renderer, /document\.addEventListener\('tulip:bookmark', \(\) => setBookmark\(\)\)/, 'the renderer answers /bookmark with setBookmark')
+  assert.match(read('src', 'editor.js'), /const RENDERED = \[bookmarkPreview,/, 'the editing view draws the bookmark widget')
+  assert.match(renderer, /editor\.scrollToLine\(marker, \{ center: true \}\)[\s\S]{0,80}restoreReadingPlace\(marker, \{ center: true \}\)/, 'the bookmark is centred in both views')
+  assert.match(renderer, /if \(place && !marked\) \{/, 'the bookmark takes the remembered place\'s turn rather than racing it')
+  assert.match(read('src', 'styles.css'), /\.bookmark-mark, \.tk-bookmark \{/, 'both views share the ribbon styles')
+}
 
 console.log(`ui contracts: ${source ? 'source' : target}`)

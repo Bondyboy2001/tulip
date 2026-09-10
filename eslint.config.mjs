@@ -42,7 +42,8 @@ const require = createRequire(import.meta.url)
 const tulip = {
   rules: {
     'consistent-optional-chaining': require('./eslint-rules/consistent-optional-chaining.js'),
-    'no-layout-thrash': require('./eslint-rules/no-layout-thrash.js')
+    'no-layout-thrash': require('./eslint-rules/no-layout-thrash.js'),
+    'no-module-init-use-before-define': require('./eslint-rules/no-module-init-use-before-define.js')
   }
 }
 
@@ -55,23 +56,14 @@ const REAL_MISTAKES = {
 
   /* The two that earned their place, tuned rather than taken as they come. */
 
-  /* Function declarations hoist, and this codebase leans on that everywhere —
-     a module reads top-down as prose, with the helpers underneath the thing
-     they help. Values do not hoist, which is the case that bit.
-
-     A warning and not an error, and the distinction is the whole point. The
-     rule cannot see *when* a reference runs: a `const` named inside a function
-     body that is only called later is perfectly safe, and this codebase is
-     full of those. What it caught was a reference evaluated during module
-     initialisation, where "later" never comes. So the rule reports every one
-     and a person reads the list — which is worth doing, and is not worth
-     failing a build over. */
-  'no-use-before-define': ['warn', {
-    functions: false,
-    classes: false,
-    variables: true,
-    allowNamedExports: true
-  }],
+  /* Function declarations hoist, and this codebase reads top-down with the
+     helpers and state below the operations that close over them. The stock
+     rule cannot tell a deferred callback from module initialisation and made
+     that safe structure produce hundreds of warnings. Keep the defect it once
+     found as a precise error: a later value read while the module itself is
+     evaluating. See the local rule for the two shapes and its regression tests. */
+  'no-use-before-define': 'off',
+  'tulip/no-module-init-use-before-define': 'error',
 
   /* Deliberate, everywhere they appear: terminal output is stripped of its
      escape sequences before it is shown, and a NUL is exactly what the HTML

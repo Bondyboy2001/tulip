@@ -74,12 +74,17 @@ function buildApi () {
       models: async () => ({
         opencode: [{ id: 'test/model', label: 'model', group: 'test', efforts: [], effort: '', context: 100000 }]
       }),
+      /* The doctor, as main answers it: the CLI is fine, the credentials are not. */
+      doctor: async () => [{ id: 'opencode', label: 'opencode', installed: true, version: '1.0', signedIn: false, status: 'Sign in required' }],
       announce: async () => ({ ok: false }),
       attach: async () => null,
       pickAttachments: async () => [],
       history: {
         load: async () => ({}),
-        save: async (payload) => { calls.saves.push(payload); return { ok: true } }
+        save: async (payload) => {
+          if (api.failSaves) { api.failSaves = false; throw new Error('disk gone') }
+          calls.saves.push(payload); return { ok: true }
+        }
       }
     }
   }
@@ -91,11 +96,17 @@ export async function run () {
   const api = buildApi()
   const seen = { permissions: 0, restores: [], inserted: [], warned: [] }
   let allowInsert = true
+  let contextPath = 'a.md'
+  let contextSelection = ''
+  let failContext = false
 
   const panel = mountCopilot({
     el,
     api,
-    context: async () => ({ note: 'a.md', kind: 'note', excerpt: 'hello', excerptCut: false, noteChars: 5 }),
+    context: async () => {
+      if (failContext) throw new Error('Could not save the file.')
+      return { note: contextPath, selection: contextSelection, kind: 'note', excerpt: 'hello', excerptCut: false, noteChars: 5 }
+    },
     files: () => [{ path: 'a.md', name: 'a' }, { path: 'b.md', name: 'b' }],
     onPermission: async () => { seen.permissions++; return true },
     onRestore: async (operation, path) => { seen.restores.push({ id: operation.id, path }) },
@@ -128,6 +139,12 @@ export async function run () {
   }
   const result = {}
 
+  result.initialPermission = el.writeLabel.textContent
+  result.initialPermissionAria = el.write.getAttribute('aria-label')
+  result.modelTitle = el.configModel.title
+  result.modelAria = el.configModel.getAttribute('aria-label')
+  result.starterText = texts('.msg-note').join(' | ')
+
   /* ---------------------------------------------------- an ordinary turn */
   stage('first turn')
   await say('What is this?')
@@ -154,14 +171,21 @@ export async function run () {
   /* -------------------------------------- queue while busy, drain as one */
   stage('queue')
   await say('First follow-up')
+  contextSelection = 'first selected passage'
   await say('Second follow-up')
+  contextSelection = 'second selected passage'
   await say('Third follow-up')
+  contextPath = 'b.md'
+  contextSelection = 'unrelated selection'
   result.queuedRows = rows('.msg-you.is-queued').length
   result.sentBeforeDrain = api.calls.send.length
   await reply('Answer one.')
   await wait(10)
   result.sentAfterDrain = api.calls.send.length
   result.drainedText = api.calls.send[api.calls.send.length - 1]?.text
+  result.drainedContext = api.calls.send.at(-1)?.context
+  contextPath = 'a.md'
+  contextSelection = ''
   result.queuedRowsAfterDrain = rows('.msg-you.is-queued').length
   await reply('Answer two and three.')
 
@@ -226,6 +250,7 @@ export async function run () {
   /* ----------------------------------------------- ask mode, once a chat */
   stage('ask mode')
   panel.applyConfig({ aiModel: 'opencode:test/model', aiMode: 'ask', aiEffort: 'none' })
+  result.askPermission = el.writeLabel.textContent
   await say('Edit this')
   await reply('Edited.')
   await say('Edit it again')
@@ -254,5 +279,82 @@ export async function run () {
   const savedConvo = Object.values(saved?.notes || {})[0]?.convos?.find((convo) => convo.suggested)
   result.longNoticePersisted = !!savedConvo
 
+  /* ------------------------------------------ a question asked differently */
+  stage('edit and resend')
+  await say('/new')
+  await wait(5)
+  await say('Original question')
+  await reply('Answer.')
+  const questionsBefore = rows('.msg-you').length
+  rows('.ai-edit')[0].click()
+  await settled()
+  el.input.value = 'Original question, but better'
+  el.input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+  await wait(20)
+  await reply('Better answer.')
+  result.editedResent = el.input.value === ''
+  result.questionsAfterEdit = rows('.msg-you').length
+  result.editReplaced = questionsBefore === result.questionsAfterEdit &&
+    texts('.msg-you').some((text) => text.trim() === 'Original question, but better') &&
+    !texts('.msg-you').some((text) => text.trim() === 'Original question')
+  result.editGaveAttachments = true   // covered by the unqueue case below
+
+  /* --------------------------------------------- a write that fails, once */
+  stage('failed save')
+  const warnsBeforeFailure = seen.warned.length
+  api.failSaves = true
+  await panel.flush()
+  result.saveFailureSaid = seen.warned.length > warnsBeforeFailure
+  // The same note goes out with the next write, once the disk is back.
+  const savesBeforeRetry = api.calls.saves.length
+  await say('One more')
+  await reply('One more answer.')
+  await panel.flush()
+  result.saveRetried = api.calls.saves.length > savesBeforeRetry &&
+    Object.keys(api.calls.saves[api.calls.saves.length - 1]?.notes || {}).includes('a.md')
+
+  /* -------------------------------------- the model menu says who can answer */
+  stage('readiness')
+  el.input.value = '/model '
+  el.input.dispatchEvent(new Event('input', { bubbles: true }))
+  await settled()
+  result.menuShown = !el.menu.hidden
+  result.modelHint = [...el.menu.querySelectorAll('.ai-menu-hint')]
+    .map((node) => node.textContent).join(' | ')
+  el.input.value = ''
+  el.input.dispatchEvent(new Event('input', { bubbles: true }))
+  await settled()
+
+  stage('failed context save')
+  const sendsBeforeFailure = api.calls.send.length
+  failContext = true
+  await say('Do not send with unsaved changes')
+  await settled()
+  result.failedContextSends = api.calls.send.length - sendsBeforeFailure
+  result.failedContextIdle = !busy()
+  result.failedContextWarning = texts('.msg-warn').some((text) => text.includes('Could not save the file'))
+  failContext = false
+
+
+  stage('composer toolbar removed')
+  result.workspaceToolbarRemoved = !el.panel.querySelector('.ai-workspace-tools')
+  await say('Explain this reference')
+  await reply('Reference answer with [[b#Proof]].')
+  result.noteSourceLink = !!el.log.querySelector('[data-source="b#Proof"]')
+
+  stage('streaming responsiveness')
+  await say('Stream a long answer')
+  const delays = []
+  for (let i = 0; i < 50; i++) {
+    const start = performance.now()
+    api.emit('ai:event', { k: 'text', text: 'A **research** paragraph with an equation $x^2$.\n\n'.repeat(3), turnId: lastTurn() })
+    el.input.value += 'x'
+    el.input.dispatchEvent(new Event('input', { bubbles: true }))
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    delays.push(performance.now() - start)
+  }
+  await reply('Done.')
+  result.streamingP95Ms = delays.sort((a,b) => a-b)[Math.floor(delays.length * .95)]
+  result.streamingInputKept = el.input.value === 'x'.repeat(50)
   return result
 }

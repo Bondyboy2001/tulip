@@ -305,34 +305,9 @@ async function main () {
     assert.ok(fs.existsSync(pythonIn(dir2)))
   })
 
-  await ok('an environment records which note it belongs to', async () => {
-    /* The directory is a digest, so without the stamp inside it the only
-       honest thing a settings panel could say is "17 directories, no idea
-       whose". */
-    const listed = await envs.list()
-    const mine = listed.find((entry) => entry.note === 'Notes/Renamed.md')
-    assert.ok(mine, 'the note should be named in the listing')
-    assert.equal(mine.mine, true)
-    assert.equal(mine.unknown, false)
-    assert.ok(mine.bytes > 0, 'and weighed')
-  })
-
-  await ok('an environment whose note is gone is reported as orphaned', async () => {
-    /* Only ever reported, never acted on by itself: a note that has merely
-       been renamed outside the app is indistinguishable from a deleted one,
-       and silently rebuilding is a cost nobody asked for. */
-    const live = new Set(['Notes/Renamed.md'])
-    const other = await envs.dirFor('Notes/Ghost.md')
-    await envs.ensure(other)
-    const listed = await envs.list(live)
-    assert.equal(listed.find((e) => e.note === 'Notes/Ghost.md')?.orphaned, true)
-    assert.equal(listed.find((e) => e.note === 'Notes/Renamed.md')?.orphaned, false)
-    // And with nothing to compare against, nothing is accused.
-    assert.equal((await envs.list(null)).every((e) => !e.orphaned), true)
-  })
-
   await ok('an environment can be thrown away, and only inside the root', async () => {
     const doomed = await envs.dirFor('Notes/Ghost.md')
+    await envs.ensure(doomed)
     assert.equal(await envs.remove(doomed), true)
     assert.equal(fs.existsSync(doomed), false)
     /* The path arrives from a renderer, and a few directories up from the

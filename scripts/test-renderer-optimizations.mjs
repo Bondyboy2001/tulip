@@ -76,15 +76,20 @@ const fakeStyle = () => ({
   values: new Map(),
   setProperty (key, value) { this.values.set(key, value) }
 })
-const panel = (left, right) => ({ getBoundingClientRect: () => ({ left, right }) })
+const panel = (left, right) => ({
+  getBoundingClientRect: () => ({ left, right }),
+  addEventListener () {}
+})
 const grip = () => Object.assign(new EventHub(), {
   offsetParent: {},
   style: {},
   classList: { add () {}, remove () {} },
   getClientRects () { return [{}] },
-  setPointerCapture () {}
+  setPointerCapture () {},
+  hasPointerCapture () { return false },
+  releasePointerCapture () {}
 })
-const panelApp = { dataset: {}, style: fakeStyle(), append () {} }
+const panelApp = { dataset: {}, style: fakeStyle(), append () {}, addEventListener () {} }
 const sidebarGrip = grip()
 const starts = []
 const previews = []
@@ -93,6 +98,9 @@ globalThis.window.addEventListener = () => {}
 globalThis.window.innerWidth = 1440
 globalThis.MutationObserver = class { observe () {} }
 globalThis.ResizeObserver = class { observe () {} }
+// Panels read back host positioning to tell in-flow columns from overlay
+// drawers; the fakes are in-flow, with no specified offsets.
+globalThis.getComputedStyle = () => ({ position: 'static', right: 'auto' })
 let panelFrame = null
 globalThis.requestAnimationFrame = (callback) => { panelFrame = callback; return 7 }
 globalThis.cancelAnimationFrame = (id) => { if (id === 7) panelFrame = null }

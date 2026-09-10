@@ -29,6 +29,7 @@ await writeFile('node_modules/.cache/reading-list-page.html', `<!doctype html>
 await writeFile('node_modules/.cache/reading-list-main.mjs', `
 import electron from 'electron'
 const { app, BrowserWindow } = electron
+if (process.platform === 'darwin') app.setActivationPolicy('prohibited')
 app.whenReady().then(async () => {
   const win = new BrowserWindow({ width: 900, height: 700, show: false })
   try {

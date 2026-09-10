@@ -57,11 +57,15 @@ body { margin: 0; }
 await writeFile('node_modules/.cache/agent-diff-main.mjs', `
 import electron from 'electron'
 const { app, BrowserWindow } = electron
+if (process.platform === 'darwin' && process.env.TULIP_SHOW_TEST_WINDOWS !== '1') {
+  app.setActivationPolicy('prohibited')
+}
 const say = (payload) => { console.log(JSON.stringify(payload)); app.exit(payload.error ? 1 : 0) }
 app.whenReady().then(async () => {
   /* Not throttled behind another window — see the note in test-grid.mjs. */
   const win = new BrowserWindow({
-    width: 520, height: 400, show: true, webPreferences: { backgroundThrottling: false }
+    width: 520, height: 400, show: process.env.TULIP_SHOW_TEST_WINDOWS === '1',
+    webPreferences: { backgroundThrottling: false }
   })
   try {
     await win.loadFile(${JSON.stringify(await import('node:path').then((m) => m.resolve('node_modules/.cache/agent-diff-page.html')))})
@@ -96,6 +100,10 @@ console.error(JSON.stringify(result, null, 2))
 
 assert.equal(result.resizeTopLine, result.measuredTopLine,
   'a transient resize layout keeps the last valid top line')
+assert.ok(result.zoomAnchorDrift <= 1,
+  `window zoom keeps the same source line at the editor midpoint (drift ${result.zoomAnchorDrift})`)
+assert.ok(result.zoomOffsetDrift <= 3,
+  `window zoom keeps the source line at the same screen offset (drift ${result.zoomOffsetDrift}px)`)
 
 /* The state carries the whole diff: the rewritten line is lit, the words that
    moved inside it are marked over exactly the changed words, and every removed
@@ -148,6 +156,10 @@ assert.deepEqual(
 
 assert.match(result.codeStyle.deletedFontFamily, /monospace/, 'code removals use the code font')
 assert.equal(result.codeStyle.deletedFontSize, '12.5px', 'code removals use the code font size')
+assert.ok(result.scrollChecks.filter((check) => check.numbers > 0).length >= 3,
+  'the repeated viewport swaps exercise numbered code')
+assert.ok(result.scrollChecks.every((check) => check.outsideFrame === 0),
+  'vertical scrolling never leaves the number gutter without its code frame')
 assert.equal(result.codeStyle.addedMarker, '"+"', 'code additions show a + marker')
 assert.equal(result.codeStyle.addedMarkerZIndex, '4', 'the + marker sits above the sticky gutter')
 

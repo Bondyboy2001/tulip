@@ -45,7 +45,11 @@ const main = path.join(cache, 'tulip-table-tests-main.cjs')
 await writeFile(main, `
 const { app, BrowserWindow } = require('electron')
 app.disableHardwareAcceleration()
+if (process.platform === 'darwin' && process.env.TULIP_SHOW_TEST_WINDOWS !== '1') {
+  app.setActivationPolicy('prohibited')
+}
 app.whenReady().then(async () => {
+  const visible = process.env.TULIP_SHOW_TEST_WINDOWS === '1'
   /* Shown and focused, not hidden: Chromium defers focus events on a document
      that does not have focus, so in an off-screen window a cell became the
      active element without ever being told — and a table cell only reveals its
@@ -55,7 +59,7 @@ app.whenReady().then(async () => {
      window, which is the same stall as the focus problem above by a different
      route. */
   const win = new BrowserWindow({
-    show: true, width: 1200, height: 900, webPreferences: { backgroundThrottling: false }
+    show: visible, width: 1200, height: 900, webPreferences: { backgroundThrottling: false }
   })
 
   /* The deadline inside the page cannot fire if the page is what went — a
@@ -79,8 +83,10 @@ app.whenReady().then(async () => {
 
   try {
     await win.loadFile(${JSON.stringify(page)})
-    app.focus({ steal: true })
-    win.focus()
+    if (visible) {
+      app.focus({ steal: true })
+      win.focus()
+    }
     win.webContents.focus()
     /* The suite is async, so the load event says nothing about it: the results
        land on the window once every test has settled. Wait for those.

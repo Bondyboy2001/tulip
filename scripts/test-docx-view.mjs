@@ -55,10 +55,14 @@ await writeFile('node_modules/.cache/docx-page.html', `<!doctype html>
 await writeFile('node_modules/.cache/docx-main.mjs', `
 import electron from 'electron'
 const { app, BrowserWindow } = electron
+if (process.platform === 'darwin' && process.env.TULIP_SHOW_TEST_WINDOWS !== '1') {
+  app.setActivationPolicy('prohibited')
+}
 const say = (payload) => { console.log(JSON.stringify(payload)); app.exit(payload.error ? 1 : 0) }
 app.whenReady().then(async () => {
   const win = new BrowserWindow({
-    width: 940, height: 640, show: true, webPreferences: { backgroundThrottling: false }
+    width: 940, height: 640, show: process.env.TULIP_SHOW_TEST_WINDOWS === '1',
+    webPreferences: { backgroundThrottling: false }
   })
   const said = []
   win.webContents.on('console-message', (e, level, message) =>

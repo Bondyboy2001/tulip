@@ -131,3 +131,30 @@ function harness ({ path = 'Notes/A.md', dirty = true, canDraft = () => true } =
 }
 
 console.log('drafts tests passed')
+
+// A resolved IPC failure must allow another attempt for the SAME document.
+{
+  const doc = {}
+  let attempts = 0
+  const drafts = makeDrafts({
+    state: { current: { path: 'Retry.md' }, dirty: true },
+    editor: () => ({ state: { doc } }), canDraft: () => true, docText: () => 'unsaved',
+    save: async () => ({ ok: ++attempts > 1 })
+  })
+  await drafts.writeDraft()
+  await drafts.writeDraft()
+  assert.equal(attempts, 2)
+  console.log('ok - resolved IPC failure retries the unchanged draft')
+}
+// Continuous keystrokes must not postpone the crash copy indefinitely.
+{
+  const { drafts, saved } = harness()
+  drafts.queueDraft()
+  for (let i = 0; i < 7; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    drafts.queueDraft()
+  }
+  assert.ok(saved.length > 0, 'draft landed during continuous typing')
+  drafts.clearDraft('Notes/A.md')
+  console.log('ok - continuous typing checkpoints a draft')
+}

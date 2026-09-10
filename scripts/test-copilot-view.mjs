@@ -50,6 +50,7 @@ await writeFile('node_modules/.cache/copilot-page.html', `<!doctype html>
 await writeFile('node_modules/.cache/copilot-main.mjs', `
 import electron from 'electron'
 const { app, BrowserWindow } = electron
+if (process.platform === 'darwin') app.setActivationPolicy('prohibited')
 const say = (payload) => { console.log(JSON.stringify(payload)); app.exit(payload.error ? 1 : 0) }
 app.whenReady().then(async () => {
   const win = new BrowserWindow({
@@ -96,6 +97,15 @@ const r = probe.result
 
 let passed = 0
 const ok = (what, fn) => { fn(); passed++; console.log(`ok - ${what}`) }
+
+ok('model and permission state are explicit even when the visual row truncates', () => {
+  assert.equal(r.initialPermission, 'Read only')
+  assert.match(r.initialPermissionAria, /Permission mode: Read/)
+  assert.equal(r.askPermission, 'Ask first')
+  assert.equal(r.modelTitle, 'model')
+  assert.equal(r.modelAria, 'Model: model')
+  assert.match(r.starterText, /permission control below decides whether Copilot may change the vault/)
+})
 
 ok('a question starts one copilot, sends once, and is busy until the reply', () => {
   assert.equal(r.startedOnce, 1)
@@ -161,4 +171,42 @@ ok('the "getting long" notice is given once and remembered on disk', () => {
   assert.equal(r.longNoticePersisted, true)
 })
 
+ok('a question can be lifted, reworded, and sent in the original\'s place', () => {
+  assert.equal(r.editedResent, true)
+  assert.equal(r.editReplaced, true)
+  assert.equal(r.questionsAfterEdit, 1)
+})
+
+ok('a failed history write is said, and retried with the same notes', () => {
+  assert.equal(r.saveFailureSaid, true)
+  assert.equal(r.saveRetried, true)
+})
+
+ok('a model whose provider cannot answer says so where it is offered', () => {
+  assert.equal(r.menuShown, true)
+  assert.match(r.modelHint, /sign in required/)
+})
+
+
+ok('queued questions retain the original file and each original selection', () => {
+  assert.equal(r.drainedContext.note, 'a.md')
+  assert.equal(r.drainedContext.selection, 'first selected passage')
+  assert.deepEqual(r.drainedContext.queuedContexts.map((item) => item.selection), ['first selected passage', 'second selected passage'])
+})
+ok('failed context saves never send a request and leave the panel idle', () => {
+  assert.equal(r.failedContextSends, 0)
+  assert.equal(r.failedContextIdle, true)
+  assert.equal(r.failedContextWarning, true)
+})
+
 console.log(`${passed} copilot panel checks passed`)
+
+ok('composer toolbar is removed and source links still render', () => {
+  assert.equal(r.workspaceToolbarRemoved, true)
+  assert.equal(r.noteSourceLink, true)
+})
+ok('typing remains responsive during a simulated long streamed answer', () => {
+  assert.equal(r.streamingInputKept, true)
+  assert.ok(r.streamingP95Ms < 150, `p95 streaming input delay: ${r.streamingP95Ms}ms`)
+  console.log(`streaming input p95: ${r.streamingP95Ms.toFixed(1)}ms (budget 150ms)`)
+})
