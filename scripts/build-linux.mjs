@@ -50,7 +50,7 @@ const version = pkg.version
 step(`assembling ${APP}`)
 await rm(APP, { recursive: true, force: true })
 await mkdir(APP, { recursive: true })
-for (const file of ['electron', 'chrome-sandbox', 'libEGL.so', 'libGLESv2.so', 'libvk_swiftshader.so', 'libvulkan.so.1', 'resources', 'locales']) {
+for (const file of ['electron', 'chrome-sandbox', 'libvk_swiftshader.so', 'libvulkan.so.1', 'resources', 'locales']) {
   const src = path.join(ELECTRON, file)
   if (await exists(src)) await cp(src, path.join(APP, file === 'electron' ? 'tulip' : file), { recursive: true })
 }

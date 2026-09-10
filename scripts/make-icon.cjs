@@ -14,6 +14,7 @@
 'use strict'
 
 const { app, BrowserWindow } = require('electron')
+if (process.platform === 'darwin') app.setActivationPolicy('prohibited')
 const { writeFileSync, mkdirSync } = require('node:fs')
 const path = require('node:path')
 

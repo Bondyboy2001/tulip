@@ -122,9 +122,12 @@ for (const foreign of ['Electron.app', 'electron']) {
 }
 
 step('bundling the renderer')
-// `--release` for the same reason build-app.sh passes it: packaging is the
-// release boundary, and nothing else should move the version.
-await run(process.execPath, [path.join(ROOT, 'build.mjs'), '--release'], { cwd: ROOT })
+// `--release` for the same reason build-app.sh passes it: local packaging is
+// the release boundary. CI packages a tag whose version is already final and
+// sets TULIP_NO_VERSION_BUMP=1 so the artifact keeps the tag's version.
+const buildArgs = [path.join(ROOT, 'build.mjs')]
+if (process.env.TULIP_NO_VERSION_BUMP !== '1') buildArgs.push('--release')
+await run(process.execPath, buildArgs, { cwd: ROOT })
 
 const pkg = JSON.parse(await readFile(path.join(ROOT, 'package.json'), 'utf8'))
 const { name, version, description, main, license } = pkg

@@ -1,6 +1,7 @@
 import electron from 'electron'
 
 const { app, BrowserWindow } = electron
+if (process.platform === 'darwin') app.setActivationPolicy('prohibited')
 globalThis.document = {
   /* src/math.js resolves the lazy KaTeX stylesheet from the document rather
      than from whichever shared chunk esbuild put the module in. Match the real

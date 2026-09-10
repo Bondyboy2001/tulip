@@ -40,7 +40,7 @@ lock-in.
 
 | | |
 | --- | --- |
-| macOS | 12.0 or later — Electron 43 does not run on 11 |
+| macOS | 13.0 or later — required by Electron 44 |
 | Windows | 10 or later, x64 |
 | Node | 22 or later, to build from source |
 
@@ -72,14 +72,18 @@ Settings rather than offered.
 
 ### Updating
 
-There is no auto-updater, and Tulip never checks for one on its own. **Check for
-updates…** in the command palette asks GitHub for the newest release and says
-whether this copy is behind it; nothing else in the app makes that request, and
-nothing installs anything.
+**Check for updates…** in the command palette asks GitHub for the newest
+release. Tulip only contacts GitHub when you ask it to.
 
-Updating itself means pulling and re-running the build script above, which
-replaces the installed app in place — or downloading a build (below) and
-replacing `Tulip.app` by hand.
+On an installed Mac app, a release that supplies a SHA-256 digest for
+`Tulip-macos.zip` offers **Install and restart**. Tulip checks the download,
+macOS signature and Gatekeeper assessment, bundle identity, version, and CPU
+architecture before saving your documents and restarting into the new app.
+The previous app remains beside it in Applications. An installation failure is
+recorded in `update-install.log` in Tulip's application support folder.
+
+Unsigned releases, releases without a digest, and other platforms offer the
+download link. You can also update by pulling and re-running the build script.
 
 ### Downloads
 
@@ -88,9 +92,10 @@ run under **Actions** and take `Tulip-macos` or `Tulip-windows` from its
 artifacts. Tagging a commit `v0.1.26` publishes the same two builds as a
 GitHub release.
 
-Those builds are ad-hoc signed unless the signing secrets are set, so see
-**Distributing a build** below for what the receiving machine will say about
-them.
+Tagged builds use the signing secrets configured for the repository. If those
+secrets are absent, CI still proves and publishes an ad-hoc/unsigned fallback
+and the release notes say what the receiving machine will report. See
+**Distributing a build** below for the local equivalent.
 
 (The bundle does carry `Squirrel.framework`, `Mantle.framework` and
 `ReactiveObjC.framework`, which exist for an updater Tulip does not use. They
@@ -108,6 +113,7 @@ environment before running the script:
 export TULIP_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
 export TULIP_NOTARY_PROFILE="tulip"      # from `notarytool store-credentials`
 ./scripts/build-app.sh
+./scripts/package-dmg.sh                  # signed/notarised when those vars remain set
 
 # Windows — signs with signtool
 set TULIP_WIN_CERT=C:\path\to\cert.pfx
@@ -145,12 +151,26 @@ vault; **Open in new window** on a tab or a file does the same with that
 document already showing. Both windows are the same app on the same notes — an
 edit in one appears in the other.
 
-Two things belong to the first window only. It is the one whose tabs are
-remembered, so a second window opened to read one note cannot replace the strip
-you left behind; and it is the one that holds the copilot, because the CLI
-session and the saved transcripts are one per vault and two windows writing them
-would overwrite each other. The copilot's button is hidden in a second window
-rather than half-working there.
+Every window remembers its own tabs, pinned tabs, reading locations, side
+pane, and window position. All open windows return after quitting and relaunching.
+Each window also has its own Copilot conversations; closing one stops its
+Copilot sessions without stopping another window's work.
+
+**Save workspace…** stores the current windows under a name such as Research.
+**Open workspace…** saves your documents before replacing the current windows
+with that arrangement. Named workspaces belong to the current vault.
+
+Use the command palette (⌘P) to find workspace commands, backups, templates,
+exports, and keyboard shortcuts.
+The keyboard shortcut sheet has a search field.
+
+### Reading beside a document
+
+Choose **Open document beside this one** from the command palette, **Open to the side** from a
+file or tab menu, or Option-click a note link. The existing side pane displays a
+note or PDF with independent scrolling. Drag its divider to resize it, use
+**Swap** to exchange the main and side documents, or close it with its × button.
+Its width and reading position return with the window's session.
 
 ## Templates
 
@@ -175,6 +195,26 @@ asks to run one, Tulip asks you first, and can remember the answer for that
 vault. Only trust vaults whose notes you wrote: notes that arrive shared, synced
 or downloaded can carry code you did not.
 
+Python, Rust, JavaScript / TypeScript, Go and Julia blocks have a managed
+package environment for each note. Write normal `import` / `use` / `using`
+statements and click Run: Tulip installs a missing external package and retries.
+The runtime and native package manager must already be installed. Other code
+languages continue to use their installed tools without automatic packages.
+
+**Manage code packages…** in the command palette opens the current note's
+installed versions, with Add, Update,
+Remove, Reset and Export environment. The optional import-name field remembers
+packages whose import name differs from their registry name. Settings → Documents
+→ Code packages controls automatic installation and lists environments by note.
+Generated projects, packages and lockfiles stay in Tulip’s application data,
+not the vault. Python inline dependency declarations remain supported.
+
+Missing local modules and unsupported imports remain errors. When a registry
+cannot resolve a name, use Manage code packages… to select the distribution explicitly.
+Automatic retries may execute the code preceding the failed import again.
+Versions are retained between runs; exporting the environment records the native
+manifests and locks for sharing (Tulip does not yet import environment exports).
+
 ## Switching vaults
 
 The vault name at the top of the sidebar opens a list of the vaults Tulip has
@@ -184,6 +224,22 @@ the system's own folder dialog.
 
 ## When something goes wrong
 
+### Recovery inbox and vault health
+
+**Recovery inbox…** in the command palette keeps unsaved drafts, failed-save reminders,
+and conflicting copies available until resolved. A status-bar button appears when
+there is something to review. Closing the inbox preserves its items. Drafts can be
+compared with the saved file and restored as a separate copy; the original is kept.
+Each window keeps its own crash draft, and continuous typing checkpoints it rather
+than indefinitely delaying recovery. A force quit can still lose typing since the
+last checkpoint.
+
+**Vault health report…** checks local note links, missing embeds and bibliography
+references. Open an issue at its source, or preview and apply a replacement for a
+single wiki reference. A changed file is refused until previewed again. The report
+skips code examples and remote URLs; it does not validate in-page headings or delete
+files. Closing a running scan cancels it between batches.
+
 ### Backups
 
 **Back up vault…** and **Restore vault…** are available in the command palette and
@@ -191,6 +247,14 @@ the File menu. A backup is a readable folder containing the vault's notes,
 attachments, annotations, review data, and vault-local history. Tulip verifies every file with
 SHA-256 before completing a backup or restore, and restores into a new vault rather
 than overwriting the current one.
+
+**Backups and recovery…** in the command palette shows the last completed
+backup and any failure. Choose a destination outside the vault, a daily or
+weekly schedule, and retention of 7, 14, or 30 automatic backups. Scheduling runs
+while Tulip is open and catches up on an overdue backup. An unavailable drive
+leaves existing backups intact and retries later. Retention removes only older
+copies created by that vault's scheduler, after a new copy passes verification.
+Use **Browse backups** to inspect them or **Restore…** to recover into a new vault.
 
 If Tulip ever says something went wrong, the palette has the two things worth
 doing about it. **Reveal crash log** opens the folder holding `crash.log`, which
@@ -215,6 +279,7 @@ npm run typecheck # tsc --checkJs, a report rather than a gate; see tsconfig.jso
 npm audit         # must stay clean; see the overrides in package.json
 npm run bench     # markdown render; also bench:reading, bench:dom, bench:table
 npm run bench:boot # real launches, timed — see bench/boot-bench.mjs
+npm run bench:session -- --check # repeated mixed-document sessions, retained heap and idle activity
 ```
 
 The lint rules are few and every one of them fires only on a defect — including
@@ -247,3 +312,61 @@ further. Tulip makes no network request unless asked: the only one it can
 make on its own behalf is **Check for updates…**, and nothing runs it but you.
 
 Tulip is licensed under the [MIT License](LICENSE).
+
+## Reviewing and researching with Copilot
+
+The Copilot composer has **Context**, **Instructions**, and **Find chat** controls.
+Context previews the open document and selected passage, shows when the excerpt
+is shortened, and lets you exclude either or pin up to eight reference notes or
+PDFs. These choices belong to the conversation and return when it is reopened.
+Attachments remain removable in the composer. Changing context affects future
+messages; earlier messages remain part of the conversation.
+
+Instructions opens editable, reusable prompts. **Use in composer** prepares a
+message for you to review before sending. Find chat searches questions, answers,
+and file changes in the current note's saved conversations, with bookmarks for
+up to thirty useful messages per conversation.
+
+Copilot edits are applied before review. In a turn's **Diff**, choose
+**Choose sections…** to keep or reject individual changes in a text file and
+preview the resulting content before saving. A file changed since that turn is
+refused so newer edits remain intact. **Resume request** on a stopped turn, or a
+failed turn with completed steps, asks Copilot to inspect current files and
+continue the original request without repeating completed work.
+
+PDF citations and `[[Note#Heading]]` or `[[Note#^block-id]]` references open a
+source passage preview. **Open source** jumps to the cited location. PDF previews
+use existing extracted text when available, otherwise read only the requested
+page without creating a text sidecar; scanned pages may need the source viewer.
+Ranked vault search is available to Copilot in Read, Ask, and Auto through a
+local read-only tool. It supports the same filters and indexed PDF text as the
+app's search.
+
+The recovery inbox's **Merge selected changes…** compares a recovered version
+with the current file and saves your chosen result. A changed file must be
+previewed again before saving; the recovered conflict copy is preserved.
+Search filters offer a value field (and folder suggestions), and selecting a
+search result shows its surrounding passage. Back and forward now also revisit
+heading jumps, source citations, and search locations within the same document.
+Vault health checks links to headings and blocks in indexed Markdown notes.
+
+### Recover one document
+
+**Recover this document…** in the command palette or a text document's tab/file
+menu brings together saved versions, backup copies, and unresolved drafts or
+conflicts for that document. Expand a saved version or backup to compare its
+text. Restoring a saved version keeps a restore point; restoring a backup or a
+draft creates a separate copy and preserves the current file. **Show recovery
+for all documents** returns to the full inbox.
+
+Backup copies come from the vault's recorded manual and automatic backups.
+Unavailable drives and documents absent from a backup are labelled. A selected
+backup file is checked against its SHA-256 digest before comparison or restore.
+Text comparison supports UTF-8; other encodings can be restored as a separate
+copy. For files over 32 MB or backups from another location, use the full-vault
+restore available in the same panel.
+
+The mixed-document session benchmark checks actual rendered PDF pages, typing
+frames below 50 ms, document-switch p95 below 500 ms, retained heap growth below
+20 MB over 20 cycles, and idle renderer activity below 5%. These are regression
+limits on the test fixtures, rather than guarantees for every vault or machine.

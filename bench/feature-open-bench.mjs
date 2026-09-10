@@ -58,7 +58,10 @@ await writeFile(path.join(profile, 'config.json'), `${JSON.stringify({
 })}\n`)
 
 const child = spawn(electron, ['.', `--remote-debugging-port=${PORT}`, `--user-data-dir=${profile}`, '--disable-gpu'], {
-  cwd: ROOT, detached: process.platform !== 'win32', stdio: ['ignore', 'ignore', 'pipe']
+  cwd: ROOT,
+  detached: process.platform !== 'win32',
+  stdio: ['ignore', 'ignore', 'pipe'],
+  env: { ...process.env, TULIP_TEST_WINDOW_HIDDEN: '1' }
 })
 let tail = ''
 child.stderr.on('data', (chunk) => { tail = (tail + chunk).slice(-5000) })

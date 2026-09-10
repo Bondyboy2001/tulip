@@ -49,8 +49,15 @@ const main = path.join(cache, 'tulip-table-bench-main.cjs')
 await writeFile(main, `
 const { app, BrowserWindow } = require('electron')
 app.disableHardwareAcceleration()
+if (process.platform === 'darwin' && process.env.TULIP_SHOW_TEST_WINDOWS !== '1') {
+  app.setActivationPolicy('prohibited')
+}
 app.whenReady().then(async () => {
-  const win = new BrowserWindow({ show: true, width: 1200, height: 900 })
+  const visible = process.env.TULIP_SHOW_TEST_WINDOWS === '1'
+  const win = new BrowserWindow({
+    show: visible, width: 1200, height: 900,
+    webPreferences: { backgroundThrottling: false }
+  })
   try {
     /* The sampling profiler, when asked for. Attached before the page runs and
        read after it, so what comes back is the whole workload rather than a
@@ -63,8 +70,10 @@ app.whenReady().then(async () => {
       await win.webContents.debugger.sendCommand('Profiler.start')
     }
     await win.loadFile(${JSON.stringify(page)})
-    app.focus({ steal: true })
-    win.focus()
+    if (visible) {
+      app.focus({ steal: true })
+      win.focus()
+    }
     win.webContents.focus()
     const results = await win.webContents.executeJavaScript(
       'new Promise((resolve, reject) => {' +

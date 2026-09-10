@@ -62,6 +62,7 @@ import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 const { app, BrowserWindow } = electron
 const dir = ${JSON.stringify(dir)}
+if (process.platform === 'darwin') app.setActivationPolicy('prohibited')
 app.commandLine.appendSwitch('js-flags', '--expose-gc')
 app.whenReady().then(async () => {
   const win = new BrowserWindow({ show: false, width: 1280, height: 900 })

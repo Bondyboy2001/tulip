@@ -104,6 +104,14 @@ jobs:
   package:
     name: package (macOS)
     runs-on: macos-latest
+    env:
+      TULIP_NO_VERSION_BUMP: '1'
+      MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -112,9 +120,57 @@ jobs:
           cache: npm
       - run: npm ci
 
-      # Packaging is where signing, the icon pipeline and the Info.plist are
-      # exercised. Ad-hoc signed and left in build/ — no secrets are needed for
-      # CI to prove the bundle still assembles.
+      - name: Validate signing configuration
+        shell: bash
+        run: |
+          if [[ -n "$MACOS_CERTIFICATE" || -n "$MACOS_CERTIFICATE_PASSWORD" || -n "$MACOS_SIGN_IDENTITY" ]]; then
+            [[ -n "$MACOS_CERTIFICATE" && -n "$MACOS_CERTIFICATE_PASSWORD" && -n "$MACOS_SIGN_IDENTITY" ]] || {
+              echo "macOS signing needs MACOS_CERTIFICATE, MACOS_CERTIFICATE_PASSWORD and MACOS_SIGN_IDENTITY" >&2
+              exit 1
+            }
+          fi
+          if [[ -n "$APPLE_ID" || -n "$APPLE_TEAM_ID" || -n "$APPLE_APP_PASSWORD" ]]; then
+            [[ -n "$MACOS_CERTIFICATE" && -n "$APPLE_ID" && -n "$APPLE_TEAM_ID" && -n "$APPLE_APP_PASSWORD" ]] || {
+              echo "notarisation needs the signing certificate and all three Apple credentials" >&2
+              exit 1
+            }
+          fi
+
+      # Secrets are optional so forks and ordinary pushes still prove the
+      # ad-hoc path. On the release repository they turn the same packaging
+      # command into a Developer ID build and give it a temporary notarytool
+      # profile; neither the certificate nor its password is printed.
+      - name: Import signing identity
+        if: env.MACOS_CERTIFICATE != ''
+        shell: bash
+        run: |
+          CERTIFICATE="$RUNNER_TEMP/tulip-signing.p12"
+          KEYCHAIN="$RUNNER_TEMP/tulip-signing.keychain-db"
+          KEYCHAIN_PASSWORD=$(openssl rand -hex 24)
+          echo "$MACOS_CERTIFICATE" | base64 --decode > "$CERTIFICATE"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$CERTIFICATE" -k "$KEYCHAIN" -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN"
+          security default-keychain -d user -s "$KEYCHAIN"
+          echo "TULIP_SIGN_IDENTITY=$MACOS_SIGN_IDENTITY" >> "$GITHUB_ENV"
+          echo "TULIP_SIGNING_KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
+          if [[ -n "$APPLE_ID" ]]; then
+            xcrun notarytool store-credentials tulip-ci \
+              --keychain "$KEYCHAIN" \
+              --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD"
+            echo "TULIP_NOTARY_PROFILE=tulip-ci" >> "$GITHUB_ENV"
+          fi
+
+      - name: Tag and package version agree
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: test "v$(node -p "require('./package.json').version")" = "$GITHUB_REF_NAME"
+
+      # Packaging exercises signing, the icon pipeline and Info.plist. The
+      # no-bump flag keeps an already-versioned tag exact.
       - name: Package the app
         run: ./scripts/build-app.sh --no-install
 
@@ -129,6 +185,21 @@ jobs:
 
       - name: The packaged app launches and writes a vault
         run: npm run test:packaged-app -- build/Tulip.app/Contents/MacOS/Tulip
+
+      - name: Recovery survives interrupted edits and writes
+        run: npm run test:recovery-app -- build/Tulip.app/Contents/MacOS/Tulip
+
+      - name: Document recovery unifies versions and backup copies
+        run: npm run test:document-recovery -- build/Tulip.app/Contents/MacOS/Tulip
+
+      - name: Right panels resize in column and drawer layouts
+        run: npm run test:panel-resize -- build/Tulip.app/Contents/MacOS/Tulip
+
+      - name: Workspaces restore across app launches
+        run: npm run test:workspace-app -- build/Tulip.app/Contents/MacOS/Tulip
+
+      - name: Create the disk image
+        run: ./scripts/package-dmg.sh
 
       # Zipped rather than uploaded as a directory: the upload action does not
       # preserve the executable bit or the symlinks inside a .app, and a bundle
@@ -146,14 +217,27 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Tulip-macos
-          path: build/Tulip-macos.zip
+          path: |
+            build/Tulip-macos.dmg
+            build/Tulip-macos.zip
           # Long enough to bisect a regression across a few weeks of pushes,
           # short enough that the account is not storing every build ever made.
           retention-days: 30
 
+      - name: Remove signing material
+        if: always() && env.MACOS_CERTIFICATE != ''
+        shell: bash
+        run: |
+          security delete-keychain "$TULIP_SIGNING_KEYCHAIN" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/tulip-signing.p12"
+
   package-windows:
     name: package (Windows)
     runs-on: windows-latest
+    env:
+      TULIP_NO_VERSION_BUMP: '1'
+      WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -167,8 +251,27 @@ jobs:
       # a dependency of the project.
       - run: npm i -D rcedit --no-save
 
+      - name: Validate signing configuration
+        shell: bash
+        run: |
+          if [[ -n "$WINDOWS_CERTIFICATE" || -n "$WINDOWS_CERTIFICATE_PASSWORD" ]]; then
+            [[ -n "$WINDOWS_CERTIFICATE" && -n "$WINDOWS_CERTIFICATE_PASSWORD" ]] || {
+              echo "Windows signing needs WINDOWS_CERTIFICATE and WINDOWS_CERTIFICATE_PASSWORD" >&2
+              exit 1
+            }
+          fi
+
+      - name: Import signing certificate
+        if: env.WINDOWS_CERTIFICATE != ''
+        shell: pwsh
+        run: |
+          $certificate = Join-Path $env:RUNNER_TEMP 'tulip-signing.pfx'
+          [IO.File]::WriteAllBytes($certificate, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          "TULIP_WIN_CERT=$certificate" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "TULIP_WIN_CERT_PASSWORD=$env:WINDOWS_CERTIFICATE_PASSWORD" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Package the app
-        run: npm run app:win
+        run: npm run app:win -- --zip
 
       - name: The folder is well formed
         shell: bash
@@ -183,14 +286,24 @@ jobs:
         shell: bash
         run: npm run test:packaged-app -- build/Tulip-win32-x64/Tulip.exe
 
+      - name: Verify Authenticode signature
+        if: env.WINDOWS_CERTIFICATE != ''
+        shell: pwsh
+        run: signtool verify /pa /v build/Tulip-win32-x64/Tulip.exe
+
       # A portable folder, so it goes up as it is — the upload action zips it,
       # and Windows has no executable bit to lose on the way.
       - name: Keep it
         uses: actions/upload-artifact@v4
         with:
           name: Tulip-windows
-          path: build/Tulip-win32-x64
+          path: build/Tulip-*-win32-x64.zip
           retention-days: 30
+
+      - name: Remove signing material
+        if: always() && env.WINDOWS_CERTIFICATE != ''
+        shell: pwsh
+        run: Remove-Item "$env:RUNNER_TEMP/tulip-signing.pfx" -Force -ErrorAction SilentlyContinue
 
   # A tagged commit becomes a downloadable release, built by the same two jobs
   # that already prove the packaging works — so what is published is the thing
@@ -217,8 +330,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
+            artifacts/Tulip-macos/Tulip-macos.dmg
             artifacts/Tulip-macos/Tulip-macos.zip
-            artifacts/Tulip-windows/**
+            artifacts/Tulip-windows/*.zip
           # Both builds are ad-hoc signed unless the signing secrets are set,
           # and a download that has to be argued past Gatekeeper should say so
           # where somebody will read it rather than in a README they have not
@@ -226,11 +340,14 @@ jobs:
           body: |
             Built by CI from ${{ github.sha }}.
 
-            **macOS** — unzip and move `Tulip.app` to Applications. Unless this
-            build was signed with a Developer ID, macOS will refuse it as
-            "damaged" or from an "unidentified developer"; clear the quarantine
-            attribute with `xattr -cr /Applications/Tulip.app`.
+            **macOS** — open `Tulip-macos.dmg` and drag Tulip to Applications.
+            With the repository signing secrets configured, the app and disk
+            image are Developer ID signed, notarised and stapled. The zip is an
+            alternate copy of the same verified app.
 
-            **Windows** — a portable folder. Unzip it anywhere and run
-            `Tulip.exe`. SmartScreen will warn about an unsigned binary.
+            **Windows** — unzip the portable build anywhere and run `Tulip.exe`.
+            It is Authenticode-signed when the repository certificate is configured.
+
+            If a signing secret is absent, CI deliberately falls back to the
+            ad-hoc/unsigned build; Gatekeeper or SmartScreen will then warn.
           generate_release_notes: true

@@ -22,14 +22,20 @@ IDENTIFIER=com.hb.tulip
 
 echo "› bundling the renderer"
 # `--release` is what advances the patch version, and this script is the only
-# caller that passes it: packaging is the release boundary, `npm start` is not.
+# local caller that passes it: packaging is the release boundary, `npm start`
+# is not. CI packages an already-versioned tag with TULIP_NO_VERSION_BUMP=1;
+# advancing again there would make a v0.1.270 tag publish a 0.1.271 app.
 # Trimmed dictionaries: `TULIP_SPELL_LANGUAGES=fr,de ./scripts/build-app.sh`
 # (or `=none`) shrinks the ~16MB of Hunspell dictionaries to the named
 # languages. Unset builds all fifteen, which stays the default because the app
 # runs offline and cannot fetch a dictionary later. The variable needs no
 # forwarding here — the environment passes it to build.mjs untouched; see
 # SPELL_LANGUAGE_IDS there.
-node build.mjs --release
+if [ "${TULIP_NO_VERSION_BUMP:-}" = "1" ]; then
+  node build.mjs
+else
+  node build.mjs --release
+fi
 
 # Read after the build, not before: the build has just advanced the version, and
 # the bundle should say what the source tree now says rather than lag it by one.
@@ -99,9 +105,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundleVersion</key><string>$VERSION</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-  <!-- Electron 43 does not run on macOS 11; claiming it only turns a clear
-       "requires macOS 12" into a launch that dies without saying why. -->
-  <key>LSMinimumSystemVersion</key><string>12.0.0</string>
+  <!-- Electron 44 requires Ventura. State that in the bundle so an older Mac
+       gets a clear compatibility message instead of a failed launch. -->
+  <key>LSMinimumSystemVersion</key><string>13.0.0</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSSupportsAutomaticGraphicsSwitching</key><true/>

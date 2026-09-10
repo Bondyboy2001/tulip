@@ -318,6 +318,8 @@ await mkdir(output, { recursive: true })
    of the bundle impossible to read. */
 await rm(path.join(output, 'chunks'), { recursive: true, force: true })
 await cp('src/index.html', path.join(output, 'index.html'))
+await cp('src/settings-window.html', path.join(output, 'settings-window.html'))
+await cp('src/settings-window.css', path.join(output, 'settings-window.css'))
 
 /* pdf.js reads these at run time rather than having them compiled in: the glyph
    data for a PDF that names a standard font without embedding it, the character
@@ -381,6 +383,7 @@ const options = {
      order by another route. */
   entryPoints: {
     renderer: 'src/renderer.js',
+    'settings-window': 'src/settings-window.js',
     katex: 'node_modules/katex/dist/katex.min.css',
     whiteboard: `node_modules/@excalidraw/excalidraw/dist/${watch ? 'dev' : 'prod'}/index.css`,
     /* The feature-owned surfaces in src/styles-features.css. Static-imported it
@@ -388,7 +391,8 @@ const options = {
        in index.html; as a named sibling it lands at `dist/styles-features.css`
        and the renderer fetches it after the first paint — see
        prefetchFeatureStyles in src/renderer.js. */
-    'styles-features': 'src/styles-features.css'
+    'styles-features': 'src/styles-features.css',
+    controls: 'src/controls.css'
   },
   bundle: true,
   outdir: output,
@@ -679,7 +683,7 @@ if (watch) {
    *  impossible to carry into the packaged app. */
   const required = [
     'index.html', 'renderer.js', 'renderer.css', 'katex.css', 'whiteboard.css',
-    'styles-features.css',
+    'styles-features.css', 'controls.css',
     ...Object.keys(FEATURE_STYLE_SECTIONS).map((feature) => `${feature}.css`),
     'pdf.worker.js', 'pdf-text.cjs', ...(mac ? ['pdf-ocr'] : []), 'lint.cjs', 'three.js',
     'pdfjs/standard_fonts', 'pdfjs/cmaps', 'pdfjs/iccs', 'pdfjs/wasm',

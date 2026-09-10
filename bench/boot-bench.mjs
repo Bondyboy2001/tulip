@@ -144,7 +144,12 @@ async function runOnce (userData) {
   const child = spawn(
     electron,
     ['.', `--remote-debugging-port=${PORT}`, `--user-data-dir=${userData}`],
-    { cwd: ROOT, detached: process.platform !== 'win32', stdio: ['ignore', 'ignore', 'pipe'] }
+    {
+      cwd: ROOT,
+      detached: process.platform !== 'win32',
+      stdio: ['ignore', 'ignore', 'pipe'],
+      env: { ...process.env, TULIP_TEST_WINDOW_HIDDEN: '1' }
+    }
   )
   let tail = ''
   child.stderr.on('data', (chunk) => { tail = (tail + chunk).slice(-4000) })
@@ -222,7 +227,16 @@ try {
 
   const runs = []
   for (let n = 0; n < RUNS; n++) {
-    const timing = await runOnce(userData)
+    let timing
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        timing = await runOnce(userData)
+        break
+      } catch (error) {
+        if (attempt) throw error
+        process.stderr.write(`  run ${n + 1}/${RUNS} did not launch; retrying once\n`)
+      }
+    }
     runs.push(timing)
     process.stderr.write(`  run ${n + 1}/${RUNS}  dcl ${round(timing.domContentLoaded)}ms\n`)
   }
