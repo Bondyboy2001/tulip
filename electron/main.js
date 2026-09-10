@@ -28,7 +28,17 @@ const { makeVaultWriteDomain } = require('./ipc-vault-write')
 const { makeVaultInfoDomain } = require('./ipc-vault-info')
 const { makeIndexCache } = require('./index-cache')
 const { makeSelfWrites } = require('./self-writes')
+const { checkForUpdate } = require('./update-check')
+const { makeUpdateInstaller } = require('./update-install')
+const { makeWindowSessions } = require('./window-sessions')
 const { mapLimit, WALK_LIMIT } = require('./map-limit')
+
+/* Hidden benchmark and packaged-smoke launches must not become the active macOS
+   application. `show: false` hides a window but does not stop Electron from
+   activating its process and taking the menu bar/focus from the reader. */
+if (process.platform === 'darwin' && process.env.TULIP_TEST_WINDOW_HIDDEN === '1') {
+  app.setActivationPolicy('prohibited')
+}
 /* Which files a run wrote, and which it may take back. Lifted out so the
    deletion guards can be tested directly — see electron/run-pages.js. */
 const { htmlFilesIn, collectRunPages } = require('./run-pages')
@@ -62,7 +72,7 @@ const { makePathStore, relocateAll, resetAll } = require('./path-store')
    import it needs is not installed — see electron/python-env.js. */
 const { makePythonEnvs, missingPackage, hasInlineDeps } = require('./python-env')
 const { writeAtomicSync, syncDirectory } = require('./atomic-store')
-const { BACKUP_EXTENSION, backupVault, restoreVault } = require('./vault-backup')
+const { makeBackupDomain } = require('./ipc-backups')
 const {
   parseFrontmatter, propsOf, propValues, tagsFromProps, writeListProp
 } = require('./frontmatter.cjs')
@@ -311,13 +321,11 @@ const useAppScheme = () => process.env.TULIP_NO_APP_SCHEME !== '1'
    the vault, which are true in every window at once, and `toFocused` for
    commands, which mean "here".
 
-   ONE OF THEM IS THE PRIMARY WINDOW: the first one opened, and the one whose
-   tab strip is the session that comes back at launch. Two windows writing
-   `tabs` to a single config file would each overwrite the other's; rather than
-   invent a merge for a shallow config, the second window keeps its strip for as
-   long as it is open and writes none of it down. The copilot is the primary
-   window's too — see `copilotWindow`. */
+   Window sessions own their document state and geometry. Shared preferences
+   remain in the app config; Copilot sessions and event routing are scoped to
+   the window that started them. */
 const windows = new Set()
+const windowSessions = makeWindowSessions({ readConfig, writeConfig, getVault: () => vaultPath })
 /** @type {Electron.BrowserWindow | null} */
 let primaryWindow = null
 
@@ -340,8 +348,23 @@ function focusedWindow () {
   return live.includes(primaryWindow) ? primaryWindow : live[0] || null
 }
 
-/** The window that owns the copilot: the primary one, always. */
-const copilotWindow = () => (primaryWindow && !primaryWindow.isDestroyed() ? primaryWindow : null)
+// CLI sessions are scoped by sender; turn events retain their owner through
+// asynchronous PDF preparation, tools, and the final history review.
+const copilotOwners = new Map()
+const copilotKeys = new Map()
+function copilotKey (event, key) {
+  const scoped = `${event.sender.id}:${String(key || '')}`
+  const keys = copilotKeys.get(event.sender.id) || new Set()
+  keys.add(scoped)
+  copilotKeys.set(event.sender.id, keys)
+  return scoped
+}
+function ownCopilotTurn (event, id) {
+  const owner = copilotOwners.get(id)
+  if (owner && owner !== windowOf(event)) throw new Error('This turn belongs to another window.')
+  copilotOwners.set(id, windowOf(event))
+}
+
 
 /** A fact about the vault or the app — true in every window, so said to each. */
 function broadcast (channel, payload) {
@@ -1996,7 +2019,10 @@ async function relocate (srcAbs, targetAbs) {
     (isDir
       ? moves.filter(({ from }) => MD_EXT.has(path.extname(from).toLowerCase()))
       : [{ from: fromPath, to: toPath }])
-      .map(({ from, to }) => pythonEnvs.relocate(from, to))
+      .map(async ({ from, to }) => {
+        await codeEnvs.relocate(from, to)
+        await pythonEnvs.relocate(from, to)
+      })
   )
   await carryAnnotations(rel(srcAbs), rel(targetAbs))
   await carryAttachments(rel(srcAbs), rel(targetAbs))
@@ -2498,6 +2524,7 @@ ipcMain.handle('vault:open', async (_event, dir) => {
 
 async function openVault (dir) {
   vaultPath = dir
+  windowSessions.switchVault()
   /* The kernels belonged to the vault that is closing, and their namespaces
      describe notebooks nothing is showing any more. */
   kernelDomain.moveRoot(dir)
@@ -2583,57 +2610,15 @@ ipcMain.handle('app:version', () => app.getVersion())
    neither has to be derived from the other. */
 const REPO_URL = 'https://github.com/Bondyboy2001/tulip'
 
-const RELEASES = 'https://api.github.com/repos/Bondyboy2001/tulip/releases/latest'
+ipcMain.handle('app:update-install', makeUpdateInstaller({ app, fetch: (url, options) => net.fetch(url, options), flushAllWindows: () => flushAllWindows() }))
 
-/** `v0.1.26` and `0.1.26` alike, as numbers, so they can be compared. */
-function versionParts (text) {
-  return String(text).replace(/^v/, '').split('.').map((n) => parseInt(n, 10) || 0)
-}
-
-/** Whether `candidate` is a later version than `current`. */
-function isNewer (candidate, current) {
-  const a = versionParts(candidate)
-  const b = versionParts(current)
-  for (let i = 0; i < Math.max(a.length, b.length); i++) {
-    if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) > (b[i] || 0)
-  }
-  return false
-}
-
-ipcMain.handle('app:update-check', async () => {
-  const current = app.getVersion()
-  let latest
-  try {
-    /* `net.fetch` rather than the global one: it goes through Chromium's stack,
-       which is what already knows about this machine's proxy and certificates. */
-    const res = await net.fetch(RELEASES, {
-      headers: {
-        accept: 'application/vnd.github+json',
-        'user-agent': `Tulip/${current}`
-      }
-    })
-    /* A repository with no releases yet answers 404, which is an answer and not
-       a failure — it means there is nothing newer, which is true. */
-    if (res.status === 404) return { ok: true, current, latest: null, newer: false }
-    if (!res.ok) return { ok: false, current, reason: `GitHub answered ${res.status}` }
-    latest = await res.json()
-  } catch (error) {
-    return { ok: false, current, reason: error.message || 'the network could not be reached' }
-  }
-
-  const tag = String(latest?.tag_name || '')
-  if (!tag) return { ok: true, current, latest: null, newer: false }
-  return {
-    ok: true,
-    current,
-    latest: tag.replace(/^v/, ''),
-    newer: isNewer(tag, current),
-    url: String(latest?.html_url || ''),
-    /* Release notes for the update dialog, truncated so a long changelog does
-       not become a long dialog. Plain text: the dialog renders detail as-is. */
-    notes: String(latest?.body || '').slice(0, 2000)
-  }
-})
+ipcMain.handle('app:update-check', () => checkForUpdate({
+  current: app.getVersion(),
+  /* Chromium's stack already knows this machine's proxy and certificates. */
+  fetch: (url, options) => net.fetch(url, options),
+  platform: process.platform,
+  arch: process.arch
+}))
 
 /**
  * Something went wrong in the window, and now somebody knows.
@@ -2908,8 +2893,7 @@ const CASCADE = 28
  *
  * @returns {{bounds: {x: number, y: number, width: number, height: number}|null, maximized: boolean}}
  */
-function rememberedWindow () {
-  const saved = readConfig().window
+function rememberedWindow (saved = readConfig().window) {
   if (!saved || typeof saved !== 'object') return { bounds: null, maximized: false }
   const { x, y, width, height } = saved
   const finite = [x, y, width, height].every((n) => Number.isFinite(n))
@@ -2959,28 +2943,26 @@ function scheduleWindowRepaint (win) {
 /**
  * A window on the vault.
  *
- * The first one is the primary — the session's own window, the one that
- * restores the tab strip that was left behind and the one the copilot belongs
- * to. Every window after it is an ordinary one: same vault, same everything it
- * can do to the vault, but its strip lives only as long as it does.
+ * Each window restores its own saved documents and geometry.
  *
  * @param {object} [opts]
  * @param {string|null} [opts.open]  a vault-relative path to open in it
+ * @param {any} [opts.saved] a persisted window session
  */
-function createWindow ({ open = null } = {}) {
+function createWindow ({ open = null, saved = null } = {}) {
   /* The first window opens where the last session left it — see
      `rememberedWindow` — and fills the screen when there is nothing to go back
      to; a second one is sized and placed from the window it was opened out of,
      so it lands somewhere the reader is already looking. */
   const parent = windows.size ? focusedWindow() : null
-  const remembered = windows.size ? { bounds: null, maximized: false } : rememberedWindow()
+  const remembered = saved?.bounds ? rememberedWindow(saved.bounds) : windows.size ? { bounds: null, maximized: false } : rememberedWindow()
   const win = new BrowserWindow({
     width: 1180,
     height: 780,
     minWidth: 680,
     minHeight: 460,
     ...(remembered.bounds || {}),
-    ...cascadeFrom(parent),
+    ...(saved ? {} : cascadeFrom(parent)),
     .../** @type {Electron.BrowserWindowConstructorOptions} */ (windowChrome()),
     backgroundColor: nativeTheme.shouldUseDarkColors ? '#141317' : '#FBFAF8',
     show: false,
@@ -2988,6 +2970,12 @@ function createWindow ({ open = null } = {}) {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      /* Hidden automation is also a non-activating macOS app. Keep its
+         requestAnimationFrame-driven readiness probes at foreground cadence
+         and give Chromium an offscreen compositor to paint into; ordinary
+         windows retain Chromium's normal on-screen rendering and throttling. */
+      backgroundThrottling: process.env.TULIP_TEST_WINDOW_HIDDEN !== '1',
+      offscreen: process.env.TULIP_TEST_WINDOW_HIDDEN === '1',
       // The preload uses only contextBridge, ipcRenderer, and webUtils — all
       // available inside the sandbox, so there is no reason to leave it off.
       sandbox: true,
@@ -2998,6 +2986,7 @@ function createWindow ({ open = null } = {}) {
     }
   })
 
+  windowSessions.add(win, saved, !windows.size)
   windows.add(win)
 
   /* The native menu follows the frontmost window. Its renderer reports the
@@ -3030,16 +3019,16 @@ function createWindow ({ open = null } = {}) {
      and a restore size equal to the screen would make the green button do
      nothing. A second window keeps the size it was cascaded at: it was opened
      to be looked at beside something, which a maximise would undo. */
-  if (primary && (!remembered.bounds || remembered.maximized)) win.maximize()
+  if (remembered.maximized || (primary && !remembered.bounds)) win.maximize()
 
   /* The primary window's place is kept, so the next launch opens where this
      one was left. The live events rather than `resized` and `moved`: those
      only follow a resize made by hand, and a window sized by a script or by
      the system — a display coming or going — would be remembered wrong. A drag
      delivers one per frame, and the config write behind them is debounced. */
-  if (primary) {
+  {
     for (const event of /** @type {Array<'resize' | 'move' | 'maximize' | 'unmaximize'>} */ (['resize', 'move', 'maximize', 'unmaximize'])) {
-      win.on(/** @type {any} */ (event), () => rememberBounds(win))
+      win.on(/** @type {any} */ (event), () => { windowSessions.bounds(win); if (primary) rememberBounds(win) })
     }
   }
 
@@ -3062,6 +3051,10 @@ function createWindow ({ open = null } = {}) {
     if (shown || win.isDestroyed()) return
     shown = true
     clearTimeout(/** @type {any} */ (revealBackstop))
+    /* Real-window benchmarks still need Chromium, layout and the compositor,
+       but they do not need to take over the developer's desktop. This switch
+       is set only by those harnesses; ordinary launches always show. */
+    if (process.env.TULIP_TEST_WINDOW_HIDDEN === '1') return
     win.show()
     /* A window opened while another one has the screen has to come forward as
        well as appear, or the reader's ⌘⌥N looks like it did nothing. */
@@ -3153,6 +3146,8 @@ function createWindow ({ open = null } = {}) {
   win.on('closed', () => {
     clearTimeout(repaintTimers.get(win))
     repaintTimers.delete(win)
+    windowSessions.remove(contentsId, quitting)
+    if (quitting || windows.size === 1) flushConfig()
     windows.delete(win)
     reveals.delete(contentsId)
     documentZoomClaims.delete(contentsId)
@@ -3161,9 +3156,12 @@ function createWindow ({ open = null } = {}) {
     releaseClaimsOwnedBy(contentsId)
     stopRunsOwnedBy(win)
     kernelDomain.stopOwnedBy(win)
+    for (const key of copilotKeys.get(contentsId) || []) aiInstance?.stop(key)
+    copilotKeys.delete(contentsId)
+    for (const [id, owner] of copilotOwners) { if (owner === win) copilotOwners.delete(id) }
     if (primary) {
       primaryWindow = null
-      try { aiInstance?.stopAll('SIGKILL') } catch { /* nothing running */ }
+
     }
   })
 
@@ -3210,6 +3208,39 @@ function createWindow ({ open = null } = {}) {
   return win
 }
 
+// Settings is a utility window, separate from document sessions and their geometry.
+/** @type {Electron.BrowserWindow | null} */
+let settingsWindow = null
+ipcMain.handle('settings:open', async () => {
+  if (settingsWindow && !settingsWindow.isDestroyed()) {
+    if (settingsWindow.isMinimized()) settingsWindow.restore()
+    settingsWindow.show()
+    settingsWindow.focus()
+    return true
+  }
+  const win = new BrowserWindow({
+    title: 'Tulip Settings', width: 900, height: 650, minWidth: 700, minHeight: 480,
+    ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 12, y: 12 } } : {}),
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#141317' : '#FBFAF8',
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'), contextIsolation: true,
+      nodeIntegration: false, sandbox: true,
+      backgroundThrottling: process.env.TULIP_TEST_WINDOW_HIDDEN !== '1',
+      offscreen: process.env.TULIP_TEST_WINDOW_HIDDEN === '1'
+    }
+  })
+  settingsWindow = win
+  win.on('closed', () => { settingsWindow = null })
+  win.on('focus', () => win.webContents.send('settings:refresh'))
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  win.webContents.on('will-navigate', (event) => event.preventDefault())
+  if (useAppScheme()) await win.loadURL('tulip-app://settings/settings-window.html')
+  else await win.loadFile(path.join(__dirname, '..', 'dist', 'settings-window.html'))
+  if (process.env.TULIP_TEST_WINDOW_HIDDEN !== '1') win.show()
+  return true
+})
+
 /**
  * Another window on the same vault, optionally showing a particular note.
  *
@@ -3245,6 +3276,29 @@ ipcMain.handle('window:role', (event) => {
 ipcMain.handle('window:new', (_e, open) => {
   const wanted = typeof open === 'string' && open.length <= 1024 ? open : null
   createWindow({ open: wanted })
+  return { ok: true }
+})
+
+ipcMain.handle('workspace:save', async (_event, name) => {
+  const flushed = await flushAllWindows()
+  if (flushed.some((result) => result?.failed)) return { ok: false }
+  for (const win of liveWindows()) windowSessions.bounds(win)
+  return { ok: windowSessions.saveNamed(name) }
+})
+ipcMain.handle('workspace:open', async (event) => {
+  const named = windowSessions.named()
+  const names = Object.keys(named)
+  if (!names.length) {
+    await dialog.showMessageBox(/** @type {any} */ (windowOf(event)), { message: 'No saved workspaces yet.', detail: 'Use Save workspace… to name your open windows and documents.', buttons: ['OK'] })
+    return { ok: false }
+  }
+  const picked = await dialog.showMessageBox(/** @type {any} */ (windowOf(event)), { message: 'Open a workspace', buttons: [...names, 'Cancel'], cancelId: names.length })
+  if (picked.response >= names.length) return { canceled: true }
+  const flushed = await flushAllWindows()
+  if (flushed.some((result) => result?.failed)) return { ok: false }
+  const old = liveWindows()
+  for (const saved of named[names[picked.response]].slice(0, 12)) createWindow({ saved })
+  for (const win of old) win.close()
   return { ok: true }
 })
 
@@ -3516,25 +3570,14 @@ ipcMain.handle('document:take', async (event, p) => {
   return { ok: true }
 })
 
-/**
- * The copilot belongs to the primary window, and answers only to it.
- *
- * One CLI session, and one chat file per vault written whole on every save: a
- * second window holding a conversation would overwrite the first window's
- * transcripts with its own copy of them. Rather than invent a merge, the
- * copilot is offered in one window — the second window hides the panel, and
- * this is the fence behind that, because a hidden control is a decision the
- * renderer could change its mind about and this one is not the renderer's.
- */
+/** Only live application windows may own Copilot sessions. */
 function assertCopilotWindow (event) {
-  if (windowOf(event) !== copilotWindow()) {
-    throw new Error('The copilot runs in the main window.')
-  }
+  if (!windows.has(windowOf(event))) throw new Error('Open a Tulip window to use Copilot.')
 }
 
-/** The copilot's events, to the one window that is allowed to hold it. */
 function toCopilot (channel, payload) {
-  sendTo(copilotWindow(), channel, payload)
+  const win = copilotOwners.get(payload?.turnId)
+  if (win) sendTo(win, channel, payload)
 }
 
 /**
@@ -3624,7 +3667,15 @@ ipcMain.on('zoom:staged', (_event, id) => zoomStageWaits.get(Number(id))?.())
 async function commitZoom (win, clamped) {
   if (win.isDestroyed() || win.webContents.isDestroyed()) return
   const current = win.webContents.getZoomFactor()
-  if (Math.abs(current - clamped) > 0.005) await stageZoom(win, clamped / current)
+  if (Math.abs(current - clamped) > 0.005) {
+    /* A scrollTop is a CSS-pixel offset, so leaving it untouched while the
+       viewport changes size moves the text under the reader. Give the page a
+       chance to remember a document anchor before the staging transform and
+       native zoom change it lays out around. IPC messages to one renderer are
+       ordered, so this reaches it before zoom:stage below. */
+    sendTo(win, 'zoom:will-change', { from: current, to: clamped })
+    await stageZoom(win, clamped / current)
+  }
   if (win.isDestroyed() || win.webContents.isDestroyed()) return
   win.webContents.setZoomFactor(clamped)
   sendTo(win, 'zoom:unstage')
@@ -3638,16 +3689,20 @@ function applyZoom (factor) {
   if (!win) return
   const clamped = Math.min(/** @type {number} */ (ZOOM_STEPS.at(-1)), Math.max(ZOOM_STEPS[0], factor))
   pendingZooms.set(win, clamped)
-  const work = (zoomWork.get(win) || Promise.resolve())
-    .catch(() => {})
-    .then(() => commitZoom(win, clamped))
-  zoomWork.set(win, work)
-  return work.finally(() => {
-    if (zoomWork.get(win) === work) {
-      zoomWork.delete(win)
-      pendingZooms.delete(win)
+  const existing = zoomWork.get(win)
+  if (existing) return existing
+  const work = Promise.resolve().then(async () => {
+    while (pendingZooms.has(win) && !win.isDestroyed()) {
+      const latest = pendingZooms.get(win)
+      await commitZoom(win, latest)
+      if (pendingZooms.get(win) === latest) pendingZooms.delete(win)
     }
+  }).finally(() => {
+    zoomWork.delete(win)
+    pendingZooms.delete(win)
   })
+  zoomWork.set(win, work)
+  return work
 }
 
 /**
@@ -3973,78 +4028,14 @@ ipcMain.handle('vault:pick-default', async () => {
 /* ------------------------------------------------------------ vault backup
    Backups are ordinary folders with a manifest and SHA-256 entries. That keeps
    the result inspectable and portable without adding an archive dependency. */
-async function backupCurrentVault (event) {
-  if (!vaultPath) return { ok: false, error: 'Open a vault before backing it up.' }
-  const flushed = await flushAllWindows()
-  if (flushed.some((result) => result?.failed)) {
-    return { ok: false, error: 'The vault could not be saved before the backup.' }
-  }
-
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
-  const suggested = `${path.basename(vaultPath)}-${stamp}${BACKUP_EXTENSION}`
-  const picked = await dialog.showSaveDialog(/** @type {any} */ (windowOf(event)), {
-    title: 'Back up vault',
-    defaultPath: path.join(app.getPath('documents'), suggested),
-    filters: [{ name: 'Tulip backup folder', extensions: [BACKUP_EXTENSION.slice(1)] }]
-  })
-  if (picked.canceled || !picked.filePath) return { canceled: true }
-
-  const target = picked.filePath.toLowerCase().endsWith(BACKUP_EXTENSION)
-    ? picked.filePath
-    : `${picked.filePath}${BACKUP_EXTENSION}`
-  try {
-    const manifest = await backupVault(vaultPath, target)
-    return { ok: true, path: target, files: manifest.files.length }
-  } catch (error) {
-    return { ok: false, error: error?.message || 'The vault backup could not be created.' }
-  }
-}
-
-async function restoreBackup (event) {
-  const flushed = await flushAllWindows()
-  if (flushed.some((result) => result?.failed)) {
-    return { ok: false, error: 'The vault could not be saved before restoring.' }
-  }
-
-  const picked = await dialog.showOpenDialog(/** @type {any} */ (windowOf(event)), {
-    title: 'Choose a Tulip backup folder',
-    properties: ['openDirectory']
-  })
-  if (picked.canceled || !picked.filePaths[0]) return { canceled: true }
-  const source = picked.filePaths[0]
-
-  let manifest
-  try {
-    const { verifyBackup } = require('./vault-backup')
-    manifest = await verifyBackup(source)
-  } catch (error) {
-    return { ok: false, error: error?.message || 'That folder is not a valid Tulip backup.' }
-  }
-
-  const destination = await dialog.showOpenDialog(/** @type {any} */ (windowOf(event)), {
-    title: 'Choose where to restore the vault',
-    properties: ['openDirectory', 'createDirectory']
-  })
-  if (destination.canceled || !destination.filePaths[0]) return { canceled: true }
-
-  const parent = destination.filePaths[0]
-  const name = path.basename(String(manifest.sourceName || 'Vault')) || 'Vault'
-  let target = path.join(parent, `${name} Restored`)
-  for (let number = 2; fsSync.existsSync(target); number++) {
-    target = path.join(parent, `${name} Restored ${number}`)
-  }
-
-  try {
-    await restoreVault(source, target)
-    await openVault(target)
-    return { ok: true, path: target, files: manifest.files.length }
-  } catch (error) {
-    return { ok: false, error: error?.message || 'The backup could not be restored.' }
-  }
-}
-
-ipcMain.handle('vault:backup', backupCurrentVault)
-ipcMain.handle('vault:restore', restoreBackup)
+const backupDomain = makeBackupDomain({ app, dialog, shell, windowOf,
+  getVault: () => vaultPath, flushAllWindows, openVault, readConfig, writeConfig, realSafeTargetPath })
+ipcMain.handle('vault:backup', backupDomain.backup)
+ipcMain.handle('vault:restore', backupDomain.restore)
+ipcMain.handle('vault:backups', backupDomain.manage)
+ipcMain.handle('backup:documents', backupDomain.documents.list)
+ipcMain.handle('backup:preview', backupDomain.documents.preview)
+ipcMain.handle('backup:restore-document', backupDomain.documents.restore)
 
 /* -------------------------------------------------------------- sync health
 
@@ -4410,10 +4401,14 @@ const TEX_PREVIEW_DIR = () => path.join(app.getPath('userData'), 'tex-preview')
    focused one, which is exactly the state a page is in while a native context
    menu is up, and it can only be found out about after the copy silently did
    not happen. This one has no such condition. */
-ipcMain.handle('clipboard:write', (_e, text) => {
-  clipboard.writeText(String(text ?? ''))
-  return true
-})
+async function writeClipboardText (text) {
+  try {
+    await clipboard.writeText(String(text ?? ''))
+    return true
+  } catch { return false }
+}
+
+ipcMain.handle('clipboard:write', (_e, text) => writeClipboardText(text))
 
 /* ------------------------------------------------------------ spelling
 
@@ -4527,7 +4522,7 @@ function termRegex (term, { regex, caseSensitive, word }) {
 }
 
 const FILTER = /^(tag|path|file|prop|type):(.*)$/i
-const TOKEN = /"([^"]*)"|(\S+)/g
+const TOKEN = /"([^"]*)"|((?:tag|path|file|prop|type):"[^"]*"|\S+)/gi
 
 /**
  * Splits a query into its filters and its terms, then compiles the terms.
@@ -5805,7 +5800,7 @@ const pdfTextFile = (relPath) => safePath(path.join(ANNOTATION_DIR, `${relPath}$
    caught here is "never". */
 const PDF_TEXT_TIMEOUT_MS = 10 * 60 * 1000
 
-function extractPdfTextOffThread (pdf, relPath) {
+function extractPdfTextOffThread (pdf, relPath, pageNumber = 0) {
   return new Promise((resolve, reject) => {
     const child = utilityProcess.fork(path.join(__dirname, 'pdf-text-worker.js'), [], {
       serviceName: 'Tulip PDF text'
@@ -5822,7 +5817,7 @@ function extractPdfTextOffThread (pdf, relPath) {
     }
     timer = setTimeout(
       () => finish(new Error(`PDF text worker timed out after ${PDF_TEXT_TIMEOUT_MS / 1000}s`)),
-      PDF_TEXT_TIMEOUT_MS
+      pageNumber ? 15000 : PDF_TEXT_TIMEOUT_MS
     )
     timer.unref?.()
     child.once('message', (message) => {
@@ -5833,7 +5828,7 @@ function extractPdfTextOffThread (pdf, relPath) {
     })
     child.once('spawn', () => {
       child.postMessage({
-        pdf,
+        pdf, pageNumber,
         name: path.basename(relPath),
         extractor: appAsset('pdf-text.cjs'),
         ocr: appAsset('pdf-ocr'),
@@ -6135,6 +6130,8 @@ function turnPdfs (context) {
  * vault path the renderer offered, but it arrives over IPC and is treated as an
  * assertion rather than a fact.
  */
+const { readInlineAttachment } = require('./copilot-attachments.js')
+
 const INLINE_ATTACHMENT_BYTES = 4096
 const INLINE_ATTACHMENT_EXT = new Set([
   ...MD_EXT, TEX_EXT, SITE_EXT, ...CODE_EXT, ...DATA_EXT
@@ -6148,10 +6145,7 @@ async function inlineAttachments (context, totalBytes = INLINE_ATTACHMENT_BYTES 
 
   const read = await Promise.all(paths.map(async (file) => {
     try {
-      const abs = await realSafeTargetPath(file)
-      const stat = await fs.stat(abs)
-      if (!stat.isFile() || stat.size > INLINE_ATTACHMENT_BYTES) return null
-      return { path: file, text: await fs.readFile(abs, 'utf8'), bytes: stat.size }
+      return await readInlineAttachment(file, realSafeTargetPath, INLINE_ATTACHMENT_BYTES)
     } catch { return null }
   }))
   let used = 0
@@ -6523,7 +6517,9 @@ const pythonEnvs = makePythonEnvs({
 
 /** Opt-in: a pasted note can name any PyPI package, so installing on a
  *  traceback is off until the reader turns it on in Settings. */
-const mayInstallPython = () => readConfig().autoInstallPythonDeps === true
+const mayInstallPython = () => (readConfig().autoInstallPackages ?? readConfig().autoInstallPythonDeps ?? true) === true
+const { makeCodeEnvs } = require('./code-envs')
+const codeEnvs = makeCodeEnvs({ root: () => app.getPath('userData'), vault: () => vaultPath || '', pathFor: runnerPath, pythonEnvs, autoInstall: mayInstallPython })
 
 /* stdout is a pipe, so Python otherwise block-buffers it and a long-running
    block can look silent until it exits. `-u` makes each print available to the
@@ -7248,7 +7244,8 @@ ipcMain.handle('run:start', async (event, lang, code, noteRel) => {
   /* If its control already started a compiler warmup, let that finish before
      compiling a new block. A cache hit skips the wait: it has no need for a
      warm compiler, and can claim another slot if the warmup still owns one. */
-  if (spec.compiled && !(await spec.cached(code))) {
+  const managed = codeEnvs.supports(spec.id, code)
+  if (!managed && spec.compiled && !(await spec.cached(code))) {
     await warmRunner(lang).catch(() => {})
   }
 
@@ -7263,9 +7260,9 @@ ipcMain.handle('run:start', async (event, lang, code, noteRel) => {
   await ensureLoginPath()
   await ensureFallbackPaths()
   const note = typeof noteRel === 'string' && noteRel ? noteRel : null
-  const ready = spec.prepare ? await spec.prepare(note, code).catch(() => null) : null
+  const ready = !managed && spec.prepare ? await spec.prepare(note, code).catch(() => null) : null
 
-  const plan = executionPlan(await spec.steps(file, dir, code, ready))
+  const plan = managed ? { steps: [], release: null } : executionPlan(await spec.steps(file, dir, code, ready))
   const steps = plan.steps
   // A language that spends its first seconds starting itself up says so; the
   // `runTimeout` setting still overrides whatever it asked for.
@@ -7288,7 +7285,10 @@ ipcMain.handle('run:start', async (event, lang, code, noteRel) => {
      that installs a missing import runs the same file twice, and a sequence
      that tidied up after the first attempt would leave the second nothing to
      run. Removed in `finally`, so both paths out of here are covered. */
-  runWithMissingImports(id, steps, { cwd, timeoutMs, ready })
+  const work = managed
+    ? codeEnvs.run({ id, note, lang: spec.id, code, cwd, timeoutMs, typescript: ['ts', 'typescript', 'mts'].includes(lang), output: (stream, text) => toRun('run:out', { id, stream, text }) })
+    : runWithMissingImports(id, steps, { cwd, timeoutMs, ready })
+  work
     .then(async (result) => {
       /* Only a run that finished on its own terms may take a file away. One
          that was stopped, timed out or failed has left the directory in a
@@ -7303,7 +7303,7 @@ ipcMain.handle('run:start', async (event, lang, code, noteRel) => {
         : []
       // `errTail` is the retry's working material and means nothing to the
       // renderer, which was streamed every one of those bytes as they arrived.
-      const { errTail: _tail, ...reportable } = result
+      const { errTail: _tail, stdout: _stdout, ...reportable } = result
       toRun('run:done', { id, ...reportable, pages })
     })
     /* A failure before `run:done` is sent leaves the block on screen saying
@@ -7422,6 +7422,7 @@ const cancelled = new Set()
 
 /** SIGTERM first so a program can tidy up, SIGKILL if it will not go. */
 function stopRun (id) {
+  if (codeEnvs.stop(id)) return true
   const run = runs.get(id)
   /* Only a run that is going: `cancelled` is emptied by the run that reads
      it, and a Stop pressed after the run had finished left an entry nothing
@@ -7451,6 +7452,7 @@ kernelDomain.register()
 /* For quitting, where there is no later: the SIGKILL escalation timer in
    `stopRun` would never fire, so the groups go outright. */
 function killAllRuns () {
+  codeEnvs.disposeSync()
   for (const run of runs.values()) killTree(run.child, 'SIGKILL')
 }
 
@@ -7459,41 +7461,14 @@ function killAllRuns () {
    render domain — manim, tikz and the TeX preview, which share the artefact
    cache and the run machinery — lives in electron/ipc-render.js. */
 
-/* ------------------------------------------------- managing environments
+/* ------------------------------------------------- managing packages */
 
-   What settings shows. `list` is a walk of every file under every
-   environment, so it is asked for when the panel opens and not on a timer. */
-
-ipcMain.handle('python:envs', async () => {
-  /* The notes that still exist, so an environment left behind by one that does
-     not can say so. Read here rather than in python-env.js, which deliberately
-     knows nothing about the index. */
-  /** @type {Set<string>|null} */
-  let live = null
-  if (vaultPath) {
-    await ensureIndex()
-    live = new Set(index.keys())
-  }
-  return pythonEnvs.list(live)
-})
-
-ipcMain.handle('python:env-remove', async (_e, dir) => {
-  if (typeof dir !== 'string' || !dir) return false
-  return pythonEnvs.remove(dir)
-})
-
-/** Every environment whose note this vault no longer has. */
-ipcMain.handle('python:env-prune', async () => {
-  if (!vaultPath) return 0
-  await ensureIndex()
-  const live = new Set(index.keys())
-  const all = await pythonEnvs.list(live)
-  let gone = 0
-  for (const env of all) {
-    if (!env.orphaned) continue
-    if (await pythonEnvs.remove(env.dir)) gone++
-  }
-  return gone
+ipcMain.handle('packages:list', () => codeEnvs.list())
+ipcMain.handle('packages:manage', async (_event, note, lang, action, name, imported) => {
+  if (note != null && (typeof note !== 'string' || note.length > 4096)) throw new Error('Invalid note.')
+  if (!['list', 'export'].includes(action) && !executionTrusted()) throw new Error('Trust this vault before managing its packages.')
+  await ensureLoginPath()
+  return codeEnvs.manage(note || null, lang, action, name, imported)
 })
 
 /* The render handlers register here, where the run ids they borrow live
@@ -7809,11 +7784,42 @@ function aiService () {
   return service
 }
 
+/** @type {Awaited<ReturnType<typeof import("./copilot-search-server").startSearchServer>> | null} */
+let copilotSearchServer = null
+/** @type {string | null} */
+let copilotSearchVault = null
+/** @type {Promise<any> | null} */
+let copilotSearchStarting = null
+async function ensureCopilotSearch () {
+  if (copilotSearchVault !== vaultPath) {
+    copilotSearchServer?.close()
+    copilotSearchServer = null
+    copilotSearchStarting = null
+    copilotSearchVault = vaultPath
+  }
+  if (!copilotSearchStarting) {
+    const startedVault = vaultPath
+    copilotSearchStarting = require('./copilot-search-server').startSearchServer(async (query) => {
+      if (vaultPath !== startedVault) throw new Error('This vault session ended. Start a new Copilot turn.')
+      const result = await searchVault(query)
+      if (vaultPath !== startedVault) throw new Error('The vault changed during search.')
+      return { ...result, truncated: result.truncated || (result.results?.length || 0) > 30, results: result.results?.slice(0, 30) }
+    }).then((server) => {
+      if (vaultPath !== startedVault) { server.close(); throw new Error('The vault changed while starting search.') }
+      copilotSearchServer = server
+      return server.config
+    }).catch((error) => { copilotSearchStarting = null; throw error })
+  }
+  return copilotSearchStarting
+}
+
 ipcMain.handle('ai:start', async (event, opts) => {
   assertCopilotWindow(event)
   const ai = aiService()
   ai.setVault(vaultPath)
+  ai.setSearchConnection(await ensureCopilotSearch())
   const id = turnId(opts?.turnId)
+  if (id) ownCopilotTurn(event, id)
   if (!id) return { ok: false, error: 'The Copilot turn could not be identified.' }
   /* Which conversation's copilot this is. Sessions are per chat, so the key is
      part of every call that names one — see electron/ai.js. */
@@ -7822,7 +7828,7 @@ ipcMain.handle('ai:start', async (event, opts) => {
   // "command not found" for a tool that is installed.
   await ensureLoginPath()
   await ensureFallbackPaths()
-  return ai.start({ ...(opts || {}), key: String(opts?.key || ''), turnId: id })
+  return ai.start({ ...(opts || {}), key: copilotKey(event, opts?.key), turnId: id })
 })
 ipcMain.handle('ai:models', async (_e, opts) => {
   await ensureLoginPath()
@@ -7838,8 +7844,9 @@ ipcMain.handle('ai:send', async (event, key, text, context, requestedTurnId) => 
   assertCopilotWindow(event)
   const ai = aiService()
   ai.setVault(vaultPath)
-  const chat = String(key || '')
+  const chat = copilotKey(event, key)
   const id = turnId(requestedTurnId)
+  if (id) ownCopilotTurn(event, id)
   if (!id) return { ok: false, error: 'The Copilot turn could not be identified.' }
   const words = String(text || '')
   const prepared = await preparePdfTurn(words, context || null, id)
@@ -7885,7 +7892,7 @@ ipcMain.handle('ai:baseline', (_e, turn, relPath) =>
   aiTurns.baseline(turn, String(relPath || '')))
 
 ipcMain.handle('ai:announce', (_e, info) => {
-  const win = copilotWindow()
+  const win = windowOf(_e)
   if (!win || win.isFocused()) return { ok: false }
   if (!Notification.isSupported()) return { ok: false }
 
@@ -7911,13 +7918,32 @@ ipcMain.handle('ai:stop', async (event, key, requestedTurnId) => {
   const id = turnId(requestedTurnId)
   /* One conversation's copilot, not every one of them: the other notes' turns
      are somebody else's work and go on running. */
-  const stopped = aiInstance?.stop(String(key || '')).ok || false
+  if (id) ownCopilotTurn(event, id)
+  const stopped = aiInstance?.stop(copilotKey(event, key)).ok || false
   const operation = await finishAiHistory(id).catch(() => null)
   sendAiReview(id, operation)
   return stopped
 })
 
 /* ------------------------------------------------------- note history */
+
+ipcMain.handle('pdf:passage', async (_event, requested, page) => {
+  const target = await realSafePath(requested)
+  if (!isPdf(target) || !Number.isInteger(page) || page < 1) throw new Error('Choose a valid PDF page.')
+  const vault = vaultPath
+  let text
+  if (await pdfTextIsCurrent(rel(target))) {
+    const pages = require('./pdf-context').parsePages(await fs.readFile(pdfTextFile(rel(target)), 'utf8'))
+    const found = pages.find((item) => item.page === page)
+    if (!found) throw new Error('That page has no extracted text.')
+    text = found.text
+  } else {
+    const extracted = await extractPdfTextOffThread(target, rel(target), page)
+    text = extracted.passage || ''
+  }
+  if (vaultPath !== vault) throw new Error('The vault changed while reading this passage.')
+  return { text: text.slice(0, 6000), truncated: text.length > 6000 }
+})
 
 ipcMain.handle('trust:list', () => trust?.list() || [])
 ipcMain.handle('trust:operation', (_e, id) => trust?.operation(String(id)) || null)
@@ -7985,7 +8011,10 @@ ipcMain.handle('trust:restore', async (_e, id, onlyPath = null) => {
    between machines should not carry transcripts around with it. One file per
    vault, named by digest so two vaults with the same folder name stay apart. */
 const CHAT_DIR = () => path.join(app.getPath('userData'), 'chats')
-const chatFile = () => path.join(CHAT_DIR(), `${sha1(vaultPath || '')}.json`)
+const chatFile = (event) => {
+  const id = windowSessions.id(event.sender.id)
+  return path.join(CHAT_DIR(), `${sha1(vaultPath || '')}${id === 'main' ? '' : '-' + id}.json`)
+}
 
 /* What the file holds, read once per vault and kept — the same arrangement
    electron/path-store.js uses for its sidecars, and sound for the same reason:
@@ -8001,8 +8030,8 @@ const chatFile = () => path.join(CHAT_DIR(), `${sha1(vaultPath || '')}.json`)
 let chatCache = null
 let chatCacheFile = ''
 
-function chatHistoryNow () {
-  const file = chatFile()
+function chatHistoryNow (event) {
+  const file = chatFile(event)
   if (chatCache && chatCacheFile === file) return chatCache
   let parsed = {}
   try {
@@ -8023,7 +8052,7 @@ ipcMain.handle('ai:history:load', (event) => {
      write them has no business reading them either. */
   assertCopilotWindow(event)
   if (!vaultPath) return {}
-  const file = chatFile()
+  const file = chatFile(event)
   let raw
   try {
     raw = fsSync.readFileSync(file, 'utf8')
@@ -8060,8 +8089,8 @@ ipcMain.handle('ai:history:save', async (event, history) => {
   if (!vaultPath) return { ok: false }
   try {
     await fs.mkdir(CHAT_DIR(), { recursive: true })
-    const file = chatFile()
-    history = mergeChatHistory(chatHistoryNow(), history)
+    const file = chatFile(event)
+    history = mergeChatHistory(chatHistoryNow(event), history)
     /* Not fsync'd. The last write of a transcript is the one the window makes
        on its way out, and waiting on the disk there is both the slowest place
        to do it and the likeliest to be cut short — which is what left hundreds
@@ -8146,7 +8175,10 @@ makeDraftDomain({
   getVaultPath: () => vaultPath,
   sha1,
   writeAtomic,
-  safePath
+  safePath,
+  realSafePath,
+  realSafeTargetPath,
+  changed: () => { invalidateVaultSnapshot(); markIndexDirty() }
 }).register()
 
 /**
@@ -8219,7 +8251,7 @@ ipcMain.on('menu:context', (event, kind) => {
 ipcMain.handle('edit:undo', (e) => e.sender.undo())
 ipcMain.handle('edit:redo', (e) => e.sender.redo())
 
-ipcMain.handle('config:get', () => readConfig())
+ipcMain.handle('config:get', (event) => windowSessions.config(event.sender?.id))
 ipcMain.handle('hotkeys:list', () => hotkeyCatalogue)
 
 ipcMain.handle('config:set', (_e, patch) => {
@@ -8251,7 +8283,7 @@ ipcMain.handle('config:set', (_e, patch) => {
   if (rejected.length) {
     console.warn(`config:set refused ${rejected.join(', ')} — not settable from the renderer`)
   }
-  const next = writeConfig(accepted)
+  const next = writeConfig(windowSessions.patch(_e.sender?.id, accepted))
   // The menu is the thing a hotkey lives in, so a change means a rebuild —
   // cheap, and the only way an accelerator ever moves.
   if (Object.prototype.hasOwnProperty.call(accepted, 'hotkeys')) buildMenu()
@@ -8262,6 +8294,7 @@ ipcMain.handle('config:set', (_e, patch) => {
     spellDomain.forgetChecker()
     broadcast('dictionary:changed')
   }
+  if (_e.sender === settingsWindow?.webContents) broadcast('settings:changed', accepted)
   return next
 })
 
@@ -8636,12 +8669,12 @@ function guardGuests () {
       const add = (label, click, enabled = true) => items.push({ label, click, enabled })
 
       if (params.linkURL && /^https?:/.test(params.linkURL)) {
-        add('Copy Link', () => clipboard.writeText(params.linkURL))
+        add('Copy Link', () => { void writeClipboardText(params.linkURL) })
         add('Open Link in Browser', () => shell.openExternal(params.linkURL))
         items.push({ type: 'separator' })
       }
       if (params.mediaType === 'image' && /^https?:/.test(params.srcURL || '')) {
-        add('Copy Image Address', () => clipboard.writeText(params.srcURL))
+        add('Copy Image Address', () => { void writeClipboardText(params.srcURL) })
         items.push({ type: 'separator' })
       }
       if (params.selectionText) {
@@ -8662,7 +8695,7 @@ function guardGuests () {
       add('Forward', () => contents.navigationHistory.goForward(), contents.navigationHistory.canGoForward())
       add('Reload', () => contents.reload())
       items.push({ type: 'separator' })
-      add('Copy Page Address', () => clipboard.writeText(contents.getURL()))
+      add('Copy Page Address', () => { void writeClipboardText(contents.getURL()) })
       add('Open Page in Browser', () => shell.openExternal(contents.getURL()),
         /^https?:/.test(contents.getURL()))
 
@@ -8828,7 +8861,7 @@ app.whenReady().then(async () => {
 
   protocol.handle('tulip-app', async (request) => {
     const url = new URL(request.url)
-    if (url.host !== 'app') return new Response('Forbidden', { status: 403 })
+    if (!['app', 'settings'].includes(url.host)) return new Response('Forbidden', { status: 403 })
 
     let abs
     try {
@@ -8910,7 +8943,9 @@ app.whenReady().then(async () => {
     watchVault()
   }
 
-  const first = createWindow({ open: launchOpen ? path.basename(launchOpen) : null })
+  const savedWindows = launchOpen ? [] : windowSessions.saved()
+  const first = createWindow({ open: launchOpen ? path.basename(launchOpen) : null, saved: savedWindows[0] })
+  for (const saved of savedWindows.slice(1, 12)) createWindow({ saved })
   /* After the window is asked for, not before. Building the menu is a
      two-hundred-line template and an accelerator table, and none of it is on
      screen until the reader reaches for it — while `createWindow` is what
@@ -8919,6 +8954,8 @@ app.whenReady().then(async () => {
      it belongs to has painted. */
   buildMenu()
   guardGuests()
+  const backupTimer = setInterval(() => { if (!quitting) backupDomain.tick() }, 60_000)
+  backupTimer.unref()
   finderOpensReady = true
   drainFinderOpens()
   if (vaultPath) first.setTitle(path.basename(vaultPath))

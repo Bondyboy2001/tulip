@@ -1,113 +1,150 @@
 'use strict'
 
-/* ---------------------------------------------------------------- drafts
-
-   What was typed but not yet saved, kept somewhere a crash cannot take with it.
-
-   The autosave is quick — 600 ms by default — but "quick" is not "always", and
-   the gap is real: a renderer crash, a GPU process kill, a force quit, a power
-   cut all land on a note whose last few seconds exist only in the editor's
-   memory. Nothing on disk records them, so nothing can offer them back.
-
-   A draft is that record. It is written on its own timer, beside the app's
-   state rather than in the vault — an unfinished paragraph is not something to
-   sync to other machines, and a stray file next to the note would be picked up
-   by the tree, the index and the backlink scan as though it were one. It is
-   removed the moment the real save succeeds, so the ordinary state of this
-   folder is empty and anything in it at launch is by definition a note whose
-   edits never reached disk.
-
-   Lifted out of main.js with its state (the drafts directory is a function of
-   the current vault and nothing else); main's `writeAtomic`, `safePath` and
-   `sha1` arrive through the context object rather than being re-exported.
-   ================================================================== */
-
-const { app, ipcMain } = require('electron')
+const { app, ipcMain, BrowserWindow } = require('electron')
 const path = require('node:path')
 const fs = require('node:fs/promises')
+const { randomUUID } = require('node:crypto')
 
-/**
- * @param {{
- *   getVaultPath: () => string | null,
- *   sha1: (text: string, chars?: number) => string,
- *   writeAtomic: (abs: string, content: string, opts?: { durable?: boolean }) => Promise<any>,
- *   safePath: (relOrAbs: string) => string
- * }} ctx
- */
-function makeDraftDomain (ctx) {
-  const { getVaultPath, sha1, writeAtomic, safePath } = ctx
-
-  const DRAFT_DIR = () => path.join(app.getPath('userData'), 'drafts', sha1(getVaultPath() || ''))
-  const draftFile = (rel) => path.join(DRAFT_DIR(), `${sha1(rel)}.json`)
-
+// Drafts belong to a window and a launch, so two editors never replace each
+// other's crash copy. All mutations in a vault share a queue, including clear.
+function makeDraftDomain ({ getVaultPath, sha1, writeAtomic, safePath, realSafePath, realSafeTargetPath, changed }) {
+  const launch = randomUUID()
+  const queues = new Map()
+  const owners = new Map()
+  const directory = () => path.join(app.getPath('userData'), 'drafts', sha1(getVaultPath() || ''))
+  const ownId = (event, rel) => `${sha1(rel)}-${sha1(`${launch}:${event.sender.id}`)}.json`
+  function serial (dir, work) {
+    const next = (queues.get(dir) || Promise.resolve()).catch(() => {}).then(work)
+    queues.set(dir, next)
+    return next.finally(() => { if (queues.get(dir) === next) queues.delete(dir) })
+  }
+  function notify () {
+    for (const win of BrowserWindow.getAllWindows()) win.webContents.send('recovery:changed')
+  }
+  function draftPath (dir, id) {
+    if (typeof id !== 'string' || !/^[a-f0-9-]+\.json$/.test(id)) throw new Error('Invalid recovery item.')
+    return path.join(dir, id)
+  }
+  async function events (dir) {
+    try { return JSON.parse(await fs.readFile(path.join(dir, 'recovery.json'), 'utf8')) } catch (error) {
+      if (error.code === 'ENOENT') return []
+      throw error
+    }
+  }
+  async function writeEvents (dir, items) {
+    await fs.mkdir(dir, { recursive: true })
+    await writeAtomic(path.join(dir, 'recovery.json'), JSON.stringify(items))
+    notify()
+  }
   function register () {
-    ipcMain.handle('draft:save', async (_e, rel, text) => {
+    ipcMain.handle('draft:save', (event, rel, text) => {
       if (!getVaultPath() || typeof rel !== 'string' || typeof text !== 'string') return { ok: false }
-      try {
-        await fs.mkdir(DRAFT_DIR(), { recursive: true })
-        /* Not durable, and deliberately so: this races the very crash it exists
-           for, and an fsync per keystroke-pause would cost more than it buys. The
-           rename still makes each draft whole-or-absent, which is the guarantee
-           that matters — a half-written draft offered back as recovery would be
-           worse than none. */
-        await writeAtomic(draftFile(rel), JSON.stringify({ path: rel, text, at: Date.now() }), { durable: false })
-        return { ok: true }
-      } catch (err) {
-        console.error('draft write failed', err)
-        return { ok: false }
-      }
-    })
-
-    ipcMain.handle('draft:clear', async (_e, rel) => {
-      if (!getVaultPath() || typeof rel !== 'string') return { ok: false }
-      await fs.unlink(draftFile(rel)).catch(() => {})
-      return { ok: true }
-    })
-
-    /**
-     * Every draft this vault has, with the file's current text beside it.
-     *
-     * The comparison is made here rather than in the renderer because it is the
-     * whole question: a draft that matches the note on disk is one whose save did
-     * land, and offering it back would be asking about nothing. Those are dropped
-     * — and deleted — so the renderer only ever hears about real losses.
-     */
-    ipcMain.handle('draft:list', async () => {
-      if (!getVaultPath()) return []
-      /* Resolved once: the directory is one string per vault, and rebuilding it
-         per draft was a join per file for a value that never moves mid-list. */
-      const dir = DRAFT_DIR()
-      let names
-      try { names = await fs.readdir(dir) } catch { return [] }
-
-      const out = []
-      for (const name of names) {
-        if (!name.endsWith('.json')) continue
-        const file = path.join(dir, name)
-        /* Read once: the parse, the shape check and the comparison below all
-           reuse this text rather than reading the file again. */
-        let raw
-        try { raw = await fs.readFile(file, 'utf8') } catch { continue }
-        let draft
-        try { draft = JSON.parse(raw) } catch { draft = null }
-        if (!draft || typeof draft.path !== 'string' || typeof draft.text !== 'string') {
-          await fs.unlink(file).catch(() => {})
-          continue
+      safePath(rel)
+      const dir = directory()
+      const id = ownId(event, rel)
+      owners.set(id, event.sender.id)
+      return serial(dir, async () => {
+        try {
+          await fs.mkdir(dir, { recursive: true })
+          await writeAtomic(draftPath(dir, id), JSON.stringify({ path: rel, text, at: Date.now() }), { durable: false })
+          return { ok: true }
+        } catch (error) {
+          console.error('draft write failed', error)
+          return { ok: false }
         }
-        /* The note may have been renamed, deleted or moved out of the vault since.
-           `safePath` throws on anything that is not inside it, which is also the
-           check that keeps a hand-edited draft from naming a file elsewhere. */
-        /** @type {string | null} */
-        let disk = null
-        try { disk = await fs.readFile(safePath(draft.path), 'utf8') } catch { disk = null }
-        if (disk === draft.text) { await fs.unlink(file).catch(() => {}); continue }
-        out.push({ path: draft.path, text: draft.text, at: draft.at || 0, disk })
-      }
-      return out
+      })
+    })
+    ipcMain.handle('draft:clear', (event, rel, id = null) => {
+      if (!getVaultPath() || typeof rel !== 'string') return { ok: false }
+      const dir = directory()
+      const target = draftPath(dir, id || ownId(event, rel))
+      return serial(dir, async () => {
+        if (id) {
+          const draft = JSON.parse(await fs.readFile(target, 'utf8'))
+          if (draft.path !== rel) throw new Error('Recovery item changed.')
+        }
+        await fs.unlink(target).catch((error) => { if (error.code !== 'ENOENT') throw error })
+        owners.delete(id || ownId(event, rel))
+        if (id) notify()
+        return { ok: true }
+      })
+    })
+    ipcMain.handle('draft:list', (_event, recoveryOnly = false) => {
+      if (!getVaultPath()) return []
+      const dir = directory()
+      return serial(dir, async () => {
+        const live = new Set(BrowserWindow.getAllWindows().map((win) => win.webContents.id))
+        const names = await fs.readdir(dir).catch(() => [])
+        const out = []
+        for (const id of names) {
+          if (!/^[a-f0-9-]+\.json$/.test(id)) continue
+          if (recoveryOnly && live.has(owners.get(id))) continue
+          const file = draftPath(dir, id)
+          let draft
+          try { draft = JSON.parse(await fs.readFile(file, 'utf8')) } catch { continue }
+          if (typeof draft?.path !== 'string' || typeof draft?.text !== 'string') continue
+          let disk = /** @type {string | null} */ (null)
+          try { disk = await fs.readFile(await realSafePath(draft.path), 'utf8') } catch { /* missing or inaccessible */ }
+          if (disk === draft.text) { await fs.unlink(file); owners.delete(id); continue }
+          out.push({ ...draft, id, disk })
+        }
+        return out
+      })
+    })
+    ipcMain.handle('draft:restore', (_event, id) => {
+      const dir = directory()
+      const vault = getVaultPath()
+      return serial(dir, async () => {
+        if (!vault || getVaultPath() !== vault) throw new Error('The vault changed. Reopen recovery.')
+        const draft = JSON.parse(await fs.readFile(draftPath(dir, id), 'utf8'))
+        if (typeof draft.text !== 'string') throw new Error('Invalid draft.')
+        const ext = path.extname(draft.path)
+        const name = path.basename(draft.path, ext)
+        // A separate, exclusively created file preserves both versions, even if
+        // an external editor changes the original while this dialog is open.
+        const relative = path.join(path.dirname(draft.path), `${name} (recovered ${randomUUID().slice(0, 8)})${ext}`)
+        const target = await realSafeTargetPath(relative)
+        await fs.mkdir(path.dirname(target), { recursive: true })
+        const handle = await fs.open(target, 'wx')
+        let complete = false
+        try { await handle.writeFile(draft.text, 'utf8'); await handle.sync(); complete = true } finally {
+          await handle.close()
+          if (!complete) await fs.unlink(target).catch(() => {})
+        }
+        await fs.unlink(draftPath(dir, id))
+        owners.delete(id)
+        changed()
+        notify()
+        return { path: relative.replaceAll(path.sep, '/') }
+      })
+    })
+    ipcMain.handle('recovery:list', () => {
+      const dir = directory()
+      return serial(dir, () => events(dir))
+    })
+    ipcMain.handle('recovery:record', (_event, item) => {
+      if (!getVaultPath() || !['save', 'conflict'].includes(item?.kind) || typeof item.path !== 'string') throw new Error('Invalid recovery item.')
+      safePath(item.path)
+      if (item.copy) safePath(item.copy)
+      const dir = directory()
+      return serial(dir, async () => {
+        const list = await events(dir)
+        const id = `${item.kind}:${item.path}`
+        const next = { id, kind: item.kind, path: item.path, copy: item.copy || null, at: Date.now() }
+        const index = list.findIndex((entry) => entry.id === id)
+        if (index < 0) list.push(next)
+        else list[index] = next
+        await writeEvents(dir, list)
+      })
+    })
+    ipcMain.handle('recovery:dismiss', (_event, id) => {
+      const dir = directory()
+      return serial(dir, async () => {
+        const list = await events(dir)
+        if (list.some((item) => item.id === id)) await writeEvents(dir, list.filter((item) => item.id !== id))
+      })
     })
   }
-
   return { register }
 }
-
 module.exports = { makeDraftDomain }

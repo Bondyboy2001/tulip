@@ -29,7 +29,7 @@ async function recognize (ocr, pdf, pages) {
 /* A utility process has its own event loop and heap, so parsing a long PDF
    cannot stall the Electron main process that owns the window and IPC. */
 process.parentPort.on('message', async ({ data }) => {
-  const { pdf, extractor, fonts, cmaps, wasm, name, ocr } = data || {}
+  const { pdf, extractor, fonts, cmaps, wasm, name, ocr, pageNumber } = data || {}
   try {
     const { extract, formatPdfText, mergeOcrPages } = require(extractor)
     const bytes = new Uint8Array(await fs.readFile(pdf))
@@ -37,8 +37,9 @@ process.parentPort.on('message', async ({ data }) => {
       name: name || path.basename(pdf),
       fonts,
       cmaps,
-      wasm
+      wasm, pageNumber
     })
+    if (pageNumber) { process.parentPort.postMessage({ passage: extracted.pageTexts[0] || '' }); return }
     const recognized = await recognize(ocr, pdf, extracted.sparsePages)
     const merged = mergeOcrPages(extracted.pageTexts, recognized)
     process.parentPort.postMessage({

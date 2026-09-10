@@ -165,7 +165,6 @@ module.exports = {
   TEX_EXT,
   isTex,
   LANGUAGE_TABLE_SUFFIX,
-  LANGUAGE_FLAG,
   isLanguageTable,
   languageTableStem,
   LANGUAGE_TABLE_TEMPLATE,

@@ -8,6 +8,7 @@
  */
 
 const fs = require('node:fs')
+const { createHash } = require('node:crypto')
 const path = require('node:path')
 const VAULT_CONTRACT = require('./vault-contract.json')
 const RUNNABLE = require('./runnable-languages.json')
@@ -70,8 +71,13 @@ const template = () => {
   loaded = {
     turnRules: [shared, writeRules].filter(Boolean).join('\n'),
     readTurnRules: [shared, readRules].filter(Boolean).join('\n'),
+    /* The briefing alone. The turn rules ride each turn via `promptFor` —
+       leaving them here as well told every new thread, in its most
+       authoritative message, both to use its file tools and never to attempt
+       an edit — and the "Writing is off" line is what a write-enabled agent
+       obeyed. */
     systemTemplate: fillContract(PROMPT_TEMPLATE
-      .replace(/<!-- (?:turn|write|read)-rules:(?:start|end) -->\n?/g, ''))
+      .replace(/<!-- turn-rules:start -->[\s\S]*?<!-- turn-rules:end -->\n?/g, '').trim())
   }
   return loaded
 }
@@ -89,7 +95,6 @@ const fillContract = (source) => replace(
     runnableLanguages: RUNNABLE_LANGUAGES.join(', '),
     drawnLanguages: DRAWN_LANGUAGES.join(', '),
     flashcardExtension: VAULT_CONTRACT.flashcardExtension,
-    codeExtensionCount: VAULT_CONTRACT.codeExtensions.length,
     languageTableSuffix: VAULT_CONTRACT.languageTableSuffix,
     vocabularyColumns: VOCABULARY_COLUMNS.join(', '),
     firstVocabularyColumn: VOCABULARY_COLUMNS[0],
@@ -179,20 +184,24 @@ function opened (context) {
      headings and enough rows to know what they hold. */
   if (context.kind === 'data') {
     const shape = `\n\nThe grid shows ${Number(context.rows || 0).toLocaleString('en-US')} rows` +
-      ` in ${Number(context.columns || 0).toLocaleString('en-US')} columns.`
+      ` in ${Number(context.columns || 0).toLocaleString('en-US')} columns.` +
+      (context.previewOnly ? ' Only the beginning of this file is loaded; its full row count is unknown.' : '')
     const cell = context.atRow
       ? `\n\nThe active cell is row ${context.atRow}, ${context.column ? `column “${context.column}”` : `column ${context.atColumn}`}` +
         `${context.value ? `, with value “${context.value}”` : ''}.`
       : ''
-    const state = context.shownRows && context.shownRows !== context.rows
+    const state = Number.isInteger(context.shownRows) && context.shownRows !== context.rows
       ? `\n\nThe current view shows ${context.shownRows} of ${context.rows} rows.`
       : ''
     const order = context.sortedBy?.length ? ` Sorted by ${context.sortedBy.join(', ')}.` : ''
     const filters = context.filteredBy?.length ? ` Filtered by ${context.filteredBy.join(', ')}.` : ''
+    const sample = Number.isInteger(context.sampleRows)
+      ? `\n\nThe prepared window contains ${context.sampleRows} sampled rows, not a full-table result; its text may be shortened below. Original data-row numbers (1-based, excluding the header), in excerpt order: ${(context.sampleRowNumbers || []).join(', ') || 'none'}. For totals, counts, or comparisons across the table, calculate from the complete file and apply the stated filters; do not extrapolate from this sample.`
+      : ''
     const preview = context.text
       ? `\n\nIts headings and rows around the active cell${context.truncated ? ' (cut short — read the file for the rest)' : ''}:\n${context.text}`
       : ''
-    return `<open-data-file>${context.note}${shape}${cell}${state}${order}${filters}${preview}</open-data-file>`
+    return `<open-data-file>${context.note}${shape}${cell}${state}${order}${filters}${sample}${preview}</open-data-file>`
   }
   /* A notebook's one expensive fact: the cells as source, without the base64
      the outputs are stored as. An agent that reads the raw .ipynb instead
@@ -204,7 +213,10 @@ function opened (context) {
     const sources = context.text
       ? `\n\nCell sources around it${context.truncated ? ' (cut short — read the file for the rest, selectively)' : ''}:\n${context.text}`
       : ''
-    return `<open-notebook>${context.note}${shape}${active}${sources}</open-notebook>`
+    const output = context.outputText
+      ? `\n\nRecorded output of the active cell${context.outputTruncated ? ' (excerpt)' : ''}; it may be from an earlier execution:\n${context.outputText}`
+      : ''
+    return `<open-notebook>${context.note}${shape}${active}${sources}${output}</open-notebook>`
   }
   if (context.sourceContext) {
     return `<open-source-file>${context.note}\n\nLanguage: ${context.kind}.${caret}${selection}</open-source-file>`
@@ -228,7 +240,7 @@ const isPdfAttachment = (file) =>
  * the wording here is what tells it there is a part it cannot see.
  */
 function noteBody (context) {
-  if (!context?.excerpt) return ''
+  if (typeof context?.excerpt !== 'string') return ''
   if (!context.excerptCut) return `${context.note}, in full:\n${context.excerpt}`
   const size = context.noteChars?.toLocaleString?.('en-US') ?? 'a longer'
   return `${context.note}, around the cursor — ${context.excerpt.length.toLocaleString('en-US')} ` +
@@ -277,22 +289,22 @@ function changedRun (before, after) {
   const removed = before.length - head - tail
   const added = after.length - head - tail
   if (Math.max(removed, added) > PATCH_LIMIT) return null
-  /* Widened to line boundaries. A run that starts mid-word reads as corruption,
-     and the agent is being asked to apply this to a copy it holds. */
-  const from = after.lastIndexOf('\n', head) + 1
-  const to = added ? after.indexOf('\n', after.length - tail) : after.length - tail
-  let text = after.slice(from, to === -1 || to < from ? after.length : to)
-  /* Widening must not swallow the note. A document with no line breaks in it —
-     one long paragraph, a minified block, a note written as a single line — has
-     no boundary to widen to, so the search runs to both ends and hands back
-     everything: the whole note, quoted under a sentence promising the change
-     alone. Where that happens the run is used exactly as measured, unwidened. */
-  if (text.length > PATCH_LIMIT) text = after.slice(head, after.length - tail)
-  if (text.length > PATCH_LIMIT) return null
-  /* A run that came out empty says nothing the caller can pass on — a deletion
-     that took a whole line with it lands here — and an empty quote reads as a
-     note that is now blank. Better to send them to the file. */
-  return text ? { at: from, text, removed, added } : null
+  let from = head ? before.lastIndexOf('\n', head - 1) + 1 : 0
+  const afterEnd = after.indexOf('\n', after.length - tail)
+  let to = afterEnd === -1 ? after.length : afterEnd
+  let oldTo = to - added + removed
+  if (Math.max(to - from, oldTo - from) > PATCH_LIMIT) {
+    from = head
+    to = after.length - tail
+    oldTo = before.length - tail
+  }
+  const prefix = before.slice(0, from)
+  return {
+    line: prefix.split('\n').length,
+    column: from ? from - before.lastIndexOf('\n', from - 1) : 1,
+    before: before.slice(from, oldTo),
+    text: after.slice(from, to), removed, added
+  }
 }
 
 /**
@@ -311,7 +323,7 @@ function quoted (context, sent) {
   if (sent.body === block) {
     return `The copy of ${context.note} quoted earlier in this conversation is still current.`
   }
-  if (context.sourceContext && sent.body) {
+  if (context.sourceContext && sent.body && sent.bodyOf === context.note) {
     return `${context.note} has changed or the source window moved since the earlier excerpt. ` +
       'Read the file selectively for the current code.'
   }
@@ -325,7 +337,9 @@ function quoted (context, sent) {
      which is what `bodyOf` guards: a diff of one note against another is not
      a change, it is nonsense wearing one's name. */
   if (sent.body && sent.bodyOf === context.note) {
-    const run = changedRun(sent.body, block)
+    const run = !context.excerptCut && sent.body.startsWith(`${context.note}, in full:\n`)
+      ? changedRun(sent.body.slice(sent.body.indexOf('\n') + 1), context.excerpt)
+      : null
     if (run) {
       /* The memory moves to the new text even though the whole of it was not
          sent: the agent has been given everything it needs to hold the current
@@ -333,7 +347,9 @@ function quoted (context, sent) {
       sent.body = block
       return `${context.note} has changed since the copy quoted earlier. Everything else in it is ` +
         `unchanged; this is the part that is different now (${run.removed.toLocaleString('en-US')} ` +
-        `characters replaced by ${run.added.toLocaleString('en-US')}):\n${run.text}`
+        `characters replaced by ${run.added.toLocaleString('en-US')}):\n` +
+        `At line ${run.line}, column ${run.column} of the previous text (1-based UTF-16):\n` +
+        `Before: ${JSON.stringify(run.before)}\nAfter: ${JSON.stringify(run.text)}`
     }
     if (block.length > REQUOTE_LIMIT) {
       return `${context.note} has changed since the copy quoted earlier and is too long to quote again — ` +
@@ -372,8 +388,8 @@ const PAGES_CODA = 'Use these pages first.'
  * thousand characters, quoted again per follow-up into a thread that re-sends
  * everything it holds. Deduped by page instead: a page already in the thread
  * is named, not sent, and an agent that wants it sharper has the text file
- * listed above. A different slice of the same page counts as sent — what the
- * memo tracks is the page's presence in the thread, not the excerpt's edges.
+ * listed above. Different excerpts of a page can contain different answers. Remember a
+ * compact fingerprint of each excerpt so only text actually sent is skipped.
  */
 function freshPages (block, sent) {
   if (!block) return block
@@ -394,7 +410,8 @@ function freshPages (block, sent) {
     const to = at + 1 < marks.length ? marks[at + 1].index : end
     const pageBlock = block.slice(mark.index, to).trim()
     const revision = pageBlock.match(PAGE_REVISION)?.[1] || ''
-    const key = `${mark[1]}\u0000${mark[2]}\u0000${revision}`
+    const fingerprint = createHash('sha256').update(withoutRevisions(pageBlock)).digest('hex')
+    const key = `${mark[1]}\u0000${mark[2]}\u0000${revision}\u0000${fingerprint}`
     if (sent.pageKeys.has(key)) {
       skipped.push(`${mark[1]} page ${mark[2]}`)
       return
@@ -520,7 +537,15 @@ function promptFor (text, context, sent = null, { mode = null } = {}) {
     sent.rulesMode = mode
   }
 
-  return [open, body, attachments, ready, pages, rules, text]
+  const queued = context?.queuedContexts?.length
+    ? 'These questions were queued. File context was captured when submitted and may now be stale. Read the named file for current contents before editing or making claims about its current state. Selections below identify what each question originally referred to:\n' +
+      context.queuedContexts.map((item, index) => JSON.stringify({
+        question: index + 1, text: item.question, file: item.note,
+        selection: item.selection || '', line: item.line, page: item.page,
+        cell: item.at, row: item.atRow, column: item.atColumn
+      })).join('\n')
+    : ''
+  return [open, body, !context?.note && context?.selection ? `Selected passage:\n${context.selection}` : '', attachments, ready, pages, queued, rules, text]
     .filter(Boolean).join('\n\n')
 }
 

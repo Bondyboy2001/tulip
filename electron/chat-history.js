@@ -89,4 +89,4 @@ function mergeChatHistory (existing, update) {
   return Object.fromEntries(kept.map((path) => [path, merged[path]]))
 }
 
-module.exports = { mergeChatHistory, MAX_CHAT_NOTES, MAX_CONVOS_PER_NOTE }
+module.exports = { mergeChatHistory, MAX_CHAT_NOTES }

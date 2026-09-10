@@ -19,11 +19,8 @@
    The unit is the note. That sounds extravagant and is not: `uv` installs by
    reflink out of a shared cache, so the second note wanting numpy costs
    ~0 bytes and ~0.2s, and the download is paid once per machine rather than
-   once per note. Measured on APFS, 5 environments with numpy in each came to
-   11 MB of real disk where `du` reported 141 MB. Where `uv` is absent that
-   bargain is not on offer — pip copies, and copies are real — so the pip
-   fallback puts every block in the one shared environment instead. See
-   `dirFor`.
+   once per note. The pip fallback also isolates notes, trading disk space for
+   consistent package versions and behaviour across installers.
 
    The module takes its dependencies rather than importing them: `app` and the
    runner's PATH belong to main.js, and keeping them out means this file can be
@@ -65,52 +62,6 @@ const pythonIn = (dir) => path.join(binDir(dir), WINDOWS ? 'python.exe' : 'pytho
 const toolIn = (dir, name) => path.join(binDir(dir), WINDOWS ? `${name}.exe` : name)
 
 const exists = (target) => fs.access(target).then(() => true, () => false)
-
-/* Which note an environment belongs to, written inside it when it is made.
-
-   The directory is named after a digest, which is what keeps two notes of the
-   same name apart and what makes the name meaningless to a person. Something
-   has to carry the note back, or the only honest thing a settings panel could
-   say is "17 directories, 4.2 GB, no idea whose". Kept inside the environment
-   rather than in one index beside them so it is deleted with what it
-   describes and cannot go stale or be raced by two writers. */
-const STAMP = 'tulip-env.json'
-
-async function stamp (dir, body) {
-  await fs.writeFile(path.join(dir, STAMP), JSON.stringify(body), 'utf8').catch(() => {})
-}
-
-async function readStamp (dir) {
-  try {
-    const held = JSON.parse(await fs.readFile(path.join(dir, STAMP), 'utf8'))
-    return held && typeof held === 'object' ? held : null
-  } catch {
-    return null
-  }
-}
-
-/* What an environment takes up, as the sum of its files.
-
-   Apparent size, not blocks: `uv` installs by reflink, so the same numpy in
-   ten environments is one copy on disk and ten full-size entries in a walk.
-   Reporting the true figure per environment is not something a walk can do —
-   the sharing is between them — so the number shown is "what this would cost
-   on its own", and the panel says as much. */
-async function weigh (dir) {
-  let total = 0
-  const walk = async (at) => {
-    let entries
-    try { entries = await fs.readdir(at, { withFileTypes: true }) } catch { return }
-    for (const entry of entries) {
-      const full = path.join(at, entry.name)
-      if (entry.isDirectory()) { await walk(full); continue }
-      if (!entry.isFile()) continue
-      try { total += (await fs.stat(full)).size } catch { /* gone mid-walk */ }
-    }
-  }
-  await walk(dir)
-  return total
-}
 
 /* ------------------------------------------------------ import → package
 
@@ -255,10 +206,6 @@ function makePythonEnvs ({ root, vault, pathFor, installerOverride = () => null 
    *  after the first resolves without touching the disk. */
   const ready = new Map()
 
-  /** Which note each environment was made for, so the stamp inside it can say.
-   *  Populated by `dirFor`, which is the only thing that knows both. */
-  const noteOf = new Map()
-
   /** `${dir}\n${pkg}` -> the install in flight for it. Two blocks in the same
    *  note failing on the same import at the same moment are one install, not
    *  two writing into one environment at once. */
@@ -365,17 +312,13 @@ function makePythonEnvs ({ root, vault, pathFor, installerOverride = () => null 
   /**
    * Which environment a block belongs in.
    *
-   * A note gets its own only where isolation is close to free — see the note
-   * at the top of this file. Under pip it is not free, so everything shares
-   * one environment and the cost stays a single install rather than one per
-   * note. A block with no note behind it — the chat pane, an unsaved buffer —
+   * Each note gets its own environment under both installers. A block with
+   * no note behind it — the chat pane, an unsaved buffer —
    * has no identity to key on and shares too.
    */
   async function dirFor (noteRel) {
     if (!noteRel) return sharedDir()
-    const which = await resolveInstaller()
-    const dir = which.kind === 'pip' ? sharedDir() : noteDir(noteRel)
-    if (dir !== sharedDir()) noteOf.set(dir, noteRel)
+    const dir = noteDir(noteRel)
     return dir
   }
 
@@ -401,7 +344,6 @@ function makePythonEnvs ({ root, vault, pathFor, installerOverride = () => null 
         : await once(SYSTEM_PYTHON, ['-m', 'venv', dir], { timeoutMs: CREATE_TIMEOUT_MS })
 
       if (made.ok && await exists(python)) {
-        await stamp(dir, { vault: vault(), note: noteOf.get(dir) || null })
         return python
       }
       /* A half-made directory would be taken for a working environment by the
@@ -525,55 +467,6 @@ function makePythonEnvs ({ root, vault, pathFor, installerOverride = () => null 
     await Promise.all([forget(from), forget(to)])
   }
 
-  /* ------------------------------------------------------------ managing
-
-     Environments are invisible by design — nobody should have to think about
-     them — but invisible and unmanageable are different things. One that has
-     gone wrong needs a way to be thrown away, and a vault worked in for a year
-     needs a way to see where the disk went. */
-
-  /**
-   * Every environment under this app, newest question first: whose it is, what
-   * it holds, and whether this vault still has the note it was made for.
-   *
-   * @param {Set<string>|null} liveNotes  the notes that currently exist, so an
-   *   environment can be reported as orphaned. Null means "do not judge".
-   */
-  async function list (liveNotes = null) {
-    let names
-    try { names = await fs.readdir(envRoot(), { withFileTypes: true }) } catch { return [] }
-
-    const here = vault()
-    const shared = sharedDir()
-    const found = await Promise.all(names
-      .filter((entry) => entry.isDirectory())
-      .map(async (entry) => {
-        const dir = path.join(envRoot(), entry.name)
-        const held = await readStamp(dir)
-        const isShared = dir === shared
-        const mine = isShared || held?.vault === here
-        /* Orphaned is only ever said about this vault's own notes. Another
-           vault's environments are not this vault's business to judge, and a
-           vault that is not open cannot be asked what it still contains. */
-        const orphaned = !!(mine && !isShared && held?.note && liveNotes && !liveNotes.has(held.note))
-        return {
-          dir,
-          note: isShared ? null : (held?.note || null),
-          vault: held?.vault ?? null,
-          shared: isShared,
-          mine,
-          orphaned,
-          /* A stamp is written when an environment is made. One without it was
-             made by a version that did not write them, or interrupted — either
-             way its note cannot be recovered, and saying so is better than
-             guessing. */
-          unknown: !held,
-          bytes: await weigh(dir)
-        }
-      }))
-    return found.sort((a, b) => b.bytes - a.bytes)
-  }
-
   /** Throw one away. It is rebuilt, empty, on the next run that needs it. */
   async function remove (dir) {
     /* Only ever inside the root this module owns — the path comes from a
@@ -600,7 +493,7 @@ function makePythonEnvs ({ root, vault, pathFor, installerOverride = () => null 
      question differently. */
   return {
     dirFor, sharedDir, ensure, install, tool, activation, usesUv,
-    list, remove, forget, relocate, reset, disposeSync
+    remove, forget, relocate, reset, disposeSync
   }
 }
 

@@ -121,6 +121,9 @@ const TOOL_POLICY = {
  * is left alone rather than extended: merging onto an array or string would
  * silently produce a config neither side wrote.
  */
+let searchConnection = null
+function setSearchConnection (connection) { searchConnection = connection }
+
 function policyEnv (mode) {
   const permission = TOOL_POLICY[mode]
   if (!permission) return {}
@@ -140,7 +143,8 @@ function policyEnv (mode) {
   return {
     OPENCODE_CONFIG_CONTENT: JSON.stringify({
       ...base,
-      permission: { ...(base.permission || {}), ...permission }
+      permission: { ...(base.permission || {}), ...permission, ...(searchConnection ? { tulip_search: 'allow' } : {}) },
+      ...(searchConnection ? { mcp: { ...(base.mcp || {}), tulip: searchConnection } } : {})
     })
   }
 }
@@ -492,7 +496,6 @@ function resolveCommand (command) {
   resolvedCommands.set(cacheKey, found)
   return found
 }
-function clearResolvedCommands () { resolvedCommands.clear() }
 
 /**
  * The command and arguments, as this platform can actually run them.
@@ -1445,7 +1448,7 @@ function stopAll (signal = 'SIGTERM') {
    readers of the CLI's output, none of it reachable through the six calls above
    and none of it exercised by anything short of running that program.
    `scripts/test-ai.mjs` is what they are exported for. */
-module.exports = {
+module.exports = { setSearchConnection,
   setVault,
   setTrusted,
   sweepProtocolFiles,
@@ -1460,6 +1463,6 @@ module.exports = {
   parsers: {
     detailOf, tokensIn, tokensOf, usageOf, readLines, parseOpencode,
     policyEnv, commandCandidates, escapeForCmd, invocation, lostThread,
-    isSecretPath, hasSecretContent, versionTooOld, clearResolvedCommands
+    isSecretPath, hasSecretContent, versionTooOld
   }
 }

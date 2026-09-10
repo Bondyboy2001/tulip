@@ -19,7 +19,10 @@ function clearStagedZoom () {
   root.style.width = before.width
   root.style.height = before.height
   stagedZoom = null
-  void root.offsetWidth
+  /* Do not force a synchronous layout here. Main has just changed Chromium's
+     native scale, and making it raster the unstaged root in the middle of that
+     swap can expose an incomplete frame. Leaving style invalidation queued
+     lets Chromium coalesce the native scale and CSS cleanup into one paint. */
 }
 
 ipcRenderer.on('zoom:stage', (_event, payload) => {
@@ -39,9 +42,8 @@ ipcRenderer.on('zoom:stage', (_event, payload) => {
   }
   root.style.transformOrigin = '0 0'
   root.style.transform = `scale(${ratio})`
-  root.style.width = `${100 / ratio}%`
-  root.style.height = `${100 / ratio}%`
-  void root.offsetWidth
+  // A compositor-only preview: changing root width here reflowed the entire
+  // document twice per zoom step, once here and again at the native scale.
   globalThis.requestAnimationFrame(() => globalThis.requestAnimationFrame(() => {
     if (stagedZoom) ipcRenderer.send('zoom:staged', id)
   }))
@@ -83,6 +85,10 @@ contextBridge.exposeInMainWorld('tulip', {
      // The other names notes answer to, for resolving `[[Alias]]`.
      aliases: () => ipcRenderer.invoke('vault:aliases'),
      backup: () => ipcRenderer.invoke('vault:backup'),
+     backups: () => ipcRenderer.invoke('vault:backups'),
+     documentBackups: (path) => ipcRenderer.invoke('backup:documents', path),
+     backupPreview: (id, path) => ipcRenderer.invoke('backup:preview', id, path),
+     restoreDocument: (id, path) => ipcRenderer.invoke('backup:restore-document', id, path),
      restore: () => ipcRenderer.invoke('vault:restore')
   },
   file: {
@@ -194,6 +200,7 @@ contextBridge.exposeInMainWorld('tulip', {
    * is small and a partial one would be worse than none.
    */
   pdf: {
+    passage: (p, page) => ipcRenderer.invoke('pdf:passage', p, page),
     source: (p) => ipcRenderer.invoke('pdf:source', p),
     marks: {
       load: (p) => ipcRenderer.invoke('pdf:marks:load', p),
@@ -270,13 +277,9 @@ contextBridge.exposeInMainWorld('tulip', {
       ipcRenderer.invoke('kernel:inspect', path, code, cursorPos)
   },
 
-  /* The Python environments a note's blocks run in — see electron/python-env.js.
-     Listed for the settings panel, which is the only place they are visible;
-     `prune` takes the ones whose note the vault no longer has. */
-  python: {
-    envs: () => ipcRenderer.invoke('python:envs'),
-    removeEnv: (dir) => ipcRenderer.invoke('python:env-remove', dir),
-    pruneEnvs: () => ipcRenderer.invoke('python:env-prune')
+  packages: {
+    list: () => ipcRenderer.invoke('packages:list'),
+    manage: (note, lang, action = 'list', name, imported) => ipcRenderer.invoke('packages:manage', note, lang, action, name, imported)
   },
 
   /* Manim renders to a real file in the vault rather than to the page, so it
@@ -351,10 +354,21 @@ contextBridge.exposeInMainWorld('tulip', {
   /* What was typed but not yet saved, kept outside the vault so a crash cannot
      take it with the window. `list` answers with only the drafts that differ
      from the note on disk — see the handler in main. */
+  recovery: {
+    list: () => ipcRenderer.invoke('recovery:list'),
+    record: (item) => ipcRenderer.invoke('recovery:record', item),
+    dismiss: (id) => ipcRenderer.invoke('recovery:dismiss', id),
+    onChanged: (fn) => {
+      const listener = () => fn()
+      ipcRenderer.on('recovery:changed', listener)
+      return () => ipcRenderer.removeListener('recovery:changed', listener)
+    }
+  },
   draft: {
     save: (path, text) => ipcRenderer.invoke('draft:save', path, text),
-    clear: (path) => ipcRenderer.invoke('draft:clear', path),
-    list: () => ipcRenderer.invoke('draft:list')
+    clear: (path, id) => ipcRenderer.invoke('draft:clear', path, id),
+    list: (recoveryOnly) => ipcRenderer.invoke('draft:list', recoveryOnly),
+    restore: (id) => ipcRenderer.invoke('draft:restore', id)
   },
 
   trust: {
@@ -379,6 +393,7 @@ contextBridge.exposeInMainWorld('tulip', {
     to: (p) => ipcRenderer.invoke('links:to', p)
   },
 
+  settings: { open: () => ipcRenderer.invoke('settings:open') },
   config: {
     get: () => ipcRenderer.invoke('config:get'),
     set: (patch) => ipcRenderer.invoke('config:set', patch)
@@ -432,6 +447,10 @@ contextBridge.exposeInMainWorld('tulip', {
   },
   version: () => ipcRenderer.invoke('app:version'),
 
+  workspace: {
+    save: (name) => ipcRenderer.invoke('workspace:save', name),
+    open: () => ipcRenderer.invoke('workspace:open')
+  },
   window: {
     /* Which window this is: whether it restores and remembers the session's
        tab strip, and whether it may hold the copilot. Asked once, in boot. */
@@ -491,6 +510,7 @@ contextBridge.exposeInMainWorld('tulip', {
   /* Is there a newer Tulip? Asked only when somebody asks — see the account
      beside the handler in main. There is no updater behind this and nothing
      that installs anything; the answer is a version number and a link. */
+  installUpdate: () => ipcRenderer.invoke('app:update-install'),
   checkForUpdate: () => ipcRenderer.invoke('app:update-check'),
 
   /* An exception nobody caught, on its way to main's crash log — the renderer
@@ -508,7 +528,7 @@ contextBridge.exposeInMainWorld('tulip', {
 
   on: (channel, fn) => {
     const allowed = [
-      'vault:changed', 'vault:opened', 'menu', 'zoom',
+      'vault:changed', 'vault:opened', 'menu', 'zoom', 'zoom:will-change', 'settings:changed', 'settings:refresh',
       'run:out', 'run:done', 'ai:event', 'app:flush', 'kernel:event',
       // A word was taught or untaught — the open note's spelling is one word
       // out of date, wherever the asking happened.

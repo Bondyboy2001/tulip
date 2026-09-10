@@ -68,6 +68,7 @@ const CONFIG_KEYS = {
      which names the command that does the installing, is deliberately not, for
      the same reason `manimCommand` is not. */
   autoInstallPythonDeps: boolean,
+  autoInstallPackages: boolean,
   texEngine: string,
   zoom: number,
   /* How large the reader reads web pages, which is a preference of theirs and
@@ -86,7 +87,8 @@ const CONFIG_KEYS = {
   paneBelow: orCleared(string),
   paneBelowHeight: number,
   paneBelowHeights: recordOfNumbers,
-  sideDoc: orCleared(string),
+  sideDoc: orCleared((v) => v === null || string(v)),
+  sideScroll: number,
   /* The size the run output popup was left at, in pixels — see `legalRunSize`
      in src/runcode.js, which clamps both to the stage on the way in, so a
      number out of range here can only ever open as a panel that fits. */
@@ -110,6 +112,11 @@ const CONFIG_KEYS = {
   tabs: nullableStringList,
   /* Where each tab was left, as a source line, one per entry of `tabs`. */
   tabPlaces: numberList,
+  tabHistories: (value) => Array.isArray(value) && value.length <= 200 && value.every((trail) =>
+    record(trail) && Number.isInteger(trail.at) && Array.isArray(trail.entries) && trail.entries.length <= 50 &&
+    trail.entries.every((entry) => record(entry) && string(entry.path) && entry.path.length <= 4096 &&
+      Object.entries(entry).every(([key, value]) => ['path', 'url'].includes(key) ? string(value) && value.length <= 4096 :
+        ['at', 'top', 'line', 'page', 'x', 'y', 'zoom', 'left'].includes(key) && number(value)))),
   /* Which of them are pinned, again one per entry of `tabs`. */
   tabPinned: booleanList,
   tabIndex: number,

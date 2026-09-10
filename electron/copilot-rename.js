@@ -34,4 +34,4 @@ function isStaleRequest (request, now = Date.now()) {
   return !!request?.at && (now - request.at > REQUEST_TTL_MS)
 }
 
-module.exports = { REQUEST_PATH, isRequestPath, parseRequest, isStaleRequest, REQUEST_TTL_MS }
+module.exports = { REQUEST_PATH, isRequestPath, parseRequest, isStaleRequest }

@@ -134,8 +134,18 @@ function makeVaultWriteDomain (ctx) {
     return result
   }
 
+  // Serialize the version check and replacement together across all windows.
+  // A renderer-only queue cannot stop two windows accepting the same stamp.
+  const writes = new Map()
   function register () {
     ipcMain.handle('file:write', async (_e, p, content, metadata = null) => {
+      const key = await realSafePath(p)
+      const next = (writes.get(key) || Promise.resolve()).catch(() => {}).then(() => writeFile(key, content, metadata))
+      writes.set(key, next)
+      try { return await next } finally { if (writes.get(key) === next) writes.delete(key) }
+    })
+
+    async function writeFile (p, content, metadata) {
       /* Fully resolved, exactly as `file:read` resolves it: content flows through
          the last component here, so a link standing where the note should be would
          put the note's text wherever it points. The two handlers agreeing also
@@ -282,7 +292,7 @@ function makeVaultWriteDomain (ctx) {
          can say which file it means. Callers that only ever wrote and moved on are
          unaffected: an object is as truthy as the `true` that used to be here. */
       return { ok: true, stamp }
-    })
+    }
 
     ipcMain.handle('file:rename', (_e, p, nextName) => renameDocument(p, nextName))
 

@@ -343,7 +343,6 @@ module.exports = {
   propValues,
   tagsFromProps,
   frontmatterTags,
-  scalarText,
   writeListProp,
   writeScalarProp,
   renameProp

@@ -91,7 +91,7 @@ const FENCE_LINE = /^ {0,3}(`{3,}|~{3,})\s*([^\s`]*)/
 /** A fence-language match such as `rust` is useful only when it carries a
  *  glimpse of the code it found. Keep the matched line as the navigation
  *  anchor, then borrow the first non-empty line inside that fence. */
-function contextualLine (text, from, to, line) {
+function contextualLine (text, to, line) {
   const fence = FENCE_LINE.exec(line)
   if (!fence) return line.trim().slice(0, 220)
 
@@ -141,7 +141,7 @@ function hitLines (text, spots, max = 4) {
     const line = text.slice(from, to)
     out.push({
       line: atLine,
-      text: contextualLine(text, from, to, line),
+      text: contextualLine(text, to, line),
       col: at - from,
       heading: HEADING_LINE.test(line)
     })
