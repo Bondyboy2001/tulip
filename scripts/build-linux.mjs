@@ -60,6 +60,9 @@ for (const file of ['package.json', 'electron']) {
 }
 await chmod(path.join(APP, 'tulip'), 0o755).catch(() => {})
 
+step('closing unused Electron fuses')
+await run(process.execPath, [path.join(ROOT, 'scripts', 'apply-fuses.mjs'), path.join(APP, 'tulip')])
+
 if (process.argv.includes('--zip')) {
   step('zipping')
   const zip = `${APP}.zip`

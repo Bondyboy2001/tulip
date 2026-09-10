@@ -168,6 +168,10 @@ step('branding the executable')
 const exe = path.join(APP, 'Tulip.exe')
 await brandExecutable(exe, version)
 
+// Before the signature, because editing the binary invalidates it.
+step('closing unused Electron fuses')
+await run(process.execPath, [path.join(ROOT, 'scripts', 'apply-fuses.mjs'), exe])
+
 step('signing')
 await signExecutable(exe)
 

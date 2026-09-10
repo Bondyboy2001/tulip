@@ -1946,8 +1946,8 @@ async function checkForUpdate () {
   const go = await ask({
     title: `Tulip ${answer.latest} is available.`,
     detail: `This copy is ${answer.current}. ` + (answer.canInstall
-      ? 'Tulip will download and verify the new app, save your documents, and restart. The previous app will be kept in Applications.'
-      : 'Download the release and replace the app. Automatic installation requires a signed macOS package with a verified download.') + notes,
+      ? 'Tulip will download and verify the new app, save your documents, and restart. The previous app is kept beside it.'
+      : 'Download the release and replace the app. Automatic installation needs a release asset with a SHA-256 digest.') + notes,
     go: answer.canInstall ? 'Install and restart' : direct ? 'Download update' : 'Open the download page'
   })
   if (!go) return

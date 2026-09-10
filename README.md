@@ -82,8 +82,17 @@ architecture before saving your documents and restarting into the new app.
 The previous app remains beside it in Applications. An installation failure is
 recorded in `update-install.log` in Tulip's application support folder.
 
-Unsigned releases, releases without a digest, and other platforms offer the
-download link. You can also update by pulling and re-running the build script.
+On an installed Windows app the same release offers it for
+`Tulip-<version>-win32-x64.zip`: the download digest is checked, the archive
+is vetted for paths that would write outside the folder, the version must
+match the release, and — where the running copy carries a valid Authenticode
+signature — so must the replacement. The swap then happens after Tulip exits
+and restores the previous folder if it cannot finish. The previous folder is
+kept beside the app.
+
+Unsigned builds of either platform, releases without a digest, and Linux
+offer the download link. You can also update by pulling and re-running the
+build script.
 
 ### Downloads
 

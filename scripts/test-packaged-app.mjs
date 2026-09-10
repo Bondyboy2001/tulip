@@ -196,12 +196,17 @@ try {
     const readable = () => document.querySelector('[data-setting="readableWidth"] .switch')
     readable().focus()
     readable().click()
-    const widthDisabled = [...document.querySelectorAll('[data-setting="measure"] button')].every((button) => button.disabled)
+    /* With readable length off the widths stay pickable: choosing one is the
+       gesture that turns readable length back on — see the change handler in
+       src/settings.js, and the width-preset test that holds it. */
+    const widthEnabledWhileOff = [...document.querySelectorAll('[data-setting="measure"] button')].every((button) => !button.disabled)
     const toggleKeptFocus = document.activeElement === readable()
     readable().click()
     const widthEnabled = [...document.querySelectorAll('[data-setting="measure"] button')].every((button) => !button.disabled)
     const search = document.querySelector('.settings-search-field')
-    search.value = 'Python'
+    // By a word in the row's own name: the old key spelled Python, the setting
+    // no longer does, and the search reads names, groups and keys.
+    search.value = 'packages'
     search.dispatchEvent(new Event('input'))
     document.querySelector('.settings-suggest-row')?.click()
     const searchDestination = document.querySelector('#settings-title').textContent
@@ -221,7 +226,7 @@ try {
     while (!document.querySelector('.hotkey-name') && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50))
     const shortcutNames = [...document.querySelectorAll('.hotkey-name')].map(row => row.textContent)
     return {
-      settingsChecks: { tabs, widthDisabled, widthEnabled, toggleKeptFocus, searchDestination, foundSetting, noResults },
+      settingsChecks: { tabs, widthEnabledWhileOff, widthEnabled, toggleKeptFocus, searchDestination, foundSetting, noResults },
       setupTitle, setupHasVaultDefault: setupText.includes('Default vault') && setupText.includes('Last open'),
       shortcutNames, settingsWindow: document.body.classList.contains('settings-window'),
       hints: document.querySelectorAll('.settings-label .settings-hint').length
@@ -259,7 +264,8 @@ try {
   assert.equal(result.writeOk, true)
   assert.equal(result.readBack, true)
   assert.deepEqual(result.settingsChecks.tabs, ['Appearance', 'General', 'Shortcuts', 'Editor', 'Documents', 'Study', 'Copilot'])
-  assert.equal(result.settingsChecks.widthDisabled, true)
+  assert.equal(result.settingsChecks.widthEnabledWhileOff, true,
+    'picking a width is the gesture that turns readable length back on')
   assert.equal(result.settingsChecks.widthEnabled, true)
   assert.equal(result.settingsChecks.toggleKeptFocus, true)
   assert.equal(result.settingsChecks.searchDestination, 'Documents')

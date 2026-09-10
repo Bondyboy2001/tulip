@@ -244,7 +244,11 @@ contextBridge.exposeInMainWorld('tulip', {
     warm: (lang) => ipcRenderer.invoke('run:warm', lang),
     kill: (id) => ipcRenderer.invoke('run:kill', id),
     trusted: () => ipcRenderer.invoke('run:trusted'),
-    trust: () => ipcRenderer.invoke('run:trust')
+    trust: () => ipcRenderer.invoke('run:trust'),
+    /* The same consent, seen from outside the moment it was given: what is
+       trusted, and the way to take one back. */
+    trustedVaults: () => ipcRenderer.invoke('run:trusted-vaults'),
+    untrust: (vault) => ipcRenderer.invoke('run:untrust', vault)
   },
 
   /**

@@ -191,6 +191,10 @@ cat > "$ENTITLEMENTS" <<'ENTS'
 </plist>
 ENTS
 
+# Before the signature, because editing the binary invalidates it.
+echo "› closing unused Electron fuses"
+node "$ROOT/scripts/apply-fuses.mjs" "$APP/Contents/MacOS/Tulip"
+
 if [ -z "$SIGN_IDENTITY" ]; then
   echo "› signing (ad-hoc — set TULIP_SIGN_IDENTITY to make a distributable app)"
   codesign --force --deep --sign - "$APP" 2>/dev/null
