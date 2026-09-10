@@ -4,7 +4,7 @@
  * bundle was assembled; this proves the executable, main process, preload,
  * renderer and vault write path work together in that bundle. */
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
 import net from 'node:net'
 import os from 'node:os'
@@ -154,6 +154,11 @@ async function stop () {
   if (process.platform === 'darwin') {
     const quit = spawn('/usr/bin/osascript', ['-e', 'tell application id "com.hb.tulip" to quit'], { stdio: 'ignore' })
     await new Promise((resolve) => quit.once('exit', resolve))
+  } else if (process.platform === 'win32') {
+    /* A plain kill reaps the main process and leaves Chromium's children
+       holding the profile — the removal below then fails with EBUSY. */
+    await delay(700)
+    spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true })
   } else { await delay(700); child.kill('SIGTERM') }
   await Promise.race([exited, delay(5000).then(() => child.kill('SIGKILL'))])
 }
@@ -299,5 +304,9 @@ try {
   throw error
 } finally {
   if (child.exitCode == null) await stop()
-  await rm(scratch, { recursive: true, force: true })
+  /* A Windows profile holds a few files open for a beat after the process
+     tree is gone; a removal that lands in that beat is EBUSY. */
+  for (let attempt = 0; attempt < 10; attempt++) {
+    try { await rm(scratch, { recursive: true, force: true }); break } catch { await delay(500) }
+  }
 }

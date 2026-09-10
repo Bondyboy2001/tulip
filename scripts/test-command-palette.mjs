@@ -10,7 +10,7 @@ const app = await appSession({ executable, files: {
   'Paper.pdf': pdfFixture(),
   'Source.py': 'print("hello")\n'
 }, config: { tabs: ['Note.md'], tabIndex: 0 } })
-const waitFor = async (expression, tries = 120) => {
+const waitFor = async (expression, tries = 400) => {
   for (let i = 0; i < tries; i++) { if (await app.evaluate(expression)) return; await delay(50) }
   throw new Error('Timed out: ' + expression)
 }

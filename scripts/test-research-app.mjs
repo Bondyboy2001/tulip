@@ -16,7 +16,9 @@ try {
      does; wait for the entry rather than a fixed moment on a loaded runner. */
   let trail = []
   for (let attempt = 0; attempt < 100; attempt++) {
-    trail = await app.evaluate('window.__tulip.state.tabs[0].history')
+    /* The tab may not exist for the first moments after boot; the guard is
+       what keeps this a wait rather than a TypeError in the harness. */
+    trail = await app.evaluate('window.__tulip.state.tabs?.[0]?.history || []')
     if (trail.length >= 2 && trail.at(-1).path === trail.at(-2).path) break
     await delay(50)
   }

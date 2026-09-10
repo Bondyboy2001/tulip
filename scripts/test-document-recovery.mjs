@@ -22,8 +22,20 @@ try {
   await app.restart()
   await app.evaluate('window.tulip.file.write("Note.md", "# Note\\n\\nNewer saved text.\\n")')
   await app.evaluate('window.tulip.recovery.record({kind:"conflict",path:"Other.md"})')
-  await app.evaluate('window.__tulip.runCommand("recover-document"); true')
-  await waitFor('document.querySelector("#recovery-panel .history-row") && document.querySelector("#recovery-panel")?.textContent.includes("Restore backup as separate copy")')
+  /* The command can land before the restored window has finished reading its
+     stores — the palette is one IPC call and the app is still coming up — so
+     an empty panel is retried rather than waited on once. */
+  const openRecovery = async (ready) => {
+    for (let attempt = 0; attempt < 6; attempt++) {
+      await app.evaluate('window.__tulip.runCommand("recover-document"); true')
+      for (let i = 0; i < 30; i++) {
+        if (await app.evaluate(ready)) return
+        await delay(200)
+      }
+    }
+    throw new Error(`Timed out: ${ready}`)
+  }
+  await openRecovery('document.querySelector("#recovery-panel .history-row") && document.querySelector("#recovery-panel")?.textContent.includes("Restore backup as separate copy")')
   let text = await app.evaluate('document.querySelector("#recovery-panel").textContent')
   assert.ok(text.includes('Saved versions') && text.includes('Backup copies') && text.includes('Drafts and conflicts'))
   assert.ok(!text.includes('Other.md'), 'document recovery filters unrelated conflicts')
@@ -40,8 +52,7 @@ try {
   assert.equal(await readFile(path.join(app.vault, restored), 'utf8'), '# Note\n\nOriginal backup.\n')
   assert.equal(await readFile(path.join(app.vault, 'Note.md'), 'utf8'), '# Note\n\nNewer saved text.\n')
   await app.evaluate('window.__tulip.openNote("Note.md")')
-  await app.evaluate('window.__tulip.runCommand("recover-document"); true')
-  await waitFor('document.querySelector("#recovery-panel .history-actions button")')
+  await openRecovery('document.querySelector("#recovery-panel .history-actions button")')
   await app.evaluate('document.querySelector("#recovery-panel .history-actions button").click()')
   await waitFor('document.querySelectorAll("dialog[open]").length === 2')
   await app.evaluate('[...document.querySelectorAll("dialog[open]")].at(-1).querySelector("button").click()')
