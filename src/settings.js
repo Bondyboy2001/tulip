@@ -60,6 +60,13 @@ const SECTIONS = [
         key: 'defaultVaultPath',
         type: 'default-vault',
         name: 'Default vault',
+      },
+      {
+        /* Consent given at the first run, listed where it can be taken back:
+           a vault trusted a year ago otherwise keeps the privilege silently. */
+        key: 'trustedVaults',
+        type: 'trusted',
+        name: 'Code execution',
       }
     ]
   },
@@ -506,6 +513,43 @@ export function mountSettings ({ el, api, values, onChange }) {
         } catch (error) { show.textContent = error.message; show.disabled = false }
       })
       wrap.append(show)
+      return wrap
+    },
+    trusted () {
+      const wrap = node('div', 'trusted-vaults')
+      const said = node('p', 'settings-hint',
+        'Vaults whose code blocks, notebook cells and Copilot write modes may run. Tulip asks the first time one runs something.')
+      const list = node('div', 'trusted-list')
+      const paint = (vaults) => {
+        list.replaceChildren()
+        if (!vaults.length) {
+          list.append(node('span', 'settings-hint', 'No vault is trusted to run code.'))
+          return
+        }
+        for (const vault of vaults) {
+          const row = node('div', 'trusted-row')
+          const named = node('div', 'trusted-named')
+          named.append(
+            node('span', 'trusted-name', vault.name),
+            node('span', 'trusted-path', vault.path)
+          )
+          row.append(named)
+          if (vault.current) row.append(node('span', 'trusted-current', 'open now'))
+          const revoke = node('button', 'ghost is-compact is-danger', 'Revoke')
+          revoke.type = 'button'
+          revoke.setAttribute('aria-label', `Revoke code execution for ${vault.name}`)
+          revoke.addEventListener('click', async () => {
+            revoke.disabled = true
+            try { paint(await api.run.untrust(vault.path)) } catch { revoke.disabled = false }
+          })
+          row.append(revoke)
+          list.append(row)
+        }
+      }
+      Promise.resolve(api.run.trustedVaults()).then(paint).catch(() => {
+        list.replaceChildren(node('span', 'settings-hint', 'Could not read the trusted vaults.'))
+      })
+      wrap.append(said, list)
       return wrap
     },
     doctor () {
@@ -1140,7 +1184,7 @@ export function mountSettings ({ el, api, values, onChange }) {
       // A full-width control reads better under its label than squeezed
       // beside it — the theme grid and the model list are both of those.
       if (row.type === 'themes' || row.type === 'models' || row.type === 'catalogue' ||
-          row.type === 'hotkeys' || row.type === 'languages') line.classList.add('is-stacked')
+          row.type === 'hotkeys' || row.type === 'languages' || row.type === 'trusted') line.classList.add('is-stacked')
       if (row.enabledBy && values()[row.enabledBy] === false) {
         line.classList.add('is-disabled')
         control?.querySelectorAll('button, input, select').forEach((item) => { item.disabled = true })

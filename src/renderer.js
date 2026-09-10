@@ -9823,6 +9823,30 @@ function markHits (text, hits) {
   return frag
 }
 
+/**
+ * The query's words, marked where they land in a result's snippet.
+ *
+ * `hit.text` is the matched line trimmed to a useful length but not to the
+ * match, so which part of it answered the query was left to the reader; the
+ * words come back from main — the parser that actually ran — rather than
+ * being guessed at here, and an empty answer leaves the text unmarked.
+ */
+function markWords (text, words) {
+  const list = Array.isArray(words) ? words.filter((word) => word) : []
+  if (!list.length) return document.createTextNode(text)
+  const lower = text.toLowerCase()
+  const marked = new Set()
+  for (const word of list) {
+    const needle = String(word).toLowerCase()
+    let at = lower.indexOf(needle)
+    while (at !== -1) {
+      for (let i = at; i < at + needle.length; i++) marked.add(i)
+      at = lower.indexOf(needle, at + needle.length)
+    }
+  }
+  return marked.size ? markHits(text, marked) : document.createTextNode(text)
+}
+
 let searchToken = 0
 
 async function runOverlayQuery (query) {
@@ -9933,7 +9957,7 @@ async function runOverlayQuery (query) {
         el.panelList.removeAttribute('aria-busy')
       }
     }
-    const { results, truncated, unsearched, unsearchedPaths = [], error, cancelled } = answer
+    const { results, truncated, unsearched, unsearchedPaths = [], words, error, cancelled } = answer
     if (token !== searchToken || !state.overlay) return
     /* Main stood this search aside because a newer one had already started —
        see `searchGeneration` there. There are no results to paint and there is
@@ -9950,6 +9974,9 @@ async function runOverlayQuery (query) {
     state.overlay.items = results.flatMap((r) =>
       r.hits.map((h) => ({ item: { ...r, hit: h, label: r.name }, hits: [] }))
     )
+    /* The words to mark inside each snippet. A regular expression's match is
+       not its source text, so nothing is marked there rather than guessing. */
+    state.overlay.searchWords = searchOpts.regex || !Array.isArray(words) ? [] : words
     state.overlay.index = 0
     renderOverlayList(error ||
       (query.trim().length < 2 ? 'Type at least two characters.' : `Nothing matches “${query.trim()}”.`))
@@ -10201,7 +10228,7 @@ function overlayRow ({ item, hits }, i, mode, index) {
   if (mode === 'search' && item.hit) {
     const snippet = document.createElement('span')
     snippet.className = 'snippet'
-    snippet.textContent = item.hit.text
+    snippet.append(markWords(item.hit.text, state.overlay.searchWords))
     title.append(snippet)
     const folder = item.path?.split('/').slice(0, -1).join('/')
     if (folder) {

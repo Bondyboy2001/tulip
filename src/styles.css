@@ -9306,6 +9306,20 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 .ai-doctor-about { grid-column: 1 / -1; margin: 0; }
 .settings-row[data-setting="environments"] .ai-doctor-provider { grid-template-columns: minmax(0, 1fr) auto auto auto; }
 .settings .env-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+/* Consent given once, listed where it can be taken back. */
+.trusted-vaults { display: grid; gap: 8px; min-width: 0; }
+.trusted-list { display: grid; gap: 6px; min-width: 0; }
+.trusted-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 32px;
+}
+.trusted-named { display: grid; min-width: 0; }
+.trusted-name { color: var(--ink); font: 500 13px/1.4 var(--font-ui); }
+.trusted-path { color: var(--muted); font: 11.5px/1.4 ui-monospace, monospace; overflow-wrap: anywhere; }
+.trusted-current { color: var(--muted); font: 12px/1.4 var(--font-ui); }
 .settings-label { min-width: 0; }
 .settings-name {
   display: flex;

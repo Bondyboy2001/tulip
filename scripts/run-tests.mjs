@@ -57,6 +57,7 @@ const WINDOWED = new Set([
   'test:command-palette',
   'test:copilot-setup',
   'test:a11y',
+  'test:trust',
   'test:multicursor',
   'test:agent-diff',
   'test:docx-view',

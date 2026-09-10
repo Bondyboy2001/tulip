@@ -214,6 +214,11 @@ if (source) {
   /* Search rows carry both useful local context and the folder breadcrumb
      that distinguishes identically named results. */
   assert.match(renderer, /contextualLine|className = 'search-path'/)
+  /* And the match itself is marked in the snippet, from the words the search
+     actually parsed rather than a second reading of the query. */
+  assert.match(renderer, /function markWords \(/)
+  assert.match(renderer, /snippet\.append\(markWords\(item\.hit\.text, state\.overlay\.searchWords\)\)/)
+  assert.match(main, /words: q\.words/)
   /* The lower pane is sized from its separator and restores a separate height
      for each kind, without another button competing with its tabs. */
   assert.doesNotMatch(html, /id="pane-size-toggle"/)

@@ -567,6 +567,19 @@ function trustExecutionForVault () {
   return true
 }
 
+/**
+ * Every vault the reader has trusted for code execution, as the settings list
+ * names them. Trust is granted in the moment — one dialog at the first run —
+ * and this is how it is seen again and taken back; a copied vault has a
+ * different path and asks on its own, while a folder reopened keeps its answer.
+ */
+function trustedVaultList () {
+  const before = Array.isArray(readConfig().trustedVaults) ? readConfig().trustedVaults : []
+  return before
+    .filter((entry) => typeof entry === 'string' && entry)
+    .map((entry) => ({ path: entry, name: path.basename(entry) || entry, current: entry === vaultPath }))
+}
+
 async function persistConfig () {
   configTimer = null
   try {
@@ -5055,7 +5068,10 @@ async function searchVault (raw, opts = {}, { channel = null } = {}) {
      it: a custom property on an array does not survive the structured clone
      the IPC boundary performs, so the flag arrived as undefined every time and
      the cap was silent. */
-  return { results: truncated ? results.slice(0, 200) : results, truncated, unsearched, unsearchedPaths }
+  /* `words` comes back with the results so the renderer can mark the match
+     inside a snippet without parsing the query a second time — a second
+     parser is a second set of answers to what the phrase was. */
+  return { results: truncated ? results.slice(0, 200) : results, truncated, unsearched, unsearchedPaths, words: q.words }
 }
 
 /* The window that asked is what a scan stands aside for — see
@@ -7234,6 +7250,13 @@ ipcMain.handle('run:trust', async () => {
   }).catch(() => ({ response: 1 }))
   if (response !== 0) return false
   return trustExecutionForVault()
+})
+ipcMain.handle('run:trusted-vaults', () => trustedVaultList())
+ipcMain.handle('run:untrust', (_e, target) => {
+  const wanted = typeof target === 'string' ? target : ''
+  const before = Array.isArray(readConfig().trustedVaults) ? readConfig().trustedVaults : []
+  writeConfig({ trustedVaults: before.filter((entry) => entry !== wanted) })
+  return trustedVaultList()
 })
 
 ipcMain.handle('run:start', async (event, lang, code, noteRel) => {

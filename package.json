@@ -89,6 +89,7 @@
     "test:copilot-store": "node scripts/test-copilot-store.mjs",
     "test:copilot-setup": "node scripts/test-copilot-setup.mjs",
     "test:a11y": "node scripts/test-a11y.mjs",
+    "test:trust": "node scripts/test-trust.mjs",
     "test:reading-split": "esbuild scripts/test-reading-split.mjs --bundle --format=esm --platform=node --outfile=node_modules/.cache/test-reading-split.mjs --log-level=error && node node_modules/.cache/test-reading-split.mjs",
     "test:platform": "esbuild scripts/test-platform.mjs --bundle --format=esm --platform=node --outfile=node_modules/.cache/test-platform.mjs --log-level=error && node node_modules/.cache/test-platform.mjs",
     "test:settings": "node scripts/test-settings.cjs",
