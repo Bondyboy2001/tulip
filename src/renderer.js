@@ -291,6 +291,7 @@ const el = {
   panel: /** @type {HTMLElement} */ ($('panel')),
   panelInput: /** @type {HTMLInputElement} */ ($('panel-input')),
   panelList: /** @type {HTMLUListElement} */ ($('panel-list')),
+  panelEmpty: /** @type {HTMLParagraphElement} */ ($('panel-empty')),
   panelFoot: /** @type {HTMLElement} */ ($('panel-foot')),
   panelCount: /** @type {HTMLElement} */ ($('panel-count')),
   shortcuts: /** @type {HTMLElement} */ ($('shortcuts')),
@@ -10113,13 +10114,12 @@ function renderOverlayList (emptyMessage = 'Nothing matches.') {
   el.panelList.replaceChildren()
 
   if (!items.length) {
-    const li = document.createElement('li')
-    li.className = 'empty-hint'
-    li.textContent = emptyMessage
-    el.panelList.append(li)
+    el.panelEmpty.textContent = emptyMessage
+    el.panelEmpty.hidden = false
     nameActiveRow(null)
     return
   }
+  el.panelEmpty.hidden = true
 
   /* A screenful now, the rest a frame at a time. A vault search can answer
      with hundreds of rows — 200 notes at up to four hits each — and every row

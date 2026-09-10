@@ -112,7 +112,15 @@ export function mountPanels ({
       ? window.innerWidth - offset - (p.grow === 1 ? 56 : 32)
       : window.innerWidth - taken - MAIN_FLOOR
     p.width = Math.max(p.min, Math.min(p.want, panelCeiling(p), room))
-    if (paint) el.app.style.setProperty(p.prop, `${p.width}px`)
+    if (paint) {
+      el.app.style.setProperty(p.prop, `${p.width}px`)
+      /* A focusable separator is a window splitter, and the value is where its
+         edge stands — without it the role has no reading to announce. Told
+         here because this is the one place the drawn width is settled. */
+      p.grip.setAttribute('aria-valuenow', String(Math.round(p.width)))
+      p.grip.setAttribute('aria-valuemin', String(p.min))
+      p.grip.setAttribute('aria-valuemax', String(p.max))
+    }
     return p.width
   }
 

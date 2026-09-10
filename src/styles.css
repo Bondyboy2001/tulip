@@ -725,10 +725,12 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
   left: 50%;
   transform: translateX(-50%);
   z-index: 1;
-  color: var(--faint);
+  /* Muted rather than faint: this is the one text on the shell with no larger
+     target around it, and faint at reduced opacity measured under 4.5:1 on
+     the light themes. */
+  color: var(--muted);
   font: 500 10.5px/1 var(--font-ui);
   letter-spacing: .035em;
-  opacity: .72;
   white-space: nowrap;
   user-select: none;
 }
@@ -2643,7 +2645,7 @@ ol.tk-ordered-list > li > .tk-olnum {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.panel-list .empty-hint { padding: 14px 11px; color: var(--muted); font-size: 13px; }
+.empty-hint { padding: 14px 11px; color: var(--muted); font-size: 13px; }
 
 .panel-foot {
   padding: 8px 14px;
@@ -9139,7 +9141,9 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   font: 600 10.5px/1.4 var(--font-ui);
   letter-spacing: .07em;
   text-transform: uppercase;
-  color: var(--faint);
+  /* Muted rather than faint: the rail sits on the sunk surface, where faint
+     measured 4.17:1. */
+  color: var(--muted);
 }
 .settings-rail-head:first-child { margin-top: 4px; }
 

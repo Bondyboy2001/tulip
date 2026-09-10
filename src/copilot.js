@@ -1801,7 +1801,6 @@ export function mountCopilot ({
     menu = null
     el.menu.hidden = true
     el.menu.replaceChildren()
-    el.input.setAttribute('aria-expanded', 'false')
     el.input.removeAttribute('aria-activedescendant')
   }
 
@@ -1822,7 +1821,6 @@ export function mountCopilot ({
       return node
     }))
     el.menu.hidden = false
-    el.input.setAttribute('aria-expanded', 'true')
     el.input.setAttribute('aria-activedescendant', `ai-menu-opt-${current.at}`)
     el.menu.children[current.at]?.scrollIntoView({ block: 'nearest' })
   }
@@ -2020,7 +2018,6 @@ export function mountCopilot ({
      ever leaving the box. */
   el.input.setAttribute('aria-autocomplete', 'list')
   el.input.setAttribute('aria-controls', 'ai-menu')
-  el.input.setAttribute('aria-expanded', 'false')
 
   // A click lands before the textarea loses focus, so the box keeps the caret.
   el.menu.addEventListener('mousedown', (event) => event.preventDefault())

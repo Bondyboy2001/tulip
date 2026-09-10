@@ -54,7 +54,7 @@
 
     <div class="titlebar"></div>
 
-    <aside class="sidebar" id="sidebar">
+    <aside class="sidebar" id="sidebar" aria-label="Vault">
       <span class="app-version" id="app-version" aria-label="Tulip version"></span>
       <header class="sidebar-head">
         <button class="vault-name" id="vault-name" title="Switch vault">
@@ -93,7 +93,9 @@
        </header>
 
       <section class="saved-searches" id="saved-searches" hidden></section>
-      <nav class="tree pane" id="tree" role="tree" aria-label="Notes"></nav>
+      <!-- A div rather than a nav: the explicit tree role is the widget this
+           is, and `navigation` is not a role a tree may take. -->
+      <div class="tree pane" id="tree" role="tree" aria-label="Notes"></div>
       <nav class="outline-list pane" id="outline-list" aria-label="Outline" hidden></nav>
       <nav class="links-list pane" id="links-list" aria-label="Backlinks" hidden></nav>
       <nav class="spelling-list pane" id="spelling-list" aria-label="Spelling" hidden></nav>
@@ -130,6 +132,7 @@
            the lower panel to its contents. -->
       <div class="grip" id="grip-sidebar" role="separator" tabindex="0"
            aria-orientation="vertical" aria-label="Resize sidebar"
+           aria-valuemin="172" aria-valuemax="380" aria-valuenow="248"
            title="Drag to resize · double-click to reset"></div>
     </aside>
 
@@ -545,10 +548,11 @@
       <div class="sidepane-body" id="sidepane-body"></div>
       <div class="grip grip-start" id="grip-side" role="separator" tabindex="0"
            aria-orientation="vertical" aria-label="Resize side pane"
+           aria-valuemin="280" aria-valuemax="720" aria-valuenow="380"
            title="Drag to resize · double-click to reset"></div>
     </aside>
 
-    <aside class="ai" id="ai" data-busy="no">
+    <aside class="ai" id="ai" data-busy="no" aria-label="Copilot">
       <header class="ai-head">
         <span class="ai-title">Copilot</span>
         <div class="ai-head-end">
@@ -577,7 +581,13 @@
         <div class="ai-attachments" id="ai-attachments" hidden
              aria-label="Attached files"></div>
 
-        <textarea id="ai-input" class="ai-input" rows="1" placeholder="Write a message — @ for a file, / for commands…"
+        <!-- A multiline textbox that offers a listbox, rather than a
+             combobox: a textarea cannot take the combobox role, and what the
+             autocomplete needs is a text box that says it has a popup and
+             points at the lit row. The menu itself is the listbox. -->
+        <textarea id="ai-input" class="ai-input" rows="1" aria-haspopup="listbox"
+                  aria-label="Message Copilot"
+                  placeholder="Write a message — @ for a file, / for commands…"
                   autocomplete="off" spellcheck="true"></textarea>
 
         <div class="ai-tools">
@@ -629,6 +639,7 @@
       </form>
 
       <div class="grip grip-start" id="grip-ai" role="separator" tabindex="0"
+           aria-valuemin="260" aria-valuemax="680" aria-valuenow="340"
            aria-orientation="vertical" aria-label="Resize copilot"
            title="Drag to resize · double-click to reset"></div>
     </aside>
@@ -689,6 +700,10 @@
       </div>
 
       <ul class="panel-list" id="panel-list" role="listbox" aria-label="Results"></ul>
+      <!-- The empty answer is not a row: a listbox may hold options and nothing
+           else, and an `li` message inside it made the whole widget invalid.
+           It sits where the rows would, as a sibling of the list. -->
+      <p class="empty-hint" id="panel-empty" hidden></p>
       <!-- The count is announced, the caveats beside it are not: the caveats
            are read from the foot when the reader gets there, whereas how much
            was found is the answer to what they just typed. -->

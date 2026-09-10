@@ -23,8 +23,10 @@
 .settings-window .settings-tab {
   flex: none; text-align: left; padding: 10px 12px; font-size: 13px; border-radius: 8px;
 }
+/* The tint marks the selection, the ink carries the text: accent on the dim
+   accent measured 4.0:1. */
 .settings-window .settings-tab[aria-current="true"] {
-  background: var(--accent-dim); color: var(--accent); font-weight: 650;
+  background: var(--accent-dim); color: var(--ink); font-weight: 650;
 }
 .settings-window .settings-head {
   padding: 62px 32px 24px; cursor: default; gap: 20px;
