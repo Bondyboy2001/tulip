@@ -407,6 +407,22 @@ function stateFor (lang, code) {
   return state
 }
 
+/** Keep the last execution attached to a fence while its source is edited.
+ * The new source still supplies the next run; editing never resets a run.
+ */
+export function retainBlockOutput (oldLang, oldCode, lang, code) {
+  const state = results.get(runKey(oldLang, oldCode))
+  if (!state) return
+  // Intermediate edits need no separate cache entry. Keep the cache bounded
+  // even though every alias of a visible run has an active painter.
+  if (results.size >= MAX_RESULTS) {
+    for (const [key, cached] of results) {
+      if (cached === state) { results.delete(key); break }
+    }
+  }
+  results.set(runKey(lang, code), state)
+}
+
 /**
  * Starts a piece of work and hands its state the run it produced.
  *
@@ -572,7 +588,7 @@ function lastLine (text) {
  */
 function drawArtefactStatus (status, state, { busy, keep, silent, transcript }, stop) {
   status.replaceChildren()
-  status.classList.remove('is-bad')
+  status.classList.remove('is-bad', 'is-good')
   if (state.status === 'idle') { status.hidden = true; return }
 
   const bar = el('div', 'run-out-head')
@@ -986,7 +1002,7 @@ function drawOutput (panel, state, lang, code) {
   const bar = el('div', 'run-out-head')
   if (state.status === 'running') {
     bar.append(el('span', 'run-out-verdict is-running', 'Running…'))
-    panel.classList.remove('is-bad')
+    panel.classList.remove('is-bad', 'is-good')
   } else {
     const said = verdict(state)
     // Before the verdict, not after it: the line is what the reader has just
@@ -994,6 +1010,7 @@ function drawOutput (panel, state, lang, code) {
     if (askToFix && lang && worthFixing(state)) bar.append(fixButton(lang, code, state))
     bar.append(el('span', `run-out-verdict is-${said.tone}`, said.text))
     panel.classList.toggle('is-bad', said.tone === 'bad')
+    panel.classList.toggle('is-good', said.tone === 'good')
   }
   /* The transcript, to take away — the same control the source file's popup
      has. On every panel, running or done, and read at the click rather than
@@ -1373,7 +1390,7 @@ function drawRunMedia (panel, media) {
   figure.append(well)
   panel.replaceChildren(figure)
   panel.hidden = false
-  panel.classList.remove('is-bad')
+  panel.classList.remove('is-bad', 'is-good')
 }
 
 function drawRunImage (panel, state, image) {
@@ -1391,7 +1408,7 @@ function drawRunImage (panel, state, image) {
   figure.append(well)
   panel.replaceChildren(figure)
   panel.hidden = false
-  panel.classList.remove('is-bad')
+  panel.classList.remove('is-bad', 'is-good')
 }
 
 /* ----------------------------------------------------------- the popup

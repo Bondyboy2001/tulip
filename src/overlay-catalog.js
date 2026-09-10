@@ -1,5 +1,5 @@
 /* Static vocabulary for the renderer's shared picker. Keeping prompts, labels,
- * vaultless modes and command shelves together makes a new overlay define its
+ * vaultless modes together makes a new overlay define its
  * keyboard and screen-reader face in one small, type-checked place. */
 
 export const FONT_MODES = { 'font-body': 'body', 'font-ui': 'ui' }
@@ -36,16 +36,4 @@ export const OVERLAY_LABEL = {
   vaults: 'Recent vaults',
   templates: 'Insert a template',
   tags: 'Tags'
-}
-
-export function generalCommandGroup ({ id }) {
-  if (/^(new-|getting-started|backup-vault|restore-vault|move-file|open-|insert-template|export-|orphaned-images|browse-tags)/.test(id)) return 'File'
-  if (/^(themes|font-|center-headings)/.test(id)) return 'Appearance'
-  if (/^(review-stats|study-|import-cards|run-|clear-|lint-|fit-|filter-|toggle-spellcheck)/.test(id)) return 'Tools'
-  return 'App & Help'
-}
-
-export function contextCommand (command) {
-  return Boolean(command.scope && command.scope !== 'copilot') ||
-    /^(docx-|whiteboard-|fit-columns|filter-column|clear-filters|lock-file|unlock-file|edit-here)/.test(command.id)
 }

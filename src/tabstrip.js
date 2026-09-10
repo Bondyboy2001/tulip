@@ -86,7 +86,7 @@ export function repin (tabs, at, pinned) {
  * @returns {number[]}
  */
 export function othersOf (tabs, keep) {
-  return sweep(tabs, (tab, i) => i !== keep)
+  return sweep(tabs, (i) => i !== keep)
 }
 
 /**
@@ -103,14 +103,14 @@ export function othersOf (tabs, keep) {
  * @returns {number[]}
  */
 export function rightOf (tabs, from) {
-  return sweep(tabs, (tab, i) => i > from)
+  return sweep(tabs, (i) => i > from)
 }
 
 /** Indices matching `want`, minus the pinned, highest first. */
 function sweep (tabs, want) {
   const doomed = []
   for (let i = tabs.length - 1; i >= 0; i--) {
-    if (!tabs[i].pinned && want(tabs[i], i)) doomed.push(i)
+    if (!tabs[i].pinned && want(i)) doomed.push(i)
   }
   return doomed
 }

@@ -7,7 +7,7 @@ import { NOTE_EXT, isLanguageTablePath, isPdfPath, isSitePath, isTexPath, isWhit
  *  the extensionless document titles used elsewhere in the panel. */
 export const attachmentName = (path) => String(path || '').split('/').pop() || 'Attachment'
 
-export const attachmentExtension = (path) => {
+const attachmentExtension = (path) => {
   const name = attachmentName(path)
   const dot = name.lastIndexOf('.')
   return dot > 0 ? name.slice(dot + 1).toLowerCase() : ''

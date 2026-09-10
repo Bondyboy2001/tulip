@@ -144,8 +144,10 @@ const WIKI_EMBED = /!\[\[([^[\]|]+)(?:\|([^[\]]*))?\]\]/g
 /* `![alt](src "title")` — markdown's own. Narrower than markdown-it's real
    image rule, which also accepts `<...>` targets, reference images and spaces
    in the parens; those render in the reading view and stay as source in the
-   editor. Widening this is the fix if that ever matters. */
-const MD_EMBED = /!\[([^[\]]*)\]\(([^()\s]+)(?:\s+"[^"]*")?\)/g
+   editor. The `<...>` form is accepted here too, because a percent-encoded SVG
+   data URI keeps its `()` raw (`encodeURIComponent` leaves them) and the bare
+   form cannot hold one. Widening the rest is the fix if that ever matters. */
+const MD_EMBED = /!\[([^[\]]*)\]\((?:<([^<>]*)>|([^()\s]+))(?:\s+"[^"]*")?\)/g
 
 /**
  * The `|` suffix on a wiki embed is a size if its last segment looks like one —
@@ -210,7 +212,7 @@ export function findEmbeds (text) {
       from: m.index,
       to: m.index + m[0].length,
       raw: m[0],
-      src: m[2].trim(),
+      src: (m[2] ?? m[3] ?? '').trim(),
       alt,
       size,
       syntax: 'md'
@@ -579,6 +581,45 @@ function startSeconds (src) {
  *  not part of the filename, and left on it makes every extension unknown. */
 const remoteExtension = (url) => extensionOf(url.split(/[?#]/)[0])
 
+/* An inline picture — `![](data:image/png;base64,…)` — which tools paste when
+   there is no file to point at: a screenshot from the clipboard, a Concepts
+   export, a plot. Shown by the tag that plays it, the same as a remote one,
+   with no fetch behind it. Only `image/*`: a `data:text/html` is a page, not
+   a picture, and stays missing.
+
+   Two spellings: base64 (`;base64,`, with the optional `;charset=` Concepts
+   writes before it) and percent-encoded SVG (`data:image/svg+xml,…`, which is
+   what an `encodeURIComponent` SVG looks like). The encoded payload must hold
+   no quote, bracket or whitespace — anything that could break out of the
+   attribute it is read from — which encoded output never does. An `<img>`
+   showing SVG runs no script: SVG in an image context is self-contained by
+   definition, and the page CSP admits `data:` for images already. */
+const DATA_IMAGE_BASE64 =
+  /^data:image\/(?:png|jpe?g|gif|webp|avif|bmp|x-icon|svg\+xml)(?:;charset=[^;,]+)?;base64,[a-z0-9+/=\s]*$/i
+const DATA_SVG_ENCODED = /^data:image\/svg\+xml(?:;charset=[^;,]+)?,[^"\s<>]*$/i
+
+/**
+ * What to show for an inline `data:` picture, or null if the target is not
+ * one — in which case the caller's "missing" answer stands.
+ */
+function dataSpec (src, { alt, size }) {
+  const url = String(src || '').trim()
+  if (!url) return null
+  const probe = url.replace(/[\u0000-\u0020\u007f]/g, '')
+  if (!DATA_IMAGE_BASE64.test(probe) && !DATA_SVG_ENCODED.test(probe)) return null
+  return {
+    kind: 'image',
+    path: null,
+    url,
+    alt,
+    /* The URL itself would be the label by the remote rule below, which for a
+       hundred-kilobyte data URI is a wall of base64 where a chip should be. */
+    label: alt || 'Image',
+    width: size?.width || null,
+    height: size?.height || null
+  }
+}
+
 /**
  * What to show for a target that lives on the network, or null if the target
  * is not one — in which case the caller's "missing" answer stands.
@@ -660,13 +701,14 @@ export function embedSpec (src, {
 
   /* `Sample.pdf#page=3` — the fragment is an instruction to the viewer, not
      part of the name, so it comes off before the vault is asked. Only for a
-     local target: a URL keeps its fragment, which belongs to the site. */
+     local target: a URL keeps its fragment, which belongs to the site, and a
+     `data:` URI keeps its payload, which has no fragment to take. */
   let target = String(src || '')
   /** @type {number | null} */
   let page = null
   /** @type {number | null} */
   let start = null
-  if (!/^https?:\/\//i.test(target)) {
+  if (!/^https?:\/\//i.test(target) && !/^data:/i.test(target)) {
     const hash = target.indexOf('#')
     if (hash !== -1) {
       const fragment = target.slice(hash + 1).trim()
@@ -681,7 +723,10 @@ export function embedSpec (src, {
   const path = resolve ? resolve(target, dir) : null
   if (!path) {
     // Nothing in the vault answers to this. Before calling it missing, ask
-    // whether it was ever meant to be in the vault.
+    // whether it was ever meant to be in the vault: an inline picture first,
+    // which needs no network, then a remote one.
+    const inline = dataSpec(src, { alt, size })
+    if (inline) return inline
     const remote = remoteSpec(src, { alt, size, writtenAsImage })
     if (remote) return remote
 
@@ -949,7 +994,6 @@ export function renderEmbed (spec, onReady = () => {}) {
   if (spec.kind === 'image') {
     const img = document.createElement('img')
     img.className = 'embed-img'
-    img.src = spec.url
     img.alt = spec.alt || ''
     if (spec.path) img.dataset.vaultImage = spec.path
     img.loading = 'lazy'
@@ -961,7 +1005,23 @@ export function renderEmbed (spec, onReady = () => {}) {
     img.decoding = 'async'
     if (spec.width) img.width = spec.width
     if (spec.height) img.height = spec.height
-    img.addEventListener('load', onReady, { once: true })
+    if (spec.width && spec.height) {
+      img.style.aspectRatio = `${spec.width} / ${spec.height}`
+    }
+    /* Listeners first: a cached picture fires `load` the moment `src` is set,
+       and a listener registered after that never runs — so the reserved 3:2
+       box would stay forever, and CodeMirror would never remeasure. */
+    let settled = false
+    const ready = () => {
+      if (settled) return
+      settled = true
+      if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+        img.style.aspectRatio = `${img.naturalWidth} / ${img.naturalHeight}`
+      }
+      img.classList.add('is-ready')
+      onReady()
+    }
+    img.addEventListener('load', ready, { once: true })
     /* A pasted image is often still being written when the embed first asks
        for it, and a "missing" chip for a file half a second from existing is
        wrong in the way that sticks. One more look before saying so. */
@@ -980,6 +1040,8 @@ export function renderEmbed (spec, onReady = () => {}) {
       img.replaceWith(renderEmbed({ ...spec, kind: 'missing', label: spec.label }))
       onReady()
     })
+    img.src = spec.url
+    if (img.complete && img.naturalWidth > 0) ready()
     return img
   }
 

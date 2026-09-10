@@ -1,16 +1,19 @@
+import { isBookmarkLine } from './bookmark.js'
 /* ================================================================ lint
    The house style for a markdown file, applied rather than complained about.
 
-   Five rules. Three about vertical space:
+   Six rules. Four about vertical space:
 
      1. A run of blank lines is a single blank line. None at the top of the
-        file, none at the bottom, and the file ends with exactly one newline.
+        file, none at the bottom (except beside a bookmark), and the file ends with a newline.
      2. A fenced code block has one blank line above it and one below it.
      3. A heading has one blank line above it and one below it.
+     4. A standalone image — a line that is only `![…](…)` or `![[…]]` — has
+        one blank line above it and one below it.
 
    one about the shape of the outline:
 
-     4. Heading levels descend one at a time. `#` may be followed by `##` and
+     5. Heading levels descend one at a time. `#` may be followed by `##` and
         `##` by `###`, but `#` followed by `###` is a level that was skipped,
         and the note is renumbered until nothing is skipped. Climbing back is
         free — `###` to `#` is a new section, not a mistake — and the top of a
@@ -18,13 +21,13 @@
 
    and one about line ends:
 
-     5. No trailing spaces or tabs, full stop. (Two trailing spaces are a
+     6. No trailing spaces or tabs, full stop. (Two trailing spaces are a
         Markdown hard break, and this rule removes those too — a break worth
         keeping is written as a backslash at the end of the line instead.)
 
    No rule ever reaches inside a code block or a maths block, which is
    what most of this file is about: finding those regions is the hard part.
-   The frontmatter is left to rule 5 for the same reason — inside a YAML
+   The frontmatter is left to rule 6 for the same reason — inside a YAML
    literal block a trailing space is data, not dirt.
 
    The answer is a list of edits rather than a rewritten string. The editor
@@ -97,6 +100,78 @@ function mathEnd (lines, i) {
 function headingAt (line) {
   const m = /^( {0,3})(#{1,6})[ \t]+\S/.exec(line)
   return m ? { indent: m[1].length, level: m[2].length } : null
+}
+
+/**
+ * If `line` from `from` is a markdown `![…](…)` or wiki `![[…]]` image, the
+ * index just after it; otherwise -1. Titles and `<url>` destinations are
+ * accepted; anything else — a sentence that happens to start with `!`, a
+ * half-written embed — is not.
+ */
+function imageAt (line, from) {
+  if (line.charCodeAt(from) !== 33 /* ! */ || line.charCodeAt(from + 1) !== 91 /* [ */) return -1
+  if (line.charCodeAt(from + 2) === 91 /* [ */) {
+    const close = line.indexOf(']]', from + 3)
+    return close < 0 ? -1 : close + 2
+  }
+  let i = from + 2
+  while (i < line.length) {
+    const c = line.charCodeAt(i)
+    if (c === 93 /* ] */) {
+      if (line.charCodeAt(i + 1) === 40 /* ( */) break
+      return -1
+    }
+    if (c === 92 /* \ */) i++
+    i++
+  }
+  if (i >= line.length) return -1
+  i += 2
+  if (line.charCodeAt(i) === 60 /* < */) {
+    const gt = line.indexOf('>', i + 1)
+    if (gt < 0) return -1
+    i = gt + 1
+  } else {
+    while (i < line.length) {
+      const c = line.charCodeAt(i)
+      if (c === 41 /* ) */ || c === 32 || c === 9) break
+      i++
+    }
+  }
+  while (i < line.length && (line.charCodeAt(i) === 32 || line.charCodeAt(i) === 9)) i++
+  const q = line.charCodeAt(i)
+  if (q === 34 /* " */ || q === 39 /* ' */ || q === 40 /* ( */) {
+    const close = q === 40 ? 41 : q
+    i++
+    while (i < line.length && line.charCodeAt(i) !== close) {
+      if (line.charCodeAt(i) === 92) i++
+      i++
+    }
+    if (line.charCodeAt(i) !== close) return -1
+    i++
+    while (i < line.length && (line.charCodeAt(i) === 32 || line.charCodeAt(i) === 9)) i++
+  }
+  return line.charCodeAt(i) === 41 /* ) */ ? i + 1 : -1
+}
+
+/**
+ * A line that is only images — one markdown or wiki embed, or a row of them —
+ * so it is a figure, not a sentence. Column 0 only: a list item, a quote or
+ * indented code never starts with `!`, and putting a blank line inside those
+ * would rewrite how they read.
+ */
+function isImageLine (line) {
+  if (line.charCodeAt(0) !== 33 /* ! */) return false
+  let i = 0
+  let saw = false
+  while (i < line.length) {
+    while (i < line.length && (line.charCodeAt(i) === 32 || line.charCodeAt(i) === 9)) i++
+    if (i >= line.length) return saw
+    const end = imageAt(line, i)
+    if (end < 0) return false
+    saw = true
+    i = end
+  }
+  return saw
 }
 
 /**
@@ -239,17 +314,18 @@ export function lintEdits (text) {
   /* One walk classifies every line, so the rules below read arrays instead of
      re-testing every line with a fresh regex of their own. `isBlank` marks the
      blank lines no rule holds; `tailLen` is the length of the trailing run
-     rule 5 cuts, or 0. */
+     rule 6 cuts, or 0. */
   const n = lines.length
   const isBlank = new Uint8Array(n)
   const tailLen = new Uint32Array(n)
   const heads = []
+  const images = []
   for (let line = 0; line < n; line++) {
     if (held[line]) continue
     const text = lines[line]
     /* The trailing run and the blankness in one backward walk: a run that
        reaches the head of the line is the whole line being whitespace, which
-       is all `BLANK` ever said, and anything shorter is the run rule 5 cuts.
+       is all `BLANK` ever said, and anything shorter is the run rule 6 cuts.
        One pass of char codes replaces a `BLANK` scan down the line and a tail
        scan back up it — two regex setups per line for what is usually decided
        by the last character alone. */
@@ -262,23 +338,30 @@ export function lintEdits (text) {
     if (tail === text.length) { isBlank[line] = 1; continue }
     if (line <= fmEnd) continue
     /* A heading needs its first `#` inside the first four columns, so most
-       lines are refused by a few char codes without ever waking the regex. */
+       lines are refused by a few char codes without ever waking the regex.
+       A figure is even narrower: it has to begin with `!` at column 0. */
     let col = 0
     while (col < 3 && text.charCodeAt(col) === 32) col++
-    if (text.charCodeAt(col) !== 35 /* # */) {
-      if (tail) tailLen[line] = tail
-      continue
+    const first = text.charCodeAt(col)
+    if (first === 35 /* # */) {
+      const heading = headingAt(text)
+      if (heading) heads.push({ line, indent: heading.indent, level: heading.level })
+    } else if (col === 0 && first === 33 /* ! */ && isImageLine(text)) {
+      images.push(line)
     }
-    const heading = headingAt(text)
-    if (heading) heads.push({ line, indent: heading.indent, level: heading.level })
     if (tail) tailLen[line] = tail
   }
 
-  /* Rule 3, into the same set of gaps rule 2 fills, so a heading sitting under
-     a code block asks for the one blank line between them rather than two.
-     Nothing is asked for against the edges of the file: rule 1 is about to take
-     the blank lines there away again, and the two would argue forever. */
+  /* Rules 3 and 4, into the same set of gaps rule 2 fills, so a heading or
+     image sitting under a code block asks for the one blank line between them
+     rather than two. Nothing is asked for against the edges of the file: rule
+     1 is about to take the blank lines there away again, and the two would
+     argue forever. */
   for (const { line } of heads) {
+    if (line > 0 && !BLANK.test(lines[line - 1])) gaps.add(line)
+    if (line < lines.length - 1 && !BLANK.test(lines[line + 1])) gaps.add(line + 1)
+  }
+  for (const line of images) {
     if (line > 0 && !BLANK.test(lines[line - 1])) gaps.add(line)
     if (line < lines.length - 1 && !BLANK.test(lines[line + 1])) gaps.add(line + 1)
   }
@@ -290,7 +373,7 @@ export function lintEdits (text) {
      never both fire on one gap. */
   /** A blank line the rules are allowed to move. */
   const blank = (i) => isBlank[i] === 1
-  /* Lines rule 1 deletes outright, which rule 5 must then leave alone: its
+  /* Lines rule 1 deletes outright, which rule 6 must then leave alone: its
      edits sit inside the deleted span, and two edits over the same ground is
      the overlap a ChangeSet throws on. */
   const gone = new Set()
@@ -302,13 +385,16 @@ export function lintEdits (text) {
 
     const leading = i === 0
     const trailing = j === lines.length
-    const keep = leading || trailing ? 0 : 1
+    // Bookmark spacing is intentional even at the edges of a note.
+    const bookmarkEdge = (leading && isBookmarkLine(lines[j] || '')) ||
+      (trailing && isBookmarkLine(lines[i - 1] || ''))
+    const keep = bookmarkEdge ? 1 : leading || trailing ? 0 : 1
 
     if (j - i > keep) {
       if (trailing) {
         // From the end of the last line that stays, so the newline that ends it
         // is the one the file finishes on.
-        edits.push({ from: lineEnd(i - 1), to: body.length, insert: '' })
+        edits.push({ from: lineEnd(i + keep - 1), to: body.length, insert: '' })
       } else {
         edits.push({ from: starts[i + keep], to: starts[j], insert: '' })
       }
@@ -319,7 +405,7 @@ export function lintEdits (text) {
 
   for (const gap of gaps) edits.push({ from: starts[gap], to: starts[gap], insert: '\n' })
 
-  /* Rule 4, as the depth of a stack of the levels still open above each
+  /* Rule 5, as the depth of a stack of the levels still open above each
      heading. A heading pops every level at or below its own — those sections
      have ended — pushes its own, and is written at whatever depth it now sits
      at. That keeps what the levels *say* while fixing what they are: two `###`
@@ -339,7 +425,7 @@ export function lintEdits (text) {
     edits.push({ from, to: from + level, insert: '#'.repeat(open.length) })
   }
 
-  /* Rule 5. Trailing spaces and tabs go — a kept blank line is emptied, a
+  /* Rule 6. Trailing spaces and tabs go — a kept blank line is emptied, a
      content line is cut back to its last visible character — with two
      exceptions, both about not changing what code means rather than how prose
      reads. A code or maths line may mean its whitespace, and the frontmatter
@@ -367,7 +453,7 @@ export function lintEdits (text) {
      leave them non-overlapping — which is what a ChangeSet requires.
 
      The tie is between rule 3's blank line above an unindented heading and rule
-     4's rewrite of that heading's hashes, which begin at the same offset. The
+     5's rewrite of that heading's hashes, which begin at the same offset. The
      shorter goes first: the blank line belongs above the heading, not inside
      the hashes it would otherwise be sorted into the middle of. */
   return edits.sort((a, b) => (a.from - b.from) || ((a.to - a.from) - (b.to - b.from)))

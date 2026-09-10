@@ -39,6 +39,22 @@ export function createMarkdown ({ resolveEmbedSrc }) {
      came back curly-quoted. Raw HTML is its own token now and is left alone. */
   const md = new MarkdownIt({ html: true, linkify: true, breaks: true, typographer: true })
 
+  /* markdown-it's own `validateLink` admits almost no `data:` images — only
+     `gif|png|jpeg|webp` — so `![](data:image/svg+xml;…)` never becomes an image
+     token at all and stays literal text. The embed pipeline in src/assets.js
+     is what then decides a data URI is a picture, on the same terms as the
+     raw-HTML sanitiser in src/rawhtml.js, so the gate here only needs to agree
+     with those two about which `data:` URLs are pictures. Anything else keeps
+     the default verdict, and clicks never follow it anyway (see routeAnchor in
+     src/links.js, which only follows http(s) and mailto). */
+  const GOOD_DATA_IMAGE = /^data:image\/(?:png|jpe?g|gif|webp|avif|bmp|x-icon|svg\+xml)(?:;charset=[^;,]+)?[;,]/i
+  const defaultValidateLink = md.validateLink.bind(md)
+  md.validateLink = (url) => {
+    const str = String(url || '').trim()
+    if (/^data:/i.test(str)) return GOOD_DATA_IMAGE.test(str)
+    return defaultValidateLink(url)
+  }
+
   md.use(mathPlugin)
   md.use(moneyPlugin)
   md.use(citationPlugin)

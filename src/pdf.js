@@ -32,17 +32,21 @@ import { MARK_COLORS } from './pdf-colors.js'
    which awaits this — by the time a page renders or a text layer is built, the
    module is here. */
 let pdfjsLib = /** @type {any} */ (null)
+/** @type {Promise<any> | null} */
+let pdfjsLoading = null
 
-export async function loadPdfjs () {
-  if (!pdfjsLib) {
-    pdfjsLib = await import('pdfjs-dist/build/pdf.mjs')
+export function loadPdfjs () {
+  if (pdfjsLib) return Promise.resolve(pdfjsLib)
+  pdfjsLoading ||= import('pdfjs-dist/build/pdf.mjs').then((module) => {
+    pdfjsLib = module
     /* The worker is built beside the bundle by build.mjs. A relative URL
        resolves against the page, which is the only origin allowed to serve it
        one. Set here rather than at module scope because there is no module to
        set it on until now. */
     pdfjsLib.GlobalWorkerOptions.workerSrc = 'pdf.worker.js'
-  }
-  return pdfjsLib
+    return pdfjsLib
+  }).finally(() => { pdfjsLoading = null })
+  return pdfjsLoading
 }
 
 /* Everything pdf.js loads on demand: glyphs for standard fonts a document names
@@ -2005,7 +2009,7 @@ export function mountPdf ({
    * @param {string} path
    * @param {{page?:number, top?:number}|null} place  where to restore to
    */
-  async function open (path, place = null) {
+  async function open (path, place = null, readySource = null) {
     await close()
 
     const epoch = ++state.epoch
@@ -2017,7 +2021,10 @@ export function mountPdf ({
       /* Together: pdf.js and the guarded document URL are independent. The
          library fetches the latter in ranges instead of receiving one giant
          structured clone over IPC. */
-      ;[source] = await Promise.all([api.pdf.source(path), loadPdfjs()])
+      ;[source] = await Promise.all([
+        readySource === null ? api.pdf.source(path) : Promise.resolve(readySource),
+        loadPdfjs()
+      ])
     } catch (err) {
       host.classList.remove('is-loading')
       throw err

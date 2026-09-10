@@ -148,7 +148,7 @@ function parseBibTeX (source) {
    to be parsed again. The file is read again (it may have changed) but the
    same bytes are not parsed twice. */
 let parsedBib = { text: /** @type {string | null} */ (null), entries: new Map() }
-function parseBibTeXCached (source) {
+export function parseBibTeXCached (source) {
   const text = String(source || '')
   if (parsedBib.text !== text) parsedBib = { text, entries: parseBibTeX(text) }
   return parsedBib.entries

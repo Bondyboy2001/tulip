@@ -76,12 +76,11 @@ function cachedTokens (key) {
   return hit.tokens
 }
 
-function rememberTokens (key, code, tokens) {
+function rememberTokens (key, tokens) {
   /* UTF-16 strings are two bytes per code unit. Class names are shared literals
      in practice, but counting them too keeps the bound conservative. The key no
      longer holds the block (see tokenKey), so what is retained is the key plus
-     the token texts — the `code` parameter itself is the caller's and is not
-     kept. */
+     the token texts. */
   const bytes = 2 * (key.length +
     tokens.reduce((sum, token) => sum + token.text.length + token.classes.length, 0))
   if (bytes > TOKEN_CACHE_BYTES) return
@@ -269,7 +268,7 @@ export async function highlightInto (el, code, token) {
       (text, classes) => tokens.push({ text, classes: classes || '' }),
       () => tokens.push({ text: '\n', classes: '' })
     )
-    rememberTokens(key, code, tokens)
+    rememberTokens(key, tokens)
   }
 
   /* Loading a language may have yielded long enough for the note to change.

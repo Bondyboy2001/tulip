@@ -56,34 +56,6 @@
 .saved-search-row:is(:hover, :focus-within) .saved-search-remove { opacity: 1; }
 .saved-search-remove:hover { background: var(--hover); color: var(--ink); }
 
-.ai-doctor { display: grid; gap: 10px; }
-.ai-doctor-results { display: grid; gap: 4px; }
-.ai-doctor-provider {
-  display: grid;
-  grid-template-columns: 82px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 10px;
-  min-height: 30px;
-  padding: 4px 8px 4px 22px;
-  border: 1px solid var(--line-soft);
-  border-radius: 6px;
-  font: 11.5px/1.2 var(--font-ui);
-  position: relative;
-}
-.ai-doctor-provider::before {
-  content: '';
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--strong);
-  position: absolute;
-}
-.ai-doctor-provider.is-ready::before { background: var(--stem); }
-.ai-doctor-name { font-weight: 650; color: var(--ink); }
-.ai-doctor-version { overflow: hidden; color: var(--faint); text-overflow: ellipsis; white-space: nowrap; }
-.ai-doctor-status { color: var(--muted); }
-
-
 /* ========================================================== review statistics
    The panel built in src/review-panel.js. Its own block rather than rules
    folded into styles.css because it is the only surface in the app the window
@@ -201,3 +173,38 @@
 
 .stats-foot { display: flex; justify-content: flex-end; gap: 8px; padding-top: 2px; }
 
+
+/* Compact package inspector. Advanced actions stay behind disclosures. */
+.packages-dialog { box-sizing: border-box; width: min(460px, calc(100vw - 32px)); max-height: 80vh; overflow: auto; padding: 20px; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 18px 60px #0003; font: 13px/1.5 var(--font-ui); }
+.packages-dialog::backdrop { background: #0004; }
+.packages-head, .packages-toolbar, .packages-row, .packages-add-fields, .packages-action-buttons { display: flex; align-items: center; gap: 10px; }
+.packages-head, .packages-toolbar { justify-content: space-between; }
+.packages-head h2 { margin: 0; font-size: 17px; font-weight: 600; }
+.packages-close { width: 28px; height: 28px; padding: 0; border: 0; border-radius: 6px; color: var(--muted); background: transparent; font: 22px/1 var(--font-ui); cursor: pointer; }
+.packages-close:hover { color: var(--ink); background: var(--hover); }
+.packages-note { margin: 2px 0 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 12px; }
+.packages-toolbar { margin-bottom: 10px; }
+.packages-dialog input, .packages-dialog select { box-sizing: border-box; max-width: 100%; font: inherit; color: var(--ink); background: var(--sunk); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+.packages-dialog select { max-width: 58%; font-size: 12px; }
+.packages-dialog :is(button, input, select, summary):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.packages-dialog .ghost { font-size: 12px; padding: 5px 7px; }
+.packages-add { margin: 12px 0; padding: 12px; border: 1px solid var(--line); border-radius: 8px; }
+.packages-add-fields input { min-width: 0; flex: 1; }
+.packages-mapping { margin-top: 9px; }
+.packages-mapping summary, .packages-actions > summary { color: var(--muted); cursor: pointer; font-size: 11px; }
+.packages-mapping input { width: 100%; margin-top: 8px; }
+.packages-list { border-top: 1px solid var(--line); }
+.packages-list > p { color: var(--muted); font-size: 12px; margin: 18px 0; }
+.packages-row { min-height: 43px; border-bottom: 1px solid var(--line); }
+.packages-name { flex: 1; min-width: 0; overflow-wrap: anywhere; font-weight: 500; }
+.packages-version { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.packages-menu { position: relative; }
+.packages-menu > summary { list-style: none; width: 28px; border-radius: 5px; text-align: center; font-weight: 700; cursor: pointer; color: var(--muted); }
+.packages-menu > summary::-webkit-details-marker { display: none; }
+.packages-menu[open] > summary, .packages-menu > summary:hover { background: var(--hover); color: var(--ink); }
+.packages-menu-items { position: absolute; z-index: 2; right: 0; top: 26px; min-width: 100px; display: grid; padding: 4px; background: var(--surface); border: 1px solid var(--line); border-radius: 7px; box-shadow: 0 6px 18px #0002; }
+.packages-menu-items button { text-align: left; }
+.packages-actions { margin-top: 14px; }
+.packages-action-buttons { flex-wrap: wrap; margin-top: 8px; }
+.packages-status { margin: 10px 0 0; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.packages-status:empty { display: none; }

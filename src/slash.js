@@ -167,12 +167,12 @@ const placeholderField = ViewPlugin.fromClass(
 
 /* ------------------------------------------------------- the picker
 
-   One dropdown, opened from the chip or from an image's change control. The
-   menu is the app's own — the same component the language picker uses — not
-   the completion tooltip, and it is the only thing that ever opens in this
-   flow. */
+   One dropdown, opened from the empty embed chip or from `/` → Image or file.
+   The menu is the app's own — the same component the language picker uses —
+   not the completion tooltip, and it is the only thing that ever opens in
+   this flow. */
 
-export function openEmbedPicker (view, from, to) {
+function openEmbedPicker (view, from, to) {
   const choices = view.state.facet(embedChoices)()
   const options = [
     { value: 'web', label: URL_KINDS.web.label },

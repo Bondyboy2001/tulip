@@ -51,7 +51,7 @@ import {
 import { calloutHead, calloutIcon } from './callouts.js'
 import { parseFlashcards } from './flashcards.js'
 import {
-  slashEmbed, openEmbedPicker, slashCommands, fenceLanguages, calloutKinds,
+  slashEmbed, slashCommands, fenceLanguages, calloutKinds,
   hashTags, tagChoices as tagChoicesFacet,
   embedChoices as embedChoicesFacet
 } from './slash.js'
@@ -626,6 +626,16 @@ class EmbedWidget extends WidgetType {
    */
   constructor (spec, figure) { super(); this.spec = spec; this.figure = figure }
 
+  /* A figure with no written size still occupies a column-wide 3:2 box in
+     CSS; reporting that height here keeps CodeMirror's scroll map from treating
+     the line as empty until the picture decodes — which is what threw a note
+     of remote photographs to the bottom on every scroll up. */
+  get estimatedHeight () {
+    if (this.spec.height) return this.spec.height
+    if (this.figure && (this.spec.kind === 'image' || this.spec.kind === 'youtube')) return 280
+    return -1
+  }
+
   // Compared field by field rather than by identity: a fresh spec object is
   // built on every decoration pass, and an identity check would re-create the
   // <img> — and re-decode the picture — on every keystroke.
@@ -648,12 +658,12 @@ class EmbedWidget extends WidgetType {
     // the cursor and the scrollbar from sitting a picture too high — and it is
     // the one thing here the reading view has no equivalent of.
     const embed = renderEmbed(this.spec, () => view.requestMeasure())
+    if (this.figure) embed.classList.add('is-figure')
     if (this.spec.kind === 'image') {
       const host = sizerFor(embed, view)
       if (this.figure) host.classList.add('is-figure')
       return host
     }
-    if (this.figure) embed.classList.add('is-figure')
     return embed
   }
 
@@ -677,6 +687,9 @@ class EmbedWidget extends WidgetType {
  * into the note as the `|400` suffix both views already read — the size is a
  * fact about the note, not about this session, so it survives the round trip
  * through disk and shows the same in the reading view.
+ *
+ * The corner control reveals the Markdown that produced the picture. Clicking
+ * the picture itself only places the caret.
  */
 function sizerFor (img, view) {
   const host = document.createElement('span')
@@ -684,49 +697,21 @@ function sizerFor (img, view) {
 
   const source = document.createElement('button')
   source.type = 'button'
-  source.className = 'tk-embed-control tk-embed-source'
-  source.title = 'Show this image’s Markdown'
-  source.setAttribute('aria-label', 'Show this image’s Markdown')
+  source.className = 'tk-embed-control'
+  source.title = 'Show raw Markdown'
+  source.setAttribute('aria-label', 'Show raw Markdown')
   source.innerHTML =
-    '<svg viewBox="0 0 16 16" aria-hidden="true">' +
-      '<path d="m6 4-4 4 4 4M10 4l4 4-4 4" fill="none" stroke="currentColor" ' +
-        'stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>' +
-    '</svg>'
-
-  /* The second control: change what the picture embeds. Same corner, one
-     button over from the source reveal — clicking the picture itself stays
-     free for caret placement, and this is the explicit "click into it" the
-     placeholder chip already offers. */
-  const change = document.createElement('button')
-  change.type = 'button'
-  change.className = 'tk-embed-control tk-embed-change'
-  change.title = 'Choose what to embed'
-  change.setAttribute('aria-label', 'Choose what to embed')
-  change.innerHTML =
-    '<svg viewBox="0 0 16 16" aria-hidden="true">' +
-      '<path d="M7 2.5 3.5 6 7 9.5M9 2.5l3.5 3.5L9 9.5" fill="none" stroke="currentColor" ' +
-        'stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>' +
+    '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">' +
+      '<path d="M5.9 4.3 2.6 8l3.3 3.7M10.1 4.3 13.4 8l-3.3 3.7" fill="none" stroke="currentColor" ' +
+        'stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>' +
     '</svg>'
 
   const grip = embedResizeGrip()
-  host.append(img, change, source, grip)
+  host.append(img, source, grip)
 
   /* Keep the editor's caret where it is until the click selects the exact
      source range below. Otherwise mousedown first moves it to whichever side
      of the replacement CodeMirror happens to hit-test. */
-  change.addEventListener('mousedown', (event) => {
-    event.preventDefault()
-    event.stopPropagation()
-  })
-  change.addEventListener('click', (event) => {
-    event.preventDefault()
-    event.stopPropagation()
-    const range = embedRangeAtDOM(view, host)
-    if (range) openEmbedPicker(view, range.from, range.to)
-  })
-
-  /* Same for the source reveal: keep the caret put until the click selects
-     the exact range below. */
   source.addEventListener('mousedown', (event) => {
     event.preventDefault()
     event.stopPropagation()
@@ -1241,7 +1226,7 @@ class BulletWidget extends WidgetType {
   }
 }
 
-/* An ordered item's number, drawn as a small accent-coloured circle — the
+/* An ordered item's number, drawn as a small accent-coloured badge — the
    same rendering the reading view builds from the list-item counter, so the
    two views agree on what a numbered list looks like. */
 class OrderedMarkWidget extends WidgetType {
@@ -2097,6 +2082,15 @@ function buildDecorations (view, imageSource = null) {
   }
 }
 
+/* A viewport-only update is coalesced to the next animation frame below. The
+   effect is the repaint handshake: mutating a ViewPlugin's decoration field
+   after its update method has returned does not, by itself, make CodeMirror
+   read that field again. Without a transaction, recycled lines kept the live
+   preview classes from the old viewport while the independent line-number
+   plugin painted the new one — leaving exactly a number gutter on otherwise
+   plain code after a vertical scroll. */
+const viewportPreviewEffect = StateEffect.define()
+
 const livePreview = ViewPlugin.fromClass(
   class {
     constructor (view) {
@@ -2153,7 +2147,7 @@ const livePreview = ViewPlugin.fromClass(
       }
       this.viewportRaf = requestAnimationFrame(() => {
         this.viewportRaf = 0
-        Object.assign(this, buildDecorations(view, this.imageSource))
+        if (view.dom.isConnected) view.dispatch({ effects: viewportPreviewEffect.of(null) })
       })
     }
 
@@ -2191,6 +2185,8 @@ const livePreview = ViewPlugin.fromClass(
       // resolves against. Nothing in the update itself would show that.
       const refreshed = update.transactions.some((tr) =>
         tr.effects.some((e) => e.is(refreshEffect)))
+      const viewportPainted = update.transactions.some((tr) =>
+        tr.effects.some((e) => e.is(viewportPreviewEffect)))
       const settled = update.transactions.some((tr) =>
         tr.effects.some((e) => e.is(selectionRevealEffect)))
       const sourceEffect = update.transactions
@@ -2213,12 +2209,12 @@ const livePreview = ViewPlugin.fromClass(
         if (!selected) this.imageSource = null
       }
 
-      if (refreshed || foldChanged || update.docChanged || update.viewportChanged ||
+      if (refreshed || viewportPainted || foldChanged || update.docChanged || update.viewportChanged ||
           syntaxTree(update.startState) !== syntaxTree(update.state)) {
         /* A scroll on its own waits for the frame — see `queueViewport`. The
            tree comparison is part of that question: a changed tree with no
            document change still rebuilds at once, as before. */
-        if (!refreshed && !foldChanged && !update.docChanged && update.viewportChanged &&
+        if (!refreshed && !viewportPainted && !foldChanged && !update.docChanged && update.viewportChanged &&
             !settled && !sourceEffect &&
             syntaxTree(update.startState) === syntaxTree(update.state)) {
           this.queueViewport(update.view)
@@ -3287,6 +3283,52 @@ export function createEditor ({
   }
 
   /**
+   * The document position at the middle of the editor before a window zoom.
+   * A pixel scroll offset cannot describe the same reading place once the
+   * viewport gets taller or shorter, and wrapped lines may change height too.
+   * A source position survives both changes. Keep its offset as well: the
+   * midpoint can be in the margin between two preview blocks, where there is
+   * no position to ask CodeMirror for directly.
+   */
+  /** @type {any} */ (view).zoomAnchor = () => {
+    try {
+      const box = view.scrollDOM.getBoundingClientRect()
+      if (box.width <= 0 || box.height <= 0) return null
+      const middle = box.top + box.height / 2
+      /* CodeMirror already keeps this geometry for its virtual viewport. Asking
+         it avoids both the ambiguity of a coordinate in the gap between
+         blocks and a DOM measurement for every visible line. */
+      const block = view.lineBlockAtHeight(middle - view.documentTop)
+      return { pos: block.from, offset: view.documentTop + block.top - middle }
+    } catch { return null }
+  }
+
+  /** Put the source position captured above back at the viewport midpoint. */
+  /** @type {any} */ (view).restoreZoomAnchor = (anchor) => {
+    const pos = Number(anchor?.pos)
+    if (!Number.isFinite(pos)) return false
+    const at = Math.max(0, Math.min(pos, view.state.doc.length))
+    /* CodeMirror virtualises lines outside this range. First bring the anchor
+       into that range; a following paint frame will have a real DOM line to
+       measure. Do not keep dispatching this effect once it is present: its
+       own deferred scroll write would overwrite the exact correction below. */
+    if (at < view.viewport.from || at > view.viewport.to) {
+      view.dispatch({ effects: EditorView.scrollIntoView(at, { y: 'center', yMargin: 0 }) })
+      return false
+    }
+
+    try {
+      const box = view.scrollDOM.getBoundingClientRect()
+      if (box.height <= 0) return false
+      const wanted = box.top + box.height / 2 + (Number(anchor.offset) || 0)
+      const block = view.lineBlockAt(at)
+      const delta = view.documentTop + block.top - wanted
+      if (Math.abs(delta) > 0.5) view.scrollDOM.scrollTop += delta
+    } catch { return false }
+    return true
+  }
+
+  /**
    * The note's own undo, reachable from outside the editor.
    *
    * ⌘Z is on the Edit menu, and a menu key equivalent is taken by the menu
@@ -3363,4 +3405,20 @@ export function createEditor ({
   }
 
   return view
+}
+
+// Scratch documents share the editor's typography and keyboard behavior, but
+// have no vault path or persistence callbacks.
+export function createMemoryEditor (parent, text, onChange) {
+  return new EditorView({
+    parent,
+    state: EditorState.create({ doc: text, extensions: [
+      tulipTheme, markdown(), history(), drawSelection(), multiCursor, EditorView.lineWrapping,
+      search(), keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap]),
+      EditorView.updateListener.of((update) => {
+        if (update.docChanged) onChange(update.state.doc.toString())
+      }),
+      EditorView.contentAttributes.of({ 'aria-label': 'Temporary Markdown document' })
+    ] })
+  })
 }

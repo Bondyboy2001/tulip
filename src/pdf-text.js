@@ -57,11 +57,12 @@ class LocalBinaryDataFactory {
  *   have no character codes to come back as.
  * @param {string} [opts.cmaps]  `dist/pdfjs/cmaps/`, the same story for CJK
  *   documents, whose character codes live in maps rather than fonts.
+ * @param {number} [opts.pageNumber] Read just this page for an on-demand preview.
  * @param {string} [opts.wasm]   `dist/pdfjs/wasm/`, the decoders pdf.js ships
  *   as wasm files.
  * @returns {Promise<{ text: string, pageTexts: string[], pages: number, sparsePages: number[] }>}
  */
-export async function extract (bytes, { name = 'document.pdf', fonts, cmaps, wasm } = {}) {
+export async function extract (bytes, { name = 'document.pdf', fonts, cmaps, wasm, pageNumber = 0 } = {}) {
   /* pdf.js parses in a worker, and out of a browser it makes a fake one by
      importing its worker file by path — which a bundle does not have, and the
      packaged app has nowhere to put. `globalThis.pdfjsWorker` is the door it
@@ -90,7 +91,8 @@ export async function extract (bytes, { name = 'document.pdf', fonts, cmaps, was
 
   const pages = []
   try {
-    for (let n = 1; n <= doc.numPages; n++) {
+    if (pageNumber && (!Number.isInteger(pageNumber) || pageNumber < 1 || pageNumber > doc.numPages)) throw new Error('That page is outside this PDF.')
+    for (let n = pageNumber || 1; n <= (pageNumber || doc.numPages); n++) {
       const page = await doc.getPage(n)
       try {
         const content = await page.getTextContent()

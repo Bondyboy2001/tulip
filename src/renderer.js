@@ -1,3 +1,7 @@
+import { sourcePassage, showSourcePreview } from './source-preview.js'
+import { mountRecoveryPanel } from './recovery-panel.js'
+import { mountShortcuts } from './shortcuts.js'
+import { mountWorkspaceTools } from './workspace-tools.js'
 // @ts-ignore — resolved by the esbuild CSS loader, which tsc does not see
 import './styles.css'
 /* styles-features.css is not imported here: it styles surfaces that are hidden
@@ -8,7 +12,7 @@ import './styles.css'
    CSS reached through a dynamic import into the entry point's own stylesheet
    (see build.mjs), so the file is a named build entry fetched as a link. */
 import { createMarkdown } from './markdown.js'
-import { BOOKMARK_LINE, bookmarkLineOf } from './bookmark.js'
+import { bookmarkInsertion, bookmarkLineOf } from './bookmark.js'
 import { mountPanels } from './panels.js'
 import { makeDrafts } from './drafts.js'
 import { mountTexSplit } from './tex-split.js'
@@ -23,7 +27,7 @@ import {
 } from './vault-paths.js'
 import { CONTEXT_MODES } from './models.js'
 import {
-  boundedText, contextBudget, noteExcerpt, textContextKind
+  boundedText, contextBudget, noteExcerpt, textContextKind, captureSavedContext
 } from './copilot-context.js'
 import { DEFAULT_ZOOM } from './zoom.js'
 import { highlightInto } from './highlight.js'
@@ -42,7 +46,7 @@ import {
 import { makeLineScanner } from './spelling.js'
 import { prepareMath, equationIndex, equationsFor, docText } from './math.js'
 import { dressCitations } from './citations.js'
-import { THEMES, resolveTheme, isTheme, isDarkTheme } from './themes.js'
+import { THEMES, resolveTheme, isDarkTheme } from './themes.js'
 import { FONTS, FONT_ROLES, fontStack, fontLabel, isFont } from './fonts.js'
 import {
   assetIndex, embedSpec, specForEmbed, renderEmbed, isAsset,
@@ -56,6 +60,7 @@ import {
   initSidePane, openToSide, closeSidePane, sideDoc, refreshSidePane
 } from './sidepane.js'
 import { routeFragmentClick, activateFocusedWikilink } from './links.js'
+import { openPackages } from './packages.js'
 import { settled, repin, othersOf, rightOf } from './tabstrip.js'
 import { safeCut } from './reading-split.js'
 import { initInfoPane, renderInfo, queueInfo } from './info-pane.js'
@@ -93,8 +98,7 @@ import { mountPanelAccessibility } from './panel-state.js'
 import { mountSavedSearches } from './saved-searches.js'
 import { COUNTRIES, countryCode, languageIdentity } from './countries.js'
 import {
-  FONT_MODES, VAULTLESS, OVERLAY_PROMPT, OVERLAY_LABEL,
-  generalCommandGroup, contextCommand
+  FONT_MODES, VAULTLESS, OVERLAY_PROMPT, OVERLAY_LABEL
 } from './overlay-catalog.js'
 
 const api = /** @type {any} */ (window).tulip
@@ -211,7 +215,7 @@ const state = {
   pickAnchor: null,    // where a shift-range measures from
   /** @type {any} */
   dragging: null,      // paths currently being dragged in the tree
-  theme: 'light',
+  theme: 'linen',
   // The typeface in each role — see FONT_ROLES in fonts.js.
   fonts: { body: 'charter', ui: 'system-sans' },
   /* The file tree is the sidebar's upper panel and is not optional. This is
@@ -328,6 +332,8 @@ const el = {
   panelReplaceInput: /** @type {HTMLInputElement} */ ($('panel-replace-input')),
   panelReplaceGo: /** @type {HTMLButtonElement} */ ($('panel-replace-go')),
   panelSaveSearch: /** @type {HTMLButtonElement} */ ($('panel-save-search')),
+  panelFilterToggle: /** @type {HTMLButtonElement} */ ($('panel-filter-toggle')),
+  panelFilterPresets: /** @type {HTMLElement} */ ($('panel-filter-presets')),
   savedSearches: /** @type {HTMLElement} */ ($('saved-searches')),
   askDetail: /** @type {HTMLElement} */ ($('ask-detail')),
   flashcardComposer: /** @type {HTMLElement} */ ($('flashcard-composer')),
@@ -384,6 +390,7 @@ const el = {
   aiConfig: /** @type {HTMLElement} */ ($('ai-config')),
   aiConfigModel: /** @type {HTMLElement} */ ($('ai-config-model')),
   aiConfigEffort: /** @type {HTMLElement} */ ($('ai-config-effort')),
+  sidebarOpen: /** @type {HTMLButtonElement} */ ($('sidebar-open')),
   gripSidebar: /** @type {HTMLElement} */ ($('grip-sidebar')),
   gripAi: /** @type {HTMLElement} */ ($('grip-ai')),
   sidepane: /** @type {HTMLElement} */ ($('sidepane')),
@@ -971,7 +978,13 @@ let pdfLoading = null
 function ensurePdf () {
   if (pdf) return Promise.resolve(pdf)
   pdfLoading ||= Promise.all([
-    import('./pdf.js'),
+    /* Start pdf.js as soon as the small viewer module arrives. Previously the
+       large library did not begin loading until the viewer and its stylesheet
+       had both mounted, leaving two serial waits on the first PDF open. */
+    import('./pdf.js').then(async (module) => {
+      await module.loadPdfjs()
+      return module
+    }),
     import('./pdf-find.js'),
     loadFeatureStyles('pdf')
   ]).then(([{ mountPdf }, { mountPdfFind }]) => {
@@ -1160,6 +1173,7 @@ function setViewerDirty (dirty) {
 function markViewerSaved () {
   renderTabs()
   setStatusRight('Saved')
+  if (state.current) void recoveryPanel.saved(state.current.path).catch(console.error)
 }
 
 /* Loaded only when the first board opens. Excalidraw and React are far larger
@@ -1787,6 +1801,7 @@ async function saveCurrentNow () {
   if (!state.current || !state.dirty) return true
   if (viewingWhiteboard()) {
     try { await whiteboardInstance?.save() } catch (err) {
+      void recoveryPanel.record('save', state.current.path)
       toast(reason(err, 'Could not save this whiteboard.'))
       return false
     }
@@ -1794,6 +1809,7 @@ async function saveCurrentNow () {
   }
   if (viewingData()) {
     try { await dataInstance?.save({ flush: true }) } catch (err) {
+      void recoveryPanel.record('save', state.current.path)
       toast(reason(err, 'Could not save this table.'))
       return false
     }
@@ -1801,6 +1817,7 @@ async function saveCurrentNow () {
   }
   if (viewingNotebook()) {
     try { await notebookInstance?.save({ flush: true }) } catch (err) {
+      void recoveryPanel.record('save', state.current.path)
       toast(reason(err, 'Could not save this notebook.'))
       return false
     }
@@ -1808,6 +1825,7 @@ async function saveCurrentNow () {
   }
   if (viewingDocx()) {
     try { await docxInstance?.save({ flush: true }) } catch (err) {
+      void recoveryPanel.record('save', state.current.path)
       toast(reason(err, 'Could not save this Word document.'))
       return false
     }
@@ -1867,6 +1885,7 @@ async function saveCurrentNow () {
       state.dirty = false
       renderTabs()
       setStatusRight('Saved')
+      void recoveryPanel.saved(wrote).catch(console.error)
       /* The note is on disk, so the copy kept against a crash has nothing left
          to protect. Only on this branch: if a keystroke landed mid-write the
          buffer has run ahead of the file again, and the draft is once more the
@@ -1881,6 +1900,7 @@ async function saveCurrentNow () {
       await refreshLanguageHistory(wrote)
     }
   } catch (err) {
+    void recoveryPanel.record('save', wrote)
     toast(reason(err, 'Could not save this note.'))
     return false
   }
@@ -1905,16 +1925,7 @@ function saveNow () {
  * saved is never linted either. This is asked for rather than incidental, so it
  * has no reason to hold anything back.
  */
-/**
- * Whether there is a newer Tulip, said once and acted on by hand.
- *
- * There is no updater, and the answer to a new version is still to download it
- * and replace the app — see the README. What this removes is the part that was
- * genuinely missing: a way to find out at all, short of visiting the repository
- * and reading tags.
- *
- * Everything about the request is in main; this is the sentence it becomes.
- */
+/** Offer a verified installation where available, or the release download. */
 async function checkForUpdate () {
   setStatusRight('Checking for updates…')
   const answer = await api.checkForUpdate().catch(() => null)
@@ -1930,13 +1941,25 @@ async function checkForUpdate () {
   }
 
   const notes = answer.notes ? `\n\n${answer.notes}` : ''
+  const direct = !!answer.downloadUrl
   const go = await ask({
     title: `Tulip ${answer.latest} is available.`,
-    detail: `This copy is ${answer.current}. Updating means downloading the new ` +
-      `version and replacing the app — Tulip does not update itself.${notes}`,
-    go: 'Open the download page'
+    detail: `This copy is ${answer.current}. ` + (answer.canInstall
+      ? 'Tulip will download and verify the new app, save your documents, and restart. The previous app will be kept in Applications.'
+      : 'Download the release and replace the app. Automatic installation requires a signed macOS package with a verified download.') + notes,
+    go: answer.canInstall ? 'Install and restart' : direct ? 'Download update' : 'Open the download page'
   })
-  if (go && answer.url) api.openExternal(answer.url)
+  if (!go) return
+  if (answer.canInstall) {
+    setStatusRight('Downloading and verifying update…')
+    const installed = await api.installUpdate().catch(() => null)
+    if (!installed?.ok) {
+      setStatusRight('')
+      const download = await ask({ title: 'The update could not be installed.',
+        detail: installed?.reason || 'Download the release to install it manually.', go: 'Download instead' })
+      if (download && (answer.downloadUrl || answer.url)) api.openExternal(answer.downloadUrl || answer.url)
+    }
+  } else if (answer.downloadUrl || answer.url) api.openExternal(answer.downloadUrl || answer.url)
 }
 
 async function lintFile () {
@@ -1974,18 +1997,8 @@ async function setBookmark () {
     ? doc.line(Math.max(1, Math.min(target, doc.lines)))
     : doc.lineAt(view.state.selection.main.head)
   const had = bookmarkLineOf(doc.toString())
-  const changes = []
-  /* The old marker and its line break go together, so that no blank line is
-     left where it stood. On the last line the break is the one before it. */
-  if (had) {
-    const old = doc.line(had)
-    if (old.number === at.number) { setStatusRight('Bookmarked here already'); return }
-    changes.push(old.to < doc.length
-      ? { from: old.from, to: old.to + 1 }
-      : { from: Math.max(0, old.from - 1), to: old.to })
-  }
-  changes.push({ from: at.from, insert: BOOKMARK_LINE + '\n' })
-  view.dispatch({ changes, userEvent: 'input.bookmark' })
+  const { anchor, ...change } = bookmarkInsertion(doc.toString(), at.number)
+  view.dispatch({ changes: change, selection: { anchor }, userEvent: 'input.bookmark' })
   saveNow()
   toast(had ? 'Bookmark moved here.' : 'Bookmarked.')
 }
@@ -2685,7 +2698,7 @@ async function openFromTree (path) {
   const at = state.tabs.findIndex((tab) => tab.path === path)
   if (at === state.tabIndex) return
   if (at >= 0) return selectTab(at)
-  return openNote(path, { newTab: !!state.tabs[state.tabIndex]?.path })
+  return openNote(path, { newTab: !!(activeTab()?.path || activeTab()?.memory) })
 }
 
 /**
@@ -3154,6 +3167,7 @@ async function openNote (path, opts = {}) {
  * does the tab change hands.
  */
 function enterDoc (path, { history, newTab }) {
+  closeMemoryDocument()
   markPlace()
 
   if (newTab || !state.tabs.length) {
@@ -3162,6 +3176,7 @@ function enterDoc (path, { history, newTab }) {
     state.tabs.splice(state.tabIndex + 1, 0, blankTab())
     state.tabIndex++
   }
+  delete activeTab().memory
   activeTab().path = path
   if (history) pushHistory(path)
 
@@ -3211,6 +3226,7 @@ function settleDoc (path, { chat = true } = {}) {
  * a live page in it — and none of that should outlive the tab pointing at it.
  */
 async function leaveDoc () {
+  closeMemoryDocument()
   /* Before the teardown, not after. The place a tab was left at is read from
      the viewer that is holding it, and a closed viewer has nothing left to
      say — `enterDoc` marks the place too, but by then the page it would have
@@ -3477,7 +3493,7 @@ async function openText (path, { focus = true, history = true, place = null, new
   if (reading()) renderReading()
   if (focus && !reading()) editor?.focus()
   /* After the page is built, because there is nothing to scroll until then. */
-  if (place?.line > 1 && reading() && !marked) restoreReadingPlace(place.line)
+  if (place?.line >= 1 && reading() && !marked) restoreReadingPlace(place.line)
   if (marked) goToBookmark({ quiet: true })
 
   settleDoc(path, { chat })
@@ -3561,7 +3577,14 @@ async function openViewed (path, { focus = true, history = true, place = null, n
 
 function openPdf (path, opts = {}) {
   return openViewed(path, opts, {
-    show: async (p, place) => (await ensurePdf()).open(p, place),
+    show: async (p, place) => {
+      /* The guarded document URL and the lazy viewer graph are independent.
+         Resolve them together so the first open does not pay their latency in
+         sequence; `open` accepts the already-resolved source and keeps the
+         ordinary viewer API unchanged for every other caller. */
+      const [viewer, source] = await Promise.all([ensurePdf(), api.pdf.source(p)])
+      return viewer.open(p, place, source)
+    },
     failed: 'That PDF could not be opened.',
     focus: () => el.pdf.focus()
   })
@@ -3872,7 +3895,7 @@ function applyPanes () {
   /* The switch is for the documents with more than one view of themselves: the
      note's three, and the table's two — a `.csv` is read and edited in the same
      grid, and which of the two it is in is this control. */
-  el.viewSwitch.hidden = flashcardOpen || (!text && !dataOpen && !notebookOpen && !docxOpen) || sourceOnly
+  el.viewSwitch.hidden = Boolean(state.tabs[state.tabIndex]?.memory) || flashcardOpen || (!text && !dataOpen && !notebookOpen && !docxOpen) || sourceOnly
   /* The toolbar's Run: only over a source file in a language the run
      machinery accepts — the same test a fenced block's control makes, against
      the extension instead of the fence word. Moving to a different document
@@ -4087,7 +4110,7 @@ function renderTabs () {
     button.className = `tab${active ? ' is-active' : ''}${tab.pinned ? ' is-pinned' : ''}`
     // The folder a note sits in is the tooltip rather than the label: the strip
     // has to stay readable at eight tabs, and the name is what identifies it.
-    button.title = tab.pinned ? `${tab.path} — pinned` : (tab.path || 'New tab')
+    button.title = tab.memory ? `${tab.memory.title} — temporary` : (tab.pinned ? `${tab.path} — pinned` : (tab.path || 'New tab'))
 
     /* Which document is showing, said out loud. The strip looked like a row of
        plain buttons to a screen reader — nothing marked one of them as the one
@@ -4104,15 +4127,19 @@ function renderTabs () {
 
     const label = document.createElement('span')
     label.className = 'tab-label'
-    label.textContent = tab.path ? tabLabel(tab.path) : 'New tab'
+    label.textContent = tab.memory?.title || (tab.path ? tabLabel(tab.path) : 'New tab')
     button.append(label)
 
-    // The unsaved dot belongs to the note, so only the tab actually holding
-    // unsaved text shows one.
-    if (active && state.dirty) {
+    // Only disk-backed editable documents have a save state. Inactive tabs
+    // have already passed through saveNow before the next file is opened.
+    if (!tab.memory && tab.path && (isEditableTextPath(tab.path) || isUnmergeablePath(tab.path))) {
+      const unsaved = active && state.dirty
+      const status = unsaved ? 'Unsaved changes' : 'Saved'
       const dot = document.createElement('span')
-      dot.className = 'tab-dirty'
-      dot.title = 'Unsaved changes'
+      dot.className = `tab-save-status${unsaved ? ' tab-dirty' : ' is-saved'}`
+      dot.title = status
+      dot.setAttribute('aria-hidden', 'true')
+      button.setAttribute('aria-label', `${label.textContent} — ${status}`)
       button.append(dot)
     }
 
@@ -4136,7 +4163,7 @@ function renderTabs () {
       const close = document.createElement('span')
       close.className = 'tab-close'
       close.setAttribute('role', 'button')
-      close.setAttribute('aria-label', `Close ${tab.path ? tabLabel(tab.path) : 'New tab'}`)
+      close.setAttribute('aria-label', `Close ${tab.memory?.title || (tab.path ? tabLabel(tab.path) : 'New tab')}`)
       close.tabIndex = active ? 0 : -1
       close.textContent = '×'
       close.addEventListener('click', (e) => { e.stopPropagation(); closeTab(i) })
@@ -4272,7 +4299,7 @@ function showTabContextMenu (event, i) {
        trashing were reachable only from a tree the reader may have scrolled
        away from or closed altogether. */
     if (isEditableTextPath(tab.path)) {
-      items.push({ label: 'Show history…', run: () => noteHistory.show(tab.path) })
+      items.push({ label: 'Recover this document…', run: () => recoveryPanel.show(tab.path).catch(error => toast(error.message)) })
     }
     items.push({ label: 'Move to…', run: () => openMovePicker([tab.path]) })
     items.push({ label: revealLabel(), run: () => api.file.reveal(tab.path) })
@@ -4506,20 +4533,8 @@ function settleTabOrder () {
   rememberTabs()
 }
 
-/**
- * A config write that belongs to the session, made only by the session's window.
- *
- * These are the keys that name documents — the tab strip, the note last open,
- * the document in the side pane. Every window shares one config file, so a
- * second window writing them would decide what the next launch comes back to,
- * and a window opened for one look at one note is not that.
- *
- * Preferences are deliberately NOT routed through here: the theme, the fonts,
- * the panel widths, which folders are unfolded. Those are settings, they are
- * meant to be shared, and last-writer-wins is the behaviour they already had
- * between two runs of the app.
- */
-const sessionOnly = (patch) => { if (state.primary) api.config.set(patch) }
+/** Main scopes document and layout state to the sending window. */
+const sessionOnly = (patch) => { api.config.set(patch) }
 
 /**
  * Show a document in a window of its own.
@@ -4550,16 +4565,18 @@ function rememberTabs () {
      leave nothing announced. The rest of the strip already carries the place
      each tab was last marked at. */
   markPlace()
+  const savedTabs = state.tabs.filter((tab) => !tab.memory)
   sessionOnly({
-    tabs: state.tabs.map((t) => t.path),
-    tabIndex: state.tabIndex,
+    tabs: savedTabs.map((t) => t.path),
+    tabIndex: Math.max(0, savedTabs.indexOf(activeTab())),
     /* Beside the paths rather than nested inside them: this config is
        deliberately shallow, and a parallel list lets an older one — which has
        no places in it at all — read as a strip of notes opened at the top. */
-    tabPlaces: state.tabs.map((t) => tabPlace(t)?.line || 1),
+    tabPlaces: savedTabs.map((t) => tabPlace(t)?.line || 1),
+    tabHistories: savedTabs.map((tab) => ({ entries: tab.history.map((entry) => ({ ...entry })), at: tab.historyAt })),
     // Same reasoning, and the same reading of an older config: no list at all
     // is a strip where nothing was pinned, which is what it was.
-    tabPinned: state.tabs.map((t) => !!t.pinned)
+    tabPinned: savedTabs.map((t) => !!t.pinned)
   })
 }
 
@@ -4667,6 +4684,7 @@ async function reopenTab () {
 /** Put the pane back to its empty state, with the current tab holding nothing. */
 async function showBlank () {
   const tab = activeTab()
+  if (tab?.memory) return showMemoryDocument(tab)
   /* Edits are saved, not dropped, before the note is abandoned — the same
      promise selectTab and closeTab make. Without it a ⌘T fired while the
      merge panel was up (which has refused the autosave) would lose the buffer
@@ -4810,6 +4828,18 @@ function markPlace () {
   entry.top = editor.scrollDOM.scrollTop
 }
 
+function recordLocationJump () {
+  markPlace()
+  const tab = activeTab()
+  const entry = tab?.history[tab.historyAt]
+  if (!tab || !entry) return
+  tab.history.length = tab.historyAt + 1
+  tab.history.push({ ...entry })
+  if (tab.history.length > HISTORY_MAX) tab.history.shift()
+  tab.historyAt = tab.history.length - 1
+  renderNavArrows()
+}
+
 function pushHistory (path) {
   const tab = activeTab()
   if (!tab || tab.history[tab.historyAt]?.path === path) return
@@ -4837,6 +4867,8 @@ async function goHistory (delta) {
 
   markPlace()
   const entry = tab.history[target]
+  const leaving = tab.history[tab.historyAt]
+  const leavingPlace = { ...leaving }
   /* A watcher can remove a document between the moment this trail was drawn
      and the moment its arrow is pressed. Do not send the missing path through
      openNote: every opener quite correctly reports a failed read, but history
@@ -4862,7 +4894,9 @@ async function goHistory (delta) {
 
   /* The open above redrew the strip before the cursor moved, so the arrows
      were painted from where it used to point — settle them from where it does. */
+  Object.assign(leaving, leavingPlace)
   tab.historyAt = target
+  rememberTabs()
   renderNavArrows()
   revealInTree(entry.path)
 }
@@ -5389,6 +5423,7 @@ async function keepBufferOverDisk (path, kind = 'note') {
   /* A new file appeared beside the open one, and the tree is drawn from a
      snapshot that predates it. An episode writing over the copy it already made
      adds no row, so the tree is left alone. */
+  await recoveryPanel.record('conflict', path, copy)
   if (copy && !made.repeat) await loadTree()
   return copy
 }
@@ -5547,8 +5582,25 @@ const copilotDeps = {
      read live rather than handed over once — it changes with every note made,
      and a picker offering yesterday's vault is worse than none. */
   files: () => state.files,
-  onCite: ({ path, page }) => {
-    goToCitation(path, page).catch(() => toast('That page could not be opened.'))
+  onCite: async ({ path, page }) => {
+    try {
+      const wanted = path ? resolvePdfPath(path) : (viewingPdf() ? state.current.path : '')
+      if (!wanted) throw new Error('That PDF is not in this vault.')
+      const passage = await api.pdf.passage(wanted, page)
+      showSourcePreview({ title: `${wanted} · page ${page}`, ...passage, open: () => goToCitation(wanted, page) })
+    } catch (error) { toast(error.message) }
+  },
+  onSource: async (target) => {
+    try {
+      const { name, anchor } = splitAnchor(target)
+      const path = name ? linkTargetFor(name.toLowerCase())?.path : state.current?.path
+      if (!path) throw new Error('That source note is not in this vault.')
+      const text = state.current?.path === path && viewingText() ? noteText() : await api.file.read(path)
+      const passage = sourcePassage(text, { anchor })
+      showSourcePreview({ title: target, ...passage, open: async () => {
+        await openNote(path); recordLocationJump(); goToLine(passage.line); markPlace(); rememberTabs()
+      } })
+    } catch (error) { toast(error.message) }
   },
   onOpen: async (path, line = null, operationId = null) => {
     await openNote(path, { focus: false })
@@ -5559,6 +5611,16 @@ const copilotDeps = {
     await showAgentReview(path, operationId)
   },
   onAccept: acceptAgentChanges,
+  onPartial: async (path, expected, text) => {
+    if (!await saveNow()) throw new Error('Save the open document before reviewing changes.')
+    const got = await api.file.readEncoded(path)
+    if (!got?.ok || !got.clean) throw new Error('This file could not be decoded without losing text.')
+    if (got.text !== expected) throw new Error('This file changed after the turn. Compare its latest version in Recovery or History before editing it.')
+    const result = await api.file.write(path, text, { expect: got.stamp, encoding: got.encoding, bom: got.bom })
+    if (!result?.ok) throw new Error(result?.error || 'The selected changes could not be saved.')
+    if (pendingAgentDiffs.get(path)?.after === expected) pendingAgentDiffs.delete(path)
+    if (state.current?.path === path) { editor?.clearAgentDiff(); await reloadCurrent() }
+  },
   /* Once per conversation, not per message — see `permissionFor` in
      copilot.js. A dialog on every send was a nag, and a nag gets answered by
      switching to Auto, which is the opposite of what Ask is for. */
@@ -5585,9 +5647,12 @@ const copilotDeps = {
   },
   onRenamed: absorbAgentRename,
   onWarn: (message) => toast(message),
-  /* The copilot's column shrinks the same document the sidebar's does, and it
-     was the one panel that slid with nothing pinned. See freezePanelSlide. */
-  willSlide: (opening) => freezePanelSlide(opening, el.aiPanel),
+  /* The desktop column shrinks the document and needs the expensive surface
+     pinned while it slides. In narrow reflow Copilot is a fixed drawer over
+     the document, so there is no grid track or document resize to pin. */
+  willSlide: (opening) => {
+    if (!window.matchMedia('(max-width: 760px)').matches) freezePanelSlide(opening, el.aiPanel)
+  },
   onRestore: (operation, path = null) => noteHistory.restore(operation, path),
   onEditing: rememberAgentBefore,
   // A failure here means the note on screen has quietly fallen behind the file
@@ -5824,7 +5889,15 @@ function headingAt (pos) {
 }
 
 async function copilotContext (options = {}) {
-  if (state.dirty) await saveNow()
+  const path = state.current?.path || ''
+  if (options.path !== undefined && options.path !== path) {
+    throw new Error('The open file changed before Copilot could capture it. Please resend the question.')
+  }
+  // Capture synchronously where possible, before a save yields to navigation.
+  return options.preview ? collectCopilotContext(options) : captureSavedContext(() => collectCopilotContext(options), saveNow, state.dirty)
+}
+
+async function collectCopilotContext (options = {}) {
   const budget = contextBudget(options)
   const done = (context) => ({ ...context, contextBudget: budget })
   const code = viewingCode()
@@ -5859,16 +5932,19 @@ async function copilotContext (options = {}) {
      name (see `text` in src/site.js): the fence is untouched, and this is the
      reader's own request for the page they are looking at. */
   if (viewingSite()) {
+    const path = state.current.path
     const viewer = await ensureSite()
     const view = viewer.state()
     const page = await viewer.text()
+    if (state.current?.path !== path) throw new Error('The website changed while Copilot was reading it. Please resend the question.')
+    const preview = boundedText(page?.text || '', budget.structured)
     return done({
       note: state.current.path,
       kind: 'site',
       url: view.url,
       title: page?.title || view.title,
-      text: boundedText(page?.text || '', budget.structured),
-      truncated: !!page?.truncated,
+      text: preview.text,
+      truncated: !!page?.truncated || preview.truncated,
       selection: ''
     })
   }
@@ -5940,9 +6016,12 @@ async function copilotContext (options = {}) {
       column: table.column || '',
       value: table.value || '',
       shownRows: table.shownRows || 0,
+      previewOnly: table.previewOnly,
+      sampleRows: table.sampleRows,
+      sampleRowNumbers: table.sampleRowNumbers,
       sortedBy: table.sortedBy || [],
       filteredBy: table.filteredBy || [],
-      truncated: preview.truncated
+      truncated: preview.truncated || !!table.truncated
     })
   }
 
@@ -5959,6 +6038,8 @@ async function copilotContext (options = {}) {
       text: preview.text,
       cells: book.cells,
       language: book.language,
+      outputText: book.outputText,
+      outputTruncated: book.outputTruncated,
       at: Number.isInteger(book.at) ? book.at + 1 : 0,
       truncated: preview.truncated
     })
@@ -6079,7 +6160,9 @@ async function goToCitation (path, page) {
      citation again once it is will land. */
   if (!pdf) return
   if (page > pdf.pages()) { toast(`That PDF has only ${pdf.pages()} pages.`); return }
+  recordLocationJump()
   pdf.goToPage(page)
+  markPlace(); rememberTabs()
   el.pdf.focus()
 }
 
@@ -6158,8 +6241,12 @@ el.aiToggle.addEventListener('click', () => copilot.toggle())
 /* The button beside the tabs mirrors the panel — a toggle can come from the
    chord, the palette or the button itself, and data-ai is where they all end
    up. */
-const paintAiToggle = () =>
-  el.aiToggle.setAttribute('aria-pressed', String(el.app.dataset.ai === 'open'))
+const paintAiToggle = () => {
+  const open = el.app.dataset.ai === 'open'
+  el.aiToggle.setAttribute('aria-pressed', String(open))
+  if (open && window.innerWidth <= 760 && sidebarOpen()) toggleSidebar(false)
+  if (open && window.innerWidth <= 1040 && el.app.dataset.side === 'open') closeSidePane()
+}
 new MutationObserver(paintAiToggle).observe(el.app, { attributeFilter: ['data-ai'] })
 paintAiToggle()
 
@@ -6538,6 +6625,81 @@ function showZoom (percent) {
   }, 1500)
 }
 
+/* A native window zoom changes the viewport's size in CSS pixels. Keeping the
+   old scrollTop therefore keeps a distance, not the text the reader was
+   looking at. Capture the source position at the middle of a note before the
+   change and restore it after CodeMirror or the reading DOM has reflowed. */
+/** @type {{view: 'edit', pos: number, offset: number} | {view: 'read', line: number, offset: number} | null} */
+let windowZoomAnchor = null
+
+function rememberWindowZoomAnchor () {
+  windowZoomAnchor = null
+  if (!state.current || viewingPdf() || viewingSite() || viewingWhiteboard()) return
+  if (!reading()) {
+    const anchor = editor?.zoomAnchor?.()
+    if (Number.isFinite(anchor?.pos)) {
+      windowZoomAnchor = { view: 'edit', pos: Number(anchor.pos), offset: Number(anchor.offset) || 0 }
+    }
+    return
+  }
+
+  const pane = el.reading
+  const frame = pane.getBoundingClientRect()
+  if (frame.width <= 0 || frame.height <= 0) return
+  const middle = frame.top + frame.height / 2
+  const hit = document.elementFromPoint(frame.left + Math.min(32, frame.width / 2), middle)
+  let target = /** @type {HTMLElement | null} */ (hit?.closest?.('[data-line]') || null)
+  if (!target || !pane.contains(target)) target = readingNodeAt(viewportLine())
+  if (!target) return
+  windowZoomAnchor = {
+    view: 'read',
+    line: Number(target.dataset.line) + 1,
+    offset: target.getBoundingClientRect().top - middle
+  }
+}
+
+function restoreWindowZoomAnchor () {
+  const anchor = windowZoomAnchor
+  windowZoomAnchor = null
+  if (!anchor) return
+  if (anchor.view === 'edit') {
+    /* Electron reports the factor in the same turn that changes Chromium's
+       backing scale. CodeMirror does not know its new viewport until the next
+       layout pass, so an immediate scroll would faithfully centre the anchor
+       in the old geometry and then move again. Reapply for the few paint
+       frames in which its viewport tiles settle. */
+    let frames = 0
+    const settle = () => {
+      if (reading() || frames++ >= 4) return
+      /* Once CodeMirror has real geometry the correction is complete. Rewriting
+         scrollTop for three more paints made an otherwise stable zoom look as
+         if the page blinked while its virtual viewport caught up. */
+      if (editor?.restoreZoomAnchor?.(anchor)) return
+      requestAnimationFrame(settle)
+    }
+    requestAnimationFrame(settle)
+    return
+  }
+  if (!reading()) return
+
+  /* Images and content-visibility can settle just after the native scale
+     swap. Correct for a few frames, but stop if the reader scrolls meanwhile. */
+  let frames = 0
+  let mine = el.reading.scrollTop
+  const settle = () => {
+    if (!reading() || frames++ >= 6 || Math.abs(el.reading.scrollTop - mine) > 1) return
+    const target = readingNodeAt(anchor.line)
+    if (!target) return
+    const frame = el.reading.getBoundingClientRect()
+    const wanted = frame.top + frame.height / 2 + anchor.offset
+    const delta = target.getBoundingClientRect().top - wanted
+    if (Math.abs(delta) > 0.5) el.reading.scrollTop += delta
+    mine = el.reading.scrollTop
+    requestAnimationFrame(settle)
+  }
+  requestAnimationFrame(settle)
+}
+
 /**
  * Pinching a note does nothing.
  *
@@ -6787,6 +6949,7 @@ function bestLinkTarget (matches) {
  * heading at the *bottom* of the viewport rather than the top.
  */
 function goToLine (n, col = 0) {
+  readingPlaceGeneration++
   if (!reading() && editor) {
     const line = editor.state.doc.line(n)
     editor.dispatch({ selection: { anchor: Math.min(line.from + col, line.to) } })
@@ -6809,7 +6972,9 @@ function jumpToHeading (anchor) {
       : `No heading “${anchor}” in this note.`)
     return
   }
+  recordLocationJump()
   goToLine(found.line)
+  markPlace(); rememberTabs()
 }
 
 /* --------------------------------------------------------------- outline
@@ -8758,7 +8923,9 @@ function scrollToLine (line) {
  * out — see `renderReading({ reuse: true })` — and so has real heights from the
  * first attempt.
  */
+let readingPlaceGeneration = 0
 function restoreReadingPlace (line, { center = false } = {}) {
+  const generation = ++readingPlaceGeneration
   let frames = 0
   /* The last position this function put the pane at. Anything else is the
      reader, and the reader wins: chasing a line somebody has already scrolled
@@ -8766,7 +8933,7 @@ function restoreReadingPlace (line, { center = false } = {}) {
   let mine = -1
   const settle = () => {
     const pane = el.reading
-    if (!pane || !reading() || frames++ > READING_PLACE_FRAMES) return
+    if (!pane || !reading() || generation !== readingPlaceGeneration || frames++ > READING_PLACE_FRAMES) return
     if (mine >= 0 && Math.abs(pane.scrollTop - mine) > 1) return
     const target = readingNodeAt(line)
     if (!target) return
@@ -8884,6 +9051,7 @@ async function toggleLock () {
 /* Called with the current view too — at boot, where it is what marks the
    active button — so it must not shortcut when nothing is changing. */
 function setView (view) {
+  if (memoryEditor) { memoryEditor.focus(); return }
   if ((viewingLanguageTable() || viewingData() || viewingNotebook() || viewingDocx()) && view === 'raw') {
     view = 'edit'
   }
@@ -9058,112 +9226,44 @@ el.reading.addEventListener('click', (e) => {
 
 /* ------------------------------------------------------------- overlays */
 
-/**
- * What the palette offers: the three things that have nowhere better to live.
- *
- * Everything the app can do still runs through `runCommand` — the menus, the
- * shortcuts and the empty-state buttons all call it, and none of them read
- * this list. What was here was a second copy of the menu bar, searchable: a
- * list you had to read past to reach anything, where every entry named the
- * shortcut that made the entry redundant. Three rows is a list you take in
- * whole, which is the only thing a palette is faster than a menu at.
- *
- * The test for adding a fourth: is there any other way to reach it? Reading
- * view has ⌘1, the sidebar has ⌘B — those go in the menu. A theme picker has
- * no key of its own, so it goes here.
- *
- * Linting the file passes that test too: it has no key and no menu item, because
- * the rules are applied on every save anyway — this is for the one thing a save
- * leaves alone, the blank line the caret is sitting in.
- */
+/** Keep palette-only workflows here; menus, tab menus and Settings own their direct actions. */
 const COMMANDS = [
-  { id: 'new-file', title: 'New file…', key: '›' },
-  { id: 'getting-started', title: 'Open Getting Started' },
-  { id: 'backup-vault', title: 'Back up vault…' },
-  { id: 'restore-vault', title: 'Restore vault…' },
+  { id: 'new-file', title: 'New file…', scope: 'vault', key: '›' },
+  { id: 'recover-document', title: 'Recover this document…', scope: 'vault', keywords: 'history versions backup restore draft conflict' },
+  { id: 'recovery-inbox', title: 'Recovery inbox…', scope: 'vault', keywords: 'failed save conflict unsaved restore draft' },
+  { id: 'vault-health', title: 'Open logs.md', scope: 'vault', keywords: 'health report check scan broken links missing embeds citations empty duplicate output' },
+  { id: 'backups', title: 'Backups and recovery…', keywords: 'automatic schedule restore protection' },
+  { id: 'save-workspace', title: 'Save workspace…', scope: 'vault' },
+  { id: 'open-workspace', title: 'Open workspace…' },
   { id: 'fold-all-headings', title: 'Fold all headings', scope: 'markdown' },
   { id: 'unfold-all-headings', title: 'Unfold all headings', scope: 'markdown' },
-  { id: 'center-headings', title: 'Center headings', scope: 'markdown' },
-  { id: 'note-history', title: 'Show history…', scope: 'text' },
-  { id: 'move-file', title: 'Move this file…', scope: 'file' },
-  { id: 'orphaned-images', title: 'Show orphaned images…' },
+  { id: 'orphaned-images', title: 'Show orphaned images…', scope: 'vault' },
   { id: 'themes', title: 'Change theme…' },
-  { id: 'font-body', title: 'Change markdown font…' },
-  { id: 'font-ui', title: 'Change interface font…' },
   { id: 'lint-file', title: 'Lint current file', scope: 'markdown' },
-  /* A bookmark is a line in the note — `<!-- bookmark -->`, drawn as a ribbon
-     in both views — and a note has one at most: setting another moves it. The
-     note opens at it from then on. Both pass the admission test: the marker
-     is otherwise a comment to be typed by hand and a jump to it a search. */
-  { id: 'set-bookmark', title: 'Bookmark this place', scope: 'markdown' },
+    { id: 'set-bookmark', title: 'Bookmark this place', scope: 'markdown' },
   { id: 'go-to-bookmark', title: 'Go to bookmark', scope: 'markdown' },
-  /* Both pass the test above. A block's own Run button is per block and only
-     exists where the block is on screen — a note of twenty of them has no
-     "and the rest", and the output panels have no way at all to be closed
-     again short of editing every block to change its key. */
-  { id: 'run-all-blocks', title: 'Run all code blocks', scope: 'markdown' },
+    { id: 'run-all-blocks', title: 'Run all code blocks', scope: 'markdown' },
   { id: 'clear-block-outputs', title: 'Clear all code block outputs', scope: 'markdown' },
-  /* Spellcheck is the one setting people want to reach mid-sentence — a note
-     full of names underlined in red is a reason to turn it off for a minute,
-     and walking to Settings for that is the whole trip the palette exists to
-     save. It stays a vault-wide setting either way, so no scope. */
-  { id: 'toggle-spellcheck', title: 'Toggle spellcheck', scope: 'markdown' },
-  /* Passes the test above: a template has no key and no menu item, and the
-     only other way to use one would be to open it and copy it out by hand. */
-  { id: 'insert-template', title: 'Insert template…', scope: 'markdown' },
+  { id: 'manage-packages', title: 'Manage code packages…', scope: 'markdown', keywords: 'python rust javascript typescript node go julia pip npm install dependencies environment' },
+    { id: 'toggle-spellcheck', title: 'Toggle spellcheck', scope: 'markdown' },
+    { id: 'insert-template', title: 'Insert template…', scope: 'markdown' },
   { id: 'export-pdf', title: 'Export as PDF…', scope: 'markdown' },
   { id: 'export-html', title: 'Export as HTML…', scope: 'markdown' },
   { id: 'export-markdown', title: 'Export as Markdown…', scope: 'markdown' },
-  { id: 'export-vault', title: 'Export vault as Markdown…' },
-  { id: 'import-folder', title: 'Import Markdown folder…' },
-  /* Passes the admission test the way `insert-template` does: every tag in
-     the vault with its count, and no other surface lists them — a tag is
-     otherwise only findable by already knowing its name. */
-  { id: 'browse-tags', title: 'Browse tags…' },
-  { id: 'settings', title: 'Settings…', key: '⌘,' },
-  /* Passes the palette's admission test the same way `insert-template` does:
-     there is no other way to reach it, and there is deliberately nothing
-     automatic behind it — Tulip asks about updates when it is asked to and
-     never otherwise. */
-  /* The vault's own study record — see review-panel.js. The numbers are the
-     whole vault's, but the only documents they are about are the language
-     tables, so that is where it is offered: a study record has nothing to say
-     while a spreadsheet is open. */
-  { id: 'open-recent-vault', title: 'Open recent vault…' },
+  { id: 'export-vault', title: 'Export vault as Markdown…', scope: 'vault' },
+  { id: 'import-folder', title: 'Import Markdown folder…', scope: 'vault' },
+    { id: 'browse-tags', title: 'Browse tags…', scope: 'vault' },
+  { id: 'settings', title: 'Settings…', key: '⌘,', keywords: 'preferences options configuration' },
+      { id: 'open-recent-vault', title: 'Open recent vault…', keywords: 'switch folder workspace' },
   { id: 'review-stats', title: 'Review statistics…', scope: 'language' },
-  /* Vault-wide in what it studies, but offered on the same footing as the
-     statistics: a study session has nothing to do with the note on screen
-     unless that note is a language table. */
-  { id: 'study-all', title: 'Study all due words', scope: 'language' },
-  /* Same admission as review-stats: only reachable here, and only offered
-     with a language table open — the file the imported rows join. */
-  { id: 'import-cards', title: 'Import cards from CSV…', scope: 'language' },
-  { id: 'check-for-updates', title: 'Check for updates…' },
-  /* Where the failure toast sends people. Both are here rather than in
-     Settings because this is what a reader reaches for at the moment something
-     has gone wrong, and the palette is the one place they already know to
-     look. */
-  { id: 'shortcuts', title: 'Keyboard shortcuts…', key: '⌘/' },
-  { id: 'reveal-crash-log', title: 'Reveal crash log' },
-  { id: 'copy-diagnostics', title: 'Copy diagnostics' },
-  /* Two windows on one vault: the same notes, two places in them. Offered in
-     the palette as well as the Window menu because the palette is where this
-     app's readers look for anything they do not do every day. */
-  { id: 'new-window', title: 'New window', key: '⌘⌥N' },
-  { id: 'open-in-new-window', title: 'Open in new window', scope: 'file' },
-  /* Both pass the palette's admission test. Clipping has no other surface at
-     all, and the browser hand-off is otherwise only reachable by finding the
-     one small button on the site bar — which is the wrong place to look for it
-     when what you have is a page that will not behave. */
-  { id: 'clip-page', title: 'Save this page as a note', scope: 'site' },
+    { id: 'study-all', title: 'Study all due words', scope: 'language' },
+    { id: 'import-cards', title: 'Import cards from CSV…', scope: 'language' },
+  { id: 'check-for-updates', title: 'Check for updates…', keywords: 'upgrade version download release' },
+    { id: 'shortcuts', title: 'Keyboard shortcuts…', key: '⌘/' },
+    { id: 'clip-page', title: 'Save this page as a note', scope: 'site' },
   { id: 'open-page-in-browser', title: 'Open this page in your browser', scope: 'site' },
-  { id: 'copilot', title: 'Toggle copilot', key: '⌘⇧A', scope: 'copilot' }
 ]
 
-/* One doorway in the command palette, then the same complete set of things the
-   explorer can create. Keeping the destination on the overlay matters: once
-   this nested list is open it describes the directory the command was invoked
-   from, even if the rest of the window redraws underneath it. */
 const NEW_FILE_COMMANDS = [
   { id: 'new-note', title: 'Markdown note', kind: 'note' },
   { id: 'new-flashcards', title: 'Flashcard bank', kind: 'flashcards' },
@@ -9194,7 +9294,9 @@ function commandList () {
      app rather than the document — the theme, the fonts, the settings — and
      those stay offered even with nothing open at all. */
   const SCOPES = {
-    markdown: () => Boolean(state.current && NOTE_EXT.test(state.current.path)),
+    markdown: () => Boolean(state.current && NOTE_EXT.test(state.current.path) &&
+      !viewingLanguageTable() && !viewingFlashcardBank()),
+    vault: () => Boolean(state.vault),
     text: () => Boolean(state.current && isEditableTextPath(state.current.path)),
     language: () => viewingLanguageTable(),
     file: () => Boolean(state.current),
@@ -9202,8 +9304,8 @@ function commandList () {
     // anything over a website file still waiting to be told an address — or
     // over one whose viewer is still mounting, where there is no page yet.
     site: () => viewingSite() && Boolean(site?.url()),
-    // The second window has no copilot to toggle — see `state.primary`.
-    copilot: () => state.primary
+    // Each window owns its Copilot conversations.
+    copilot: () => true
   }
   const commands = COMMANDS.filter(({ scope }) => !scope || SCOPES[scope]())
 
@@ -9267,44 +9369,16 @@ function commandList () {
       { id: 'export-whiteboard-svg', title: 'Export whiteboard as SVG…' }
       )
   }
-  return commands.sort((a, b) => a.title.localeCompare(b.title))
-}
-
-/* A resting palette is a map, not an alphabet. Recent choices answer habit;
-   applicable document commands stay at the top without a redundant heading;
-   the remaining shelves keep the full list browsable. Every command is
-   consumed by the first shelf it earns, so a recent file command is not
-   repeated later under File. */
-/** @type {string[]} */
-const recentPaletteCommands = []
-const PALETTE_RECENT_MAX = 5
-
-function rememberPaletteCommand (id) {
-  const at = recentPaletteCommands.indexOf(id)
-  if (at !== -1) recentPaletteCommands.splice(at, 1)
-  recentPaletteCommands.unshift(id)
-  recentPaletteCommands.length = Math.min(recentPaletteCommands.length, PALETTE_RECENT_MAX)
-}
-
-function paletteCommands () {
-  const available = commandList()
-  const byId = new Map(available.map((command) => [command.id, command]))
-  const used = new Set()
-  const out = []
-  const take = (command, group) => {
-    if (!command || used.has(command.id)) return
-    used.add(command.id)
-    out.push({ ...command, group })
-  }
-
-  for (const id of recentPaletteCommands) take(byId.get(id), 'Recent')
-  for (const command of available) if (contextCommand(command)) take(command)
-  for (const group of ['File', 'Appearance', 'Tools', 'App & Help']) {
-    for (const command of available) {
-      if (generalCommandGroup(command) === group) take(command, group)
-    }
-  }
-  return out
+  // Availability is shared by the resting list and every search result.
+  const applicable = commands.filter(({ id }) => {
+    if (id === 'open-beside') return canShowBeside(state.current?.path)
+    if (id === 'go-to-bookmark') return bookmarkLineOf(noteText()) > 0
+    if (['fold-all-headings', 'unfold-all-headings'].includes(id)) return headings(noteText()).length > 0
+    if (['run-all-blocks', 'clear-block-outputs'].includes(id)) return noteCodeBlocks().length > 0
+    if (['lint-file', 'set-bookmark', 'insert-template', 'import-cards'].includes(id)) return !readOnlyHere()
+    return true
+  })
+  return applicable.sort((a, b) => a.title.localeCompare(b.title))
 }
 
 /* A folder of notes to start other notes from. A plain folder in the vault,
@@ -9415,13 +9489,18 @@ function openOverlay (mode, meta = {}) {
   // Only the vault search has switches to qualify, and only it can rewrite.
   const searching = mode === 'search'
   el.panelChips.hidden = !searching
+  el.panelFilterToggle.hidden = !searching
+  el.panelFilterPresets.hidden = !searching
   el.panelSaveSearch.hidden = !searching
   el.panelReplace.hidden = !(searching && replacing)
   el.panel.classList.toggle('is-search', searching)
+  el.panel.classList.remove('filters-open')
+  el.panelFilterToggle.setAttribute('aria-expanded', 'false')
   // A pattern left half-typed dimmed the field; the panel opening again is a
   // fresh query, so it must not open already looking wrong.
   el.panel.classList.remove('is-bad')
   paintSearchChips()
+  paintSearchPresets()
 
   runOverlayQuery(el.panelInput.value)
   el.panelInput.focus()
@@ -9439,7 +9518,7 @@ function openOverlay (mode, meta = {}) {
 function revertPreview (mode) {
   dropPreview()
   if (mode === 'themes') paintTheme(state.theme)
-  else if (FONT_MODES[mode]) paintFont(FONT_MODES[mode], state.fonts[FONT_MODES[mode]])
+  else if (FONT_MODES[mode]) applyFonts(state.cfg)
 }
 
 function closeOverlay () {
@@ -9447,7 +9526,8 @@ function closeOverlay () {
   revertPreview(state.overlay?.mode)
   state.overlay = null
   el.overlay.hidden = true
-  el.panel.classList.remove('is-search', 'is-searching')
+  el.panel.classList.remove('is-search', 'is-searching', 'filters-open')
+  previewSearchResult()
   el.panelList.removeAttribute('aria-busy')
   el.panelInput.removeAttribute('aria-activedescendant')
   announceResults(0, 0)
@@ -9509,6 +9589,80 @@ el.panelSaveSearch.addEventListener('click', () => {
   if (!query) return
   toast(savedSearches.save(query) ? 'Saved as a smart folder' : 'That search is already saved')
   el.panelInput.focus()
+})
+
+/* At a narrow zoom the qualification switches move under one Filters button,
+   leaving the query field a useful width. On a wide panel CSS keeps the
+   switches visible and this button out of the way. */
+el.panelFilterToggle.addEventListener('click', () => {
+  const open = !el.panel.classList.contains('filters-open')
+  el.panel.classList.toggle('filters-open', open)
+  el.panelFilterToggle.setAttribute('aria-expanded', String(open))
+  if (!open) el.panelInput.focus()
+})
+
+function paintSearchPresets () {
+  const tokens = new Set(el.panelInput.value.trim().split(/\s+/).filter(Boolean))
+  for (const button of /** @type {NodeListOf<HTMLButtonElement>} */ (
+    el.panelFilterPresets.querySelectorAll('[data-search-filter]')
+  )) {
+    const filter = button.dataset.searchFilter || ''
+    if (filter.startsWith('type:')) button.setAttribute('aria-pressed', String(tokens.has(filter)))
+    else button.removeAttribute('aria-pressed')
+  }
+}
+
+/** Put a common filter into the real query field. Type filters toggle; the
+ *  open-ended filters leave the caret after their colon, ready for a value. */
+el.panelFilterPresets.addEventListener('click', (event) => {
+  const button = /** @type {HTMLElement | null} */ (
+    event.target instanceof Element ? event.target.closest('[data-search-filter]') : null
+  )
+  const filter = button?.dataset.searchFilter
+  if (!filter) return
+  if (!filter.startsWith('type:')) {
+    const dialog = document.createElement('dialog')
+    dialog.className = 'workspace-tools search-filter-dialog'
+    const label = document.createElement('label')
+    label.textContent = filter === 'path:' ? 'Folder path' : filter === 'prop:' ? 'Property (for example status=draft)' : 'Tag'
+    const input = document.createElement('input')
+    input.setAttribute('aria-label', label.textContent)
+    const values = document.createElement('datalist')
+    values.id = 'search-filter-values'
+    if (filter === 'path:') {
+      for (const dir of [...new Set(state.files.map((file) => file.path.includes('/') ? file.path.slice(0, file.path.lastIndexOf('/')) : '').filter(Boolean))]) {
+        const option = document.createElement('option'); option.value = dir; values.append(option)
+      }
+      input.setAttribute('list', values.id)
+    }
+    const add = document.createElement('button'); add.textContent = 'Add filter'
+    const apply = () => {
+      const value = input.value.trim()
+      if (!value || /["\n\r]/.test(value)) return
+      const token = `${filter}${/\s/.test(value) ? '"' + value + '"' : value}`
+      el.panelInput.value = `${el.panelInput.value.trim()} ${token}`.trim()
+      dialog.close(); paintSearchPresets(); runOverlayQuery(el.panelInput.value)
+    }
+    add.onclick = apply
+    input.onkeydown = (event) => { if (event.key === 'Enter') { event.preventDefault(); apply() } }
+    const close = document.createElement('button'); close.textContent = 'Cancel'; close.onclick = () => dialog.close()
+    label.append(input); dialog.append(label, values, add, close)
+    dialog.addEventListener('close', () => { dialog.remove(); el.panelInput.focus() })
+    document.body.append(dialog); dialog.showModal(); input.focus()
+    return
+  }
+
+  const tokens = el.panelInput.value.trim().split(/\s+/).filter(Boolean)
+  const exact = tokens.indexOf(filter)
+  if (filter.startsWith('type:') && exact !== -1) tokens.splice(exact, 1)
+  else if (filter.startsWith('type:')) tokens.push(filter)
+  else tokens.push(filter)
+
+  el.panelInput.value = tokens.join(' ') + (filter.endsWith(':') ? '' : ' ')
+  paintSearchPresets()
+  runOverlayQuery(el.panelInput.value)
+  el.panelInput.focus()
+  el.panelInput.setSelectionRange(el.panelInput.value.length, el.panelInput.value.length)
 })
 
 /** Subsequence match; consecutive hits and word starts score higher. */
@@ -9614,6 +9768,12 @@ function matchItem (query, item) {
 
   const onLabel = fuzzy(query, item.label)
   if (onLabel) return onLabel
+  /* Palette synonyms find the command without highlighting letters that are
+     not in its visible title. They rank below a title match, every time. */
+  if (item.keywords) {
+    const onKeywords = fuzzy(query, item.keywords)
+    if (onKeywords) return { score: onKeywords.score - 20, hits: [] }
+  }
   if (!code) return null
   const onCode = fuzzy(query, item.code)
   return onCode ? { score: onCode.score - 100, hits: [] } : null
@@ -9696,7 +9856,7 @@ async function runOverlayQuery (query) {
               ? SOURCE_CHOICES
               : (mode === 'new-files'
                   ? NEW_FILE_COMMANDS
-                  : mode === 'commands' && !query ? paletteCommands() : commandList())
+                  : commandList())
                   .map((c) => ({ ...c, label: c.title }))
 
     const scored = []
@@ -9946,6 +10106,7 @@ function nameActiveRow (row) {
 }
 
 function renderOverlayList (emptyMessage = 'Nothing matches.') {
+  previewSearchResult()
   const { items, index, mode } = state.overlay
   // The rows about to appear under the pointer were not moved to by anyone.
   overlayHoverMuted = true
@@ -9972,14 +10133,6 @@ function renderOverlayList (emptyMessage = 'Nothing matches.') {
     const stop = Math.min(items.length, from + CHUNK)
     const frag = document.createDocumentFragment()
     for (let i = from; i < stop; i++) {
-      const group = items[i].item.group
-      if (mode === 'commands' && group && items[i - 1]?.item.group !== group) {
-        const heading = document.createElement('li')
-        heading.className = 'panel-group'
-        heading.setAttribute('role', 'presentation')
-        heading.textContent = group
-        frag.append(heading)
-      }
       frag.append(overlayRow(items[i], i, mode, index))
     }
     el.panelList.append(frag)
@@ -10101,7 +10254,37 @@ function overlayRow ({ item, hits }, i, mode, index) {
   return li
 }
 
+let searchPreviewGeneration = 0
+/** @type {ReturnType<typeof setTimeout> | null} */
+let searchPreviewTimer = null
+const searchPreview = document.createElement('pre')
+searchPreview.id = 'search-result-preview'
+searchPreview.hidden = true
+searchPreview.setAttribute('aria-label', 'Selected search result excerpt')
+el.panelList.after(searchPreview)
+function previewSearchResult () {
+  const generation = ++searchPreviewGeneration
+  clearTimeout(searchPreviewTimer ?? undefined)
+  const item = state.overlay?.mode === 'search' ? state.overlay.items[state.overlay.index]?.item : null
+  searchPreview.hidden = !item
+  el.panel.classList.toggle('has-search-preview', !!item)
+  if (!item) return
+  searchPreview.textContent = `${item.path}\nLoading passage…`
+  searchPreviewTimer = setTimeout(async () => {
+    try {
+      const passage = item.kind === 'pdf' || item.kind === 'highlight'
+        ? await api.pdf.passage(item.path, item.hit.page || 1)
+        : ['note', 'code'].includes(item.kind)
+          ? sourcePassage(await api.file.read(item.path), { line: item.hit.line })
+          : { text: item.hit.text || item.hit.preview || 'Open the document to inspect this result.' }
+      if (generation !== searchPreviewGeneration) return
+      searchPreview.textContent = `${item.path}\n\n${passage.text}`
+    } catch (error) { if (generation === searchPreviewGeneration) searchPreview.textContent = error.message }
+  }, 120)
+}
+
 function syncSelection () {
+  previewSearchResult()
   const { index, mode, items } = state.overlay
   /* The scroll happens after the loop, not inside it. `scrollIntoView` forces a
      layout, and doing that between two `setAttribute`s makes the engine settle
@@ -10140,7 +10323,6 @@ async function chooseOverlayItem (i) {
   if (mode === 'themes') { commitTheme(item.id); return }
   if (FONT_MODES[mode]) { commitFont(FONT_MODES[mode], item.id); return }
   if (mode === 'commands') {
-    rememberPaletteCommand(item.id)
     runCommand(item.id)
     return
   }
@@ -10169,7 +10351,7 @@ async function chooseOverlayItem (i) {
       return
     }
     if (item.kind === 'pdf') {
-      if (pdf) pdf.goToPage(item.hit.page || 1)
+      if (pdf) { recordLocationJump(); pdf.goToPage(item.hit.page || 1); markPlace(); rememberTabs() }
       return
     }
     if (item.kind === 'whiteboard') {
@@ -10191,7 +10373,9 @@ async function chooseOverlayItem (i) {
     if (item.kind === 'site') return
     // Through the door both views share: dispatching into the editor alone
     // moved a caret nobody could see while the reading view was up.
+    recordLocationJump()
     goToLine(Math.min(item.hit.line, noteLines()), item.hit.col || 0)
+    markPlace(); rememberTabs()
   }
 }
 
@@ -10212,7 +10396,10 @@ function queueOverlayQuery (value) {
   queryTimer = setTimeout(() => runOverlayQuery(value), 90)
 }
 
-el.panelInput.addEventListener('input', (e) => queueOverlayQuery(/** @type {HTMLInputElement} */ (e.target).value))
+el.panelInput.addEventListener('input', (e) => {
+  if (state.overlay?.mode === 'search') paintSearchPresets()
+  queueOverlayQuery(/** @type {HTMLInputElement} */ (e.target).value)
+})
 
 el.panelInput.addEventListener('keydown', (e) => {
   if (!state.overlay) return
@@ -10421,7 +10608,7 @@ function showContextMenu (event, node) {
   }
   items.push({ label: 'Rename…', key: '↵', run: () => beginRename(node) })
   if (node.type !== 'folder' && isEditableTextPath(node.path)) {
-    items.push({ label: 'Show history…', run: () => noteHistory.show(node.path) })
+    items.push({ label: 'Recover this document…', run: () => recoveryPanel.show(node.path).catch(error => toast(error.message)) })
   }
   items.push({
     label: state.marks[node.path] ? 'Change icon…' : 'Add icon…',
@@ -11030,6 +11217,78 @@ function paintLanding () {
 
 /* The rows are commands, so they run as commands — the same four ids the menu
    and the command palette reach, rather than a second set of call sites. */
+/** @type {import("@codemirror/view").EditorView | null} */
+let memoryEditor = null
+/** @type {HTMLDivElement | null} */
+let memoryHost = null
+/** @type {any} */
+let memoryOwner = null
+function closeMemoryDocument () {
+  if (memoryEditor && memoryOwner) {
+    memoryOwner.memory.selection = memoryEditor.state.selection.main.anchor
+    memoryOwner.memory.top = memoryEditor.scrollDOM.scrollTop
+  }
+  memoryEditor?.destroy()
+  memoryEditor = null
+  memoryHost?.remove()
+  memoryHost = null
+  memoryOwner = null
+}
+
+async function showMemoryDocument (tab) {
+  if (state.dirty && !await saveNow()) return false
+  await leaveDoc()
+  closeCurrentNote()
+  const { createMemoryEditor, openSearchPanel: searchMemory } = await import('./editor.js')
+  openSearchPanel = searchMemory
+  if (activeTab() !== tab || !tab.memory) return false
+  memoryHost = document.createElement('div')
+  memoryHost.className = 'memory-document'
+  el.stage.append(memoryHost)
+  memoryOwner = tab
+  memoryEditor = createMemoryEditor(memoryHost, tab.memory.text, (text) => { tab.memory.text = text })
+  memoryEditor.dispatch({ selection: { anchor: Math.min(tab.memory.selection || 0, tab.memory.text.length) } })
+  memoryEditor.scrollDOM.scrollTop = tab.memory.top || 0
+  el.empty.hidden = true
+  el.stage.classList.add('has-doc')
+  copilot.setNote('')
+  renderTabs()
+  rememberTabs()
+  memoryEditor.focus()
+  return true
+}
+
+let healthScanRunning = false
+async function showVaultHealth () {
+  if (healthScanRunning || !await saveNow()) return
+  healthScanRunning = true
+  const vault = state.vault
+  setStatusRight('Checking vault…')
+  try {
+    const { scanVaultHealth, formatHealthLog } = await import('./vault-health.js')
+    const report = await scanVaultHealth({ api, cancelled: () => state.vault !== vault })
+    if (state.vault !== vault || report.cancelled) return
+    if (!await saveNow()) return
+    let tab = state.tabs.find((item) => item.memory?.kind === 'vault-health')
+    if (!tab) {
+      tab = { ...blankTab(), memory: { kind: 'vault-health', title: 'logs.md', text: '' } }
+      state.tabs.splice(state.tabIndex + 1, 0, tab)
+    }
+    tab.memory.text = formatHealthLog(report)
+    tab.memory.selection = 0
+    tab.memory.top = 0
+    markPlace()
+    state.tabIndex = state.tabs.indexOf(tab)
+    await showMemoryDocument(tab)
+  } catch (error) { toast(`Vault check failed: ${error.message}`) }
+  finally { healthScanRunning = false; setStatusRight('') }
+}
+const workspaceTools = mountWorkspaceTools({ api, notify: toast })
+const recoveryPanel = mountRecoveryPanel({ historyOptions: { confirm: ask, beforeRestore: saveNow, restoreStarted: beginAgentRestore, restoreFailed: redrawAgentRestore, afterRestore: settleAgentRestore, onError: toast }, api, open: openNote, notify: toast, beforeMerge: saveNow, afterMerge: async (path) => { if (state.current?.path === path) await reloadCurrent() }, retry: async (path) => {
+  if (state.current?.path !== path) { toast('Open the document in its editing window to retry saving.'); return false }
+  return saveNow()
+} })
+
 el.emptyActions.addEventListener('click', (e) => {
   const button = /** @type {any} */ (e.target).closest('[data-command]')
   if (button) runCommand(button.dataset.command)
@@ -11037,6 +11296,7 @@ el.emptyActions.addEventListener('click', (e) => {
 
 /** Return the pane to its empty state after the open document goes away. */
 function closeCurrentNote () {
+  closeMemoryDocument()
   /* Closing is leaving. `leaveDoc` gives the claim up on the way to another
      document, but this is the way out of one to nothing at all — ⌘T, the last
      tab closed, a deleted file's tabs dropped — and without it the window goes
@@ -11197,6 +11457,17 @@ function clearAllCodeBlockOutputs () {
   toast(running ? 'Nothing to clear — those blocks are still running.' : 'No output to clear.')
 }
 
+/**
+ * The palette's way into the package environments. The dialog carries its own
+ * language picker, so this only chooses which tab it opens on: the first
+ * managed-language block in the note, or Python when the note has none.
+ */
+function managePackages () {
+  const managed = ['python', 'rust', 'node', 'go', 'julia']
+  const block = noteCodeBlocks().find(({ lang }) => managed.some((id) => isLanguage(lang, id)))
+  openPackages(state.current?.path || null, block ? managed.find((id) => isLanguage(block.lang, id)) : 'python')
+}
+
 /** Keep the reading view's disclosure buttons in step with the editor folds. */
 function setReadingHeadingFolds (folded) {
   for (const button of /** @type {NodeListOf<HTMLButtonElement>} */ (el.reading.querySelectorAll('.heading-fold'))) {
@@ -11317,9 +11588,23 @@ function runCommand (id, dir = state.current?.dir || '') {
     case 'set-bookmark': setBookmark(); break
     case 'go-to-bookmark': goToBookmark(); break
     case 'run-all-blocks': runAllCodeBlocks(); break
+    case 'manage-packages': managePackages(); break
     case 'run-file': runCurrentFile(); break
     case 'clear-block-outputs': clearAllCodeBlockOutputs(); break
     case 'open-recent-vault': openRecentVault(); break
+    case 'backups': api.vault.backups().catch(() => toast('Could not open backup controls.')); break
+    case 'recover-document':
+      if (state.current?.path) recoveryPanel.show(state.current.path).catch(error => toast(error.message))
+      else toast('Open a document to see its recovery options.')
+      break
+    case 'recovery-inbox': void recoveryPanel.show().catch(console.error); break
+    case 'vault-health': void showVaultHealth().catch(console.error); break
+    case 'save-workspace': workspaceTools.save(); break
+    case 'open-workspace': api.workspace.open().catch(() => toast('Could not open the workspace.')); break
+    case 'open-beside':
+      if (canShowBeside(state.current?.path)) openToSide(state.current.path)
+      else toast('Open a note or PDF to read it beside another document.')
+      break
     case 'backup-vault':
       api.vault.backup().then((result) => {
         if (result?.ok) {
@@ -11390,7 +11675,6 @@ function runCommand (id, dir = state.current?.dir || '') {
     case 'view-raw': setView('raw'); break
     case 'sidebar': toggleSidebar(); break
     case 'copilot':
-      if (!state.primary) { setStatusRight('The copilot runs in the main window'); break }
       copilot.toggle()
       break
     case 'themes': openOverlay('themes'); break
@@ -11399,6 +11683,7 @@ function runCommand (id, dir = state.current?.dir || '') {
     case 'theme': cycleTheme(); break
     case 'save': saveNow(); break
     case 'find':
+      if (memoryEditor) { openSearchPanel(memoryEditor); break }
       /* A PDF has its own find: the editor's panel searches a buffer, and the
          document on screen is not in one. The words come from the viewer, which
          has already read them to lay the selectable text over each page. */
@@ -11465,7 +11750,7 @@ function runCommand (id, dir = state.current?.dir || '') {
     case 'undo': stepHistory(false); break
     case 'redo': stepHistory(true); break
     case 'open-vault': connectVault(); break
-    case 'settings': settings.open(); break
+    case 'settings': api.settings?.open ? api.settings.open() : settings.open(); break
     case 'export-pdf': exportPdf(); break
     case 'export-html': exportHtml(); break
     case 'export-markdown': exportMarkdown(); break
@@ -12276,6 +12561,7 @@ function freezePanelSlide (opening, panel) {
      the pins exist to make the motion affordable. The grid snaps and the page
      lays out once, which is the whole of what they asked for. */
   if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+  if (panel === el.sidebar) { animateSidebarLayout(opening); return }
 
   /* Measured before the attribute flips, which is why this runs first: the
      width the column is about to lose is only readable while it still has it,
@@ -12342,11 +12628,58 @@ function freezePanelSlide (opening, panel) {
     : (opening ? [width, 0] : [-width, 0])
   slideAnimations = [slide(panel, ...panelRun)]
   if (left) slideAnimations.push(slide(el.main, opening ? -width : width, 0))
+  else {
+    // The pinned main column keeps the toolbar at its old right edge. Move
+    // it with the panel so the panel never covers the view buttons. On open,
+    // releasing the width pin replaces this translation with the same layout.
+    const tools = el.main.querySelector('.doc-tools')
+    if (tools) slideAnimations.push(slide(tools, opening ? 0 : -width, opening ? -width : 0))
+  }
 
   const mine = slideAnimations
   Promise.all(mine.map((animation) => animation.finished))
     .then(() => { if (slideAnimations === mine) releaseStage() })
     .catch(() => { /* cancelled by a newer slide, which released for it */ })
+}
+
+/** Lay out the destination once, then translate its visible contents from
+ * their previous positions. Nothing changes width when the animation ends. */
+function animateSidebarLayout (opening) {
+  const head = el.main.querySelector('.doc-head')
+  if (!head) return
+  const chrome = [...head.children]
+  // These five chrome groups are measured together, with no intervening writes.
+  // eslint-disable-next-line tulip/no-layout-thrash
+  const before = chrome.map((node) => node.getBoundingClientRect().left)
+  const anchor = (reading() ? el.stage.querySelector('#reading-document-title') : el.stage.querySelector('.cm-content')) || el.stage
+  const oldLeft = anchor.getBoundingClientRect().left
+  const panelLeft = el.sidebar.getBoundingClientRect().left
+  const interrupted = slideAnimations.length > 0
+  const width = railWidth()
+  releaseStage()
+  el.main.classList.add('is-sliding', 'is-sidebar-sliding')
+  el.sidebar.style.zIndex = '2'
+  el.app.classList.add('is-sliding')
+  holdSidebarContents(width)
+  el.sidebar.style.width = `${width}px`
+  el.app.dataset.sidebar = opening ? 'open' : 'closed'
+  const slide = (node, from, to = 0) => node.animate(
+    [{ transform: `translateX(${from}px)` }, { transform: `translateX(${to}px)` }],
+    { duration: SLIDE_MS, easing: SLIDE_EASE, fill: 'both' }
+  )
+  // One read batch after the destination layout; animations start below it.
+  // eslint-disable-next-line tulip/no-layout-thrash
+  const positions = chrome.map((node) => node.getBoundingClientRect().left)
+  const newLeft = anchor.getBoundingClientRect().left
+  const panelHome = el.sidebar.getBoundingClientRect().left
+  slideAnimations = chrome.map((node, i) => slide(node, before[i] - positions[i]))
+  slideAnimations.push(slide(el.stage, oldLeft - newLeft))
+  slideAnimations.push(slide(el.sidebar, opening && !interrupted ? -width : panelLeft - panelHome, opening ? 0 : -width))
+  const mine = slideAnimations
+  Promise.all(mine.map((animation) => animation.finished))
+    .then(() => { if (slideAnimations === mine) releaseStage() })
+    .catch(() => {})
+  slideTimer = setTimeout(releaseStage, 320)
 }
 
 /* How long a panel takes to arrive or leave, and the curve it does it on —
@@ -12380,7 +12713,8 @@ const railWidth = () =>
 
 function pinStage (wide) {
   el.stage.style.width = wide + 'px'
-  el.stage.style.flex = 'none'
+  // Pin only the width: the stage must keep its vertical flex allocation.
+  // Disabling flex lets a newly opened PDF expand to its full document height.
   holdSidebarContents(railWidth())
   el.main.classList.add('is-sliding')
   el.app.classList.add('is-sliding')
@@ -12404,7 +12738,8 @@ function freezeReadingSidebarResize () {
   readingSidebarResizePinned = true
   readingSidebarResizeStart = el.sidebar.offsetWidth
   el.stage.style.width = el.stage.clientWidth + 'px'
-  el.stage.style.flex = 'none'
+  // Pin only the width: the stage must keep its vertical flex allocation.
+  // Disabling flex lets a newly opened PDF expand to its full document height.
   holdSidebarContents(readingSidebarResizeStart)
   el.main.classList.add('is-sliding')
   el.app.classList.add('is-sliding')
@@ -12423,8 +12758,10 @@ function releaseStage () {
   el.aiPanel.style.width = ''
   holdSidebarContents(0)
   el.main.style.transform = ''
-  el.main.classList.remove('is-sliding')
+  el.main.classList.remove('is-sliding', 'is-sidebar-sliding')
+  el.sidebar.style.zIndex = ''
   el.app.classList.remove('is-sliding')
+  el.app.dispatchEvent(new Event('panel-layout-settled'))
 }
 el.app.addEventListener('transitionend', (e) => {
   if (e.target === el.app && e.propertyName === 'grid-template-columns') releaseStage()
@@ -12432,8 +12769,10 @@ el.app.addEventListener('transitionend', (e) => {
 
 function toggleSidebar (on = !sidebarOpen()) {
   const drawer = window.matchMedia('(max-width: 760px)').matches
+  if (on && drawer && el.app.dataset.ai === 'open') copilot.close()
   if (!drawer) freezePanelSlide(on, el.sidebar)
   el.app.dataset.sidebar = on ? 'open' : 'closed'
+  el.sidebarOpen.setAttribute('aria-expanded', String(on))
   api.config.set({ sidebar: on ? 'open' : 'closed' })
   /* Everything that draws the outline skips the work while the panel is out of
      sight, so a document opened behind a closed sidebar left the last one's
@@ -12444,10 +12783,24 @@ function toggleSidebar (on = !sidebarOpen()) {
   if (on) setTimeout(renderPanes, 320)
 }
 
+el.sidebarOpen.addEventListener('click', () => toggleSidebar())
+const paintSidebarOpen = () => {
+  const open = sidebarOpen()
+  el.sidebarOpen.setAttribute('aria-expanded', String(open))
+  el.sidebarOpen.setAttribute('aria-label', open ? 'Hide sidebar' : 'Show sidebar')
+  el.sidebarOpen.title = `${open ? 'Hide' : 'Show'} sidebar (${keyLabel('⌘B')})`
+}
+new MutationObserver(paintSidebarOpen).observe(el.app, { attributeFilter: ['data-sidebar'] })
+paintSidebarOpen()
+
 function closeNarrowDrawer () {
   if (window.innerWidth > 1040) return false
   if (el.app.dataset.side === 'open') {
     closeSidePane()
+    return true
+  }
+  if (window.innerWidth <= 760 && el.app.dataset.ai === 'open') {
+    copilot.close()
     return true
   }
   if (window.innerWidth <= 760 && el.app.dataset.sidebar === 'open') {
@@ -12476,10 +12829,12 @@ window.addEventListener('resize', () => {
   })
 })
 
-/* Only the narrow sidebar owns a scrim. The side document has its close button,
-   and Copilot remains a grid column, so neither should answer this click. */
+/* The two narrow drawers share one scrim. Whichever is visually on top is the
+   one the click closes; the side document keeps its own close button. */
 el.drawerScrim.addEventListener('click', () => {
-  if (window.innerWidth <= 760 && el.app.dataset.sidebar === 'open') toggleSidebar(false)
+  if (window.innerWidth > 760) return
+  if (el.app.dataset.ai === 'open') copilot.close()
+  else if (el.app.dataset.sidebar === 'open') toggleSidebar(false)
 })
 
 /* ------------------------------------------------------- panel widths */
@@ -12572,7 +12927,9 @@ function applyFonts (cfg) {
   for (const [role, spec] of Object.entries(FONT_ROLES)) {
     const id = isFont(cfg[spec.key]) ? cfg[spec.key] : spec.fallback
     state.fonts[role] = id
-    paintFont(role, id)
+    // Unset font preferences follow the theme; explicit choices stay personal.
+    if (isFont(cfg[spec.key])) paintFont(role, id)
+    else document.documentElement.style.removeProperty(spec.token)
   }
 }
 
@@ -12607,7 +12964,7 @@ async function commitFont (role, id) {
 }
 
 function applyTheme (id) {
-  const next = isTheme(id) ? id : 'light'
+  const next = resolveTheme(id)
   /* Already painted — and every setting passes through here, so painting it
      again would freeze transitions for two frames on a change of font size. A
      preview leaves `data-theme` on something else, which is what the second
@@ -12680,11 +13037,11 @@ function swatch (theme) {
 }
 
 async function cycleTheme () {
-  const next = state.theme === 'dark' ? 'light' : 'dark'
+  const next = isDarkTheme(state.theme) ? 'linen' : 'midnight'
   applyTheme(next)
   state.cfg = { ...state.cfg, theme: next }
   redrawForTheme()
-  toast(next === 'dark' ? 'Ink' : 'Paper')
+  toast(THEMES.find((theme) => theme.id === next)?.label || next)
   await api.config.set({ theme: next })
 }
 
@@ -13013,104 +13370,7 @@ for (const type of ['dragover', 'drop']) {
   window.addEventListener(type, (e) => { if (carriesFiles(e)) e.preventDefault() })
 }
 
-/* ------------------------------------------------------------ shortcuts
-
-   What the app answers to, in one place.
-
-   Every chord here is already declared somewhere — most in main's menu, the
-   rest in the panes that own them — and this is deliberately a written copy
-   rather than something derived from either. Main's accelerators live in a
-   process this one cannot read, and half the list never was a menu item; a
-   sheet assembled from what happens to be reachable would quietly omit exactly
-   the shortcuts that are hardest to discover, which are the ones it is for.
-
-   The cost is that it can drift. That is what the test in
-   scripts/test-ui-contracts.mjs is for: it holds this list against main's menu.
-   ================================================================== */
-
-const SHORTCUTS = [
-  ['Getting around', [
-    ['⌘O', 'Quick switcher'],
-    ['⌘P', 'Command palette'],
-    ['⌘⇧F', 'Search the vault'],
-    ['⌘F', 'Find in this note'],
-    ['⌘[', 'Back'],
-    ['⌘]', 'Forward'],
-    ['⌥⌘←', 'Previous tab'],
-    ['⌥⌘→', 'Next tab']
-  ]],
-  ['Documents', [
-    ['⌘N', 'New note'],
-    ['⌘⇧N', 'New folder'],
-    ['⌘T', 'New tab'],
-    ['⌘W', 'Close tab'],
-    ['⌘⇧T', 'Reopen closed tab'],
-    ['⌘S', 'Save'],
-    ['⌘⌥P', 'Print'],
-    ['↵', 'Rename, in the file tree'],
-    ['⌘↵', 'Open, in the file tree']
-  ]],
-  ['Views and panels', [
-    ['⌘1', 'Reading view'],
-    ['⌘2', 'Editing view'],
-    ['⌘3', 'Raw view'],
-    ['⌘E', 'Toggle reading view'],
-    ['⌘B', 'Toggle sidebar'],
-    ['⌘⇧E', 'Toggle outline'],
-    ['⌘⇧K', 'Toggle backlinks'],
-    ['⌘⇧I', 'Toggle info'],
-    ['⌘⇧A', 'Toggle copilot'],
-    ['⌃T', 'Copilot thinking level'],
-    ['⌘⇧L', 'Toggle theme']
-  ]],
-  ['The window', [
-    ['⌘⌥N', 'New window'],
-    ['⌘⇧W', 'Close window'],
-    ['⌘⇧O', 'Open a vault'],
-    ['⌘,', 'Settings'],
-    ['⌘0', 'Default size'],
-    ['⌘+', 'Zoom in'],
-    ['⌘-', 'Zoom out'],
-    ['⌘/', 'This sheet']
-  ]],
-  ['Notebooks and tables', [
-    ['⌘.', 'Interrupt the kernel'],
-    ['⌘⇧F', 'Filter a column'],
-    ['⌥⌘F', 'Fit every column'],
-    ['⌘⏎', 'Add a row below']
-  ]]
-]
-
-function openShortcuts () {
-  if (!el.shortcutsBody.childElementCount) {
-    const frag = document.createDocumentFragment()
-    for (const [group, rows] of SHORTCUTS) {
-      const section = node('section', 'shortcuts-group')
-      section.append(node('h3', 'shortcuts-group-name', group))
-      for (const [chord, what] of rows) {
-        const row = node('div', 'shortcuts-row')
-        row.append(node('span', 'shortcuts-what', what))
-        // Spelt for this platform: on Windows these are Ctrl chords, and the
-        // glyphs name keys that keyboard has not got.
-        row.append(node('kbd', 'shortcuts-key', keyLabel(chord)))
-        section.append(row)
-      }
-      frag.append(section)
-    }
-    el.shortcutsBody.append(frag)
-  }
-  el.shortcuts.hidden = false
-  el.shortcutsClose.focus()
-}
-
-function closeShortcuts () {
-  if (el.shortcuts.hidden) return
-  el.shortcuts.hidden = true
-}
-
-el.shortcutsClose.addEventListener('click', closeShortcuts)
-// Clicking the dimmed page behind it is the way out of every other overlay here.
-el.shortcuts.addEventListener('mousedown', (e) => { if (e.target === el.shortcuts) closeShortcuts() })
+const { openShortcuts, closeShortcuts } = mountShortcuts({ el, search: $('shortcuts-search'), keyLabel })
 
 /* ---------------------------------------------------------------- toast */
 
@@ -13581,6 +13841,8 @@ initSidePane({
   isPdf: isPdfPath,
   label: docLabel,
   remember: (path) => sessionOnly({ sideDoc: path }),
+  rememberScroll: (top) => sessionOnly({ sideScroll: top }),
+  title: $('sidepane-title'),
   /* Called immediately before the column changes, because the width being lost
      has to be measured while it is still there. The pane owns opening and
      closing; what a slide costs the document beside it is the shell's business,
@@ -13589,9 +13851,26 @@ initSidePane({
   ...fragmentRouting
 })
 el.sidepaneClose.addEventListener('click', () => closeSidePane())
+$('sidepane-swap').addEventListener('click', async () => {
+  const beside = sideDoc()
+  const current = state.current?.path
+  if (!beside || !current || !canShowBeside(current)) return
+  const opened = await openNote(beside)
+  if (opened !== false) openToSide(current)
+})
+
+api.on('settings:changed', (patch) => {
+  state.cfg = { ...state.cfg, ...patch }
+  applySettings(state.cfg)
+  if (Object.keys(patch).some((key) => key.startsWith('ai'))) copilot.applyConfig(state.cfg)
+})
 
 api.on('menu', runCommand)
-api.on('zoom', showZoom)
+api.on('zoom:will-change', rememberWindowZoomAnchor)
+api.on('zoom', (percent) => {
+  restoreWindowZoomAnchor()
+  showZoom(percent)
+})
 /* A word was taught from the editor's own context menu, or taken back out in
    Settings. Either way the note in front of you is underlined by a dictionary
    that has just changed its mind, so it is read again. */
@@ -13935,7 +14214,9 @@ api.on('app:flush', async () => {
     // close barrier as the editor and transcript.
     await languageStudy?.flush()
     await pdf?.flush()
-  } finally { clearInterval(alive); api.flushed({ ok }) }
+    rememberTabs()
+    await api.config.set({ sideScroll: (el.sidepaneBody.querySelector('.embed-pdf-pages') || el.sidepaneBody).scrollTop })
+  } catch { ok = false } finally { clearInterval(alive); api.flushed({ ok }) }
 })
 
 window.addEventListener('beforeunload', () => { if (state.dirty) saveNow() })
@@ -14019,10 +14300,10 @@ async function boot () {
      opened below finds no conversation in hand if the read has not landed yet
      — and needs none: `setNote` on a panel still arriving is a no-op, and the
      mount hands the finished restore the note that is on screen by then. */
-  const restoringCopilot = state.primary ? copilot.restoreAtBoot(cfg) : Promise.resolve()
+  const restoringCopilot = copilot.restoreAtBoot(cfg)
   // Nothing to toggle where there is no copilot; the palette entry and the
   // menu command are turned away in the same breath, where each is handled.
-  el.aiToggle.hidden = !state.primary
+  el.aiToggle.hidden = false
   state.expanded = new Set(cfg.expanded || [])
 
   /* No vault: nothing below this line has a folder to run against, so the
@@ -14062,7 +14343,7 @@ async function boot () {
      buffer is a merge nobody asked for either. */
   const session = role.open
     ? { tabs: [role.open], tabIndex: 0 }
-    : state.primary ? cfg : { tabs: [], tabIndex: 0 }
+    : cfg
   const places = Array.isArray(session.tabPlaces) ? session.tabPlaces : []
   const pins = Array.isArray(session.tabPinned) ? session.tabPinned : []
   /* Paired with its path before the filter, not read back by position after
@@ -14071,26 +14352,29 @@ async function boot () {
      never about. The same goes for which of them were pinned — a shifted pin
      holds open a note nobody asked to keep, and lets go of the one they did. */
   const stored = (Array.isArray(session.tabs) ? session.tabs : [])
-    .map((path, at) => ({ path, line: Number(places[at]) || 1, pinned: !!pins[at] }))
+    .map((path, at) => ({ path, line: Number(places[at]) || 1, pinned: !!pins[at], trail: session.tabHistories?.[at] }))
     .filter(({ path }) => path === null || known.has(path))
 
-  state.tabs = stored.map(({ path, line, pinned }) => ({
-    path,
-    history: path ? [{ path, at: 0, top: 0, line }] : [],
-    historyAt: path ? 0 : -1,
-    base: null,
-    /* A blank tab is never pinned, whatever the file says: there is nothing in
-       it to hold open, and one at the front of the strip would sit where the
-       kept documents are meant to be. */
-    pinned: pinned && !!path
-  }))
+  state.tabs = stored.map(({ path, line, pinned, trail }) => {
+    const entries = Array.isArray(trail?.entries) ? trail.entries.slice(-HISTORY_MAX).filter((entry) => entry && known.has(entry.path)) : []
+    const selected = trail?.entries?.[trail?.at]
+    const at = entries.indexOf(selected)
+    const restored = at >= 0 && entries[at].path === path
+    return {
+      path,
+      history: restored ? entries.map((entry) => ({ ...entry })) : path ? [{ path, at: 0, top: 0, line }] : [],
+      historyAt: restored ? at : path ? 0 : -1,
+      base: null,
+      pinned: pinned && !!path
+    }
+  })
 
   if (!state.tabs.length) {
     // Nothing stored: the note last open stands as the single tab, which is
     // what every earlier version of Tulip did.
     /* And in a second window, nothing at all: `lastNote` is the session's too,
        and a window opened from the Window menu opens on a blank tab. */
-    const last = state.primary && cfg.lastNote && known.has(cfg.lastNote) ? cfg.lastNote : null
+    const last = cfg.lastNote && known.has(cfg.lastNote) ? cfg.lastNote : null
     state.tabs = [last
       ? { path: last, history: [{ path: last, at: 0, top: 0, line: 1 }], historyAt: 0, base: null, pinned: false }
       : blankTab()]
@@ -14144,8 +14428,8 @@ async function boot () {
 
   /* The side pane comes back too — the reference being read is as much a part
      of how the window was left as the tabs are. */
-  if (state.primary && cfg.sideDoc && known.has(cfg.sideDoc)) {
-    openToSide(cfg.sideDoc, { persist: false })
+  if (cfg.sideDoc && known.has(cfg.sideDoc)) {
+    openToSide(cfg.sideDoc, { persist: false, scroll: cfg.sideScroll || 0 })
   }
 
   paintBootReady()
@@ -14196,32 +14480,7 @@ boot()
  * launch thereafter.
  */
 async function offerDraftRecovery () {
-  const drafts = await api.draft.list().catch(() => [])
-  if (!drafts.length) return
-
-  for (const draft of drafts) {
-    const name = docLabel(draft.path)
-    const restore = await ask({
-      title: `Restore unsaved edits to “${name}”?`,
-      detail: draft.disk === null
-        ? 'Tulip closed before these edits were saved, and the note is no longer in the vault. Restoring writes it back.'
-        : 'Tulip closed before these edits were saved. The copy on disk is older than what was on screen.',
-      go: 'Restore'
-    })
-    if (restore) {
-      try {
-        await api.file.write(draft.path, draft.text)
-        toast(`Restored unsaved edits to “${name}”`)
-      } catch (err) {
-        toast(reason(err, `“${name}” could not be restored.`))
-        // Kept, so the next launch can try again rather than losing the text
-        // to a failure that may be temporary.
-        continue
-      }
-    }
-    await api.draft.clear(draft.path).catch(() => {})
-  }
-
-  await loadTree()
-  await reloadCurrent()
+  // Recovery stays available until explicitly resolved; closing the panel must
+  // never mean discarding unsaved work or overwriting a newer disk version.
+  await recoveryPanel.refresh()
 }

@@ -71,6 +71,55 @@ export function flashTarget (target) {
 }
 
 /**
+ * Say where a jump landed, once it has landed.
+ *
+ * A short jump settles before the eye does, so flashing on the spot is
+ * right. A long one is still travelling while the wash plays out: a footnote
+ * at the foot of a long note had already faded by the time the scroll
+ * arrived, and the reader met an unmarked line. So the wash waits for the
+ * target to stop moving underneath it, and only then starts. Bounded: a page
+ * that keeps shifting under the reader — pictures landing as they load —
+ * still gets the wash, where the target was when patience ran out.
+ */
+function flashWhenSettled (target, flights = 3) {
+  if (!(target instanceof HTMLElement)) return
+  /* Steady alone cannot tell a stall from an arrival: a scroll starved of
+     frames — a hidden window, a page mid-layout — stops moving without having
+     arrived, and flashing then is the old bug back. So the wash also waits
+     until the target is actually on screen. Anything overlapping the viewport
+     counts: a destination the page cannot fully show still deserves its mark. */
+  const arrived = () => {
+    const box = target.getBoundingClientRect()
+    return box.bottom > 0 && box.top < window.innerHeight
+  }
+  let last = target.getBoundingClientRect().top
+  let steady = 0
+  const started = performance.now()
+  const tick = () => {
+    if (!target.isConnected) return
+    const top = target.getBoundingClientRect().top
+    steady = Math.abs(top - last) < 2 ? steady + 1 : 0
+    last = top
+    if (steady < 3 && performance.now() - started <= 4000) { setTimeout(tick, 50); return }
+    /* The flight has ended — or patience has. If it stranded short, the page
+       was still laying itself out underneath it: content-visibility subtrees
+       landing as they near the viewport move everything below them, and the
+       destination the scroll aimed at is no longer where it aimed. Aim again
+       from here, at the further-materialised layout; each round strands
+       closer than the last. Bounded, so a page that never settles still gets
+       the wash where the target is — and a reader who has since scrolled
+       elsewhere is glided back at most twice, never fought. */
+    if (flights > 1 && !arrived()) {
+      target.scrollIntoView({ block: 'center', behavior: scrollBehavior() })
+      flashWhenSettled(target, flights - 1)
+      return
+    }
+    flashTarget(target)
+  }
+  setTimeout(tick, 50)
+}
+
+/**
  * The in-page jump, taken over from the browser so it can be seen.
  *
  * The destination is looked for outwards from the link rather than in the
@@ -102,7 +151,7 @@ export function revealAnchorTarget (event) {
   // Centred, not scrolled-to-the-top: a reference is read against what is
   // around it, and the browser's own jump hides the lines above the target.
   target.scrollIntoView({ block: 'center', behavior: scrollBehavior() })
-  flashTarget(target)
+  flashWhenSettled(target)
   return true
 }
 

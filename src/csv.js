@@ -5273,9 +5273,14 @@ export function mountCsv ({
         column,
         value: selectedRow >= 0 ? String(rows[selectedRow]?.[cursor.c] || '') : '',
         shownRows: order.length,
+        sampleRows: shown.length,
+        sampleRowNumbers: order.slice(from, from + count).map((index) => index + 1),
+        truncated: shown.length < order.length || !!current.truncated,
+        previewOnly: !!current.truncated,
         sortedBy: sorts.map(({ col, dir }) => `${header[col] || `column ${col + 1}`} ${dir}`),
         filteredBy: [...filters].filter(([, hidden]) => hidden.size)
-          .map(([col]) => header[col] || `column ${col + 1}`),
+          .map(([col, hidden]) => `${JSON.stringify(header[col] || `column ${col + 1}`)} excludes ${JSON.stringify([...hidden])}`)
+          .concat(onlyMatches && query.trim() ? [`rows matching search ${JSON.stringify(query.trim())}`] : []),
         focus: activeText ? Math.max(0, text.indexOf(activeText)) : 0
       }
     },

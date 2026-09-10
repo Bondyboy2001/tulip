@@ -1,7 +1,6 @@
+import { openPackages } from './packages.js'
 /* ============================================================= settings
-   A rail of sections on the left, flat rows on the right — the shape people
-   already know from Obsidian, and the shape that keeps a growing list of
-   preferences from turning into a wall of controls.
+   A compact sidebar and quiet detail rows, following Rose’s settings layout.
 
    Nothing here decides what a setting *means*. Every row states its key and
    its control, and hands the new value to `onChange`; the renderer is what
@@ -13,7 +12,7 @@ import { el as node } from './dom.js'
 import { isMac } from './platform.js'
 import { SPELL_LANGUAGES } from './spell-languages.js'
 import { NO_MATCH, dropdown, matcher } from './dropdown.js'
-import { THEMES } from './themes.js'
+import { THEMES, resolveTheme } from './themes.js'
 
 /* Zoom is the one setting the main process owns outright — it is a property of
    the window, not of the page — so the stops come from the same table the menu
@@ -26,154 +25,177 @@ import { ZOOM_STEPS, DEFAULT_ZOOM, nearestStep } from './zoom.js'
    different things. */
 import {
   DEFAULT_CATALOGUE,
-  allModels, asOptions, defaultEnabled, modelFromConfig, offeredModels,
-  providerLabel, splitKey
+  allModels, asOptions, defaultEnabled, effortLabel, effortsFor, modelFromConfig,
+  nearestEffort, offeredModels,
+  providerLabel
 } from './models.js'
-import { fileSize } from './units.js'
 
+// Related preferences share a page; headings keep specialist controls easy to scan.
+// Hints stay to one quiet line: the name says what it is, the hint says what it
+// does when the name alone does not.
 const SECTIONS = [
-  /* Which folder the app opens. The default is pinned here and wins over the
-     last-open vault on every launch, so a temporary switch to another folder
-     does not move where the next launch lands. Clearing it returns to reopening
-     whatever was last open. */
-  {
-    id: 'vault',
-    group: 'Options',
-    label: 'Vault',
-    rows: [
-      {
-        key: 'defaultVaultPath',
-        type: 'default-vault',
-        name: 'Default vault'
-      }
-    ]
-  },
-  /* What the window looks like, and nothing else. Everything that used to sit
-     here — how wide a line runs, whether the outline shows — turned out to be a
-     question about reading a note rather than about the app, and notes have a
-     tab of their own now. */
   {
     id: 'appearance',
-    group: 'Options',
+    group: 'Tulip',
     label: 'Appearance',
     rows: [
       {
         key: 'theme',
         type: 'themes',
-        name: 'Theme',
-        hint: 'The palette the whole window wears.'
+        name: 'Theme'
       },
       {
         key: 'zoom',
         type: 'zoom',
-        name: 'Default zoom',
-        // "Default", because this is the size Tulip opens at: ⌘+ and ⌘− move
-        // the window you are in, and this is where they come back to.
-        hint: 'The size Tulip opens at — ⌘+ and ⌘− move the window you are in.'
+        name: 'Window zoom',
+      }
+    ]
+  },
+  {
+    id: 'vault',
+    group: 'Tulip',
+    label: 'General',
+    rows: [
+      {
+        key: 'defaultVaultPath',
+        type: 'default-vault',
+        name: 'Default vault',
       }
     ]
   },
   {
     id: 'hotkeys',
-    group: 'Options',
-    label: 'Hotkeys',
+    group: 'Tulip',
+    label: 'Shortcuts',
     rows: [
       {
         key: 'hotkeys',
         type: 'hotkeys',
         name: 'Keyboard shortcuts',
-        hint: 'Click a key, press the new one. Backspace clears it, Esc cancels.'
       }
     ]
   },
-  /* One tab per kind of document, because that is how the questions arrive:
-     what you want of a note is not what you want of a paper you are reading or
-     a paper you are writing. Manim sat in a tab of its own for want of anywhere
-     better; it is a thing markdown does, and this is where markdown lives —
-     along with everything else that is true of a note and of nothing else. */
   {
     id: 'markdown',
-    group: 'Documents',
-    label: 'Markdown',
+    group: 'Workspace',
+    label: 'Editor',
     rows: [
       {
         key: 'readableWidth',
         type: 'toggle',
         name: 'Readable line length',
-        hint: 'Hold note text to a comfortable measure instead of the window’s full width.',
-        fallback: true
+        fallback: true,
+        group: 'Reading'
       },
       {
         key: 'measure',
         type: 'segment',
         name: 'Line width',
-        hint: 'How wide a line may run while the readable length is on.',
         options: [
           { value: 'narrow', label: 'Narrow' },
           { value: 'normal', label: 'Normal' },
           { value: 'wide', label: 'Wide' }
         ],
-        fallback: 'normal'
+        fallback: 'normal',
+        group: 'Reading',
       },
       {
         key: 'centerHeadings',
         type: 'toggle',
-        name: 'Center headings',
-        hint: 'Set headings on the centre line of the page.',
-        fallback: false
+        name: 'Centre headings',
+        fallback: false,
+        group: 'Reading'
       },
       {
         key: 'spellcheck',
         type: 'toggle',
         name: 'Check spelling',
-        hint: 'Underline words the dictionary does not know.',
-        fallback: true
+        fallback: true,
+        group: 'Spelling'
       },
-      /* The checker's exceptions, not a setting of the app's own — the list
-         lives with the spellchecker, and this row only reads and prunes it.
-         Hence key-less: nothing here goes through the config. */
       {
         key: '',
         type: 'dictionary',
-        name: 'Dictionary',
-        hint: 'The words spellcheck has been taught to accept.'
+        name: 'Personal dictionary',
+        group: 'Spelling'
       },
-      /* English is not on the grid because it is not optional — the app's
-         locale picks its spelling. These are the languages a note might be in
-         on top of that, and a word right in any chosen one is not underlined. */
       {
         key: 'spellLanguages',
         type: 'languages',
-        name: 'Spelling languages',
-        hint: 'Languages checked besides English.',
-        fallback: []
-      },
-      {
-        key: 'outline',
-        type: 'toggle',
-        name: 'Show the outline',
-        hint: 'Keep the outline pane open beside notes.',
-        fallback: false
+        name: 'Languages',
+        fallback: [],
+        group: 'Spelling'
       },
       {
         key: 'codeNumbers',
         type: 'toggle',
-        name: 'Number code lines',
-        hint: 'Line numbers down the side of fenced code blocks.',
-        fallback: true
+        name: 'Line numbers',
+        fallback: true,
+        group: 'Code blocks'
       },
       {
         key: 'codeWrap',
         type: 'toggle',
-        name: 'Wrap long code lines',
-        hint: 'Wrap instead of scrolling sideways.',
-        fallback: false
+        name: 'Wrap long lines',
+        fallback: false,
+        group: 'Code blocks'
+      }
+    ]
+  },
+  {
+    id: 'documents',
+    group: 'Workspace',
+    label: 'Documents',
+    rows: [
+      {
+        key: 'pdfText',
+        type: 'toggle',
+        name: 'Read PDF text',
+        fallback: true,
+        group: 'PDF',
+      },
+      {
+        key: 'sourceNumbers',
+        type: 'toggle',
+        name: 'Line numbers',
+        fallback: false,
+        group: 'Source files'
+      },
+      {
+        key: 'csvBorders',
+        type: 'toggle',
+        name: 'Cell borders',
+        fallback: false,
+        group: 'Tables'
+      },
+      {
+        key: 'texEngine',
+        type: 'select',
+        name: 'Compiler',
+        options: [
+          { value: 'pdflatex', label: 'pdfLaTeX' },
+          { value: 'xelatex', label: 'XeLaTeX' },
+          { value: 'lualatex', label: 'LuaLaTeX' }
+        ],
+        fallback: 'pdflatex',
+        group: 'LaTeX'
+      },
+      {
+        key: 'autoInstallPackages',
+        type: 'toggle',
+        name: 'Automatically install missing packages',
+        fallback: true,
+        group: 'Code packages',
+      },
+      {
+        type: 'packages',
+        name: 'Packages by note',
+        group: 'Code packages'
       },
       {
         key: 'manimQuality',
         type: 'select',
         name: 'Manim quality',
-        hint: 'How sharply a ```manim scene renders — higher is slower.',
         options: [
           { value: 'l', label: 'Low — 480p15' },
           { value: 'm', label: 'Medium — 720p30' },
@@ -181,122 +203,20 @@ const SECTIONS = [
           { value: 'p', label: 'Very high — 1440p60' },
           { value: 'k', label: '4K — 2160p60' }
         ],
-        fallback: 'm'
+        fallback: 'm',
+        group: 'Animation'
       }
     ]
   },
-  /* A source file — `.py`, `.cpp`, `.tex` — shown as itself. It is the one kind
-     of document with no reading view to have opinions about, so what is asked
-     here is only about the text: how it is addressed, not how it is set. */
-  {
-    id: 'source',
-    group: 'Documents',
-    label: 'Source',
-    rows: [
-      {
-        key: 'sourceNumbers',
-        type: 'toggle',
-        /* Off by default. Numbers down the side are what a source file is read
-           with in every other editor, but they are also a column of chrome
-           beside a page that has none, and which of those it reads as is a
-           matter of taste rather than of correctness. */
-        name: 'Show line numbers',
-        hint: 'A numbered margin beside source files.',
-        fallback: false
-      }
-    ]
-  },
-  /* Where a `python` block's imports come from — see electron/python-env.js.
-     Two settings and a list: whether Tulip may install what a block asks for,
-     and what it has built so far. The list is the only place environments are
-     visible at all, which is why it exists: invisible is the right default,
-     unmanageable is not. */
-  {
-    id: 'python',
-    group: 'Documents',
-    label: 'Python',
-    rows: [
-      {
-        key: 'autoInstallPythonDeps',
-        type: 'toggle',
-        name: 'Install missing packages',
-        hint: 'Off by default: a pasted note can name any package. When on, a block that stops on a missing import has it installed, then runs again. ' +
-          'A script declaring its own dependencies is left alone.',
-        fallback: false
-      },
-      {
-        type: 'environments',
-        name: 'Environments',
-        hint: 'One per note, kept outside the vault. Deleting one costs a rebuild and nothing else.'
-      }
-    ]
-  },
-  /* The `.csv` grid. One question so far, and it is a real one: rules between
-     the columns are enough to read a table by, and a full lattice is what you
-     want when you are aiming at cells rather than reading rows. */
-  {
-    id: 'csv',
-    group: 'Documents',
-    label: 'CSV',
-    rows: [
-      {
-        key: 'csvBorders',
-        type: 'toggle',
-        name: 'Border every cell',
-        hint: 'A full lattice for aiming at cells, not only rules between columns.',
-        fallback: false
-      }
-    ]
-  },
-  {
-    id: 'pdf',
-    group: 'Documents',
-    label: 'PDF',
-    rows: [
-      {
-        key: 'pdfText',
-        type: 'toggle',
-        name: 'Read PDFs out for the copilot',
-        hint: 'Extract each PDF as page-marked text the copilot can read a page at a time.',
-        fallback: true
-      }
-    ]
-  },
-  {
-    id: 'tex',
-    group: 'Documents',
-    label: 'TeX',
-    rows: [
-      {
-        key: 'texEngine',
-        type: 'select',
-        name: 'Compile with',
-        hint: 'The engine a TeX document is built with.',
-        options: [
-          { value: 'pdflatex', label: 'pdfLaTeX' },
-          { value: 'xelatex', label: 'XeLaTeX' },
-          { value: 'lualatex', label: 'LuaLaTeX' }
-        ],
-        fallback: 'pdflatex'
-      }
-    ]
-  },
-  /* Four settings, and every one of them is a decision the scheduler cannot
-     make for you: how much new material you have appetite for, how much
-     forgetting you are willing to trade for fewer reviews, and whether you want
-     to type and hear the words or only look at them. Everything else about the
-     schedule — when each card comes back — is arithmetic, and arithmetic does
-     not get a control. */
   {
     id: 'study',
-    group: 'Features',
+    group: 'Workspace',
     label: 'Study',
     rows: [
       {
         key: 'studyNewPerDay',
         type: 'number',
-        name: 'New words a day',
-        hint: 'How much unseen material a day’s study may introduce.',
+        name: 'New words per day',
         placeholder: '8',
         min: 1,
         max: 200
@@ -304,63 +224,58 @@ const SECTIONS = [
       {
         key: 'studyRetention',
         type: 'select',
-        name: 'Aim to remember',
-        hint: 'The recall the scheduler aims for — fewer reviews against more forgetting.',
+        name: 'Recall target',
         options: [
           { value: 0.85, label: '85% — fewer reviews' },
-          { value: 0.9, label: '90% — the usual balance' },
-          { value: 0.95, label: '95% — forget less, review more' }
+          { value: 0.9, label: '90% — balanced' },
+          { value: 0.95, label: '95% — more reviews' }
         ],
         fallback: 0.9,
-        cast: Number
+        cast: Number,
       },
       {
         key: 'studySpeaking',
         type: 'toggle',
-        name: 'Speak the words',
-        hint: 'Say each word aloud as it is studied.',
+        name: 'Read words aloud',
         fallback: true
       }
     ]
   },
   {
     id: 'copilot',
-    group: 'Features',
+    group: 'Workspace',
     label: 'Copilot',
     rows: [
       {
         key: 'aiModel',
         type: 'models',
         name: 'Default model',
-        hint: 'Who answers when the copilot is asked — selected from your shortlist.'
+        group: 'Model',
+      },
+      {
+        key: 'aiEffort',
+        type: 'effort',
+        name: 'Thinking level',
+        group: 'Model',
       },
       {
         key: 'aiModels',
         type: 'catalogue',
-        name: 'Browse all models',
-        hint: 'Open a provider below to add models to the shortlist used by the panel and default picker.',
-        /* Beside the name rather than in the list: it undoes the whole list, and a
-           control that clears three hundred ticks does not belong among them. */
-        action: { id: 'clear-models', label: 'Reset', title: 'Tick nothing — offer no models of your own' }
+        name: 'Available models',
+        group: 'Model',
       },
       {
         key: '',
         type: 'doctor',
-        name: 'Copilot Doctor',
-        hint: 'A local readiness check: installed, signed in, ready to answer.'
-      },
-      /* Permission mode and effort belong to the conversation, not to the app:
-         both are per-turn decisions, and you make them while looking at the
-         panel. Mode is a control on the composer; effort is ⌃T, with the
-         composer's readout naming the level in force. The settings themselves
-         (`aiEffort`, `aiMode`) are still persisted; this is only about where
-         they are changed from. Effort had the additional problem of being a
-         property of the model rather than of the app — the levels are whatever
-         the chosen model publishes — so a copy of it here could offer one the
-         model in the panel does not take. */
+        name: 'Connection status',
+        group: 'Diagnostics',
+      }
     ]
   }
 ]
+
+// Existing in-app links continue to reach their consolidated page.
+const SECTION_ALIASES = { source: 'documents', csv: 'documents', tex: 'documents', python: 'documents', pdf: 'documents' }
 
 /* A keydown, as the accelerator string Electron's menu takes. Letters and
    digits come from `code` so a layout's shifted characters do not leak into
@@ -431,29 +346,11 @@ export function mountSettings ({ el, api, values, onChange }) {
   let spellInstalled = null
   /** @type {Array<{id:string, label:string, signedIn:boolean, version?:string, status:string}>|null} */
   let doctorState = null
-  /**
-   * One python environment, as `python:envs` reports it.
-   * @typedef {object} PythonEnv
-   * @property {string} dir
-   * @property {string|null} note      the note it was built for, if recorded
-   * @property {string|null} vault
-   * @property {boolean} shared        the pool for blocks with no note
-   * @property {boolean} mine          belongs to the vault that is open
-   * @property {boolean} orphaned      its note is gone from this vault
-   * @property {boolean} unknown       built before Tulip recorded whose it was
-   * @property {number} bytes
-   */
-
-  /** The environments last read, or null before the panel has asked. Walking
-   *  every file under every one of them is not something to do on a timer.
-   *  @type {PythonEnv[]|null} */
-  let envState = null
-
   /* ------------------------------------------------------------ controls */
 
   /** The stored value for a row, or what the app behaves as when unset. */
   function valueOf (row) {
-    const raw = values()[row.key]
+    const raw = row.key === 'autoInstallPackages' ? (values().autoInstallPackages ?? values().autoInstallPythonDeps) : values()[row.key]
     if (raw === undefined || raw === null || raw === '') {
       return row.fallback !== undefined ? row.fallback : ''
     }
@@ -461,10 +358,19 @@ export function mountSettings ({ el, api, values, onChange }) {
   }
 
   function change (row, value) {
+    const focused = document.activeElement
+    const previousRow = focused?.closest('.settings-row')
+    const at = previousRow && focused ? [...previousRow.querySelectorAll('button, input, select')].indexOf(focused) : -1
+    // Picking a text width should apply it even when full-width reading was on.
+    if (row.key === 'measure' && values().readableWidth === false) onChange('readableWidth', true)
     onChange(row.key, value)
     // Rows can depend on each other — the zoom stepper reads back what the
     // main process settled on — so the pane is redrawn rather than patched.
     renderBody()
+    if (at >= 0) {
+      const nextRow = [...el.body.querySelectorAll('.settings-row')].find((line) => line.dataset.setting === row.key)
+      nextRow?.querySelectorAll('button, input, select')[at]?.focus({ preventScroll: true })
+    }
   }
 
   /* ----------------------------------------------------------- dictionary
@@ -521,7 +427,7 @@ export function mountSettings ({ el, api, values, onChange }) {
       const shown = words.filter((word) => hit(word))
       if (!shown.length) {
         list.replaceChildren(node('span', 'settings-hint',
-          'No word like that yet — Add puts it in.'))
+          'No matching words.'))
         return
       }
       list.replaceChildren(...shown.map((word) => {
@@ -561,85 +467,29 @@ export function mountSettings ({ el, api, values, onChange }) {
   }
 
   const CONTROLS = {
-    environments () {
-      const wrap = node('div', 'ai-doctor')
-      const results = node('div', 'ai-doctor-results')
-      const actions = node('div', 'env-actions')
-      const refresh = node('button', 'model-refresh', envState ? 'Refresh' : 'Show environments')
-      refresh.type = 'button'
-
-      if (envState) {
-        if (!envState.length) {
-          results.append(node('span', 'settings-hint', 'None built yet.'))
-        }
-        for (const env of envState) {
-          const row = node('div', `ai-doctor-provider is-${env.orphaned ? 'problem' : 'ready'}`)
-          const name = env.shared
-            ? 'Shared'
-            : env.note || (env.unknown ? 'Unrecorded' : 'Another vault')
-          const why = env.orphaned
-            ? 'note deleted'
-            : env.shared
-              ? 'blocks with no note of their own'
-              : env.mine ? '' : 'another vault'
-          row.append(
-            node('span', 'ai-doctor-name', name),
-            node('span', 'ai-doctor-version', fileSize(env.bytes)),
-            node('span', 'ai-doctor-status', why)
-          )
-          const drop = node('button', 'ghost is-compact is-danger', 'Delete')
-          drop.type = 'button'
-          drop.title = `Delete this environment — it is rebuilt on the next run that needs it`
-          drop.addEventListener('click', async () => {
-            drop.disabled = true
-            await api.python.removeEnv(env.dir).catch(() => {})
-            envState = await api.python.envs().catch(() => envState)
-            renderBody()
-          })
-          row.append(drop)
-          results.append(row)
-        }
-
-        /* Only offered when there is something to take: a button that reports
-           "removed 0" is a button that should not have been there. */
-        if (envState.some((env) => env.orphaned)) {
-          const prune = node('button', 'ghost is-compact', 'Delete orphaned')
-          prune.type = 'button'
-          prune.title = 'Delete the environments whose notes are gone'
-          prune.addEventListener('click', async () => {
-            prune.disabled = true
-            await api.python.pruneEnvs().catch(() => {})
-            envState = await api.python.envs().catch(() => envState)
-            renderBody()
-          })
-          actions.append(prune)
-        }
-      } else {
-        results.append(node('span', 'settings-hint',
-          'Sizes are what each would cost alone; packages are shared between them, ' +
-          'so the real total is lower.'))
-      }
-
-      refresh.addEventListener('click', async () => {
-        refresh.disabled = true
-        refresh.textContent = 'Reading…'
+    packages () {
+      const wrap = node('div', 'env-actions')
+      const show = node('button', 'ghost', 'Show notes')
+      show.addEventListener('click', async () => {
+        show.disabled = true
         try {
-          envState = await api.python.envs()
-          renderBody()
-        } catch {
-          refresh.disabled = false
-          refresh.textContent = 'Could not read'
-        }
+          const records = await api.packages.list()
+          wrap.replaceChildren()
+          if (!records.length) wrap.append(node('span', 'settings-hint', 'No environments.'))
+          for (const record of records) {
+            const button = node('button', 'ghost', `${record.note || 'Scratch code'} · ${record.language}`)
+            button.addEventListener('click', () => openPackages(record.note, record.language))
+            wrap.append(button)
+          }
+        } catch (error) { show.textContent = error.message; show.disabled = false }
       })
-      actions.append(refresh)
-      wrap.append(results, actions)
+      wrap.append(show)
       return wrap
     },
-
     doctor () {
       const wrap = node('div', 'ai-doctor')
       const results = node('div', 'ai-doctor-results')
-      const run = node('button', 'model-refresh', doctorState ? 'Run again' : 'Run checks')
+      const run = node('button', 'model-refresh', 'Check')
       run.type = 'button'
 
       if (doctorState?.length) {
@@ -652,7 +502,7 @@ export function mountSettings ({ el, api, values, onChange }) {
           )
           results.append(row)
         }
-      } else results.append(node('span', 'settings-hint', 'Run a local readiness check.'))
+      }
 
       run.addEventListener('click', async () => {
         run.disabled = true
@@ -784,7 +634,7 @@ export function mountSettings ({ el, api, values, onChange }) {
       function paint () {
         wrap.replaceChildren()
         if (!hotkeyCatalogue.length) {
-          wrap.append(node('span', 'settings-hint', 'The command list is still loading — reopen this section in a moment.'))
+          wrap.append(node('span', 'settings-hint', 'Loading shortcuts…'))
           return
         }
         const overrides = values().hotkeys || {}
@@ -797,7 +647,7 @@ export function mountSettings ({ el, api, values, onChange }) {
         for (const entry of hotkeyCatalogue) {
           const line = node('div', 'hotkey-row')
           const name = node('span', 'hotkey-name', entry.label)
-          if (entry.section) name.append(node('span', 'hotkey-menu', entry.section))
+          if (entry.section) name.title = entry.section
           line.append(name)
 
           const custom = typeof overrides[entry.command] === 'string'
@@ -851,6 +701,7 @@ export function mountSettings ({ el, api, values, onChange }) {
       const button = node('button', 'switch')
       button.type = 'button'
       button.setAttribute('role', 'switch')
+      button.setAttribute('aria-label', row.name)
       button.setAttribute('aria-checked', String(on))
       button.append(node('span', 'switch-thumb'))
       button.addEventListener('click', () => change(row, !on))
@@ -861,6 +712,7 @@ export function mountSettings ({ el, api, values, onChange }) {
       const current = valueOf(row)
       const group = node('div', 'seg')
       group.setAttribute('role', 'radiogroup')
+      group.setAttribute('aria-label', row.name)
       for (const option of row.options) {
         const button = node('button', '', option.label)
         button.type = 'button'
@@ -898,300 +750,174 @@ export function mountSettings ({ el, api, values, onChange }) {
         options: asOptions(offeredModels(modelCatalogue, values().aiModels, chosen)),
         value: chosen,
         placeholder: 'No model selected',
-        onChange: (key) => change(row, key)
+        onChange: (key) => {
+          /* The level belongs to the model: settle the stored one against the
+             new model's own levels before drawing, so the Thinking row never
+             shows a level the model has never offered. Written silently first
+             so the redraw below — which restores focus to this row — shows
+             both new readings at once. The panel settles the same way in
+             memory; see `settleEffort` in copilot.js. */
+          const model = allModels(modelCatalogue).find((entry) => entry.key === key)
+          if (model && effortsFor(model).length) {
+            const settled = nearestEffort(model, values().aiEffort || 'medium')
+            if (settled && values().aiEffort !== settled) onChange('aiEffort', settled)
+          }
+          change(row, key)
+        }
       }).root)
 
-      const providerId = splitKey(chosen).provider
-      const readiness = doctorState?.find((provider) => provider.id === providerId)
-      const status = readiness
-        ? readiness.signedIn
-          ? `${readiness.label} is ready${readiness.version ? ` · ${readiness.version}` : ''}.`
-          : `${readiness.label} is not ready · ${readiness.status}.`
-        : providerId
-          ? `Run Copilot Doctor below to check ${providerLabel(providerId)}.`
-          : 'Choose a model, then run Copilot Doctor to check its provider.'
-      wrap.append(node('span', `settings-hint model-readiness${readiness?.signedIn ? ' is-ready' : ''}`, status))
       return wrap
     },
 
     /**
-     * Every model the CLI will admit to, ticked or not.
-     *
-     * One row per copilot, and its models inside it. opencode answers with
-     * several hundred, so what the pane shows at rest is the copilot itself —
-     * the question anyone opening it is actually asking — and the models are a
-     * fold away. Search opens whichever copilots match.
-     *
-     * A model's own shelf (`anthropic`, `Claude Opus 5`) is not a row of its
-     * own any more: it rides each model as a quiet qualifier, because `glm-5.2`
-     * alone says nothing about whose subscription is paying for it.
-     *
-     * Ticking writes straight through rather than going by way of `change`,
-     * which redraws the pane and would lose the search and scroll position.
+     * The default model's thinking level — the same `aiEffort` the panel steps
+     * with ⌃T and carries per chat. The levels are the default model's own, so
+     * the control follows it: a model with no such dial says so instead of
+     * offering one, and a stored level the model does not take is shown at the
+     * nearest one it does — the panel's `nearestEffort` reading, not a second
+     * idea of it.
      */
-    catalogue (row) {
-      const all = allModels(modelCatalogue)
-      const stored = values()[row.key]
-      /* An empty list and no list are different answers. Nothing saved is
-         someone who has never been here, and they are shown the defaults
-         ticked; an empty list is someone who cleared it, and clearing it has to
-         survive the pane being closed and opened again. */
-      const chosen = new Set(Array.isArray(stored) ? stored : defaultEnabled(modelCatalogue))
-      let query = ''
-      // Explicit choices last only for this visit to the pane. A fresh pane
-      // gets a fresh map, so every provider begins folded again.
-      const opened = new Map()
+    effort (row) {
+      const key = modelFromConfig(values())
+      if (!key) return node('span', 'settings-hint', 'Choose a default model first.')
+      const model = allModels(modelCatalogue).find((entry) => entry.key === key)
+      if (!model) return node('span', 'settings-hint', 'Reading the model list…')
+      const levels = effortsFor(model)
+      if (!levels.length) return node('span', 'settings-hint', `${model.label} has no thinking levels.`)
+      return dropdown({
+        label: 'Thinking level',
+        options: levels.map((level) => ({ value: level, label: effortLabel(level) })),
+        value: nearestEffort(model, values().aiEffort || 'medium'),
+        onChange: (value) => change(row, value)
+      }).root
+    },
 
-      /* Grouped once, by the CLI that offers them — `allModels` already emits
-         them in provider order, so this keeps the catalogue's own order. Who
-         offers what is a property of the catalogue, not of what is typed, so
-         only the membership of each is recomputed per keystroke; each model
-         already carries the lowercased text it is searched by. */
+    // The shortlist is the default view. Browse groups or search to add a model.
+    catalogue (row) {
+      const all = [...allModels(modelCatalogue)]
+      const stored = values()[row.key]
+      const chosen = new Set(Array.isArray(stored) ? stored : defaultEnabled(modelCatalogue))
+      // Keep saved selections visible while a provider catalogue is refreshing.
+      for (const key of chosen) {
+        if (all.some((model) => model.key === key)) continue
+        const saved = offeredModels(modelCatalogue, [key], key).find((model) => model.key === key)
+        if (saved) all.push(saved)
+      }
+      let query = ''
+      let selectedOnly = chosen.size > 0
+      const opened = new Map()
+      const providers = new Set(all.map((model) => model.provider))
       const groups = []
       const byName = new Map()
       for (const model of all) {
-        let group = byName.get(model.provider)
+        const shelf = model.group || providerLabel(model.provider)
+        const name = providers.size > 1 && shelf !== providerLabel(model.provider)
+          ? `${providerLabel(model.provider)} · ${shelf}` : shelf
+        let group = byName.get(name)
         if (!group) {
-          group = { name: providerLabel(model.provider), models: [] }
-          byName.set(model.provider, group)
+          group = { name, models: [] }
+          byName.set(name, group)
           groups.push(group)
         }
         group.models.push(model)
       }
+      groups.sort((a, b) => a.name.localeCompare(b.name))
+      for (const group of groups) group.models.sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true }))
 
-      const wrap = node('div', 'model-picker')
-
-      /**
-       * Everything ticked, in one place.
-       *
-       * The list below runs to several hundred models and is closed by default.
-       * These chips keep every chosen model visible without opening each
-       * copilot, and clicking one removes it from the offered list.
-       */
-      const picked = node('div', 'model-picked')
-
+      const wrap = node('div', 'model-picker is-simple')
       const head = node('div', 'model-picker-head')
+      const filters = node('div', 'seg model-filters')
+      filters.setAttribute('aria-label', 'Model list')
+      const selected = node('button', '', 'Selected')
+      const browse = node('button', '', 'All models')
+      for (const button of [selected, browse]) button.type = 'button'
+      filters.append(selected, browse)
+      const again = node('button', 'model-refresh', 'Refresh')
+      again.type = 'button'
+      again.addEventListener('click', () => {
+        again.disabled = true
+        again.textContent = 'Refreshing…'
+        loadModels({ fresh: true }).catch(() => {
+          again.disabled = false
+          again.textContent = 'Retry'
+        })
+      })
+      head.append(filters, again)
       const search = node('input', 'field model-search')
       search.type = 'search'
       search.spellcheck = false
-      search.placeholder = `Search ${all.length} models…`
-
-      /* Asking the CLIs again. The catalogue is read when the pane opens, but
-         main holds its answer for a few minutes, and the moment you want this
-         is the moment you have just installed something. */
-      const again = node('button', 'model-refresh')
-      again.type = 'button'
-      again.title = 'Ask the CLIs for their models again'
-      again.append(node('span', 'model-refresh-label', 'Refresh'))
-      again.addEventListener('click', () => {
-        if (again.disabled) return
-        again.disabled = true
-        again.querySelector('.model-refresh-label').textContent = 'Refreshing…'
-        /* `loadModels` redraws the pane, which builds this row again from the
-           new catalogue — so there is nothing to put back on success. A failure
-           leaves the old list, and says so where the button was. */
-        loadModels({ fresh: true }).catch(() => {
-          again.disabled = false
-          again.querySelector('.model-refresh-label').textContent = 'Not reachable'
-        })
-      })
-
-      head.append(search, again)
-
+      search.placeholder = 'Search models…'
+      search.setAttribute('aria-label', 'Search models')
       const list = node('div', 'model-picker-list')
-      wrap.append(picked, head, list)
+      wrap.append(head, search, list)
 
-      function paintPicked () {
-        const on = all.filter((model) => chosen.has(model.key))
-        // Nothing ticked, nothing said: the strip disappears rather than
-        // explaining itself.
-        picked.hidden = !on.length
-        if (!on.length) { picked.replaceChildren(); return }
-        picked.replaceChildren(...on.map((model) => {
-          const chip = node('button', 'model-chip')
-          chip.type = 'button'
-          chip.title = `Stop offering ${model.label}`
-          /* Named by its copilot rather than by its shelf: which of the five is
-             answering is the thing a chip has to say, and the shelf is in the
-             tooltip for the models whose name alone is ambiguous. */
-          chip.append(
-            node('span', 'model-chip-group', providerLabel(model.provider)),
-            node('span', 'model-chip-name', model.label),
-            node('span', 'model-chip-x', '×')
-          )
-          chip.addEventListener('click', () => {
-            chosen.delete(model.key)
-            persist()
-            // The row for it in the list below may be on screen and ticked, so
-            // this one does repaint — unticking from here is a deliberate act,
-            // not the per-model ticking the list's fast path exists for.
-            paint()
-          })
-          return chip
-        }))
+      const updateFilters = () => {
+        selected.textContent = `Selected (${chosen.size})`
+        selected.setAttribute('aria-pressed', String(selectedOnly))
+        browse.setAttribute('aria-pressed', String(!selectedOnly))
       }
-
-      /* Written down without redrawing. Ticking one model used to rebuild every
-         row in the list — four hundred-odd buttons — to change one checkbox. */
-      const persist = () =>
-        onChange(row.key, all.filter((model) => chosen.has(model.key)).map((m) => m.key))
-
+      const persist = () => {
+        onChange(row.key, [...chosen])
+        updateFilters()
+        // Refresh only the default picker so new selections are immediately available.
+        const defaultControl = el.body.querySelector('[data-setting="aiModel"] .settings-control')
+        if (defaultControl) defaultControl.replaceChildren(CONTROLS.models({ key: 'aiModel' }))
+      }
       function paint () {
+        updateFilters()
         const hit = matcher(query)
-        const shown = groups
-          .map((group) => ({ ...group, models: group.models.filter((m) => hit(m.search)) }))
-          .filter((group) => group.models.length)
+        const shown = groups.map((group) => ({
+          ...group, models: group.models.filter((model) => hit(model.search) && (!selectedOnly || chosen.has(model.key)))
+        })).filter((group) => group.models.length)
         list.replaceChildren(...shown.map((group) => {
-          const of = group.models.length
-          let ticked = group.models.filter((model) => chosen.has(model.key)).length
-          // A newly opened settings pane starts with every copilot folded.
-          // Search results open automatically; otherwise only an explicit
-          // click changes a copilot's state for the lifetime of this pane.
           const open = opened.has(group.name)
             ? opened.get(group.name)
-            : !!query
-
+            : !!query || selectedOnly
           const box = node('div', 'model-group')
           box.classList.toggle('is-open', open)
-
           const bar = node('button', 'model-group-head')
           bar.type = 'button'
           bar.setAttribute('aria-expanded', String(open))
-          const counter = node('span', 'model-group-count', `${ticked}/${of}`)
-          // One button for the whole copilot, because ticking three hundred
-          // opencode models one at a time is not a feature.
-          const every = node('button', 'model-group-all')
-          every.type = 'button'
-
-          const refresh = () => {
-            ticked = group.models.filter((model) => chosen.has(model.key)).length
-            counter.textContent = `${ticked}/${of}`
-            every.textContent = ticked === of ? 'None' : 'All'
-            every.title = ticked === of
-              ? 'Take all of these out of the list'
-              : 'Put all of these in the list'
-          }
-          refresh()
-
-          bar.append(node('span', 'model-group-caret'), node('span', 'model-group-name', group.name), counter)
+          bar.append(node('span', 'model-group-caret'), node('span', 'model-group-name', group.name),
+            node('span', 'model-group-count', String(group.models.length)))
           bar.addEventListener('click', () => { opened.set(group.name, !open); paint() })
-
-          every.addEventListener('click', (event) => {
-            event.stopPropagation()
-            const add = ticked !== of
-            for (const model of group.models) {
-              if (add) chosen.add(model.key)
-              else chosen.delete(model.key)
-            }
-            opened.set(group.name, true)
-            persist()
-            // A whole group at once does change every row, so this one repaints.
-            paint()
-          })
-          bar.append(every)
           box.append(bar)
-
           if (open) {
             const body = node('div', 'model-group-body')
-
-            /* The fold, grouped by shelf — opencode's own sub-providers. The
-               shelf used to ride each row as a badge, which put
-               `opencode-go` four hundred times down the right edge and said
-               nothing about where one shelf ended; a heading says it once, and
-               gives each shelf an All of its own. First-appearance order, so a
-               catalogue whose shelves arrive scattered is still collected. */
-            const shelves = new Map()
             for (const model of group.models) {
-              const name = model.group || group.name
-              if (!shelves.has(name)) shelves.set(name, [])
-              shelves.get(name).push(model)
-            }
-
-            for (const [shelfName, models] of shelves) {
-              const section = node('div', 'model-shelf')
-              // One shelf that is just the copilot's own name is no grouping
-              // at all, and a heading for it would repeat the bar above.
-              const titled = shelves.size > 1 || shelfName !== group.name
-              let syncShelf = () => {}
-
-              if (titled) {
-                const shelfHead = node('div', 'model-shelf-head')
-                const count = node('span', 'model-shelf-count')
-                const every = node('button', 'model-group-all')
-                every.type = 'button'
-                syncShelf = () => {
-                  const on = models.filter((m) => chosen.has(m.key)).length
-                  count.textContent = `${on}/${models.length}`
-                  every.textContent = on === models.length ? 'None' : 'All'
-                  every.title = on === models.length
-                    ? `Take all of ${shelfName} out of the list`
-                    : `Put all of ${shelfName} in the list`
-                }
-                syncShelf()
-                every.addEventListener('click', () => {
-                  const add = models.some((m) => !chosen.has(m.key))
-                  for (const m of models) {
-                    if (add) chosen.add(m.key)
-                    else chosen.delete(m.key)
-                  }
-                  persist()
-                  // A whole shelf at once changes every one of its rows.
-                  paint()
-                })
-                shelfHead.append(node('span', 'model-shelf-name', shelfName), count, every)
-                section.append(shelfHead)
+              const option = node('button', 'model-option')
+              option.type = 'button'
+              option.setAttribute('role', 'checkbox')
+              option.title = `${group.name} · ${model.label}`
+              option.append(node('span', 'model-tick'), node('span', 'model-name', model.label))
+              const mark = () => {
+                option.setAttribute('aria-checked', String(chosen.has(model.key)))
+                option.classList.toggle('is-on', chosen.has(model.key))
               }
-
-              const grid = node('div', 'model-shelf-grid')
-              for (const model of models) {
-                const option = node('button', 'model-option')
-                option.type = 'button'
-                option.setAttribute('role', 'checkbox')
-                /* Under its own heading the shelf's name is already said, so a
-                   model named after it keeps only what is its own — "High"
-                   under "Claude Opus 5", not the heading over again. */
-                const name = titled && model.label !== shelfName && model.label.startsWith(`${shelfName} `)
-                  ? model.label.slice(shelfName.length + 1)
-                  : model.label
-                option.append(node('span', 'model-tick'), node('span', 'model-name', name))
-                const mark = (on) => {
-                  option.setAttribute('aria-checked', String(on))
-                  option.classList.toggle('is-on', on)
-                }
-                mark(chosen.has(model.key))
-                option.addEventListener('click', () => {
-                  const on = !chosen.has(model.key)
-                  if (on) chosen.add(model.key)
-                  else chosen.delete(model.key)
-                  mark(on)
-                  refresh()
-                  syncShelf()
-                  // The strip at the top is the one other thing on screen that
-                  // has just gone out of date; the rows below have not.
-                  paintPicked()
-                  persist()
-                })
-                grid.append(option)
-              }
-              section.append(grid)
-              body.append(section)
+              mark()
+              option.addEventListener('click', () => {
+                if (chosen.has(model.key)) chosen.delete(model.key)
+                else chosen.add(model.key)
+                mark()
+                persist()
+                if (selectedOnly) { paint(); selected.focus() }
+              })
+              body.append(option)
             }
             box.append(body)
           }
           return box
         }))
-
-        if (!shown.length) list.append(node('div', 'model-picker-empty', NO_MATCH))
-        paintPicked()
+        if (!shown.length) list.append(node('div', 'model-picker-empty', selectedOnly ? 'No selected models' : NO_MATCH))
       }
-
+      selected.addEventListener('click', () => { selectedOnly = true; opened.clear(); paint() })
+      browse.addEventListener('click', () => { selectedOnly = false; opened.clear(); paint() })
       search.addEventListener('input', () => {
         query = search.value
-        // A new search decides for itself which groups to open.
+        if (query.trim()) selectedOnly = false
         opened.clear()
         paint()
       })
-
       paint()
       return wrap
     },
@@ -1219,7 +945,7 @@ export function mountSettings ({ el, api, values, onChange }) {
     },
 
     themes () {
-      const current = values().theme || 'light'
+      const current = resolveTheme(values().theme)
       const list = node('div', 'theme-grid')
       for (const theme of THEMES) {
         const button = node('button', 'theme-card')
@@ -1250,7 +976,7 @@ export function mountSettings ({ el, api, values, onChange }) {
     'default-vault' (row) {
       const wrap = node('div', 'env-actions')
       const pinned = values()[row.key] || ''
-      const shown = node('span', 'settings-hint', pinned || 'Last open')
+      const shown = node('span', 'settings-hint is-path', pinned || 'Last open')
       if (pinned) shown.title = pinned
       const pick = node('button', 'model-refresh', 'Choose…')
       pick.type = 'button'
@@ -1296,20 +1022,9 @@ export function mountSettings ({ el, api, values, onChange }) {
 
   /* -------------------------------------------------------------- render */
 
-  /** What a row's own button does, by the name the row calls it. Here rather
-   *  than on the row itself, which is a description of the pane and has no way
-   *  to reach the config. */
-  const ROW_ACTIONS = {
-    // Every tick off, and it stays off: the pane reads an empty list as a
-    // choice, not as an absence, so this is not undone the next time it opens.
-    'clear-models': () => { onChange('aiModels', []); renderBody() }
-  }
-
   function renderRail () {
     el.rail.replaceChildren()
-    /* Obsidian's arrangement: the sections run under small group headings —
-       Options, then the document kinds, then the features — so the rail reads
-       as three short lists rather than one long one. */
+    // App preferences first, then workspace features.
     /** @type {string | null} */
     let group = null
     for (const section of SECTIONS) {
@@ -1320,7 +1035,13 @@ export function mountSettings ({ el, api, values, onChange }) {
       const button = node('button', 'settings-tab', section.label)
       button.type = 'button'
       button.setAttribute('aria-current', String(section.id === active))
-      button.addEventListener('click', () => { active = section.id; renderRail(); renderBody() })
+      button.addEventListener('click', () => {
+        active = section.id
+        renderRail()
+        renderBody()
+        el.body.scrollTop = 0
+        el.rail.querySelector('[aria-current="true"]')?.focus()
+      })
       el.rail.append(button)
     }
   }
@@ -1330,24 +1051,37 @@ export function mountSettings ({ el, api, values, onChange }) {
     el.title.textContent = section.label
     el.body.replaceChildren()
 
+    let group = null
+    /** @type {HTMLElement | null} */
+    let card = null
     for (const row of section.rows) {
+      if (row.group && row.group !== group) {
+        group = row.group
+        el.body.append(node('h3', 'settings-group-title', group))
+      }
+      if (!card || card.dataset.group !== (row.group || '')) {
+        card = document.createElement('div')
+        card.className = 'settings-card'
+        card.dataset.group = row.group || ''
+        el.body.append(card)
+      }
       const line = node('div', 'settings-row')
+      line.dataset.setting = row.key || row.type
       const label = node('div', 'settings-label')
       const name = node('div', 'settings-name', row.name)
-      if (row.action) {
-        const act = node('button', 'settings-action', row.action.label)
-        act.type = 'button'
-        act.title = row.action.title || ''
-        act.addEventListener('click', () => ROW_ACTIONS[row.action.id]?.())
-        name.append(act)
-      }
       label.append(name)
-      const hint = typeof row.hint === 'function' ? /** @type {any} */ (row.hint)(values()) : row.hint
-      if (hint) label.append(node('div', 'settings-hint', hint))
       line.append(label)
 
       const control = /** @type {any} */ (CONTROLS[row.type])?.(row)
-      if (control) {
+      if (control && row.type === 'doctor') {
+        line.append(control.querySelector('.model-refresh'))
+        const results = control.querySelector('.ai-doctor-results')
+        if (results.hasChildNodes()) line.append(results)
+      } else if (control) {
+        if (row.type === 'default-vault' && document.body.classList.contains('settings-window')) {
+          const path = control.querySelector('.settings-hint.is-path')
+          if (path) label.append(path)
+        }
         const holder = node('div', 'settings-control')
         holder.append(control)
         line.append(holder)
@@ -1355,24 +1089,27 @@ export function mountSettings ({ el, api, values, onChange }) {
 
       // A full-width control reads better under its label than squeezed
       // beside it — the theme grid and the model list are both of those.
-      if (row.type === 'themes' || row.type === 'catalogue' || row.type === 'doctor' ||
-          row.type === 'hotkeys' || row.type === 'languages' ||
-          row.type === 'environments') line.classList.add('is-stacked')
-      el.body.append(line)
+      if (row.type === 'themes' || row.type === 'models' || row.type === 'catalogue' ||
+          row.type === 'hotkeys' || row.type === 'languages') line.classList.add('is-stacked')
+      if (row.enabledBy && values()[row.enabledBy] === false) {
+        line.classList.add('is-disabled')
+        control?.querySelectorAll('button, input, select').forEach((item) => { item.disabled = true })
+      }
+      card.append(line)
     }
   }
 
   /* -------------------------------------------------------------- search
      One field over the whole pane, between the section's title and the close
-     button. Typing suggests every row it matches — by its own name or its
-     section's — and choosing one switches to that section and flashes the
-     row, which is quicker than remembering which of six tabs holds it. */
+     button. Typing suggests every row it matches — by its own name, its group
+     or its hint — and choosing one switches to that section and flashes the
+     row, which is quicker than remembering which tab holds it. */
 
   const INDEX = SECTIONS.flatMap((section) =>
     section.rows.filter((row) => row.name).map((row) => ({
       section,
       name: row.name,
-      search: `${section.label} ${row.name}`.toLowerCase()
+      search: `${section.label} ${row.group || ''} ${row.name} ${row.key || ''}`.toLowerCase()
     })))
 
   const searchWrap = node('div', 'settings-search')
@@ -1404,7 +1141,12 @@ export function mountSettings ({ el, api, values, onChange }) {
 
   function paintSuggest () {
     const matches = searchMatches()
-    if (!matches.length) { hideSuggest(); return }
+    if (!matches.length) {
+      if (!searchField.value.trim()) { hideSuggest(); return }
+      suggest.replaceChildren(node('div', 'settings-search-empty', 'No settings found'))
+      suggest.hidden = false
+      return
+    }
     picked = Math.min(picked, matches.length - 1)
     suggest.replaceChildren(...matches.map((entry, at) => {
       const option = node('button', 'settings-suggest-row')
@@ -1487,12 +1229,15 @@ export function mountSettings ({ el, api, values, onChange }) {
   let openedFrom = null
 
   function open (section) {
+    section = SECTION_ALIASES[section] || section
     if (section && SECTIONS.some((s) => s.id === section)) active = section
     renderRail()
     renderBody()
     loadModels().catch(() => {})
     Promise.resolve(api.hotkeys?.list()).then((list) => {
-      hotkeyCatalogue = Array.isArray(list) ? list : []
+      hotkeyCatalogue = Array.isArray(list)
+        ? [...list].sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: 'base', numeric: true }))
+        : []
       if (!el.root.hidden) renderBody()
     }).catch(() => {})
     if (!spellInstalled) {
@@ -1518,6 +1263,7 @@ export function mountSettings ({ el, api, values, onChange }) {
   function close () {
     clearSearch()
     el.root.hidden = true
+    if (document.body.classList.contains('settings-window')) window.close()
     const back = openedFrom
     openedFrom = null
     if (back?.isConnected) /** @type {HTMLElement} */ (back).focus()
@@ -1549,7 +1295,7 @@ export function mountSettings ({ el, api, values, onChange }) {
   }
 
   head?.addEventListener('pointerdown', (event) => {
-    if (event.button !== 0) return
+    if (event.button !== 0 || document.body.classList.contains('settings-window')) return
     // The close button and the search field live here too, and a drag must
     // not begin on either of them.
     if (event.target.closest('button, input, select, textarea')) return

@@ -97,9 +97,20 @@ export function mountPanels ({
   function fitPanel (p, paint = true) {
     // The other open panels are already spoken for, so the room this one may
     // take is what is left over once they and the note's floor are counted.
+    const floating = getComputedStyle(p.host).position === 'fixed'
     const taken = PANELS.reduce(
-      (sum, q) => sum + (q === p || !panelOpen(q) ? 0 : q.width), 0)
-    const room = window.innerWidth - taken - MAIN_FLOOR
+      (sum, q) => sum + (q === p || !panelOpen(q) || getComputedStyle(q.host).position === 'fixed' ? 0 : q.width), 0)
+    // Drawers overlay the document: reserving its 380px floor pins a right
+    // drawer at its minimum in zoomed/narrow windows, making drag a no-op.
+    // Only a right drawer can stand off the window's edge — the side pane
+    // stepping aside for an open Copilot — so only those read `right` back.
+    // A left drawer's computed `right` is not an offset but the space it
+    // leaves over (window minus its own width), so subtracting it ratchets
+    // the drawer down to its minimum on every refit and every drag.
+    const offset = p.grow === 1 ? 0 : parseFloat(getComputedStyle(p.host).right) || 0
+    const room = floating
+      ? window.innerWidth - offset - (p.grow === 1 ? 56 : 32)
+      : window.innerWidth - taken - MAIN_FLOOR
     p.width = Math.max(p.min, Math.min(p.want, panelCeiling(p), room))
     if (paint) el.app.style.setProperty(p.prop, `${p.width}px`)
     return p.width
@@ -159,6 +170,9 @@ export function mountPanels ({
       }
       const done = () => {
         p.grip.removeEventListener('pointermove', move)
+        p.grip.removeEventListener('pointerup', done)
+        p.grip.removeEventListener('pointercancel', done)
+        p.grip.removeEventListener('lostpointercapture', done)
         if (moveFrame) cancelAnimationFrame(moveFrame)
         moveFrame = 0
         // A release between frames still commits the divider where it ended.
@@ -168,12 +182,14 @@ export function mountPanels ({
         p.grip.classList.remove('is-live')
         onResizeEnd?.(p.key, p.width)
         onResize?.()
+        if (p.grip.hasPointerCapture(e.pointerId)) p.grip.releasePointerCapture(e.pointerId)
         api.config.set({ [p.key]: p.want })
       }
 
       p.grip.addEventListener('pointermove', move)
       p.grip.addEventListener('pointerup', done, { once: true })
       p.grip.addEventListener('pointercancel', done, { once: true })
+      p.grip.addEventListener('lostpointercapture', done, { once: true })
     })
 
     // Back to the width the app ships with — the same gesture a window divider
@@ -192,6 +208,12 @@ export function mountPanels ({
   }
 
   window.addEventListener('resize', refitPanels)
+  // Translated drawers can finish opening without a size change. Reposition
+  // their grips once the animation's temporary widths/transforms are removed.
+  el.app.addEventListener('panel-layout-settled', () => requestAnimationFrame(refitPanels))
+  for (const p of PANELS) p.host.addEventListener('transitionend', (event) => {
+    if (event.target === p.host && event.propertyName === 'transform') refitPanels()
+  })
 
   /* Opening/closing a pane animates the grid edge. Follow the actual host box
      through those frames instead of guessing where the CSS transition is. */

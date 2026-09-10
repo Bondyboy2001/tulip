@@ -639,6 +639,33 @@ const MIME_ORDER = [
  * viewer draws for a given output is exactly the sort of thing that is easy to
  * get subtly wrong and impossible to notice by looking.
  */
+/** Plain recorded output for Copilot; never serialise rich MIME payloads. */
+export function copilotOutput (outputs, limit = 4000) {
+  const chunks = []
+  let used = 0
+  let truncated = false
+  // Recent errors take priority over streams and display results.
+  const recent = (outputs || []).slice(-20).reverse()
+  const ordered = [...recent.filter((o) => o.output_type === 'error'), ...recent.filter((o) => o.output_type !== 'error')]
+  for (const output of ordered) {
+    let text = ''
+    if (output.output_type === 'error') {
+      text = [output.ename, output.evalue].filter(Boolean).join(': ') + '\n' + (output.traceback || []).join('\n')
+    } else if (output.output_type === 'stream') text = cellText(output.text)
+    else text = cellText(output.data?.['text/plain'])
+    // Strip terminal colour sequences from tracebacks.
+    text = stripAnsi(text)
+    if (!text) continue
+    const available = Math.max(0, limit - used - (chunks.length ? 2 : 0))
+    if (text.length > available) truncated = true
+    if (!available) continue
+    const excerpt = text.length > available ? text.slice(-available) : text
+    chunks.push(excerpt)
+    used += excerpt.length + (chunks.length > 1 ? 2 : 0)
+  }
+  return { outputText: chunks.join('\n\n'), outputTruncated: truncated || (outputs || []).length > 20 }
+}
+
 export function outputParts (output) {
   if (!output || typeof output !== 'object') return []
 
@@ -4780,6 +4807,7 @@ export function mountNotebook ({
         text,
         cells: cells.length,
         language,
+        ...copilotOutput(cells[at]?.outputs),
         at,
         focus: Math.max(0, text.indexOf('← the cell in view'))
       }

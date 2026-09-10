@@ -83,3 +83,13 @@ export function textContextKind ({ tex = false, code = false, language = false, 
   if (flashcards) return 'flashcards'
   return 'note'
 }
+
+/** A failed flush must never produce a sendable snapshot. Both promises are
+ * observed immediately, including when website extraction is still pending. */
+export async function captureSavedContext (collect, save, dirty) {
+  const collected = collect()
+  const saved = dirty ? save() : Promise.resolve(true)
+  const [snapshot, ok] = await Promise.all([collected, saved])
+  if (!ok) throw new Error('Could not save the file. Save it successfully before asking Copilot again.')
+  return snapshot
+}

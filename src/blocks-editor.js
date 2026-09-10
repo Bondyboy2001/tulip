@@ -138,22 +138,23 @@ function shiftOnly (tr, fences) {
  * keystroke. The field remembers where every fence stands to make that call.
  * Widget eq() keeps the untouched ones alive across every rebuild.
  *
- * @param {(state: any) => import('@codemirror/view').DecorationSet} build
+ * @param {(state: any, previous?: import('@codemirror/view').DecorationSet) => import('@codemirror/view').DecorationSet} build
  * @param {{ also?: (tr) => boolean }} [opts]  a further reason to rebuild
  */
 export function fenceField (build, { also } = {}) {
-  const make = (state) => ({
-    deco: build(state),
+  const make = (state, previous) => ({
+    deco: build(state, previous),
     fences: fenceList(state).map(({ node }) => ({ from: node.from, to: node.to }))
   })
 
   return StateField.define({
-    create: make,
+    create: (state) => make(state),
     update (value, tr) {
-      if (also?.(tr)) return make(tr.state)
+      const previous = tr.docChanged ? value.deco.map(tr.changes) : value.deco
+      if (also?.(tr)) return make(tr.state, previous)
 
       if (!tr.docChanged) {
-        return syntaxTree(tr.state) !== syntaxTree(tr.startState) ? make(tr.state) : value
+        return syntaxTree(tr.state) !== syntaxTree(tr.startState) ? make(tr.state, previous) : value
       }
 
       if (shiftOnly(tr, value.fences)) {
@@ -165,7 +166,7 @@ export function fenceField (build, { also } = {}) {
           }))
         }
       }
-      return make(tr.state)
+      return make(tr.state, previous)
     },
     provide: (field) => EditorView.decorations.from(field, (value) => value.deco)
   })

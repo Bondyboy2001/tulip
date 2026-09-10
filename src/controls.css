@@ -1,0 +1,103 @@
+/* Shared control treatment for the document window and Settings.
+   Component styles still own sizing and layout; these rules own appearance. */
+:root {
+  --control-radius: 4px;
+  --control-border: var(--line);
+  --control-selected: color-mix(in srgb, var(--accent) 10%, var(--surface));
+}
+
+/* Actions and closed dropdowns use one flat, outlined surface. */
+:root body :is(.ghost, .model-refresh, .ask-btn, .boot-action, .fileview-btn,
+  .find-btn, .landing-connect, .study-start, .pdf-password-btn, .dd-button, .ai-go, .flashcard-submit,
+  .tk-embed-control) {
+  border: 1px solid var(--control-border);
+  border-radius: var(--control-radius);
+  background: var(--surface);
+  color: var(--ink-soft);
+  box-shadow: none;
+  font-weight: 500;
+  transition: background .12s, border-color .12s, color .12s;
+}
+:root body :is(.ghost, .model-refresh, .ask-btn, .boot-action, .fileview-btn,
+  .find-btn, .landing-connect, .study-start, .pdf-password-btn, .dd-button, .ai-go, .flashcard-submit,
+  .tk-embed-control):hover:not(:disabled) {
+  background: var(--hover);
+  border-color: var(--muted);
+  color: var(--ink);
+}
+:root body :is(.is-primary, .is-go, .ghost.is-accent, .landing-connect, .study-start, .ai-go, .flashcard-submit):is(button) {
+  background: var(--control-selected);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  color: var(--accent);
+  box-shadow: none;
+}
+:root body :is(.ghost, .ask-btn, .pdf-pop-btn).is-danger {
+  color: var(--code-removed);
+  border-color: color-mix(in srgb, var(--code-removed) 30%, var(--line));
+}
+:root body :is(.ghost, .ask-btn, .pdf-pop-btn).is-danger:hover:not(:disabled) {
+  color: var(--code-removed);
+  background: color-mix(in srgb, var(--code-removed) 9%, var(--surface));
+}
+
+/* Connected choices have dividers and an accent underline, never a raised pill. */
+:root body :is(.seg, .merge-choice, .view-switch, .stepper) {
+  gap: 0;
+  padding: 0;
+  border: 1px solid var(--control-border);
+  border-radius: var(--control-radius);
+  background: transparent;
+  box-shadow: none;
+}
+:root body :is(.seg, .merge-choice, .view-switch, .stepper) > button {
+  margin: 0;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  box-shadow: none;
+  font-weight: 500;
+}
+:root body :is(.seg, .merge-choice, .view-switch, .stepper) > button + button {
+  border-left: 1px solid var(--control-border);
+}
+:root body :is(.seg, .merge-choice, .view-switch, .stepper) > button:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--ink);
+}
+:root body :is(.seg, .merge-choice, .view-switch) > button:is([aria-checked="true"], [aria-pressed="true"], .is-active) {
+  border-bottom-color: var(--accent);
+  background: var(--control-selected);
+  color: var(--accent);
+  box-shadow: none;
+}
+
+/* Compact toolbar controls keep their existing hit areas and icon sizing. */
+:root body :is(.icon-btn, .doc-tool, .run-btn, .nav-arrow, .zoom, .pdf-bar-btn,
+  .pdf-tool, .pdf-scale, .docx-btn, .site-btn, .msg-action, .packages-close,
+  .pdf-pop-btn, .settings-tab, .tab-close, .tab-pin, .vault-name,
+  .sidebar-open, .workspace-tools-open, .ai-chip, .shortcuts-close, .find-close,
+  .media-dock-close, .ai-attachment-remove, .ai-attachment-dialog-close) {
+  border-radius: var(--control-radius);
+  box-shadow: none;
+}
+/* Every toolbar toggle lights the same way, with the app's one pressed tint —
+   the same colour `.pdf-tool.is-on` and the icon buttons already use, so no
+   two toolbars answer the pointer differently. The sidebar's pane tabs are
+   deliberately absent: their state is a hairline of their own. */
+:root body :is(.icon-btn, .doc-tool, .run-btn, .pdf-tool, .docx-btn):is([aria-pressed="true"], .is-running) {
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+:root body .switch { border-radius: var(--control-radius); box-shadow: none; }
+:root body .switch-thumb { border-radius: 2px; box-shadow: none; }
+:root body :is(.packages-dialog, .settings-window) :is(input:not([type="checkbox"]), select) { border-radius: var(--control-radius); box-shadow: none; }
+:root body button:focus-visible, :root body summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+:root body button:disabled { opacity: .45; cursor: default; }
+
+:root body .tab { border-radius: var(--control-radius); border-bottom: 2px solid transparent; box-shadow: none; }
+:root body .tab.is-active { border-bottom-color: var(--accent); background: var(--control-selected); color: var(--accent); box-shadow: none; }

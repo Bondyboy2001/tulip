@@ -14,7 +14,7 @@
 import { Decoration, WidgetType } from '@codemirror/view'
 import { codeCopilotButton, copyButton } from './blocks.js'
 import { eachFence, fenceField } from './blocks-editor.js'
-import { isRunnable, retirePainters, runButtonUI, runPanelUI } from './runcode.js'
+import { isRunnable, retainBlockOutput, retirePainters, runButtonUI, runPanelUI } from './runcode.js'
 import { htmlFence, isHtmlRun } from './htmlrun.js'
 import { isThree, threeFence } from './threejs.js'
 
@@ -91,8 +91,14 @@ class RunPanelWidget extends WidgetType {
   ignoreEvent () { return true }
 }
 
-function buildRunWidgets (state) {
+function buildRunWidgets (state, previous) {
   const widgets = []
+  const oldPanels = new Map()
+  previous?.between(0, state.doc.length, (from, _to, decoration) => {
+    if (decoration.spec.widget instanceof RunPanelWidget) {
+      oldPanels.set(from, decoration.spec.widget)
+    }
+  })
 
   eachFence(state, ({ node, first, lang, code }) => {
     // One membership test, from the table above: a language no kind claims is
@@ -114,6 +120,11 @@ function buildRunWidgets (state) {
     )
 
     if (!runs) return
+    const old = oldPanels.get(node.to)
+    if (old && isRunnable(old.lang) && isRunnable(lang) &&
+        (old.lang !== lang.toLowerCase() || old.code !== code)) {
+      retainBlockOutput(old.lang, old.code, lang, code)
+    }
     widgets.push(
       Decoration.widget({
         widget: new RunPanelWidget(lang.toLowerCase(), code),

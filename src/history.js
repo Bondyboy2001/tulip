@@ -121,7 +121,7 @@ const TAGS = {
 }
 
 export function mountHistory ({
-  el, api, confirm, beforeRestore, restoreStarted, restoreFailed, afterRestore, onError
+  el, api, confirm, beforeRestore, restoreStarted, restoreFailed, afterRestore, onError, embedded = false
 }) {
   /** @type {{ path: string | null,
    *           operations: { id: string, at: number, source: string,
@@ -140,7 +140,7 @@ export function mountHistory ({
     if (!ok) return
     await restoreStarted?.(operation, path)
     try {
-      await beforeRestore?.()
+      if (await beforeRestore?.() === false) throw new Error('The open document could not be saved. Resolve its save error before restoring.')
       await api.trust.restore(operation.id, path)
     } catch (err) {
       await restoreFailed?.(operation, path)
@@ -301,7 +301,7 @@ export function mountHistory ({
   }
 
   el.close.addEventListener('click', close)
-  document.addEventListener('keydown', (event) => {
+  if (!embedded) document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape' && !el.panel.hidden) close()
   })
   return { show, close, restore }

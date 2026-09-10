@@ -32,67 +32,7 @@
   font-style: italic;
 }
 
-/* Text colours are held to a contrast floor against their own background: both
-   --muted and --faint clear WCAG AA for body text (4.5:1), so status text and
-   keyboard hints stay legible instead of fading into the paper.
-
-   --faint used to sit at roughly 4:1 by design, on the reasoning that it is
-   decoration. It is not: completed tasks, study progress, timestamps and the
-   version string are all real text wearing it, in 149 places. Nine of the
-   eleven themes were below the floor; they were moved along their own hue and
-   saturation until they cleared it, so each theme still looks like itself.
-   (Solarized's --muted is the one deliberate divergence from a published
-   palette — base00 lands at 4.3:1 on base3, and legibility won.)
-
-   Keep new themes to the same floor. The check is a contrast ratio against
-   --paper, not an eyeball: these were all plausible-looking before. */
 :root {
-  --paper:     #FBFAF8;
-  --surface:   #FFFFFF;
-  --sunk:      #F3F0EA;
-  --ink:       #1A1815;
-  --ink-soft:  #443F39;
-  --muted:     #6B655E;
-  --faint:     #756F67;
-  --line:      #E1DCD4;
-  --line-soft: #EBE8E1;
-  --accent:    #A63A5A;
-  --accent-dim:#A63A5A26;
-  --stem:      #4F6B4B;
-  --sel:       #A63A5A24;
-
-  /* Emphasis is a colour as well as a weight or a slant. Bold takes the warm
-     side of the palette and italic the cool one, in every theme, so the two
-     stay told apart at a glance and neither is mistaken for a link. */
-  --strong:    #A6472C;
-  --emph:      #3F5A73;
-
-  /* Code tokens. Six hues, all pulled toward the paper's warmth so a fenced
-     block reads as part of the page rather than a pasted-in terminal. */
-  --code-keyword:  #9B3B63;
-  --code-atom:     #8A5A1F;
-  --code-number:   #8A5A1F;
-  --code-string:   #40693C;
-  --code-string2:  #2F6E6B;
-  --code-comment:  #8A847B;
-  --code-function: #2C5F87;
-  --code-def:      #2C5F87;
-  --code-type:     #6B4E9C;
-  --code-property: #3F5A73;
-  --code-tag:      #A6472C;
-  --code-operator: #6B655E;
-  --code-punct:    #8A847B;
-  --code-meta:     #6B655E;
-  --code-added:    #40693C;
-  --code-removed:  #A63A5A;
-  --math:          #2C5F87;
-  --money:         #3F6B4A;
-  /* Inline code, which is prose furniture rather than a code token: it has to
-     be told apart from a link, from bold, from italic and from a tag at a
-     glance, so each theme gives it the one hue those five have left. Violet
-     here; the warm themes take their own yellow or pink. */
-  --code-inline:   #6B4E9C;
-
   /* Interaction states are a tint of the theme's own accent, not a wash of
      white. Neutral grey over a near-black paper reads as a rendering artefact;
      the same lift carrying a trace of the accent reads as a decision. */
@@ -114,27 +54,6 @@
   /* The copilot's edits, marked in the accent so they read as the app
      speaking rather than as a selection. */
   --agent-flash: color-mix(in srgb, var(--accent) 20%, transparent);
-}
-
-/* One hue per heading level, so depth is legible before the size is measured —
-   in the editor, in the reading view and in the outline alike.
-
-   Written out per theme rather than aliased to the code-token colours: those
-   repeat within a palette (Dracula draws tags and operators in the same pink,
-   Cobalt tags and types in the same cyan), and a repeat there landed as two
-   heading levels the same colour. Every level is a literal so the six can be
-   checked against each other by eye.
-
-   The order is the same in all six themes — accent, cool, green, amber,
-   violet, warm — so a note keeps its shape when the theme changes, and so
-   neighbouring levels never sit next to each other on the wheel. */
-:root {
-  --h1: #A63A5A;
-  --h2: #2C5F87;
-  --h3: #40693C;
-  --h4: #8A5A1F;
-  --h5: #6B4E9C;
-  --h6: #A6472C;
 }
 
 /* ------------------------------------------------------------- layers
@@ -182,513 +101,315 @@
   --z-landing:   300;    /* no vault: nothing behind it is worth showing */
 }
 
-[data-theme="dark"] {
-  --paper:     #141317;
-  --surface:   #1A181E;
-  --sunk:      #201E25;
-  --ink:       #E9E5DF;
-  --ink-soft:  #C4BEB6;
-  --muted:     #9C958C;
-  --faint:     #867F75;
-  --line:      #332F3B;
-  --line-soft: #272430;
-  --accent:    #E87D9B;
-  --accent-dim:#E87D9B2E;
-  --stem:      #8CB286;
-  --sel:       #E87D9B2E;
-  --strong:    #E0906F;
-  --emph:      #9FB6CC;
-
-  --code-keyword:  #E58AAE;
-  --code-atom:     #D6A05E;
-  --code-number:   #D6A05E;
-  --code-string:   #8CB286;
-  --code-string2:  #7FC0BB;
-  --code-comment:  #7E776E;
-  --code-function: #82B4DC;
-  --code-def:      #82B4DC;
-  --code-type:     #B79BE8;
-  --code-property: #9FB6CC;
-  --code-tag:      #E0906F;
-  --code-operator: #9C958C;
-  --code-punct:    #7E776E;
-  --code-meta:     #9C958C;
-  --code-added:    #8CB286;
-  --code-removed:  #E87D9B;
-  --math:          #82B4DC;
-  --money:         #7FA37A;
-  --code-inline:   #B79BE8;
-
-  --h1: #E87D9B;
-  --h2: #82B4DC;
-  --h3: #8CB286;
-  --h4: #D6A05E;
-  --h5: #B79BE8;
-  --h6: #E0906F;
+/* Tulip palettes. Keep text tokens at 4.5:1 or higher. */
+:root, [data-theme="linen"] {
+  color-scheme: light;
+  --paper: #F8F4ED;
+  --surface: #FFFCF7;
+  --sunk: #EEE7DC;
+  --ink: #292620;
+  --ink-soft: #494239;
+  --muted: #70665A;
+  --faint: #776C60;
+  --line: #DCD2C4;
+  --line-soft: #E8DFD3;
+  --accent: #994963;
+  --accent-dim: #99496326;
+  --stem: #476A50;
+  --sel: #99496330;
+  --strong: #A34F36;
+  --emph: #34657F;
+  --code-keyword: #735780;
+  --code-atom: #805A26;
+  --code-number: #805A26;
+  --code-string: #476A50;
+  --code-string2: #34657F;
+  --code-comment: #776C60;
+  --code-function: #34657F;
+  --code-def: #34657F;
+  --code-type: #735780;
+  --code-property: #34657F;
+  --code-tag: #A34F36;
+  --code-operator: #70665A;
+  --code-punct: #776C60;
+  --code-meta: #70665A;
+  --code-added: #476A50;
+  --code-removed: #994963;
+  --math: #34657F;
+  --money: #476A50;
+  --code-inline: #735780;
+  --h1: #994963;
+  --h2: #34657F;
+  --h3: #476A50;
+  --h4: #805A26;
+  --h5: #735780;
+  --h6: #A34F36;
 }
 
-/* ------------------------------------------------------------- themes
-   Each block below is a complete palette. Nothing outside these blocks names
-   a colour literally, so a new theme is a new block and nothing else.
-   The named palettes follow their originals; where an original colour fell
-   below a readable contrast against its own background — Cobalt2's blue
-   comments, most notably — it is lifted just far enough to read.
-   ================================================================== */
-
-:root { color-scheme: light; }
-[data-theme="dark"], [data-theme="dracula"], [data-theme="monokai"],
-[data-theme="cobalt2"], [data-theme="cursor-midnight"],
-[data-theme="solarized-dark"], [data-theme="nord"], [data-theme="gruvbox"],
-[data-theme="catppuccin"], [data-theme="one-dark"] { color-scheme: dark; }
-
-[data-theme="solarized-light"] {
-  --paper:     #FDF6E3;
-  --surface:   #FFFCF0;
-  --sunk:      #EEE8D5;
-  --ink:       #073642;
-  --ink-soft:  #40565E;
-  --muted:     #5E737A;
-  --faint:     #637176;
-  --line:      #DCD4BD;
-  --line-soft: #E9E2CC;
-  --accent:    #268BD2;
-  --accent-dim:#268BD226;
-  --stem:      #859900;
-  --sel:       #268BD224;
-  --strong:    #CB4B16;
-  --emph:      #6C71C4;
-
-  --code-keyword:  #859900;
-  --code-atom:     #B58900;
-  --code-number:   #B58900;
-  --code-string:   #2AA198;
-  --code-string2:  #2AA198;
-  --code-comment:  #839496;
-  --code-function: #268BD2;
-  --code-def:      #268BD2;
-  --code-type:     #B58900;
-  --code-property: #657B83;
-  --code-tag:      #CB4B16;
-  --code-operator: #657B83;
-  --code-punct:    #839496;
-  --code-meta:     #B58900;
-  --code-added:    #859900;
-  --code-removed:  #DC322F;
-  --math:          #268BD2;
-  --money:         #6B8500;
-  --code-inline:   #D33682;
-
-  --h1: #268BD2;
-  --h2: #2AA198;
-  --h3: #859900;
-  --h4: #B58900;
-  --h5: #6C71C4;
-  --h6: #CB4B16;
+[data-theme="botanical"] {
+  color-scheme: light;
+  --paper: #F2F5EF;
+  --surface: #FAFCF8;
+  --sunk: #E5EBE0;
+  --ink: #253128;
+  --ink-soft: #455347;
+  --muted: #626F61;
+  --faint: #647060;
+  --line: #CDD8C8;
+  --line-soft: #DFE6DA;
+  --accent: #386749;
+  --accent-dim: #38674926;
+  --stem: #526B35;
+  --sel: #38674930;
+  --strong: #995340;
+  --emph: #376A79;
+  --code-keyword: #74577C;
+  --code-atom: #826026;
+  --code-number: #826026;
+  --code-string: #526B35;
+  --code-string2: #376A79;
+  --code-comment: #647060;
+  --code-function: #376A79;
+  --code-def: #376A79;
+  --code-type: #74577C;
+  --code-property: #376A79;
+  --code-tag: #995340;
+  --code-operator: #626F61;
+  --code-punct: #647060;
+  --code-meta: #626F61;
+  --code-added: #526B35;
+  --code-removed: #386749;
+  --math: #376A79;
+  --money: #526B35;
+  --code-inline: #74577C;
+  --h1: #386749;
+  --h2: #376A79;
+  --h3: #526B35;
+  --h4: #826026;
+  --h5: #74577C;
+  --h6: #995340;
 }
 
-[data-theme="solarized-dark"] {
-  --paper:     #002B36;
-  --surface:   #073642;
-  --sunk:      #00212B;
-  --ink:       #E7E4D8;
-  --ink-soft:  #BFC5BC;
-  --muted:     #93A1A1;
-  --faint:     #819292;
-  --line:      #14495A;
-  --line-soft: #0A3844;
-  --accent:    #268BD2;
-  --accent-dim:#268BD22E;
-  --stem:      #859900;
-  --sel:       #268BD233;
-  --strong:    #CB4B16;
-  --emph:      #6C71C4;
-
-  --code-keyword:  #859900;
-  --code-atom:     #B58900;
-  --code-number:   #B58900;
-  --code-string:   #2AA198;
-  --code-string2:  #2AA198;
-  --code-comment:  #657B83;
-  --code-function: #268BD2;
-  --code-def:      #268BD2;
-  --code-type:     #B58900;
-  --code-property: #93A1A1;
-  --code-tag:      #CB4B16;
-  --code-operator: #93A1A1;
-  --code-punct:    #7C8D8D;
-  --code-meta:     #B58900;
-  --code-added:    #859900;
-  --code-removed:  #DC322F;
-  --math:          #268BD2;
-  --money:         #859900;
-  --code-inline:   #D33682;
-
-  --h1: #268BD2;
-  --h2: #2AA198;
-  --h3: #859900;
-  --h4: #B58900;
-  --h5: #6C71C4;
-  --h6: #CB4B16;
+[data-theme="porcelain"] {
+  color-scheme: light;
+  --paper: #F5F7FA;
+  --surface: #FFFFFF;
+  --sunk: #E9EEF5;
+  --ink: #232D3D;
+  --ink-soft: #435168;
+  --muted: #626F82;
+  --faint: #637085;
+  --line: #D3DCE8;
+  --line-soft: #E3E9F1;
+  --accent: #3D61A0;
+  --accent-dim: #3D61A026;
+  --stem: #426E5C;
+  --sel: #3D61A030;
+  --strong: #A04F5F;
+  --emph: #286C80;
+  --code-keyword: #72579A;
+  --code-atom: #845D29;
+  --code-number: #845D29;
+  --code-string: #426E5C;
+  --code-string2: #286C80;
+  --code-comment: #637085;
+  --code-function: #286C80;
+  --code-def: #286C80;
+  --code-type: #72579A;
+  --code-property: #286C80;
+  --code-tag: #A04F5F;
+  --code-operator: #626F82;
+  --code-punct: #637085;
+  --code-meta: #626F82;
+  --code-added: #426E5C;
+  --code-removed: #3D61A0;
+  --math: #286C80;
+  --money: #426E5C;
+  --code-inline: #72579A;
+  --h1: #3D61A0;
+  --h2: #286C80;
+  --h3: #426E5C;
+  --h4: #845D29;
+  --h5: #72579A;
+  --h6: #A04F5F;
 }
 
-[data-theme="nord"] {
-  --paper:     #2E3440;
-  --surface:   #3B4252;
-  --sunk:      #292E39;
-  --ink:       #ECEFF4;
-  --ink-soft:  #D8DEE9;
-  --muted:     #A7B1C2;
-  --faint:     #959EAE;
-  --line:      #434C5E;
-  --line-soft: #3B4252;
-  --accent:    #88C0D0;
-  --accent-dim:#88C0D02E;
-  --stem:      #A3BE8C;
-  --sel:       #88C0D033;
-  --strong:    #D08770;
-  --emph:      #B48EAD;
-
-  --code-keyword:  #81A1C1;
-  --code-atom:     #B48EAD;
-  --code-number:   #B48EAD;
-  --code-string:   #A3BE8C;
-  --code-string2:  #8FBCBB;
-  --code-comment:  #8791A3;
-  --code-function: #88C0D0;
-  --code-def:      #88C0D0;
-  --code-type:     #8FBCBB;
-  --code-property: #D8DEE9;
-  --code-tag:      #81A1C1;
-  --code-operator: #A7B1C2;
-  --code-punct:    #8791A3;
-  --code-meta:     #D08770;
-  --code-added:    #A3BE8C;
-  --code-removed:  #BF616A;
-  --math:          #88C0D0;
-  --money:         #93B47F;
-  --code-inline:   #EBCB8B;
-
-  --h1: #88C0D0;
-  --h2: #81A1C1;
-  --h3: #A3BE8C;
-  --h4: #EBCB8B;
-  --h5: #B48EAD;
-  --h6: #D08770;
+[data-theme="jupyter"] {
+  color-scheme: light;
+  --font-body: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --paper: #FFFFFF;
+  --surface: #F7F7F7;
+  --sunk: #EDEDED;
+  --ink: #262626;
+  --ink-soft: #424242;
+  --muted: #626262;
+  --faint: #686868;
+  --line: #D0D0D0;
+  --line-soft: #E5E5E5;
+  --accent: #A84400;
+  --accent-dim: #A8440026;
+  --stem: #286B32;
+  --sel: #A8440030;
+  --strong: #9C2727;
+  --emph: #2456A6;
+  --code-keyword: #286B32;
+  --code-atom: #71509B;
+  --code-number: #2456A6;
+  --code-string: #A12B2B;
+  --code-string2: #A12B2B;
+  --code-comment: #536F73;
+  --code-function: #2456A6;
+  --code-def: #2456A6;
+  --code-type: #71509B;
+  --code-property: #2456A6;
+  --code-tag: #286B32;
+  --code-operator: #626262;
+  --code-punct: #686868;
+  --code-meta: #71509B;
+  --code-added: #286B32;
+  --code-removed: #A12B2B;
+  --math: #2456A6;
+  --money: #286B32;
+  --code-inline: #A12B2B;
+  --h1: #262626;
+  --h2: #262626;
+  --h3: #424242;
+  --h4: #424242;
+  --h5: #626262;
+  --h6: #626262;
 }
 
-[data-theme="gruvbox"] {
-  --paper:     #282828;
-  --surface:   #32302F;
-  --sunk:      #1D2021;
-  --ink:       #EBDBB2;
-  --ink-soft:  #D5C4A1;
-  --muted:     #BDAE93;
-  --faint:     #A89984;
-  --line:      #504945;
-  --line-soft: #3C3836;
-  --accent:    #FE8019;
-  --accent-dim:#FE80192E;
-  --stem:      #B8BB26;
-  --sel:       #FE801933;
-  --strong:    #FABD2F;
-  --emph:      #83A598;
-
-  --code-keyword:  #FB4934;
-  --code-atom:     #D3869B;
-  --code-number:   #D3869B;
-  --code-string:   #B8BB26;
-  --code-string2:  #8EC07C;
-  --code-comment:  #A89984;
-  --code-function: #FABD2F;
-  --code-def:      #FABD2F;
-  --code-type:     #83A598;
-  --code-property: #D5C4A1;
-  --code-tag:      #FE8019;
-  --code-operator: #BDAE93;
-  --code-punct:    #A89984;
-  --code-meta:     #FE8019;
-  --code-added:    #B8BB26;
-  --code-removed:  #FB4934;
-  --math:          #83A598;
-  --money:         #9CB02A;
-  --code-inline:   #D3869B;
-
-  --h1: #FE8019;
-  --h2: #83A598;
-  --h3: #B8BB26;
-  --h4: #FABD2F;
-  --h5: #D3869B;
-  --h6: #FB4934;
+[data-theme="latex"] {
+  color-scheme: light;
+  --font-body: "Computer Modern", "CMU Serif", "Latin Modern Roman", Georgia, serif;
+  --paper: #FFFEFA;
+  --surface: #F8F7F3;
+  --sunk: #EEECE6;
+  --ink: #252420;
+  --ink-soft: #45433E;
+  --muted: #64615A;
+  --faint: #6C6860;
+  --line: #D5D1C8;
+  --line-soft: #E8E4DB;
+  --accent: #33312E;
+  --accent-dim: #33312E26;
+  --stem: #3F624A;
+  --sel: #365B7230;
+  --strong: #252420;
+  --emph: #45433E;
+  --code-keyword: #365B72;
+  --code-atom: #725135;
+  --code-number: #725135;
+  --code-string: #3F624A;
+  --code-string2: #365B72;
+  --code-comment: #6C6860;
+  --code-function: #365B72;
+  --code-def: #365B72;
+  --code-type: #644A76;
+  --code-property: #45433E;
+  --code-tag: #365B72;
+  --code-operator: #64615A;
+  --code-punct: #6C6860;
+  --code-meta: #644A76;
+  --code-added: #3F624A;
+  --code-removed: #993E3B;
+  --math: #252420;
+  --money: #3F624A;
+  --code-inline: #644A76;
+  --h1: #252420;
+  --h2: #252420;
+  --h3: #33312E;
+  --h4: #45433E;
+  --h5: #45433E;
+  --h6: #64615A;
 }
 
-[data-theme="catppuccin"] {
-  --paper:     #1E1E2E;
-  --surface:   #2A2A3C;
-  --sunk:      #181825;
-  --ink:       #CDD6F4;
-  --ink-soft:  #BAC2DE;
-  --muted:     #A6ADC8;
-  --faint:     #8A8FA8;
-  --line:      #45475A;
-  --line-soft: #313244;
-  --accent:    #CBA6F7;
-  --accent-dim:#CBA6F72E;
-  --stem:      #A6E3A1;
-  --sel:       #CBA6F733;
-  --strong:    #FAB387;
-  --emph:      #89B4FA;
-
-  --code-keyword:  #CBA6F7;
-  --code-atom:     #FAB387;
-  --code-number:   #FAB387;
-  --code-string:   #A6E3A1;
-  --code-string2:  #94E2D5;
-  --code-comment:  #8A8FA8;
-  --code-function: #89B4FA;
-  --code-def:      #89B4FA;
-  --code-type:     #F9E2AF;
-  --code-property: #BAC2DE;
-  --code-tag:      #F38BA8;
-  --code-operator: #A6ADC8;
-  --code-punct:    #8A8FA8;
-  --code-meta:     #FAB387;
-  --code-added:    #A6E3A1;
-  --code-removed:  #F38BA8;
-  --math:          #89DCEB;
-  --money:         #82C786;
-  --code-inline:   #F5C2E7;
-
-  --h1: #CBA6F7;
-  --h2: #89B4FA;
-  --h3: #A6E3A1;
-  --h4: #F9E2AF;
-  --h5: #F5C2E7;
-  --h6: #FAB387;
+[data-theme="dusk"] {
+  color-scheme: dark;
+  --paper: #252129;
+  --surface: #2D2832;
+  --sunk: #201D24;
+  --ink: #ECE5E9;
+  --ink-soft: #CEC1CC;
+  --muted: #AD9DAD;
+  --faint: #A595A5;
+  --line: #49404D;
+  --line-soft: #39323E;
+  --accent: #DDA3BB;
+  --accent-dim: #DDA3BB26;
+  --stem: #AAC4A0;
+  --sel: #DDA3BB30;
+  --strong: #DEA48F;
+  --emph: #9DBCD5;
+  --code-keyword: #BFAAE0;
+  --code-atom: #DBBC8C;
+  --code-number: #DBBC8C;
+  --code-string: #AAC4A0;
+  --code-string2: #9DBCD5;
+  --code-comment: #A595A5;
+  --code-function: #9DBCD5;
+  --code-def: #9DBCD5;
+  --code-type: #BFAAE0;
+  --code-property: #9DBCD5;
+  --code-tag: #DEA48F;
+  --code-operator: #AD9DAD;
+  --code-punct: #A595A5;
+  --code-meta: #AD9DAD;
+  --code-added: #AAC4A0;
+  --code-removed: #DDA3BB;
+  --math: #9DBCD5;
+  --money: #AAC4A0;
+  --code-inline: #BFAAE0;
+  --h1: #DDA3BB;
+  --h2: #9DBCD5;
+  --h3: #AAC4A0;
+  --h4: #DBBC8C;
+  --h5: #BFAAE0;
+  --h6: #DEA48F;
 }
 
-[data-theme="one-dark"] {
-  --paper:     #282C34;
-  --surface:   #2F333D;
-  --sunk:      #21252B;
-  --ink:       #D7DAE0;
-  --ink-soft:  #ABB2BF;
-  --muted:     #9AA1AF;
-  --faint:     #9096A2;
-  --line:      #3B4048;
-  --line-soft: #31353D;
-  --accent:    #61AFEF;
-  --accent-dim:#61AFEF2E;
-  --stem:      #98C379;
-  --sel:       #61AFEF33;
-  --strong:    #D19A66;
-  --emph:      #C678DD;
-
-  --code-keyword:  #C678DD;
-  --code-atom:     #D19A66;
-  --code-number:   #D19A66;
-  --code-string:   #98C379;
-  --code-string2:  #56B6C2;
-  --code-comment:  #7F8694;
-  --code-function: #61AFEF;
-  --code-def:      #61AFEF;
-  --code-type:     #E5C07B;
-  --code-property: #ABB2BF;
-  --code-tag:      #E06C75;
-  --code-operator: #56B6C2;
-  --code-punct:    #7F8694;
-  --code-meta:     #9AA1AF;
-  --code-added:    #98C379;
-  --code-removed:  #E06C75;
-  --math:          #56B6C2;
-  --money:         #8AB971;
-  --code-inline:   #E5C07B;
-
-  --h1: #61AFEF;
-  --h2: #56B6C2;
-  --h3: #98C379;
-  --h4: #E5C07B;
-  --h5: #C678DD;
-  --h6: #D19A66;
-}
-
-[data-theme="dracula"] {
-  --paper:     #282A36;
-  --surface:   #343746;
-  --sunk:      #21222C;
-  --ink:       #F8F8F2;
-  --ink-soft:  #D8D8D2;
-  --muted:     #A3A9C8;
-  --faint:     #8B94B8;
-  --line:      #44475A;
-  --line-soft: #363948;
-  --accent:    #FF79C6;
-  --accent-dim:#FF79C62E;
-  --stem:      #50FA7B;
-  --sel:       #BD93F93D;
-  --strong:    #FFB86C;
-  --emph:      #BD93F9;
-
-  --code-keyword:  #FF79C6;
-  --code-atom:     #BD93F9;
-  --code-number:   #BD93F9;
-  --code-string:   #F1FA8C;
-  --code-string2:  #FFB86C;
-  --code-comment:  #7B85AE;
-  --code-function: #50FA7B;
-  --code-def:      #50FA7B;
-  --code-type:     #8BE9FD;
-  --code-property: #8BE9FD;
-  --code-tag:      #FF79C6;
-  --code-operator: #FF79C6;
-  --code-punct:    #D8D8D2;
-  --code-meta:     #FFB86C;
-  --code-added:    #50FA7B;
-  --code-removed:  #FF5555;
-  --math:          #8BE9FD;
-  --money:         #6FBF85;
-  --code-inline:   #F1FA8C;
-
-  --h1: #FF79C6;
-  --h2: #8BE9FD;
-  --h3: #50FA7B;
-  --h4: #F1FA8C;
-  --h5: #BD93F9;
-  --h6: #FFB86C;
-}
-
-[data-theme="monokai"] {
-  --paper:     #272822;
-  --surface:   #34352D;
-  --sunk:      #1E1F1C;
-  --ink:       #F8F8F2;
-  --ink-soft:  #D9D8CE;
-  --muted:     #ADA894;
-  --faint:     #949081;
-  --line:      #3E3D32;
-  --line-soft: #32332B;
-  --accent:    #F92672;
-  --accent-dim:#F926722E;
-  --stem:      #A6E22E;
-  --sel:       #FFFFFF24;
-  --strong:    #FD971F;
-  --emph:      #AE81FF;
-
-  --code-keyword:  #F92672;
-  --code-atom:     #AE81FF;
-  --code-number:   #AE81FF;
-  --code-string:   #E6DB74;
-  --code-string2:  #FD971F;
-  --code-comment:  #8B8676;
-  --code-function: #A6E22E;
-  --code-def:      #A6E22E;
-  --code-type:     #66D9EF;
-  --code-property: #D9D8CE;
-  --code-tag:      #F92672;
-  --code-operator: #F92672;
-  --code-punct:    #D9D8CE;
-  --code-meta:     #FD971F;
-  --code-added:    #A6E22E;
-  --code-removed:  #F92672;
-  --math:          #66D9EF;
-  --money:         #93C24A;
-  --code-inline:   #E6DB74;
-
-  --h1: #F92672;
-  --h2: #66D9EF;
-  --h3: #A6E22E;
-  --h4: #E6DB74;
-  --h5: #AE81FF;
-  --h6: #FD971F;
-}
-
-[data-theme="cobalt2"] {
-  --paper:     #193549;
-  --surface:   #1F4662;
-  --sunk:      #122738;
-  --ink:       #E1EFFF;
-  --ink-soft:  #C6D8E8;
-  --muted:     #9CB6CC;
-  --faint:     #7FA0BA;
-  --line:      #24506F;
-  --line-soft: #1C3E58;
-  --accent:    #FFC600;
-  --accent-dim:#FFC60030;
-  --stem:      #A5FF90;
-  --sel:       #0088FF4D;
-  --strong:    #FF9D00;
-  --emph:      #9EFFFF;
-
-  --code-keyword:  #FF9D00;
-  --code-atom:     #FF628C;
-  --code-number:   #FF628C;
-  --code-string:   #A5FF90;
-  --code-string2:  #A5FF90;
-  --code-comment:  #6FA8D6;
-  --code-function: #FFEE80;
-  --code-def:      #FFEE80;
-  --code-type:     #9EFFFF;
-  --code-property: #9EFFFF;
-  --code-tag:      #9EFFFF;
-  --code-operator: #FF9D00;
-  --code-punct:    #E1EFFF;
-  --code-meta:     #FFC600;
-  --code-added:    #A5FF90;
-  --code-removed:  #FF628C;
-  --math:          #9EFFFF;
-  --money:         #86C878;
-  --code-inline:   #FF628C;
-
-  --h1: #FFC600;
-  --h2: #9EFFFF;
-  --h3: #A5FF90;
-  --h4: #FF9D00;
-  --h5: #C792EA;
-  --h6: #FF628C;
-}
-
-[data-theme="cursor-midnight"] {
-  --paper:     #0D1017;
-  --surface:   #161B23;
-  --sunk:      #12161D;
-  --ink:       #D7DEE7;
-  --ink-soft:  #B0BAC6;
-  --muted:     #8B95A3;
-  --faint:     #737E8C;
-  --line:      #232A34;
-  --line-soft: #1A1F28;
-  --accent:    #6AA6F8;
-  --accent-dim:#6AA6F82E;
-  --stem:      #7FD88F;
-  --sel:       #6AA6F833;
-  --strong:    #F0A868;
-  --emph:      #A78BFA;
-
-  --code-keyword:  #A78BFA;
-  --code-atom:     #F0A868;
-  --code-number:   #F0A868;
-  --code-string:   #7FD88F;
-  --code-string2:  #6FD1D1;
-  --code-comment:  #6C7684;
-  --code-function: #6AA6F8;
-  --code-def:      #6AA6F8;
-  --code-type:     #62D0D0;
-  --code-property: #9FB4CC;
-  --code-tag:      #E58A7B;
-  --code-operator: #8B95A3;
-  --code-punct:    #8B95A3;
-  --code-meta:     #8B95A3;
-  --code-added:    #7FD88F;
-  --code-removed:  #E58A7B;
-  --math:          #62D0D0;
-  --money:         #6FBE85;
-  --code-inline:   #F2789F;
-
-  --h1: #6AA6F8;
-  --h2: #62D0D0;
-  --h3: #7FD88F;
-  --h4: #F0A868;
-  --h5: #A78BFA;
-  --h6: #E88BB0;
+[data-theme="midnight"] {
+  color-scheme: dark;
+  --paper: #171F2A;
+  --surface: #1E2936;
+  --sunk: #131B25;
+  --ink: #E3EAF1;
+  --ink-soft: #BFCBD9;
+  --muted: #9BABBE;
+  --faint: #94A5BA;
+  --line: #354458;
+  --line-soft: #293649;
+  --accent: #9DBCEB;
+  --accent-dim: #9DBCEB26;
+  --stem: #A0C4AC;
+  --sel: #9DBCEB30;
+  --strong: #DEA895;
+  --emph: #8EC9D2;
+  --code-keyword: #B8ADE0;
+  --code-atom: #D7BB89;
+  --code-number: #D7BB89;
+  --code-string: #A0C4AC;
+  --code-string2: #8EC9D2;
+  --code-comment: #94A5BA;
+  --code-function: #8EC9D2;
+  --code-def: #8EC9D2;
+  --code-type: #B8ADE0;
+  --code-property: #8EC9D2;
+  --code-tag: #DEA895;
+  --code-operator: #9BABBE;
+  --code-punct: #94A5BA;
+  --code-meta: #9BABBE;
+  --code-added: #A0C4AC;
+  --code-removed: #9DBCEB;
+  --math: #8EC9D2;
+  --money: #A0C4AC;
+  --code-inline: #B8ADE0;
+  --h1: #9DBCEB;
+  --h2: #8EC9D2;
+  --h3: #A0C4AC;
+  --h4: #D7BB89;
+  --h5: #B8ADE0;
+  --h6: #DEA895;
 }
 
 * { box-sizing: border-box; }
@@ -1050,6 +771,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
   width: 12px;
   z-index: var(--z-affordance);
   cursor: col-resize;
+  touch-action: none;
   -webkit-app-region: no-drag;
 }
 
@@ -1133,35 +855,43 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
 
 /* Words rather than icons: they are read once, and a rail of glyphs for a
    choice this small is a puzzle to solve. The underline is what carries the
-   state — the same hairline the panel already uses, moved to say something.
+   state — the same hairline the panel already uses, moved to say something,
+   and the only signal an active tab gives: no pill behind it as well.
+
+   The tabs divide the strip equally rather than taking their natural widths.
+   Natural widths are what used to overflow: the strip scrolled sideways with
+   its scrollbar hidden, so the last tab was cut off mid-word and nothing on
+   screen said there was more. Equal widths make that impossible; a label
+   too long for its share ellipsizes rather than pushing a neighbour out of
+   sight.
 
    One strip, at the top of the lower panel, naming what is in it. The file
    tree above has none, because it is not one of the choices: it is what the
    sidebar is. */
 .pane-tabs {
   display: flex;
-  align-items: center;
-  gap: 2px;
+  align-items: stretch;
   flex: none;
-  padding: 0 10px;
+  padding: 0 8px;
   margin-bottom: 2px;
   border-bottom: 1px solid var(--line-soft);
-  overflow-x: auto;
-  overflow-y: hidden;
-  overscroll-behavior-x: contain;
-  scrollbar-width: none;
 }
 .pane-tab {
   position: relative;
-  flex: none;
-  padding: 5px 8px 7px;
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 5px 6px 7px;
   border: 0;
   background: none;
   color: var(--faint);
   font-family: var(--font-ui);
   font-size: 11px;
   font-weight: 600;
-  letter-spacing: .04em;
+  letter-spacing: .028em;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   cursor: pointer;
   transition: color .12s;
 }
@@ -1170,11 +900,11 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
 .pane-tab.is-on::after {
   content: "";
   position: absolute;
-  left: 6px;
-  right: 6px;
+  left: 12%;
+  right: 12%;
   bottom: -1px;
-  height: 1.5px;
-  border-radius: 1px;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
   background: var(--accent);
 }
 
@@ -1398,6 +1128,16 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
    two widths and clipped here — the slide translates the document past the
    column's edge instead of re-wrapping it on every frame. */
 .main.is-sliding { overflow: hidden; }
+/* Let the translated document extend underneath the moving rail. Clipping at
+   its destination edge exposed a blank strip before the sidebar arrived. */
+.main.is-sidebar-sliding { overflow: visible; }
+.main.is-sidebar-sliding::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 0 calc(-1 * var(--rail));
+  background: var(--paper);
+  pointer-events: none;
+}
 
 /* The same pin, for the sidebar's own contents. The document was frozen long
    ago, but the tree still took a new width on every frame of the slide — a
@@ -1427,6 +1167,26 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
 .app[data-sidebar="closed"] .doc-head { padding-left: 92px; }
 .doc-head > * { -webkit-app-region: no-drag; }
 .doc-tools { display: flex; align-items: center; gap: 8px; }
+
+/* A compact left-sidebar icon reopens the closed file rail. */
+.sidebar-open {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  height: 26px;
+  width: 26px;
+  padding: 0;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  background: var(--sunk);
+  color: var(--muted);
+  font: 600 10.5px/1 var(--font-ui);
+  cursor: pointer;
+}
+.sidebar-open:hover { background: var(--hover); color: var(--ink); }
+.sidebar-open:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.app[data-sidebar="open"] .sidebar-open { background: var(--accent-dim); color: var(--accent); }
 
 /* Back and forward, to the left of the strip. A disabled arrow stays in place
    but fades — the pair reads as one control, and a vanishing half would make
@@ -1528,12 +1288,13 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
   outline: none;
 }
 
-.tab-dirty {
-  width: 5px; height: 5px;
+.tab-save-status {
+  width: 6px; height: 6px;
   border-radius: 50%;
-  background: var(--accent);
+  background: #27965c;
   flex: none;
 }
+.tab-save-status.tab-dirty { background: #e39432; }
 
 .tab-close {
   display: flex;
@@ -1720,6 +1481,13 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
    scrollbar on a first read through is less of a lie. */
 .reading-body > .code-wrap { contain-intrinsic-block-size: auto 320px; }
 .reading-body > .table-wrap { contain-intrinsic-block-size: auto 200px; }
+/* A photograph's first layout is a 3:2 box, not a 44px line. Remembering the
+   empty size is what made scrolling up clamp to the bottom: skipped figures
+   collapsed, scrollHeight shrank, scrollTop was cut to the new max. */
+.reading-body > p:has(.embed-img.is-figure),
+.reading-body > .embed-img.is-figure {
+  contain-intrinsic-block-size: auto 22rem;
+}
 .reading h1, .reading h2, .reading h3,
 .reading h4, .reading h5, .reading h6 {
   font-weight: 600;
@@ -1747,8 +1515,8 @@ ol.tk-ordered-list {
 ol.tk-ordered-list > li { position: relative; }
 ol.tk-ordered-list > li > .tk-olnum {
   position: absolute;
-  left: -2.25em;
-  top: .07em;
+  right: calc(100% + .65em);
+  top: .22em;
 }
 .reading a { color: var(--accent); text-underline-offset: .18em; }
 /* The same pair of emphasis colours the editor sets on t.strong and t.emphasis,
@@ -2585,8 +2353,15 @@ ol.tk-ordered-list > li > .tk-olnum {
 /* -------------------------------------------------------------- status */
 
 .status {
-  display: none;
+  display: flex;
+  flex: none;
+  justify-content: flex-end;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 12px 4px;
 }
+.status > span { display: none; }
+.status:not(:has(.zoom:not([hidden]))) { display: none; }
 
 /* ------------------------------------------------------- overlay panel */
 
@@ -2680,6 +2455,56 @@ ol.tk-ordered-list > li > .tk-olnum {
   padding-right: 10px;
   flex: none;
 }
+.panel-filter-toggle {
+  display: none;
+  flex: none;
+  height: 30px;
+  margin-right: 10px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: none;
+  color: var(--muted);
+  font: 550 11px/1 var(--font-ui);
+  cursor: pointer;
+}
+.panel-filter-toggle:hover,
+.panel-filter-toggle[aria-expanded="true"] { background: var(--hover); color: var(--ink); }
+.panel-filter-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.panel-filter-toggle[hidden],
+.panel-filter-presets[hidden] { display: none; }
+
+/* The common filters are examples that work. Choosing one writes the same
+   portable query syntax an experienced reader can still type and save. */
+.panel-filter-presets {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 10px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--line-soft);
+  background: color-mix(in srgb, var(--sunk) 55%, var(--surface));
+  scrollbar-width: none;
+}
+.panel-filter-presets::-webkit-scrollbar { display: none; }
+.panel-filter-presets button {
+  flex: none;
+  height: 25px;
+  padding: 0 9px;
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  font: 550 10.5px/1 var(--font-ui);
+  cursor: pointer;
+}
+.panel-filter-presets button:hover { border-color: var(--line); color: var(--ink); }
+.panel-filter-presets button[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+.panel-filter-presets button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 /* A word rather than a mark, so it takes the chrome's face over the mono one
    the three symbols are set in. */
 .panel-chip.is-wide {
@@ -2763,17 +2588,6 @@ ol.tk-ordered-list > li > .tk-olnum {
   cursor: pointer;
 }
 .panel-list li[aria-selected="true"] { background: var(--accent-dim); }
-.panel-list .panel-group {
-  padding: 10px 11px 3px;
-  border-radius: 0;
-  color: var(--faint);
-  font-size: 9.5px;
-  font-weight: 700;
-  letter-spacing: .08em;
-  text-transform: uppercase;
-  cursor: default;
-}
-.panel-list .panel-group:first-child { padding-top: 5px; }
 .panel-list li.has-file-icon { align-items: flex-start; }
 .panel-list li .file-ico { margin-top: 1px; }
 /* The column that holds a result's name, its matching line and its folder.
@@ -2858,6 +2672,25 @@ ol.tk-ordered-list > li > .tk-olnum {
    blanks on every keystroke is harder to read than one that lags by one. */
 .panel.is-searching .panel-list { opacity: .55; }
 .panel-list { transition: opacity .12s var(--ease); }
+
+/* Browser zoom reduces the effective CSS viewport. Keep the query as the
+   first full-width job and put its less-frequent switches behind one named
+   control instead of clipping the words being searched for. */
+@media (max-width: 620px) {
+  .panel { width: min(560px, calc(100vw - 24px)); }
+  .panel-head { flex-wrap: wrap; }
+  .panel-filter-toggle { display: inline-flex; align-items: center; justify-content: center; }
+  .panel-chips {
+    display: none;
+    flex: 0 0 100%;
+    justify-content: flex-end;
+    padding: 7px 10px;
+    border-top: 1px solid var(--line-soft);
+    background: var(--sunk);
+  }
+  .panel.filters-open .panel-chips { display: flex; }
+  .panel-syntax { display: none; }
+}
 
 /* -------------------------------------------------------- ctx + toast */
 
@@ -4328,23 +4161,23 @@ ol.tk-ordered-list > li > .tk-olnum {
 
 .tk-bullet { color: var(--accent); }
 
-/* An ordered item's number, circled. The reading view and editor share this
-   element, so one look for a numbered list survives switching views. Tabular
-   figures keep 9 and 10 the same height, and a min-width lets a long count grow
-   into a pill instead of overflowing the ring. */
+/* Quiet number badges shared by the reading view and editor. Tabular figures
+   keep counts steady; longer numbers expand without squeezing the digits. */
 .tk-olnum {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   box-sizing: border-box;
-  min-width: 1.5em;
-  height: 1.5em;
-  padding: 0 .3em;
-  border-radius: 999px;
-  border: 1.5px solid var(--accent);
+  min-width: 1.75em;
+  height: 1.75em;
+  padding: 0 .4em;
+  border-radius: .45em;
+  border: 0;
+  background: color-mix(in srgb, var(--accent) 10%, var(--paper));
   color: var(--accent);
-  font-size: 1.02em;
-  font-weight: 620;
+  font-family: var(--font-ui);
+  font-size: .82em;
+  font-weight: 550;
   font-variant-numeric: tabular-nums;
   line-height: 1;
 }
@@ -4812,24 +4645,28 @@ ol.tk-ordered-list > li > .tk-olnum {
   padding: 9px 16px 12px;
 }
 
-/* A failed run says so at the edge of the compartment, so you can see which
-   block went wrong while scrolling past without reading the verdict line.
-   The panel hands its top edge to the code block above it (border-top: 0), so
-   the frame is completed with an inset line rather than by putting the border
-   back — a fourth border would move everything under it down by a pixel the
-   moment a run failed. Mixed toward the frame colour rather than used neat:
-   full --code-removed is the verdict's own weight, and a border carrying it
-   too shouts the same thing twice. */
+/* A finished run says so at the edge of the compartment, so you can see which
+   block went wrong — or right — while scrolling past without reading the
+   verdict line. The panel hands its top edge to the code block above it
+   (border-top: 0), so the frame is completed with an inset line rather than
+   by putting the border back — a fourth border would move everything under
+   it down by a pixel the moment a run finished. Mixed toward the frame
+   colour rather than used neat: the full token is the verdict's own weight,
+   and a border carrying it too shouts the same thing twice. */
 .run-out.is-bad {
   border-color: color-mix(in srgb, var(--code-removed) 45%, var(--line-soft));
   box-shadow: inset 0 1px 0 color-mix(in srgb, var(--code-removed) 45%, var(--line-soft));
   background: color-mix(in srgb, var(--code-removed) 4%, var(--sunk));
 }
+.run-out.is-good {
+  border-color: color-mix(in srgb, var(--code-added) 45%, var(--line-soft));
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--code-added) 45%, var(--line-soft));
+  background: color-mix(in srgb, var(--code-added) 4%, var(--sunk));
+}
 
 /* The status line is only the verdict, kept to the right where the Run
    control sits in the header above — no "OUTPUT" caption; the compartment
-   speaks for itself. Only failure is coloured: a green EXIT 0 on every
-   successful run is a celebration of nothing. */
+   speaks for itself. */
 .run-out-head {
   display: flex;
   align-items: baseline;
@@ -5149,11 +4986,24 @@ ol.tk-ordered-list > li > .tk-olnum {
   max-height: none;
   aspect-ratio: auto;
 }
-/* A failed run tints the whole popup. The inset shadow the block panel
+/* A finished run tints the whole popup. The inset shadow the block panel
    completes its frame with would draw a second line inside its border. */
 .file-run-pop .run-out.is-bad {
   box-shadow: none;
   background: color-mix(in srgb, var(--code-removed) 4%, var(--surface));
+}
+.file-run-pop .run-out.is-good {
+  box-shadow: none;
+  background: color-mix(in srgb, var(--code-added) 4%, var(--surface));
+}
+/* The popup's own frame carries the verdict too — the inner panel has no
+   border of its own here (border: 0 above), so without this only the
+   background would speak. */
+.file-run-pop:has(.run-out.is-bad) {
+  border-color: color-mix(in srgb, var(--code-removed) 45%, var(--line));
+}
+.file-run-pop:has(.run-out.is-good) {
+  border-color: color-mix(in srgb, var(--code-added) 45%, var(--line));
 }
 .file-run-pop .run-out-stream {
   margin: 0;
@@ -5405,6 +5255,9 @@ ol.tk-ordered-list > li > .tk-olnum {
 .cm-tikz .run-out.is-bad {
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--code-removed) 45%, var(--line-soft));
 }
+.cm-tikz .run-out.is-good {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--code-added) 45%, var(--line-soft));
+}
 .cm-tikz .run-out-stream {
   margin: 0;
   font-family: var(--font-mono);
@@ -5583,10 +5436,8 @@ ol.tk-ordered-list > li > .tk-olnum {
   .view-option { width: 28px; padding: 0; justify-content: center; }
   .view-option-label { display: none; }
 }
-.view-option:hover:not(:disabled),
-.doc-tool:hover {
-  color: var(--ink);
-}
+.view-option:hover:not(:disabled) { color: var(--ink); }
+.doc-tool:hover { color: var(--ink); background: var(--hover); }
 .view-option[aria-pressed="true"],
 .doc-tool[aria-pressed="true"] {
   color: var(--accent);
@@ -5594,7 +5445,6 @@ ol.tk-ordered-list > li > .tk-olnum {
 .view-option:focus-visible,
 .doc-tool:focus-visible {
   outline-offset: 1px;
-  border-radius: 7px;
 }
 .view-option:active:not(:disabled),
 .doc-tool:active { transform: scale(.94); }
@@ -5640,22 +5490,6 @@ ol.tk-ordered-list > li > .tk-olnum {
   color: var(--muted);
 }
 .lock-mark[hidden] { display: none; }
-
-.doc-control-divider {
-  width: 1px;
-  height: 16px;
-  margin-inline: 1px;
-  border-radius: 1px;
-  background: var(--line);
-}
-/* A divider with nothing on one side of it is a stray mark. The three views
-   belong to a note, so the switch goes away for a PDF or a website — and the
-   line that was keeping Copilot apart from it was left standing beside the one
-   button, dividing it from the edge of the bar. Read off the switch's own
-   `hidden` rather than set alongside it, so the two cannot disagree. A general
-   sibling: the padlock sits between the switch and the divider, so `+` never
-   matched and the line stood on a PDF anyway. */
-.view-switch[hidden] ~ .doc-control-divider { display: none; }
 
 .study-start {
   display: inline-flex;
@@ -6546,6 +6380,15 @@ ol.tk-ordered-list > li > .tk-olnum {
    and say so with this class: `standsAlone` in src/renderer.js, and
    `LINE_FURNITURE` in src/editor.js. */
 .embed-img.is-figure { display: block; }
+/* Hold a column-wide 3:2 box until the file's own ratio is known. Without it
+   a remote picture is 0 tall, then hundreds of pixels, and a note of them
+   throws the reader to the bottom as each one lands. */
+.embed-img.is-figure:not(.is-ready) {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 3 / 2;
+  object-fit: contain;
+}
 video.embed-media { width: 100%; }
 /* `height: auto` above is for the things that have a picture in them, and a
    recording does not: with no intrinsic aspect ratio the transport bar
@@ -7264,46 +7107,32 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   margin-inline: auto;
   max-width: 100%;
 }
+.tk-embed-sizer.is-figure:has(> .embed-img:not(.is-ready)) { width: 100%; }
 .tk-embed-sizer > .embed-img { display: block; }
+.tk-embed-sizer.is-figure > .embed-img:not(.is-ready) {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 3 / 2;
+  object-fit: contain;
+}
+/* Placement only: appearance is the same outlined chip as `.ghost` and the
+   other chrome in src/controls.css. */
 .tk-embed-control {
   position: absolute;
   z-index: var(--z-sticky);
+  top: 6px;
+  right: 6px;
   display: grid;
   place-items: center;
+  width: 26px;
+  height: 26px;
   padding: 0;
-  border: 1px solid rgb(255 255 255 / .72);
-  color: #fff;
-  background: rgb(20 18 22 / .68);
-  box-shadow: 0 1px 5px rgb(0 0 0 / .24);
-  backdrop-filter: blur(5px);
   touch-action: none;
-  transition: opacity 120ms ease, background 120ms ease, transform 120ms ease;
-}
-.tk-embed-control:hover {
-  background: rgb(20 18 22 / .86);
-}
-.tk-embed-source {
-  top: 8px;
-  right: 8px;
-  width: 29px;
-  height: 27px;
-  border-radius: 7px;
-  opacity: .82;
-}
-.tk-embed-change {
-  top: 8px;
-  right: 41px;
-  width: 29px;
-  height: 27px;
-  border-radius: 7px;
-  opacity: .82;
 }
 .tk-embed-control svg {
   width: 16px;
   height: 16px;
 }
-.tk-embed-sizer:hover .tk-embed-control,
-.tk-embed-sizer:focus-within .tk-embed-control { opacity: 1; }
 
 /* One grip, in one corner, wherever a picture can be resized: the paragraph
    pictures of the editing view and the pictures inside a grid cell. The
@@ -7994,14 +7823,28 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 
 /* The turn's heartbeat — see `busyRow` in copilot.js. Sits at the foot of the
    transcript for as long as the turn runs, including the long silent stretches
-   where a tool is working and nothing else moves. */
+   where a tool is working and nothing else moves. The row is the live region;
+   the button inside it is the switch for live thinking — a control, so a
+   control element, styled back down to looking like the line it is. */
 .ai-busy {
   display: flex;
-  align-items: center;
-  gap: 7px;
   margin-top: 4px;
   font: 12px/1.5 var(--font-ui);
   color: var(--faint);
+}
+.ai-busy-toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  border-radius: 5px;
 }
 /* The label now names the tool and what it is working on, which is as long as
    the path it was given; the timer beside it is the part that must not be
@@ -8016,9 +7859,9 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 .ai-busy-time { flex: none; font-variant-numeric: tabular-nums; opacity: .75; }
 /* The strip is the switch for live thinking; it only says so once there is
    some to show. */
-.ai-busy { cursor: pointer; border-radius: 5px; }
-.ai-busy:hover { color: var(--ink-soft); }
-.ai-busy:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ai-busy-toggle { cursor: pointer; }
+.ai-busy-toggle:hover { color: var(--ink-soft); }
+.ai-busy-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .ai-busy-caret {
   display: none;
   flex: none;
@@ -9251,10 +9094,10 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 
 .settings-box {
   display: grid;
-  grid-template-columns: 178px minmax(0, 1fr);
-  width: min(820px, 100%);
-  height: min(560px, 100%);
-  border-radius: 10px;
+  grid-template-columns: 186px minmax(0, 1fr);
+  width: min(840px, 100%);
+  height: min(580px, 100%);
+  border-radius: 12px;
   border: 1px solid var(--line);
   background: var(--surface);
   /* Carrying its own separation, since there is no scrim to lift it off the
@@ -9268,14 +9111,12 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   display: flex;
   flex-direction: column;
   gap: 1px;
-  padding: 14px 8px;
+  padding: 24px 10px;
   background: var(--sunk);
   border-right: 1px solid var(--line);
   overflow-y: auto;
 }
-/* The rail's group headings — Options, Documents, Features — the way
-   Obsidian breaks its own list up. Small and muted, so they read as
-   punctuation rather than as tabs. */
+/* Quiet group labels echo Rose’s settings sidebar. */
 .settings-rail-head {
   margin: 14px 10px 4px;
   font: 600 10.5px/1.4 var(--font-ui);
@@ -9314,8 +9155,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 16px 14px 12px 22px;
-  border-bottom: 1px solid var(--line-soft);
+  padding: 26px 18px 20px 30px;
   flex: none;
   /* The header is the popup's handle — see the drag wiring in settings.js. */
   cursor: grab;
@@ -9324,9 +9164,9 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 .settings-head:active { cursor: grabbing; }
 .settings-heading {
   margin: 0;
-  font-family: var(--font-ui);
-  font-size: 15px;
-  font-weight: 650;
+  font-family: Charter, Georgia, serif;
+  font-size: 23px;
+  font-weight: 500;
   color: var(--ink);
 }
 
@@ -9334,21 +9174,96 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 4px 22px 24px;
+  padding: 0 30px 30px;
 }
 
 .settings-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 24px;
-  padding: 15px 0;
-  border-bottom: 1px solid var(--line-soft);
+  gap: 20px;
+  padding: 13px 0;
+  border: 0;
 }
-.settings-row:last-child { border-bottom: 0; }
 /* A control too wide to sit beside its label goes under it instead. */
 .settings-row.is-stacked { flex-direction: column; align-items: stretch; gap: 12px; }
 
+.settings-group-title {
+  margin: 26px 0 4px;
+  color: var(--faint);
+  font: 600 10.5px/1.4 var(--font-ui);
+  letter-spacing: .07em;
+  text-transform: uppercase;
+}
+.settings-group-title:first-child { margin-top: 6px; }
+.settings-row.is-disabled { opacity: .45; }
+.settings-row.is-disabled button { cursor: default; }
+.settings-search-empty { padding: 9px; color: var(--muted); font: 12px var(--font-ui); }
+.settings-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+/* Browser zoom turns an ordinary desktop window into a genuinely narrow CSS
+   viewport. At that point the section rail becomes a labelled horizontal
+   strip and every setting gets the full line; retaining the two desktop
+   columns made long labels collapse to one or two words per line. */
+@media (max-width: 620px) {
+  .settings { padding: 12px; }
+  .settings-box {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+    width: 100%;
+    height: 100%;
+  }
+  .settings-rail {
+    flex-direction: row;
+    gap: 3px;
+    padding: 7px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+    scrollbar-width: none;
+  }
+  .settings-rail::-webkit-scrollbar { display: none; }
+  .settings-rail-head { display: none; }
+  .settings-tab { flex: none; white-space: nowrap; text-align: center; }
+  .settings-head { padding: 12px 10px 10px 16px; }
+  .settings-body { padding: 2px 16px 20px; }
+  .settings-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    padding: 13px 0;
+  }
+  .settings-control { align-self: flex-start; max-width: 100%; }
+  .settings-row.is-stacked .settings-control { align-self: stretch; }
+  .model-default .dd { width: 100%; }
+}
+
+.settings-row:is([data-setting="environments"], [data-setting="doctor"]) {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px 20px;
+}
+.settings-row[data-setting="environments"] > .env-actions { justify-content: flex-end; }
+.settings-row:is([data-setting="environments"], [data-setting="doctor"]) > .ai-doctor-results { grid-column: 1 / -1; }
+.settings-row[data-setting="doctor"] > .model-refresh { justify-self: end; }
+/* These results belong to settings, including its standalone window. */
+.ai-doctor { display: grid; gap: 10px; }
+.ai-doctor-results { display: grid; gap: 8px; min-width: 0; }
+.ai-doctor-provider {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 16px;
+  min-height: 34px;
+  font: 13px/1.4 var(--font-ui);
+}
+.ai-doctor-name { font-weight: 500; color: var(--ink); overflow-wrap: anywhere; }
+.ai-doctor-version { color: var(--faint); font: 12px/1.4 ui-monospace, monospace; }
+.ai-doctor-status { color: var(--muted); text-align: right; overflow-wrap: anywhere; }
+.ai-doctor-provider.is-ready .ai-doctor-status { color: var(--stem); }
+.settings-row[data-setting="environments"] .ai-doctor-provider { grid-template-columns: minmax(0, 1fr) auto auto auto; }
+.settings .env-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .settings-label { min-width: 0; }
 .settings-name {
   display: flex;
@@ -9358,21 +9273,6 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   font-size: 13.5px;
   color: var(--ink);
 }
-/* A row's own button, beside its name: something that undoes the whole control
-   under it, which is not a thing to put among the control's own parts. Quiet
-   until pointed at — it is an escape hatch, not the row's subject. */
-.settings-action {
-  flex: none;
-  padding: 2px 8px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: none;
-  color: var(--faint);
-  font-family: var(--font-ui);
-  font-size: 11px;
-  cursor: pointer;
-}
-.settings-action:hover { color: var(--ink); background: var(--hover); }
 .settings-control { flex: none; }
 /* A row's own small print, under its name — prose, unlike the path above. */
 /* ------------------------------------------------------------- hotkeys
@@ -9405,10 +9305,6 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
-}
-.hotkey-menu {
-  font-size: 11px;
-  color: var(--faint);
 }
 .hotkey-chord {
   flex: none;
@@ -9459,6 +9355,12 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   font-family: var(--font-ui);
   font-size: 11.5px;
   color: var(--faint);
+}
+/* A vault path reads as a path, wherever it sits. */
+.settings-hint.is-path {
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 /* ------------------------------------------------------ settings controls */
@@ -9524,7 +9426,6 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 .field:focus { outline: none; border-color: var(--accent); }
 .field.is-number { min-width: 72px; text-align: right; }
 .field-wrap { display: flex; align-items: center; gap: 7px; }
-.field-suffix { color: var(--faint); font-family: var(--font-ui); font-size: 12px; }
 
 /* ------------------------------------------------------------ dropdown
    Every menu that opens, wherever it opens from: the settings pane's rows and
@@ -9706,8 +9607,6 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   overflow: hidden;
 }
 .model-default { display: grid; gap: 7px; }
-.model-readiness { display: block; }
-.model-readiness.is-ready { color: var(--stem); }
 .model-picker-head {
   display: flex;
   align-items: center;
@@ -9717,18 +9616,6 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 }
 .model-search { flex: 1; min-width: 0; }
 
-/* Everything ticked, above the list rather than buried in it — see the
-   `catalogue` control. Wraps rather than scrolls: this is meant to be read at a
-   glance, and a strip you have to scroll sideways answers "which ones did I
-   choose" no better than the count did. */
-.model-picked {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-  padding: 8px;
-  border-bottom: 1px solid var(--line-soft);
-  background: var(--sunk);
-}
 .model-chip {
   display: inline-flex;
   align-items: baseline;
@@ -9743,7 +9630,6 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   transition: border-color .12s, color .12s;
 }
 .model-chip:hover { border-color: var(--accent); color: var(--ink); }
-.model-chip-group { color: var(--faint); font-weight: 400; }
 .model-chip-x { color: var(--faint); font-size: 12.5px; }
 .model-chip:hover .model-chip-x { color: var(--accent); }
 
@@ -9789,8 +9675,8 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 
 /* The settings search, between the pane's title and its close button. The
    suggestions hang from the field in the dropdown menu's own dress. */
-.settings-search { position: relative; flex: 1; max-width: 250px; margin-left: auto; }
-.settings-search-field { width: 100%; }
+.settings-search { position: relative; flex: 1; min-width: 0; max-width: 190px; margin-left: auto; }
+.settings-search-field { width: 100%; min-width: 0; }
 .settings-suggest {
   position: absolute;
   top: calc(100% + 6px);
@@ -9890,18 +9776,6 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   color: var(--faint);
   font-variant-numeric: tabular-nums;
 }
-.model-group-all {
-  flex: none;
-  padding: 2px 8px;
-  border: 1px solid var(--line);
-  border-radius: 5px;
-  background: none;
-  color: var(--muted);
-  font-family: var(--font-ui);
-  font-size: 11px;
-  cursor: pointer;
-}
-.model-group-all:hover { border-color: var(--faint); color: var(--ink); }
 
 .model-group-body {
   display: flex;
@@ -9909,35 +9783,6 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   gap: 2px;
   padding: 2px 10px 10px 22px;
 }
-/* One shelf inside the fold — a sub-provider under the copilot that offers it.
-   The heading carries what the old per-row badge repeated. */
-.model-shelf-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 8px 4px;
-  font-family: var(--font-ui);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: .04em;
-  text-transform: uppercase;
-  color: var(--faint);
-}
-.model-shelf-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.model-shelf-head::after {
-  content: "";
-  flex: 1;
-  height: 1px;
-  background: var(--line-soft);
-}
-.model-shelf-count {
-  flex: none;
-  order: 2;
-  font-weight: 400;
-  letter-spacing: 0;
-  font-variant-numeric: tabular-nums;
-}
-.model-shelf-head .model-group-all { order: 3; }
 .model-shelf-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
@@ -12949,9 +12794,10 @@ h4.docx-h, h5.docx-h, h6.docx-h { font-size: 1.05em; }
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 4px 8px;
+  flex-wrap: wrap;
 }
-.ai-review-head strong { font-size: 11px; }
+.ai-review-head strong { flex: 1 1 auto; min-width: 0; font-size: 11px; }
 .ai-review-files { display: grid; }
 .ai-review-file {
   display: grid;
@@ -12972,6 +12818,11 @@ h4.docx-h, h5.docx-h, h6.docx-h { font-size: 1.05em; }
   color: var(--muted);
   text-decoration: line-through;
 }
+.ai-review-file-reject {
+  white-space: nowrap;
+  flex-shrink: 0;
+  overflow-wrap: normal;
+}
 .ai-review-path {
   overflow: hidden;
   color: var(--ink);
@@ -12989,7 +12840,20 @@ h4.docx-h, h5.docx-h, h6.docx-h { font-size: 1.05em; }
   color: var(--faint);
   font: 11px/1.4 var(--font-ui);
 }
-.ai-review-actions { display: flex; align-items: center; gap: 3px; }
+.ai-review-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 3px;
+  flex-wrap: wrap;
+  margin-left: auto;
+  min-width: 0;
+}
+.ai-review-actions button {
+  white-space: nowrap;
+  flex-shrink: 0;
+  overflow-wrap: normal;
+}
 .ai-review-diff.is-open { color: var(--ink); background: var(--hover); }
 /* The environment list's own controls — see the `environments` row in
    src/settings.js. The rows are the doctor's shape; only the footer differs,
@@ -13128,14 +12992,16 @@ h4.docx-h, h5.docx-h, h6.docx-h { font-size: 1.05em; }
 
 /* ---------------------------------------------------------- narrow drawers
 
-   At desktop size the side document earns a permanent column. Below this point
-   it becomes a drawer. Copilot deliberately remains a grid column: opening it
-   must narrow the document rather than cover it, including when browser zoom
-   pushes a wide window through this breakpoint. */
+   At desktop size the side document and Copilot earn permanent columns. The
+   side document becomes a drawer first. At the smaller breakpoint both the
+   file rail and Copilot become drawers: browser zoom then keeps a useful
+   reading measure instead of squeezing the document between fixed columns. */
 @media (max-width: 1040px) {
   .app {
     --col-side: 0px;
   }
+
+  #grip-side { z-index: calc(var(--z-drawer) + 1); }
 
   .sidepane {
     position: fixed;
@@ -13168,7 +13034,7 @@ h4.docx-h, h5.docx-h, h6.docx-h { font-size: 1.05em; }
    supported window it becomes a left drawer too, with an explicit close affordance
    in its header. */
 @media (max-width: 760px) {
-  .app { --col-rail: 0px; }
+  .app { --col-rail: 0px; --col-chat: 0px; }
 
   .sidebar {
     position: fixed;
@@ -13190,13 +13056,35 @@ h4.docx-h, h5.docx-h, h6.docx-h { font-size: 1.05em; }
     pointer-events: auto;
     transition-delay: 0s;
   }
+
+  .ai {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: var(--z-drawer);
+    width: min(var(--chat), calc(100vw - 32px));
+    max-height: 100vh;
+    box-shadow: -18px 0 42px color-mix(in srgb, var(--ink) 16%, transparent);
+    transform: translateX(105%);
+    visibility: hidden;
+    pointer-events: none;
+    transition: transform .22s var(--ease), visibility 0s linear .22s;
+  }
+  .app[data-ai="open"] .ai {
+    transform: translateX(0);
+    visibility: visible;
+    pointer-events: auto;
+    transition-delay: 0s;
+  }
+  #grip-ai, #grip-sidebar { z-index: calc(var(--z-drawer) + 1); }
   /* Browser zoom can cross this breakpoint while the native macOS traffic
      lights stay fixed in the window. The main column now starts at the window
      edge whether the sidebar drawer is open or closed, so keep its controls
      clear of that native inset in both states. */
   .doc-head { padding-left: 92px; }
 
-  body:has(.app[data-sidebar="open"]) .drawer-scrim { display: block; }
+  body:has(.app[data-sidebar="open"], .app[data-ai="open"]) .drawer-scrim { display: block; }
 }
 
 /* A drawer's closed position is a transform, and its slide is a transition on
@@ -13208,7 +13096,8 @@ h4.docx-h, h5.docx-h, h6.docx-h { font-size: 1.05em; }
    (see `data-reflow` in renderer.js); the breakpoint flips with no transition
    and a real open or close still slides. */
 .app[data-reflow] .sidepane,
-.app[data-reflow] .sidebar { transition: none; }
+.app[data-reflow] .sidebar,
+.app[data-reflow] .ai { transition: none; }
 
 /* ======================================================= the second panel
    The optional lower half of the sidebar — see setPaneBelow in renderer.js.
@@ -13258,14 +13147,6 @@ h4.docx-h, h5.docx-h, h6.docx-h { font-size: 1.05em; }
 .pane-split-grip:focus-visible::after { background: var(--accent); }
 .pane-split-grip:focus-visible { outline: none; }
 
-/* The sidebar's only strip, sitting under the divider and naming what is in
-   the panel below it. It was shrunk when there was a second strip above the
-   tree for it to defer to; there is not one now. */
-.pane-tabs.is-lower {
-  padding-top: 0;
-}
-.pane-tabs.is-lower .pane-tab { padding-top: 4px; padding-bottom: 6px; }
-
 /* The lower body: a fixed share of the height, scrolling within itself, so the
    panel above keeps its own scroll position rather than the two sharing one. */
 .sidebar > .pane-split ~ .pane {
@@ -13279,3 +13160,61 @@ h4.docx-h, h5.docx-h, h6.docx-h { font-size: 1.05em; }
    icon buttons and is styled as one — including the pressed state, which
    `.icon-btn[aria-pressed="true"]` already carries. It had rules of its own
    while it lived in a row beside a tab strip; there is no such row now. */
+
+/* Workspace commands stay in a small, keyboard-accessible dialog. */
+.workspace-tools-open { border: 0; background: transparent; color: var(--ink); cursor: pointer; font: inherit; padding: 6px 9px; border-radius: 6px; }
+.workspace-tools-open:hover { background: var(--hover); }
+.workspace-tools { background: var(--paper, #fbfaf8); color: var(--ink, #222); border: 1px solid var(--line, #ccc); border-radius: 12px; padding: 22px; width: min(360px, calc(100vw - 48px)); max-height: 85vh; overflow: auto; box-shadow: 0 16px 60px #0003; }
+.workspace-tools::backdrop { background: #0005; }
+.workspace-tools h2 { font: 600 17px var(--font-ui, sans-serif); margin: 0 0 16px; }
+.workspace-tools button { display: block; width: 100%; text-align: left; padding: 10px 12px; border: 0; border-radius: 6px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.workspace-tools button:hover, .workspace-tools button:focus-visible { background: var(--hover, #8882); }
+.workspace-tools input, .shortcuts-search { display: block; box-sizing: border-box; width: 100%; padding: 10px; margin: 10px 0; border: 1px solid var(--line, #ccc); border-radius: 6px; background: transparent; color: inherit; font: inherit; }
+.shortcuts-search { width: calc(100% - 40px); margin: 12px 20px; }
+.shortcuts-row[hidden], .shortcuts-group[hidden] { display: none; }
+.sidepane-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+
+.memory-document { position: absolute; inset: 0; background: var(--paper); overflow: hidden; z-index: 1; }
+#recovery-indicator { color: var(--ink); background: var(--hover); border: 1px solid var(--line); border-radius: 5px; font: inherit; cursor: pointer; padding: 2px 8px; }
+
+/* Review and research tools share the editor's palette and native controls. */
+.change-review, .ai-workspace-dialog, .source-preview { width: min(760px, 90vw); max-height: 85vh; overflow: auto; }
+.change-review h2, .ai-workspace-dialog h2, .source-preview h2 { overflow-wrap: anywhere; }
+.change-review-choices { display: grid; gap: 12px; margin-block: 16px; }
+.change-review-choice { display: block; padding: 10px; background: var(--bg-secondary, var(--bg)); border-radius: 8px; }
+.change-review-choice input, .ai-context-option input { margin-right: 8px; }
+.change-review-status { color: var(--danger, #bd4545); }
+.change-review button, .ai-workspace-dialog button, .source-preview button { margin: 4px; }
+.ai-workspace-tools { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 12px; }
+.ai-workspace-tools button { font-size: 12px; }
+.ai-workspace-dialog select, .ai-workspace-dialog textarea, .ai-workspace-dialog input:not([type=checkbox]) { display: block; width: 100%; margin-block: 10px; font: inherit; color: inherit; background: var(--bg); }
+.ai-context-option { display: block; margin-block: 8px; }
+.ai-context-preview, .source-preview-text { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 45vh; overflow: auto; font: inherit; user-select: text; }
+.ai-conversation-result { display: flex; align-items: start; justify-content: space-between; gap: 8px; padding-block: 6px; }
+.ai-conversation-result button:first-child { text-align: left; flex: 1; overflow-wrap: anywhere; }
+.ai-review-applied { display: block; font-size: 11px; opacity: .7; }
+.ai-note-source { color: var(--accent); font: inherit; background: transparent; border: 0; padding: 0; text-decoration: underline; cursor: pointer; }
+#search-result-preview { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 30vh; overflow: auto; padding: 14px; margin: 0; font: inherit; font-size: 13px; user-select: text; }
+@media (min-width: 1000px) {
+  .panel.has-search-preview { width: min(980px, 90vw); display: grid; grid-template-columns: 1fr 1fr; }
+  .panel.has-search-preview > :not(.panel-list):not(#search-result-preview) { grid-column: 1 / -1; }
+  .panel.has-search-preview #search-result-preview { max-height: 50vh; }
+}
+.change-review input[type="checkbox"], .ai-workspace-dialog input[type="checkbox"] {
+  display: inline-block; width: auto; height: auto; padding: 0; margin: 0 8px 0 0; vertical-align: middle;
+}
+.change-review > button, .source-preview > button, .ai-workspace-dialog > button {
+  display: inline-flex; width: auto; padding: 8px 12px; border-radius: 6px;
+}
+.change-review > h2:focus { outline: none; }
+
+#recovery-panel { width: min(740px, calc(100vw - 64px)); }
+#recovery-panel > section { margin-block: 18px; padding-block: 12px; border-top: 1px solid var(--line); }
+#recovery-panel h3 { margin: 8px 0; font-size: 14px; }
+#recovery-panel .recovery-document-name { overflow-wrap: anywhere; color: var(--muted); }
+#recovery-panel .history-row-head { display: flex; align-items: center; gap: 8px; }
+#recovery-panel .history-open { display: flex; flex: 1; gap: 10px; align-items: center; }
+#recovery-panel .history-actions { flex: none; }
+#recovery-panel .history-actions button { width: auto; }
+#recovery-panel details { margin-block: 10px; }
+#recovery-panel summary { cursor: pointer; }

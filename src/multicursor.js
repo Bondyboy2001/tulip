@@ -14,6 +14,7 @@
    ================================================================== */
 
 import { EditorView } from '@codemirror/view'
+import { EditorState } from '@codemirror/state'
 import { isMac } from './platform.js'
 
 /** Whether this click adds to the selection instead of replacing it. */
@@ -22,4 +23,7 @@ const addsMultiCursor = (event) =>
   (event.ctrlKey && !isMac())
 
 /** The extension both editors install. */
-export const multiCursor = EditorView.clickAddsSelectionRange.of(addsMultiCursor)
+export const multiCursor = [
+  EditorState.allowMultipleSelections.of(true),
+  EditorView.clickAddsSelectionRange.of(addsMultiCursor)
+]

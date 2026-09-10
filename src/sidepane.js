@@ -35,6 +35,12 @@ export function initSidePane (d) {
   // Clicks routed the way every other rendered note routes them — the pane
   // stands beside the views, where neither one's own handler reaches.
   deps.el.body.addEventListener('click', (e) => routeFragmentClick(e, deps))
+  let scrollTimer
+  deps.el.body.addEventListener('scroll', (event) => {
+    clearTimeout(scrollTimer)
+    const target = event.target
+    scrollTimer = setTimeout(() => { if (showing) deps.rememberScroll?.(target.scrollTop) }, 200)
+  }, true)
 }
 
 /* An embedded PDF holds a worker and a page observer; every view calls the
@@ -48,16 +54,18 @@ function clearBody () {
 /**
  * Put a document in the pane, opening the pane if it is closed.
  * @param {string} path  vault-relative, a note or a PDF
- * @param {{persist?: boolean, keepScroll?: boolean}} o  `keepScroll` holds the
+ * @param {{persist?: boolean, keepScroll?: boolean, scroll?: number}} o  `keepScroll` holds the
  *   reading position across a repaint, which replaces the content wholesale.
  */
-export function openToSide (path, { persist = true, keepScroll = false } = {}) {
+export function openToSide (path, { persist = true, keepScroll = false, scroll = 0 } = {}) {
   if (!deps || !path) return
-  const top = keepScroll ? deps.el.body.scrollTop : 0
+  const scrollNode = () => deps.el.body.querySelector('.embed-pdf-pages') || deps.el.body
+  const top = keepScroll ? scrollNode().scrollTop : scroll
   showing = path
+  if (deps.title) deps.title.textContent = deps.label(path)
   clearBody()
 
-  const restore = () => { if (top) deps.el.body.scrollTop = top }
+  const restore = () => { if (top) requestAnimationFrame(() => { scrollNode().scrollTop = top }) }
   if (deps.isPdf(path)) {
     deps.el.body.append(renderEmbed({ kind: 'pdf', path, label: deps.label(path) }, restore))
   } else {
@@ -74,7 +82,7 @@ export function openToSide (path, { persist = true, keepScroll = false } = {}) {
      width for the length of one. */
   if (deps.el.app.dataset.side !== 'open') deps.willSlide?.(true)
   deps.el.app.dataset.side = 'open'
-  if (persist) deps.remember(path)
+  if (persist) { deps.remember(path); deps.rememberScroll?.(top) }
 }
 
 export function closeSidePane ({ persist = true } = {}) {

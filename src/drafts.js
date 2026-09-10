@@ -35,12 +35,13 @@ export function makeDrafts ({ state, editor, canDraft, save, clear, docText }) {
   let draftDoc = null
 
   function queueDraft () {
-    if (timer != null) clearTimeout(timer)
+    if (timer != null) return
     timer = setTimeout(writeDraft, DRAFT_MS)
   }
 
   async function writeDraft () {
     if (timer != null) clearTimeout(timer)
+    timer = null
     const path = state.current?.path
     if (!path || !state.dirty || !editor() || !canDraft(path)) return
     const doc = editor().state.doc
@@ -49,7 +50,9 @@ export function makeDrafts ({ state, editor, canDraft, save, clear, docText }) {
     if (draftPath === path && draftDoc === doc) return
     draftPath = path
     draftDoc = doc
-    await save(path, docText(doc)).catch(() => {
+    await save(path, docText(doc)).then((reply) => {
+      if (reply?.ok === false && draftDoc === doc) draftDoc = null
+    }).catch(() => {
       /* Unwritten, so not the draft on disk. Forgetting it here is what lets the
          next tick try again instead of standing down on a write that never
          landed. */
@@ -66,9 +69,10 @@ export function makeDrafts ({ state, editor, canDraft, save, clear, docText }) {
    */
   function clearDraft (path) {
     if (timer != null) clearTimeout(timer)
+    timer = null
     if (!path) return
     if (draftPath === path) { draftPath = null; draftDoc = null }
-    clear?.(path)
+    Promise.resolve(clear?.(path)).catch(() => {})
   }
 
   return { queueDraft, writeDraft, clearDraft }

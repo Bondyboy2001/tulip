@@ -1,34 +1,20 @@
-/* =============================================================== themes
-   A theme is a block of custom properties in the stylesheet, selected by
-   `data-theme` on the root. This file holds only what the picker needs: the
-   name to show, and three colours to show it with. The palettes themselves
-   live in styles.css, where the rest of the app's colour already lives.
-   ================================================================== */
-
+/* Picker metadata; complete palettes live in styles.css. */
 export const THEMES = [
-  { id: 'catppuccin', label: 'Catppuccin Mocha', note: 'Dark', swatch: ['#1E1E2E', '#CBA6F7', '#A6E3A1'] },
-  { id: 'cobalt2', label: 'Cobalt2', note: 'Dark', swatch: ['#193549', '#FFC600', '#A5FF90'] },
-  { id: 'cursor-midnight', label: 'Cursor Midnight', note: 'Dark', swatch: ['#0D1017', '#6AA6F8', '#7FD88F'] },
-  { id: 'dracula', label: 'Dracula', note: 'Dark', swatch: ['#282A36', '#FF79C6', '#50FA7B'] },
-  { id: 'gruvbox', label: 'Gruvbox', note: 'Dark', swatch: ['#282828', '#FE8019', '#B8BB26'] },
-  { id: 'dark', label: 'Ink', note: 'Dark', swatch: ['#141317', '#E87D9B', '#8CB286'] },
-  { id: 'monokai', label: 'Monokai', note: 'Dark', swatch: ['#272822', '#F92672', '#A6E22E'] },
-  { id: 'nord', label: 'Nord', note: 'Dark', swatch: ['#2E3440', '#88C0D0', '#A3BE8C'] },
-  { id: 'one-dark', label: 'One Dark', note: 'Dark', swatch: ['#282C34', '#61AFEF', '#98C379'] },
-  { id: 'light', label: 'Paper', note: 'Light', swatch: ['#FBFAF8', '#A63A5A', '#4F6B4B'] },
-  { id: 'solarized-dark', label: 'Solarized Dark', note: 'Dark', swatch: ['#002B36', '#268BD2', '#859900'] },
-  { id: 'solarized-light', label: 'Solarized Light', note: 'Light', swatch: ['#FDF6E3', '#268BD2', '#859900'] }
+  { id: 'linen', label: 'Linen', note: 'Light', swatch: ['#F8F4ED', '#994963', '#476A50'] },
+  { id: 'botanical', label: 'Botanical', note: 'Light', swatch: ['#F2F5EF', '#386749', '#526B35'] },
+  { id: 'porcelain', label: 'Porcelain', note: 'Light', swatch: ['#F5F7FA', '#3D61A0', '#426E5C'] },
+  { id: 'jupyter', label: 'Jupyter Notebook', note: 'Light', swatch: ['#FFFFFF', '#A84400', '#286B32'] },
+  { id: 'latex', label: 'LaTeX', note: 'Light', swatch: ['#FFFEFA', '#33312E', '#365B72'] },
+  { id: 'dusk', label: 'Dusk', note: 'Dark', swatch: ['#252129', '#DDA3BB', '#AAC4A0'] },
+  { id: 'midnight', label: 'Midnight', note: 'Dark', swatch: ['#171F2A', '#9DBCEB', '#A0C4AC'] },
 ]
 
-const IDS = new Set(THEMES.map((t) => t.id))
-
-export const isTheme = (id) => IDS.has(id)
-
-/* Which side of the ledger a palette sits on, for the things that draw rather
-   than being painted — the whiteboard asks this, not the stylesheet. */
-const DARK = new Set(THEMES.filter((t) => t.note === 'Dark').map((t) => t.id))
-export const isDarkTheme = (id) => DARK.has(id)
+const IDS = new Set(THEMES.map((theme) => theme.id))
+const DARK = new Set(THEMES.filter((theme) => theme.note === 'Dark').map((theme) => theme.id))
+const LEGACY_DARK = new Set(['dark', 'catppuccin', 'cobalt2', 'cursor-midnight', 'dracula', 'gruvbox', 'monokai', 'nord', 'one-dark', 'solarized-dark'])
 
 export function resolveTheme (id) {
-  return isTheme(id) ? id : 'light'
+  return IDS.has(id) ? id : LEGACY_DARK.has(id) ? 'midnight' : 'linen'
 }
+
+export const isDarkTheme = (id) => DARK.has(resolveTheme(id))

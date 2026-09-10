@@ -34,3 +34,22 @@ export function bookmarkMarkup () {
     '<path class="bookmark-stripe" d="M5.1 0h1.8v14.4l-.9-.7-.9.7z"/>' +
     '</svg></span>'
 }
+
+/** Insert one bookmark above a 1-based line, normalising only its surrounding
+ * blank lines. Return a minimal edit so unrelated editor ranges stay intact. */
+export function bookmarkInsertion (text, line) {
+  const lines = text.split('\n')
+  const index = Math.max(0, Math.min(lines.length - 1, line - 1))
+  const before = lines.slice(0, index).filter(line => !isBookmarkLine(line))
+  const after = lines.slice(index).filter(line => !isBookmarkLine(line))
+  while (before.length && !before.at(-1).trim()) before.pop()
+  while (after.length && !after[0].trim()) after.shift()
+  const prefix = before.length ? before.join('\n') + '\n\n' : '\n'
+  const result = prefix + BOOKMARK_LINE + '\n\n' + after.join('\n')
+  let from = 0
+  while (from < text.length && from < result.length && text[from] === result[from]) from++
+  let to = text.length
+  let end = result.length
+  while (to > from && end > from && text[to - 1] === result[end - 1]) { to--; end-- }
+  return { from, to, insert: result.slice(from, end), anchor: prefix.length + BOOKMARK_LINE.length + 2 }
+}

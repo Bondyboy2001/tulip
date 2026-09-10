@@ -95,7 +95,15 @@ const URL_ATTRS = new Set(['href', 'src', 'poster', 'cite'])
    vault, and an `<a href>` wearing it would be a click that navigates the app
    into a vault file — so it is admitted only where an asset loads, below. */
 const ASSET_SCHEME = /^tulip-file:/i
-const DATA_IMAGE = /^data:image\/(?:png|jpe?g|gif|webp|avif|bmp|x-icon);base64,[a-z0-9+/=\s]*$/i
+/* Base64 pictures — with the `;charset=` Concepts writes before `;base64` —
+   and percent-encoded SVG, which never holds a quote, a bracket or whitespace
+   to break out of the attribute with. Only `image/*`: a `data:text/html` is a
+   page, not a picture. An `<img>` showing SVG runs no script — SVG in an image
+   context is self-contained by definition — and the page CSP admits `data:`
+   for images already (see src/index.html). */
+const DATA_IMAGE_BASE64 =
+  /^data:image\/(?:png|jpe?g|gif|webp|avif|bmp|x-icon|svg\+xml)(?:;charset=[^;,]+)?;base64,[a-z0-9+/=\s]*$/i
+const DATA_SVG_ENCODED = /^data:image\/svg\+xml(?:;charset=[^;,]+)?,[^"\s<>]*$/i
 
 /* A style attribute is allowed to say how something looks and nothing else.
    `url()` would fetch, `expression()`/`behavior:`/`-moz-binding:` were all ways
@@ -147,7 +155,7 @@ function safeUrl (value, { tag, isAsset, resolve }) {
   if (/^[a-z][a-z0-9+.-]*:/i.test(probe)) {
     if (SAFE_SCHEME.test(probe)) return url
     if (isAsset && ASSET_SCHEME.test(probe)) return url
-    if (tag === 'img' && DATA_IMAGE.test(probe)) return url
+    if (tag === 'img' && (DATA_IMAGE_BASE64.test(probe) || DATA_SVG_ENCODED.test(probe))) return url
     return null
   }
   // Protocol-relative (`//host/x`) has no base here worth guessing at.
