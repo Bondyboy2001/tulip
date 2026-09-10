@@ -53,8 +53,17 @@ test('Stop kills an installer and a failed install restores manifests', async ()
   const bin = path.join(root, 'bin')
   await fs.mkdir(bin)
   const marker = path.join(root, 'should-not-exist')
-  await fs.writeFile(path.join(bin, 'npm'), '#!' + process.execPath + '\n' +
-    'const fs = require("fs"); fs.writeFileSync("package.json", "broken"); console.log("installer started"); setTimeout(() => fs.writeFileSync(' + JSON.stringify(marker) + ', "alive"), 1500);\n', { mode: 0o755 })
+  const installer = 'const fs = require("fs"); fs.writeFileSync("package.json", "broken"); console.log("installer started"); setTimeout(() => fs.writeFileSync(' + JSON.stringify(marker) + ', "alive"), 1500);\n'
+  if (process.platform === 'win32') {
+    /* A `.cmd` cannot be started by CreateProcess, so the manager launches npm
+       through the command interpreter; the shim has to be one too, pointing at
+       the same JavaScript. */
+    const script = path.join(bin, 'npm-shim.cjs')
+    await fs.writeFile(script, installer)
+    await fs.writeFile(path.join(bin, 'npm.cmd'), `@echo off\r\n"${process.execPath}" "${script}" %*\r\n`)
+  } else {
+    await fs.writeFile(path.join(bin, 'npm'), '#!' + process.execPath + '\n' + installer, { mode: 0o755 })
+  }
   let manager
   manager = makeCodeEnvs({ root: () => root, vault: () => root, pathFor: () => bin + path.delimiter + process.env.PATH, pythonEnvs: {}, autoInstall: () => true })
   try {

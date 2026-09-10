@@ -3,12 +3,15 @@ import { build } from 'esbuild'
 import { mkdtemp, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { startSearchServer } from '../electron/copilot-search-server.js'
 const scratch = await mkdtemp(path.join(os.tmpdir(), 'tulip-research-'))
 try {
   const outfile = path.join(scratch, 'review.mjs')
   await build({ entryPoints: ['src/change-review.js'], bundle: true, platform: 'node', format: 'esm', outfile, logLevel: 'error' })
-  const { changeSections, combineSections } = await import(outfile)
+  /* A Windows path is not a URL: `import('D:\\…')` is refused as an unknown
+     scheme, so the bundle is imported by its file: URL on every platform. */
+  const { changeSections, combineSections } = await import(pathToFileURL(outfile).href)
   for (const [before, after] of [['', 'hi'], ['hi', ''], ['x\n', 'x'], ['x', 'x\n'], ['a\nb\na', 'b\na\nb'], ['a\nb', 'a\nnew\nb']]) {
     const sections = changeSections(before, after)
     assert.equal(combineSections(before, sections, new Set(sections.map((_, i) => i))), after)
@@ -29,7 +32,7 @@ try {
   console.log('selective changes: exact reconstruction, mixed choices and 200 repeated-line edits passed')
   const storeFile = path.join(scratch, 'store.mjs')
   await build({ entryPoints: ['src/copilot-store.js'], bundle: true, platform: 'node', format: 'esm', outfile: storeFile, logLevel: 'error' })
-  const { createStore } = await import(storeFile)
+  const { createStore } = await import(pathToFileURL(storeFile).href)
   const store = createStore({ persist: async () => {}, keepKey: () => 'A.md', entryBusy: () => false })
   store.ingest({ 'A.md': { convos: [{ id: 'interrupted', interrupted: true, contextOptions: { pins: ['B.md'] }, messages: [{ t: 'you', text: 'Revise this' }, { t: 'bot', text: 'Partial answer', live: true, bookmarked: true }] }] } })
   const recovered = store.entry('A.md').convos.find((convo) => convo.id === 'interrupted')

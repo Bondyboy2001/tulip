@@ -51,6 +51,15 @@ function missingImport (lang, stderr, code) {
   return safe(lang, name) ? name : null
 }
 
+/* On Windows npm and its kin ship as `.cmd` wrappers, and CreateProcess cannot
+   start one without a shell — so automatic installs worked everywhere except
+   the platform they were written for. These are the commands launched through
+   the command interpreter there. Every argument they receive is either a flag
+   written in this file or a package name `safe()` has already refused shell
+   syntax for, and each runs with its project directory as `cwd` rather than a
+   `--prefix` path, so nothing user-spelled joins the command line. */
+const WINDOWS_SHIM_COMMANDS = new Set(['npm', 'npx', 'pnpm', 'yarn'])
+
 function makeCodeEnvs ({ root, vault, pathFor, pythonEnvs, autoInstall }) {
   const queues = new Map()
   const controllers = new Map()
@@ -80,7 +89,13 @@ function makeCodeEnvs ({ root, vault, pathFor, pythonEnvs, autoInstall }) {
     return new Promise((resolve) => {
       const from = Date.now()
       let errTail = '', stdout = '', timedOut = false, error = null
-      const child = spawn(cmd, args, { cwd, env: { ...process.env, PATH: pathFor(), NO_COLOR: '1', ...env }, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' })
+      const shim = process.platform === 'win32' &&
+        WINDOWS_SHIM_COMMANDS.has(path.basename(cmd, path.extname(cmd)).toLowerCase())
+      const child = spawn(
+        shim ? (process.env.ComSpec || 'cmd.exe') : cmd,
+        shim ? ['/d', '/s', '/c', cmd, ...args] : args,
+        { cwd, env: { ...process.env, PATH: pathFor(), NO_COLOR: '1', ...env }, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' }
+      )
       const abort = () => killTree(child, 'SIGKILL')
       signal?.addEventListener('abort', abort, { once: true })
       const timer = setTimeout(() => { timedOut = true; abort() }, build ? 600000 : timeoutMs)
@@ -127,7 +142,7 @@ function makeCodeEnvs ({ root, vault, pathFor, pythonEnvs, autoInstall }) {
       how.python = python
     }
     if (lang === 'node' && !await exists(path.join(dir, 'package.json'))) await fs.writeFile(path.join(dir, 'package.json'), JSON.stringify({ name: 'tulip-note', private: true, version: '1.0.0' }))
-    if (lang === 'node' && Object.keys(record.packages).length && !await exists(path.join(dir, 'node_modules'))) await requireCommand('npm', ['ci', '--prefix', dir, '--no-audit', '--no-fund'], { ...how, cwd: dir })
+    if (lang === 'node' && Object.keys(record.packages).length && !await exists(path.join(dir, 'node_modules'))) await requireCommand('npm', ['ci', '--no-audit', '--no-fund'], { ...how, cwd: dir })
     if (lang === 'go' && !await exists(path.join(dir, 'go.mod'))) await requireCommand('go', ['mod', 'init', 'tulip.local/note'], { ...how, cwd: dir })
     await save(dir, record)
     return record
@@ -140,7 +155,7 @@ function makeCodeEnvs ({ root, vault, pathFor, pythonEnvs, autoInstall }) {
         if (await pythonEnvs.usesUv()) return ['uv', ['pip', remove ? 'uninstall' : 'install', '--python', python, ...(update ? ['--upgrade'] : []), name]]
         return [python, ['-m', 'pip', remove ? 'uninstall' : 'install', ...(remove ? ['-y'] : update ? ['--upgrade'] : []), name]]
       case 'node':
-        return ['npm', [remove ? 'uninstall' : 'install', '--prefix', dir, '--save-exact', '--no-audit', '--no-fund', name + (update ? '@latest' : '')]]
+        return ['npm', [remove ? 'uninstall' : 'install', '--save-exact', '--no-audit', '--no-fund', name + (update ? '@latest' : '')]]
       case 'rust':
         return ['cargo', [remove ? 'remove' : update ? 'update' : 'add', ...(update ? ['-p'] : []), name, '--manifest-path', path.join(dir, 'Cargo.toml')]]
       case 'go':

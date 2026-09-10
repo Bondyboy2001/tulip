@@ -22,7 +22,7 @@
    TULIP_SHOW_TEST_WINDOWS=1 when debugging one visually.
 */
 
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { availableParallelism } from 'node:os'
 import { readFile, readdir } from 'node:fs/promises'
 import path from 'node:path'
@@ -151,6 +151,19 @@ const lane = async (queue) => {
 
 const windowed = all.filter((name) => WINDOWED.has(name))
 const rest = all.filter((name) => !WINDOWED.has(name))
+
+/* The windowed tests drive `dist`, and this runner is what proves a change end
+   to end. CI's verify job has no build before the suite, so every windowed
+   test used to launch Electron against a missing renderer and sit out its
+   readiness timeout; a local run was testing whatever a previous command left
+   behind. Build once here. */
+if (windowed.length) {
+  const built = spawnSync(process.execPath, ['build.mjs'], { stdio: 'inherit' })
+  if (built.status !== 0) {
+    console.error('run-tests: the renderer build failed — there is no app for the windowed tests to drive.')
+    process.exit(1)
+  }
+}
 
 /* One lane for the windowed tests and a pool for the rest, running together.
    Half the machine, not all of it. A test here is not one process: the ones

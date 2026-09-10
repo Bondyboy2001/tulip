@@ -53,7 +53,18 @@ app.whenReady().then(async () => {
     const result = []
     for (const zoom of [1.5, 1.75, 2]) {
       win.webContents.setZoomFactor(zoom)
-      await new Promise((resolve) => setTimeout(resolve, 80))
+      /* Zoom settles asynchronously: the viewport can report its new width
+         while the layout still holds the old one. A fixed 80ms was enough on a
+         developer machine and not always on a loaded CI runner, which is how
+         the 1.5x width check failed there. Wait for the width to stop moving. */
+      let last = -1
+      for (let stable = 0; stable < 4;) {
+        await new Promise((resolve) => setTimeout(resolve, 40))
+        const width = await win.webContents.executeJavaScript('innerWidth')
+        if (width === last) stable++
+        else { stable = 0; last = width }
+      }
+      await win.webContents.executeJavaScript('new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
       result.push(await win.webContents.executeJavaScript(\`(() => {
         const app = document.getElementById('app')
         const opener = document.querySelector('.sidebar-open')

@@ -4,7 +4,7 @@
  * bundle was assembled; this proves the executable, main process, preload,
  * renderer and vault write path work together in that bundle. */
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import net from 'node:net'
 import os from 'node:os'
@@ -283,10 +283,20 @@ try {
   if (output.length) console.error(output.join('').slice(-8000))
   throw error
 } finally {
-  if (child.exitCode == null) child.kill('SIGTERM')
-  await Promise.race([
-    new Promise((resolve) => child.once('exit', resolve)),
-    delay(3000).then(() => { if (child.exitCode == null) child.kill('SIGKILL') })
-  ])
-  await rm(scratch, { recursive: true, force: true })
+  /* On Windows a plain kill reaps the main process and leaves Chromium's
+     children holding the profile — which is how the run failed after the smoke
+     itself had passed: EBUSY unlinking `Network/Trust Tokens-journal`. Kill the
+     tree, then give the filesystem a beat to let go before removing. */
+  if (child.exitCode == null && child.signalCode == null) {
+    const exited = new Promise((resolve) => child.once('exit', resolve))
+    if (process.platform === 'win32') spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true })
+    else child.kill('SIGTERM')
+    await Promise.race([
+      exited,
+      delay(3000).then(() => { if (child.exitCode == null) child.kill('SIGKILL') })
+    ])
+  }
+  for (let attempt = 0; attempt < 10; attempt++) {
+    try { await rm(scratch, { recursive: true, force: true }); break } catch { await delay(500) }
+  }
 }
