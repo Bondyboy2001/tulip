@@ -3979,7 +3979,13 @@ function buildMenu () {
         { label: 'Keyboard Shortcuts', accelerator: 'CmdOrCtrl+/', command: 'shortcuts', click: () => toFocused('menu', 'shortcuts') },
         { type: 'separator' },
         { label: 'Tulip on GitHub', click: () => shell.openExternal(REPO_URL) },
-        { label: 'Report an Issue…', click: () => shell.openExternal(`${REPO_URL}/issues/new`) },
+        /* The template is named so the form asks the questions a report needs,
+           and the title carries the version the way a bug report should. The
+           click is the whole network request; nothing is sent by the app. */
+        {
+          label: 'Report an Issue…',
+          click: () => shell.openExternal(`${REPO_URL}/issues/new?template=bug_report.md&title=${encodeURIComponent(`[Bug] Tulip ${app.getVersion()}`)}`)
+        },
         { type: 'separator' },
         { label: 'Reveal Crash Log', command: 'reveal-crash-log', click: () => toFocused('menu', 'reveal-crash-log') },
         { label: 'Copy Diagnostics', command: 'copy-diagnostics', click: () => toFocused('menu', 'copy-diagnostics') }

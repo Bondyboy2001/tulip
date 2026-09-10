@@ -1963,6 +1963,23 @@ async function checkForUpdate () {
   } else if (answer.downloadUrl || answer.url) api.openExternal(answer.downloadUrl || answer.url)
 }
 
+/**
+ * A prefilled issue in the app's tracker, opened by the reader's own click.
+ * Nothing is sent from here — `openExternal` hands the URL to the browser —
+ * and the version rides in the title so a report arrives knowing which build
+ * it is about; the diagnostics the app can gather are a palette row away,
+ * ready to paste into the body. The same URL the Help menu opens.
+ */
+async function reportProblem () {
+  let version = ''
+  try { version = await api.version() } catch {}
+  const query = new URLSearchParams({
+    template: 'bug_report.md',
+    title: version ? `[Bug] Tulip ${version}` : '[Bug] Tulip'
+  })
+  api.openExternal(`https://github.com/Bondyboy2001/tulip/issues/new?${query}`)
+}
+
 async function lintFile () {
   if (!state.current || viewingTex() || viewingPdf() || viewingSite() || viewingWhiteboard()) return
   /* Asked for from the palette, which is open in the reading view as often as
@@ -9260,6 +9277,7 @@ const COMMANDS = [
     { id: 'study-all', title: 'Study all due words', scope: 'language' },
     { id: 'import-cards', title: 'Import cards from CSV…', scope: 'language' },
   { id: 'check-for-updates', title: 'Check for updates…', keywords: 'upgrade version download release' },
+  { id: 'report-problem', title: 'Report a problem…', keywords: 'bug issue github crash broken support' },
     { id: 'shortcuts', title: 'Keyboard shortcuts…', key: '⌘/' },
     { id: 'clip-page', title: 'Save this page as a note', scope: 'site' },
   { id: 'open-page-in-browser', title: 'Open this page in your browser', scope: 'site' },
@@ -11621,6 +11639,7 @@ function runCommand (id, dir = state.current?.dir || '') {
       }).catch(() => toast('The vault restore did not finish.'))
       break
     case 'check-for-updates': checkForUpdate(); break
+    case 'report-problem': reportProblem(); break
     case 'shortcuts': openShortcuts(); break
     case 'reveal-crash-log':
       api.revealLog()

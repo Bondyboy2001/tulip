@@ -286,6 +286,27 @@ jobs:
         shell: bash
         run: npm run test:packaged-app -- build/Tulip-win32-x64/Tulip.exe
 
+      # The same battery the macOS bundle gets. These run in the `verify` job's
+      # windowed lane all along, but against the source tree; here they run
+      # against the assembled folder, where the failures they exist to catch —
+      # a path that only breaks once packaged, a rename Windows refuses — are
+      # actually reachable.
+      - name: Recovery survives interrupted edits and writes
+        shell: bash
+        run: npm run test:recovery-app -- build/Tulip-win32-x64/Tulip.exe
+
+      - name: Document recovery unifies versions and backup copies
+        shell: bash
+        run: npm run test:document-recovery -- build/Tulip-win32-x64/Tulip.exe
+
+      - name: Right panels resize in column and drawer layouts
+        shell: bash
+        run: npm run test:panel-resize -- build/Tulip-win32-x64/Tulip.exe
+
+      - name: Workspaces restore across app launches
+        shell: bash
+        run: npm run test:workspace-app -- build/Tulip-win32-x64/Tulip.exe
+
       - name: Verify Authenticode signature
         if: env.WINDOWS_CERTIFICATE != ''
         shell: pwsh
