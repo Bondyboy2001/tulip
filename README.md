@@ -320,6 +320,11 @@ There is one vault open at a time, and the sidebar splits in two and no
 further. Tulip makes no network request unless asked: the only one it can
 make on its own behalf is **Check for updates…**, and nothing runs it but you.
 
+macOS and Windows are the supported platforms. `npm run app:linux` assembles a
+portable Linux folder for anyone who wants to try one, but it is not built,
+smoke-tested or updated by CI, and the updater has no Linux package to offer
+it — treat it as a build recipe rather than a third platform.
+
 Tulip is licensed under the [MIT License](LICENSE).
 
 ## Reviewing and researching with Copilot

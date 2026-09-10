@@ -58,12 +58,15 @@ try {
     if (r.exceptionDetails) throw Error(JSON.stringify(r.exceptionDetails))
     return r.result.value
   }
-  for (let attempt = 0; attempt < 60; attempt++) {
-    if (await run(`document.getElementById('settings')?.hidden === false`)) break
-    await delay(100)
+  /* The window opens on Appearance and is told which pane is wanted over IPC,
+     so the assertion waits for the pane rather than the window: under a busy
+     suite the message can arrive after the first paint. */
+  let title = ''
+  for (let attempt = 0; attempt < 80 && title !== 'Copilot'; attempt++) {
+    title = await run(`document.getElementById('settings-title')?.textContent || ''`)
+    if (title !== 'Copilot') await delay(100)
   }
-  assert.equal(await run(`document.getElementById('settings-title').textContent`), 'Copilot',
-    'the requested pane is the one that opened')
+  assert.equal(title, 'Copilot', 'the requested pane is the one that opened')
 
   console.log('PASS: Set up opens Settings on the Copilot pane')
 } finally {

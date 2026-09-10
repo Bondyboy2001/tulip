@@ -3253,9 +3253,18 @@ ipcMain.handle('settings:open', async (_event, section) => {
   win.on('focus', () => win.webContents.send('settings:refresh'))
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   win.webContents.on('will-navigate', (event) => event.preventDefault())
-  if (useAppScheme()) await win.loadURL('tulip-app://settings/settings-window.html')
-  else await win.loadFile(path.join(__dirname, '..', 'dist', 'settings-window.html'))
-  if (wanted) win.webContents.send('settings:section', wanted)
+  /* The pane a new window should open on travels in the URL hash, not in a
+     message: the window's script suspends on its first config read, and a
+     message sent after the load can arrive before the listener exists. The
+     hash is part of the document, so there is nothing to race. */
+  if (useAppScheme()) {
+    await win.loadURL(`tulip-app://settings/settings-window.html${wanted ? `#${encodeURIComponent(wanted)}` : ''}`)
+  } else {
+    await win.loadFile(
+      path.join(__dirname, '..', 'dist', 'settings-window.html'),
+      wanted ? { hash: wanted } : undefined
+    )
+  }
   if (process.env.TULIP_TEST_WINDOW_HIDDEN !== '1') win.show()
   return true
 })

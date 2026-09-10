@@ -26,8 +26,9 @@ async function refresh () {
   pane.open()
 }
 api.on('settings:refresh', refresh)
-/* Opened for a particular pane — the copilot's "Set up" arrives here — and
-   opened without one, which is the ordinary case and leaves the last pane
-   where the reader left it. */
+/* Opened for a particular pane — the copilot's "Set up" asks for the Doctor —
+   and opened without one, which is the ordinary case and leaves the last pane
+   where the reader left it. A new window carries the pane in its hash so the
+   first paint is already there; the event is for one already open. */
 api.on('settings:section', (section) => { if (section) pane.open(section) })
-pane.open()
+pane.open(decodeURIComponent(location.hash.slice(1)) || undefined)
