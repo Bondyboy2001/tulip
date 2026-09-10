@@ -40,7 +40,11 @@ function frontmatterRange (text) {
   while (at < src.length) {
     let lineEnd = src.indexOf('\n', at)
     if (lineEnd === -1) lineEnd = src.length
-    const line = src.slice(at, lineEnd).replace(/\r$/, '')
+    /* One trailing `\r` off without the regex for the LF-only common case:
+       `lineEnd` is a `\n` or the end of the text, so a `\r` can only be right
+       before it — and on an empty line, where `lineEnd === at`, the character
+       before is the previous line's `\n`. */
+    const line = src.charCodeAt(lineEnd - 1) === 13 ? src.slice(at, lineEnd - 1) : src.slice(at, lineEnd)
     if (/^(---|\.\.\.)[ \t]*$/.test(line)) {
       return { bodyFrom, bodyTo: at, end: Math.min(lineEnd + 1, src.length) }
     }
@@ -124,7 +128,9 @@ function parseFrontmatter (text) {
   const range = frontmatterRange(text)
   if (!range) return { range: null, entries: [] }
   const body = String(text).slice(range.bodyFrom, range.bodyTo)
-  const lines = body.replace(/\r/g, '').split('\n')
+  /* Stripped only when a `\r` is actually there: for the LF-only note this is
+     asked on every parse, the map over the body was pure allocation. */
+  const lines = (body.includes('\r') ? body.replace(/\r/g, '') : body).split('\n')
 
   const entries = []
   for (let i = 0; i < lines.length; i++) {

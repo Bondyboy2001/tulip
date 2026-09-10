@@ -80,7 +80,10 @@ function makeIndexCache ({ dir, vaultPath, quietMs = QUIET_MS, maxWaitMs = MAX_W
     if (!current) return
     clearTimeout(current.timer)
     pending = null
-    writer.flush(target, current.serialize).catch(() => {}).then(() => current.settle())
+    /* Atomic still — temp file and rename — but deliberately not fsynced: the
+       module contract is that a lost cache costs a slower first search, and
+       the whole point of writing it is to be quick. */
+    writer.flush(target, current.serialize, { durable: false }).catch(() => {}).then(() => current.settle())
   }
   const schedule = (serialize) => {
     let current = pending
@@ -152,22 +155,6 @@ function makeIndexCache ({ dir, vaultPath, quietMs = QUIET_MS, maxWaitMs = MAX_W
      * the byte count, or `{ skipped: 'too large' }`.
      */
     save (entries) {
-      /* Only the four fields `load` will accept. The in-memory index picks up
-         ride-along fields over a session — search writes `kind` and `fileTags`
-         onto entries, alias resolution writes `aliases` — and serializing those
-         put bytes on disk that the load path immediately threw away. */
-      const kept = []
-      for (const [key, entry] of entries) {
-        kept.push([key, { name: entry.name, text: entry.text, mtime: entry.mtime, size: entry.size }])
-      }
-
-      const serialize = () => JSON.stringify({
-        version: VERSION,
-        vaultPath,
-        at: Date.now(),
-        entries: Object.fromEntries(kept)
-      })
-
       /* Sized by adding up, not by serializing to find out. The old way built
          the whole body here, synchronously, on every sync of the index — a
          `JSON.stringify` of every note in the vault, on the main process, to
@@ -175,9 +162,13 @@ function makeIndexCache ({ dir, vaultPath, quietMs = QUIET_MS, maxWaitMs = MAX_W
          writer whose entire purpose is to serialize lazily and once per burst.
          The estimate is an upper bound on what JSON adds per entry (the key,
          the field names, the quoting); the text dominates and is exact. */
-      const cost = ([key, entry]) => key.length + entry.name.length + entry.text.length + 80
+      const cost = (key, entry) => key.length + entry.name.length + entry.text.length + 80
       let estimate = 0
-      for (const item of kept) estimate += cost(item)
+      for (const [key, entry] of entries) estimate += cost(key, entry)
+
+      /* What the serializer will walk: the live map, unless the estimate is
+         over budget and it becomes the survivors of the drop below. */
+      let source = entries
       let dropped = 0
       if (estimate > MAX_CACHE_BYTES) {
         /* Over budget, the old behaviour was to skip the write and leave any
@@ -187,14 +178,38 @@ function makeIndexCache ({ dir, vaultPath, quietMs = QUIET_MS, maxWaitMs = MAX_W
            wrong answer, it is one re-read on the first search, the same as any
            mtime mismatch. Largest first because one 4MB note costs the budget
            of a thousand ordinary ones. */
-        kept.sort((a, b) => b[1].text.length - a[1].text.length)
-        while (kept.length && estimate > MAX_CACHE_BYTES) {
-          const drop = Math.max(1, Math.ceil(kept.length * 0.1))
-          for (const item of kept.splice(0, drop)) estimate -= cost(item)
+        source = [...entries]
+        source.sort((a, b) => b[1].text.length - a[1].text.length)
+        while (source.length && estimate > MAX_CACHE_BYTES) {
+          const drop = Math.max(1, Math.ceil(source.length * 0.1))
+          for (const [key, entry] of source.splice(0, drop)) estimate -= cost(key, entry)
           dropped += drop
         }
-        if (!kept.length) return { skipped: 'too large' }
+        if (!source.length) return { skipped: 'too large' }
       }
+
+      /* The four-field clone is deferred to the serializer rather than done in
+         `save` above: it is work for a write that actually happens, and the
+         writer coalesces bursts, so a save another save replaces before the
+         flush used to pay to memoise a body nobody ever serialized.
+
+         Only the four fields `load` will accept. The in-memory index picks up
+         ride-along fields over a session — search writes `kind` and `fileTags`
+         onto entries, alias resolution writes `aliases` — and serializing those
+         put bytes on disk that the load path immediately threw away. */
+      const serialize = () => {
+        const kept = []
+        for (const [key, entry] of source) {
+          kept.push([key, { name: entry.name, text: entry.text, mtime: entry.mtime, size: entry.size }])
+        }
+        return JSON.stringify({
+          version: VERSION,
+          vaultPath,
+          at: Date.now(),
+          entries: Object.fromEntries(kept)
+        })
+      }
+
       /* Not awaited by the caller — see the call site in `syncIndex` — but the
          promise is answered here so a rejection is not an unhandled one. A
          cache that failed to write is a slower first search next time and

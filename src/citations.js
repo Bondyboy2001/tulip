@@ -21,6 +21,7 @@ function citationAt (source, pos) {
 
 export function findCitations (source) {
   const text = String(source || '')
+  if (!text.includes('[')) return []
   const out = []
   for (let pos = 0; pos < text.length; pos++) {
     const found = citationAt(text, pos)

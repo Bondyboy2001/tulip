@@ -22,7 +22,7 @@
 
 const { ipcMain } = require('electron')
 const path = require('node:path')
-const { HASHTAG, entryHeadTags } = require('./vault-scan')
+const { HASHTAG, entryHeadTags, entryProseTags } = require('./vault-scan')
 const { hitLines } = require('./search-scan')
 const { escapeRe } = require('./vault-kinds')
 
@@ -261,7 +261,12 @@ function makeVaultInfoDomain (ctx) {
       }
       for (const [key, entry] of index()) {
         if (!entry.text) continue
-        const seenHere = new Set(cleanFileTags(assigned[key]))
+        /* Most paths have no assigned tags. `cleanFileTags` allocates a Set of
+           its own before returning null for them, so start from the empty Set
+           the dedup needs and skip the call. */
+        const seenHere = assigned[key] === undefined
+          ? new Set()
+          : new Set(cleanFileTags(assigned[key]))
         /* The head counts the same as the prose. A note that declares
            `tags: [book]` is a book-note whether or not it also says `#book`, and
            the inventory the `#` completion offers has to know the names a reader
@@ -272,9 +277,10 @@ function makeVaultInfoDomain (ctx) {
           seenHere.add(tag)
           counts.set(tag, (counts.get(tag) || 0) + 1)
         }
-        HASHTAG.lastIndex = 0
-        for (let m = HASHTAG.exec(entry.text); m; m = HASHTAG.exec(entry.text)) {
-          const tag = m[2].toLowerCase()
+        /* The same memoised scan the `tag:` search filter reads. The entry is
+           replaced wholesale when the note changes, so a cached set can never
+           describe prose that has since been edited. */
+        for (const tag of entryProseTags(entry)) {
           if (seenHere.has(tag)) continue
           seenHere.add(tag)
           counts.set(tag, (counts.get(tag) || 0) + 1)

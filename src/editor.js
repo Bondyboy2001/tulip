@@ -1390,16 +1390,11 @@ function widenOverHidden (state, hidden) {
   return moved ? EditorSelection.create(ranges, state.selection.mainIndex) : null
 }
 
-/** The source range beneath one heading, stopping before its next peer. */
-function headingFoldRange (state, heading, list) {
-  let last = state.doc.lines
-  for (const next of list) {
-    if (next.line > heading.line && next.level <= heading.level) {
-      last = next.line - 1
-      break
-    }
-  }
-  if (last <= heading.line) return null
+/** The source range beneath one heading, stopping before its next peer. The
+ *  last line is precomputed in `headingIndexFor`'s `foldEnd`. */
+function headingFoldRange (state, heading, foldEnd) {
+  const last = foldEnd.get(heading.line)
+  if (last === undefined || last <= heading.line) return null
   const from = state.doc.line(heading.line).to
   const to = state.doc.line(last).to
   return to > from ? { from, to } : null
@@ -1416,9 +1411,9 @@ const foldedExactly = (state, range) => {
 /** Let CodeMirror's fold commands and state use Markdown heading sections. */
 const headingFoldService = foldService.of((state, lineStart) => {
   const line = state.doc.lineAt(lineStart)
-  const list = /** @type {HeadingEntry[]} */ (headingsFor(state.doc))
-  const heading = list.find((entry) => entry.line === line.number)
-  return heading ? headingFoldRange(state, heading, list) : null
+  const { map, foldEnd } = headingIndexFor(state.doc)
+  const heading = map.get(line.number)
+  return heading ? headingFoldRange(state, heading, foldEnd) : null
 })
 
 /* The heading branch of `buildDecorations` runs per ATX node and used to scan
@@ -1429,25 +1424,52 @@ const headingFoldService = foldService.of((state, lineStart) => {
    `headingsFor` uses, so one entry covers many rebuilds of one note. */
 /**
  * @typedef {{ level: number, text: string, line: number, slug: string }} HeadingEntry
- * @type {{ doc: any, list: HeadingEntry[] | null, map: Map<number, HeadingEntry> | null }}
+ * @type {{ doc: any, list: HeadingEntry[] | null, map: Map<number, HeadingEntry> | null, foldEnd: Map<number, number> | null }}
  */
-let headingMapCache = { doc: null, list: null, map: null }
+let headingMapCache = { doc: null, list: null, map: null, foldEnd: null }
 /**
+ * The document's headings, the line→heading map the ATX branch asks through,
+ * and `foldEnd` — the last line of each heading's section.
+ *
+ * A section ends on the line before the first later heading at the same level
+ * or shallower, or at the end of the note. Rescanning the list from the top
+ * for every heading made folding quadratic in the number of headings, and
+ * `foldAllHeadings` asks once per heading. A monotonic stack settles every
+ * heading in one pass: headings arrive in document order, so the first later
+ * heading that is this one's peer or an ancestor is exactly the heading that
+ * pops it — anything still above it on the stack is deeper, and a shallower
+ * heading before that would have popped it already. Entries left on the stack
+ * when the list ends own the rest of the note.
+ *
  * @param {any} doc
- * @returns {{ list: HeadingEntry[], map: Map<number, HeadingEntry> }}
+ * @returns {{ list: HeadingEntry[], map: Map<number, HeadingEntry>, foldEnd: Map<number, number> }}
  */
 function headingIndexFor (doc) {
   // `headingsFor` is null-typed to the checker (see its cache in headings.js)
   // but always an array at runtime; the fallback keeps it an array to both.
   const list = headingsFor(doc) || []
-  let map = headingMapCache.doc === doc && headingMapCache.list === list
-    ? headingMapCache.map
-    : null
-  if (!map) {
-    map = new Map(list.map((entry) => [entry.line, entry]))
-    headingMapCache = { doc, list, map }
+  if (headingMapCache.doc === doc && headingMapCache.list === list &&
+      headingMapCache.map && headingMapCache.foldEnd) {
+    return { list, map: headingMapCache.map, foldEnd: headingMapCache.foldEnd }
   }
-  return { list, map }
+  /** @type {Map<number, HeadingEntry>} */
+  const map = new Map()
+  /** @type {Map<number, number>} */
+  const foldEnd = new Map()
+  /** @type {HeadingEntry[]} */
+  const stack = []
+  for (const entry of list) {
+    while (stack.length && stack[stack.length - 1].level >= entry.level) {
+      const top = stack[stack.length - 1]
+      stack.length--
+      foldEnd.set(top.line, entry.line - 1)
+    }
+    stack.push(entry)
+    map.set(entry.line, entry)
+  }
+  for (const entry of stack) foldEnd.set(entry.line, doc.lines)
+  headingMapCache = { doc, list, map, foldEnd }
+  return { list, map, foldEnd }
 }
 
 /**
@@ -1476,7 +1498,7 @@ function buildDecorations (view, imageSource = null) {
      The equations are lazier still. They are wanted only by the `\eqref`
      branch far below, which most notes never reach, so the index is not built
      unless something asks for it. */
-  const { list: documentHeadings, map: headingByLine } = headingIndexFor(state.doc)
+  const { map: headingByLine, foldEnd: headingFoldEnd } = headingIndexFor(state.doc)
   /* The heading branch below runs per ATX node and used to scan this list for
      its line each time. A line holds at most one heading, so a map answers in
      one step — shared with every other rebuild of this document version. */
@@ -1756,6 +1778,12 @@ function buildDecorations (view, imageSource = null) {
     painted.add(key)
     return true
   }
+  /* Lines a fence has already been given their decoration for. A fence the
+     viewport shows in two ranges — a block widget inside it splits them — is
+     entered once per range, and a line the two ranges meet on would otherwise
+     be decorated twice, the same overlap `codeLineNumbers` dedupes for its
+     widgets. */
+  const fencedLines = new Set()
 
   for (const { from, to } of view.visibleRanges) {
     tree.iterate({
@@ -1781,7 +1809,7 @@ function buildDecorations (view, imageSource = null) {
         if (heading) {
           const line = state.doc.lineAt(node.from)
           const entry = headingByLine.get(line.number)
-          const fold = entry && headingFoldRange(state, entry, documentHeadings)
+          const fold = entry && headingFoldRange(state, entry, headingFoldEnd)
           const folded = fold ? foldedExactly(state, fold) : false
           ranges.push(
             Decoration.line({
@@ -1840,7 +1868,23 @@ function buildDecorations (view, imageSource = null) {
           const first = opening.number
           const last = state.doc.lineAt(node.to).number
 
-          for (let n = first; n <= last; n++) {
+          /* Only the lines a visible range actually covers. The tree walk is
+             already viewport-scoped, but entering one node used to decorate
+             the whole block: a quote with a screen of hidden maths in it drew
+             a line decoration for every line, on every keystroke and every
+             scroll. The quote is painted once, so the lines are gathered
+             across every visible range it touches — a line a range reaches at
+             all counts as covered — and each covered line gets the class the
+             full loop gave it, edges included. */
+          /** @type {Set<number>} */
+          const covered = new Set()
+          for (const range of view.visibleRanges) {
+            const startLine = Math.max(first, state.doc.lineAt(Math.max(range.from, node.from)).number)
+            const endLine = Math.min(last, state.doc.lineAt(Math.min(range.to, node.to)).number)
+            for (let n = startLine; n <= endLine; n++) covered.add(n)
+          }
+
+          for (const n of [...covered].sort((a, b) => a - b)) {
             const line = state.doc.line(n)
             if (!head) {
               /* The ends are marked so the quote can be drawn as one shape
@@ -1899,7 +1943,18 @@ function buildDecorations (view, imageSource = null) {
              A block still being typed at the end of the note has no such line:
              its last line is code, and has to stay a line of code. */
           const closed = last > first && /^\s*(```|~~~)\s*$/.test(state.doc.line(last).text)
-          for (let n = first; n <= last; n++) {
+          /* Only the part of the fence this visible range actually covers. The
+             tree walk is already viewport-scoped, but entering one node used
+             to decorate the whole block: a 5,000-line fence drew a line
+             decoration for every line on every keystroke and every scroll,
+             nearly all of them for lines nobody could see. A line the range
+             reaches at all counts as covered; the fence's own first and last
+             lines keep their edge classes whenever they are covered. */
+          const head = Math.max(first, state.doc.lineAt(Math.max(from, node.from)).number)
+          const tail = Math.min(last, state.doc.lineAt(Math.min(to, node.to)).number)
+          for (let n = head; n <= tail; n++) {
+            if (fencedLines.has(n)) continue
+            fencedLines.add(n)
             const edge =
               (n === first ? ' tk-code-top' : '') +
               (n === last ? ' tk-code-bottom' : '') +
@@ -3345,9 +3400,9 @@ export function createEditor ({
   /** Fold every Markdown heading that owns a section, including nested ones. */;
   /** @type {any} */ (view).foldAllHeadings = () => {
     const { state } = view
-    const list = /** @type {HeadingEntry[]} */ (headingsFor(state.doc))
+    const { list, foldEnd } = headingIndexFor(state.doc)
     const effects = list
-      .map((heading) => headingFoldRange(state, heading, list))
+      .map((heading) => headingFoldRange(state, heading, foldEnd))
       .filter((range) => range && !foldedExactly(state, range))
       .map((range) => foldEffect.of(/** @type {any} */ (range)))
     if (effects.length) view.dispatch({ effects })
@@ -3357,9 +3412,9 @@ export function createEditor ({
   /** Unfold heading sections without disturbing a folded code block. */;
   /** @type {any} */ (view).unfoldAllHeadings = () => {
     const { state } = view
-    const list = /** @type {HeadingEntry[]} */ (headingsFor(state.doc))
+    const { list, foldEnd } = headingIndexFor(state.doc)
     const headingRanges = new Set(list
-      .map((heading) => headingFoldRange(state, heading, list))
+      .map((heading) => headingFoldRange(state, heading, foldEnd))
       .filter(Boolean)
       .map(/** @type {(range: { from: number, to: number }) => string} */ (({ from, to }) => `${from}:${to}`)))
     const effects = []

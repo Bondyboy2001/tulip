@@ -225,6 +225,15 @@ async function scanKind ({
   const results = []
   const unsearched = []
 
+  /* Query-invariant, so read once here rather than once per note. `plain` is
+     the common query — no filter list at all — and means `passesFilters` would
+     answer true for every entry, so the call is skipped outright. */
+  const filters = query.filters
+  const terms = query.terms
+  const needsFacts = filters.type.length > 0 || filters.tag.length > 0
+  const plain = !filters.type.length && !filters.path.length && !filters.file.length &&
+    !filters.tag.length && !filters.prop.length
+
   let since = Date.now()
   let counted = 0
 
@@ -244,16 +253,17 @@ async function scanKind ({
     }
 
     /* `factsFor` is one closure call plus one object per note per keystroke,
-       and the only readers of what it returns are the `type` and `tag` tests
-       above. A plain text query — the common case — asks neither, so the facts
-       are built lazily and never at all for it. */
-    const needsFacts = query.filters.type.length > 0 || query.filters.tag.length > 0
-    const facts = needsFacts ? factsFor(key, entry) : entry
-    if (!narrowed && !passesFilters(key, entry, query.filters, facts)) continue
+       and the only reader of what it returns is `passesFilters`, for its
+       `type` and `tag` tests. A plain text query — the common case — asks
+       neither, so the facts are built lazily and never at all for it. */
+    if (!narrowed && !plain) {
+      const facts = needsFacts ? factsFor(key, entry) : entry
+      if (!passesFilters(key, entry, filters, facts)) continue
+    }
 
     /* A filter on its own is a query: `tag:book` asks for the notes carrying
        it, and the note's opening line is the only context there is to show. */
-    if (!query.terms.length) {
+    if (!terms.length) {
       keys.push(key)
       results.push({
         path: key, name: entry.name, kind: kindOf(entry),
@@ -271,7 +281,7 @@ async function scanKind ({
       continue
     }
 
-    const found = findSpots(entry.text, query.terms)
+    const found = findSpots(entry.text, terms)
     if (!found) continue
     const hits = hitLines(entry.text, found.spots)
 
@@ -279,10 +289,20 @@ async function scanKind ({
        the title is the strongest signal a vault offers — it is what someone
        typing two words is usually reaching for — and, in a note, a term in a
        heading says there is a section about it rather than a passing mention. */
+    /* Counted rather than filtered: the arrays those closures built were an
+       allocation per matching note per keystroke, only to read a length. */
     const lowerName = lowerNameOf(key, entry)
-    const named = query.terms.filter((term) => nameHas(term, lowerName, entry.name)).length
-    const score = found.total + named * 8 +
-      (rankHeadings ? hits.filter((hit) => hit.heading).length * 3 : 0)
+    let named = 0
+    for (const term of terms) {
+      if (nameHas(term, lowerName, entry.name)) named++
+    }
+    let inHeadings = 0
+    if (rankHeadings) {
+      for (const hit of hits) {
+        if (hit.heading) inHeadings++
+      }
+    }
+    const score = found.total + named * 8 + inHeadings * 3
 
     keys.push(key)
     results.push({ path: key, name: entry.name, kind: kindOf(entry), hits, total: found.total, score })
@@ -295,6 +315,7 @@ module.exports = {
   HASHTAG,
   entryProps,
   entryHeadTags,
+  entryProseTags,
   nameHas,
   passesFilters,
   scanKind

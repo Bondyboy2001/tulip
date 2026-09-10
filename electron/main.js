@@ -146,11 +146,11 @@ const {
   escapeRe, MD_EXT, NOTE_EXT, TEXT_DOCUMENT_EXT,
   ATTACHMENT_DIR,
   PDF_TEXT_SUFFIX,
-  TEX_EXT, isTex, isLanguageTable,
+  TEX_EXT, isTex, isLanguageTable, LANGUAGE_TABLE_SUFFIX,
   languageTableStem, languageName, languageTableLabel,
   PDF_EXT, isPdf, SITE_EXT, isSite, WHITEBOARD_EXT, isWhiteboard,
-  NOTEBOOK_EXT, isNotebook, DOCX_EXT, isDocx, isFlashcard,
-  CODE_EXT, isCode, DATA_EXT, isData
+  NOTEBOOK_EXT, isNotebook, DOCX_EXT, FLASHCARD_EXT,
+  CODE_EXT, DATA_EXT, isData
 } = require('./vault-kinds')
 const FINDER_DOCUMENT_EXT = new Set(['.csv', PDF_EXT])
 /* A `.website` file is indexed too, and it is the cheapest entry in the whole
@@ -166,9 +166,13 @@ const isIndexedDocumentExt = (ext) =>
    read only notes and TeX made an agent's write to a notebook, a table or a
    script invisible — unreviewable, and unrejectable. Kind is decided here;
    how much of a file is worth holding two copies of is a question of bytes,
-   answered in `readDocumentSnapshot`. */
-const isReviewedDocument = (p) =>
-  isNotebook(p) || isSite(p) || isWhiteboard(p) || isCode(p) || isData(p)
+   answered in `readDocumentSnapshot`.
+
+   Stated over an extension rather than a path: the vault walk derives each
+   file's extension once and every consumer of it below shares that answer. */
+const isReviewedDocumentExt = (ext) =>
+  ext === NOTEBOOK_EXT || ext === SITE_EXT || ext === WHITEBOARD_EXT ||
+  CODE_EXT.has(ext) || DATA_EXT.has(ext)
 
 /* Highlights drawn on a PDF, mirroring the vault's own shape:
    `Papers/thesis.pdf` is annotated in `.annotations/Papers/thesis.pdf.json`.
@@ -195,30 +199,37 @@ const ASSET_EXT = new Set(
     .flatMap(([, exts]) => /** @type {string[]} */ (exts).map((ext) => `.${ext}`))
 )
 
-/* Which viewer a file of no particular kind wants, by extension alone. The
-   same four words src/assets.js uses for an embed — a picture is a picture
-   whether a note points at it or the tree does — and `file` for everything
-   with nothing to show, which the renderer describes rather than draws. */
+/* Which viewer a file of no particular kind wants, keyed by the already
+   lower-cased extension the walk measured. The same four words src/assets.js
+   uses for an embed — a picture is a picture whether a note points at it or
+   the tree does — and `file` for everything with nothing to show, which the
+   renderer describes rather than draws. */
 const ASSET_KIND_BY_EXT = new Map(
   Object.entries(ASSET_KINDS)
     .filter(([kind]) => !kind.startsWith('_'))
     .flatMap(([kind, exts]) => /** @type {string[]} */ (exts).map((ext) => [`.${ext}`, kind]))
 )
 
-const showAs = (name) => {
-  const kind = ASSET_KIND_BY_EXT.get(path.extname(name).toLowerCase())
+const showAs = (ext) => {
+  const kind = ASSET_KIND_BY_EXT.get(ext)
   return kind === 'image' || kind === 'video' || kind === 'audio' ? kind : 'file'
 }
 
 /* The snapshot's file list feeds only these consumers. Do not retain every
    regular file in a vault just to filter it into four arrays after the walk —
    attachment folders often contain thumbnails, exports, and other unrelated
-   data. */
-const isSnapshotFile = (p) => {
-  const extension = path.extname(String(p || '')).toLowerCase()
-  return MD_EXT.has(extension) || ASSET_EXT.has(extension) ||
-    isTex(p) || isPdf(p) || isDocx(p) || isReviewedDocument(p)
-}
+   data.
+
+   Over an extension, so the walk can ask this of a file it has already
+   measured; `isSnapshotFile` is the same test for the callers that still hold
+   a path. */
+const isSnapshotExt = (ext) =>
+  MD_EXT.has(ext) || ASSET_EXT.has(ext) ||
+  ext === TEX_EXT || ext === PDF_EXT || ext === DOCX_EXT ||
+  isReviewedDocumentExt(ext)
+
+const isSnapshotFile = (p) =>
+  isSnapshotExt(path.extname(String(p || '')).toLowerCase())
 
 /* Source and data files are here for one bucket only: `documents`, the list the
    turn review's before/after snapshot is read from. They are still not
@@ -228,7 +239,7 @@ const isSnapshotFile = (p) => {
    from the walk entirely, which is what this used to do, is what made
    `documents` permanently empty: an agent could rewrite a `.cpp`, a `.csv` or a
    notebook and the turn ended with no review card and nothing to reject,
-   however carefully `isReviewedDocument` said otherwise.
+   however carefully `isReviewedDocumentExt` said otherwise.
 
    Searching inside them is a real thing to want and a different feature: it
    needs an index that is about lines rather than about notes. */
@@ -1498,11 +1509,17 @@ async function scanVaultDirectory (dir, includeInTree = true) {
       }
     }
 
+    /* One extension per dirent, lower-cased once. Every kind branch below and
+       the snapshot test at the end each used to derive it again — and each
+       helper they called derived it once apiece. `rawExt` keeps the file's own
+       spelling, which `path.basename` strips case-sensitively. */
+    const rawExt = path.extname(entry.name)
+    const ext = rawExt.toLowerCase()
     /** @type {{ type: string, kind: string, name: string, flag?: string, path: string } | null} */
     let node = null
-    if (includeInTree && MD_EXT.has(path.extname(entry.name).toLowerCase())) {
-      const language = isLanguageTable(abs)
-      const flashcards = isFlashcard(abs)
+    if (includeInTree && MD_EXT.has(ext)) {
+      const language = ext === LANGUAGE_TABLE_SUFFIX
+      const flashcards = ext === FLASHCARD_EXT
       const identity = language ? languageName(languageTableStem(entry.name)) : null
       const folderIdentity = language ? languageName(path.basename(dir)) : null
       node = {
@@ -1512,37 +1529,37 @@ async function scanVaultDirectory (dir, includeInTree = true) {
         flag: identity?.flag || folderIdentity?.flag || '',
         path: rel(abs)
       }
-    } else if (includeInTree && isTex(entry.name)) {
+    } else if (includeInTree && ext === TEX_EXT) {
       node = {
         type: 'file', kind: 'tex',
-        name: path.basename(entry.name, path.extname(entry.name)), path: rel(abs)
+        name: path.basename(entry.name, rawExt), path: rel(abs)
       }
-    } else if (includeInTree && isPdf(entry.name)) {
+    } else if (includeInTree && ext === PDF_EXT) {
       node = {
         type: 'file', kind: 'pdf',
-        name: path.basename(entry.name, path.extname(entry.name)), path: rel(abs)
+        name: path.basename(entry.name, rawExt), path: rel(abs)
       }
-    } else if (includeInTree && isSite(entry.name)) {
+    } else if (includeInTree && ext === SITE_EXT) {
       node = {
         type: 'file', kind: 'site',
-        name: path.basename(entry.name, path.extname(entry.name)), path: rel(abs)
+        name: path.basename(entry.name, rawExt), path: rel(abs)
       }
-    } else if (includeInTree && isWhiteboard(entry.name)) {
+    } else if (includeInTree && ext === WHITEBOARD_EXT) {
       node = {
         type: 'file', kind: 'whiteboard',
-        name: path.basename(entry.name, path.extname(entry.name)), path: rel(abs)
+        name: path.basename(entry.name, rawExt), path: rel(abs)
       }
-    } else if (includeInTree && isNotebook(entry.name)) {
+    } else if (includeInTree && ext === NOTEBOOK_EXT) {
       node = {
         type: 'file', kind: 'notebook',
-        name: path.basename(entry.name, path.extname(entry.name)), path: rel(abs)
+        name: path.basename(entry.name, rawExt), path: rel(abs)
       }
-    } else if (includeInTree && isDocx(entry.name)) {
+    } else if (includeInTree && ext === DOCX_EXT) {
       node = {
         type: 'file', kind: 'docx',
-        name: path.basename(entry.name, path.extname(entry.name)), path: rel(abs)
+        name: path.basename(entry.name, rawExt), path: rel(abs)
       }
-    } else if (includeInTree && (isCode(entry.name) || isData(entry.name))) {
+    } else if (includeInTree && (CODE_EXT.has(ext) || DATA_EXT.has(ext))) {
       /* The one kind whose extension stays in the label. Every other document
          is named without one because its kind is already said by the icon
          beside it — but `solve.py`, `solve.c` and `solve.jl` in one folder are
@@ -1550,7 +1567,7 @@ async function scanVaultDirectory (dir, includeInTree = true) {
          called "solve". */
       node = {
         type: 'file',
-        kind: isData(entry.name) ? 'data' : 'code',
+        kind: DATA_EXT.has(ext) ? 'data' : 'code',
         name: entry.name,
         path: rel(abs)
       }
@@ -1568,14 +1585,14 @@ async function scanVaultDirectory (dir, includeInTree = true) {
          and the sync readout is where that belongs. */
       node = {
         type: 'file',
-        kind: showAs(entry.name),
+        kind: showAs(ext),
         // With the extension, like source files: `photo.png` and `photo.heic`
         // are two files, and the icon says "picture" for both of them.
         name: entry.name,
         path: rel(abs)
       }
     }
-    return { files: isSnapshotFile(entry.name) ? [abs] : [], evicted: 0, node }
+    return { files: isSnapshotExt(ext) ? [abs] : [], evicted: 0, node }
   })
 
   const tree = parts.map((part) => part.node).filter(Boolean)
@@ -1664,29 +1681,56 @@ async function getVaultSnapshot ({ fresh = false } = {}) {
 
     const { tree, files, evicted } = await scanVaultDirectory(vault)
     if (vaultPath !== vault) return { tree: [], assets: [], notes: [], pdfs: [], evicted: 0 }
-    const snapshot = {
-      tree,
-      evicted,
-      assets: files.filter((abs) => ASSET_EXT.has(path.extname(abs).toLowerCase())).map(rel),
-      notes: files.filter((abs) => MD_EXT.has(path.extname(abs).toLowerCase())),
-      tex: files.filter(isTex),
-      pdfs: files.filter(isPdf).map(rel),
-      whiteboards: files.filter(isWhiteboard),
-      docx: files.filter(isDocx),
-      documents: files.filter(isReviewedDocument),
+    /* One extension per file, shared by all eight buckets below. Each bucket
+       used to be its own filter and each predicate derived the extension
+       again — up to eight `path.extname` calls per file per walk. The lists
+       are built in `files` order, so every bucket keeps the membership and
+       order its filter produced. */
+    const assets = []
+    const notes = []
+    const tex = []
+    const pdfs = []
+    const whiteboards = []
+    const docx = []
+    const documents = []
+    const sources = []
+    /* Everything the walk kept, as vault-relative paths. The buckets above
+       are each a filter of this list for one consumer; the rename path wants
+       the list itself, because a link can name any file the tree shows and
+       "which files could this `[[Name]]` have meant" is a question about all
+       of them at once. */
+    const paths = []
+    for (const abs of files) {
+      const ext = path.extname(abs).toLowerCase()
+      const key = rel(abs)
+      paths.push(key)
+      if (ASSET_EXT.has(ext)) assets.push(key)
+      if (MD_EXT.has(ext)) notes.push(abs)
+      if (ext === TEX_EXT) tex.push(abs)
+      if (ext === PDF_EXT) pdfs.push(key)
+      if (ext === WHITEBOARD_EXT) whiteboards.push(abs)
+      if (ext === DOCX_EXT) docx.push(abs)
+      if (isReviewedDocumentExt(ext)) documents.push(abs)
       /* The subset of `documents` the search index reads: the kinds whose text
          is worth holding. Whiteboards have an index of their own already. A
          site file is here despite being two lines long, because those two
          lines are the page's title and its address — which is the whole of
          what anybody would search for a bookmark by. */
-      sources: files.filter((abs) =>
-        isCode(abs) || isData(abs) || isNotebook(abs) || isSite(abs)),
-      /* Everything the walk kept, as vault-relative paths. The buckets above
-         are each a filter of this list for one consumer; the rename path wants
-         the list itself, because a link can name any file the tree shows and
-         "which files could this `[[Name]]` have meant" is a question about all
-         of them at once. */
-      files: files.map(rel)
+      if (CODE_EXT.has(ext) || DATA_EXT.has(ext) ||
+        ext === NOTEBOOK_EXT || ext === SITE_EXT) sources.push(abs)
+    }
+    const snapshot = {
+      tree,
+      evicted,
+      assets,
+      notes,
+      tex,
+      pdfs,
+      whiteboards,
+      docx,
+      documents,
+      sources,
+      files: paths
     }
     snapshot.revision = snapshotRevision(snapshot)
     // Something changed while we were reading; the answer is already behind.
@@ -2750,6 +2794,12 @@ ipcMain.on('app:painted', (event) => {
      resolved promise and nothing more. */
   if (vaultPath) {
     setTimeout(() => { ensureIndex().catch((error) => logCrash('warmIndex', error)) }, 50)
+    /* And the litter a killed write left beside a note, swept here rather
+       than on the way to `createWindow`, where the recursive walk competed
+       with the first paint for the main thread and the disk. Deferred past
+       the paint like the index warm, and still run on every launch that
+       reopens the last vault. */
+    setTimeout(() => { sweepTemporaryFiles(vaultPath, { recursive: true }).catch(() => {}) }, 50)
   }
 
   /* And the two other pieces of warming that used to run before there was a
@@ -4337,7 +4387,19 @@ ipcMain.handle('vault:notes', async (_e, opts = null) => {
   const offset = Math.max(0, Math.floor(Number(opts?.offset) || 0))
   const asked = opts?.limit == null ? VAULT_NOTES_DEFAULT_LIMIT : Math.floor(Number(opts.limit) || 0)
   const limit = Math.min(VAULT_NOTES_MAX_LIMIT, Math.max(1, asked || VAULT_NOTES_DEFAULT_LIMIT))
-  const keys = [...index.keys()].slice(offset, offset + limit)
+  /* One synchronous walk taking only this page's window: spreading every key
+     first built an array of the whole vault just to slice `limit` of it and
+     throw the rest away. No await inside, so the key set is as stable as the
+     old spread-and-slice snapshot. */
+  const keys = []
+  let seen = 0
+  for (const key of index.keys()) {
+    if (seen >= offset) {
+      keys.push(key)
+      if (keys.length >= limit) break
+    }
+    seen++
+  }
   const notes = await mapLimit(keys, WALK_LIMIT, async (key) => {
     const entry = index.get(key)
     if (!entry) return null
@@ -7815,7 +7877,13 @@ function aiService () {
            to build out of it. A read-only turn never reaches `complete`, where
            this is otherwise dropped, and a vault read all afternoon would keep
            every path it ever looked at. */
-        .finally(() => forgetAiTurn(id))
+        .finally(() => {
+          forgetAiTurn(id)
+          /* And the owner entry goes with it. Its only job is addressing
+             `ai:event`s, and the turn's last one has already been routed by
+             the `.then`/`.catch` above — a `.finally` runs after both. */
+          copilotOwners.delete(id)
+        })
       return
     }
     toCopilot('ai:event', event)
@@ -8090,7 +8158,7 @@ function chatHistoryNow (event) {
   return chatCache
 }
 
-ipcMain.handle('ai:history:load', (event) => {
+ipcMain.handle('ai:history:load', async (event) => {
   /* The same fence as `ai:start` and the save half below: transcripts belong
      to the one window allowed to hold the panel, and a window that cannot
      write them has no business reading them either. */
@@ -8098,8 +8166,11 @@ ipcMain.handle('ai:history:load', (event) => {
   if (!vaultPath) return {}
   const file = chatFile(event)
   let raw
+  /* Read off the event loop: this handler runs in the same burst as the
+     renderer's boot calls, and a long transcript read synchronously stalled
+     the snapshot and the first note behind it. */
   try {
-    raw = fsSync.readFileSync(file, 'utf8')
+    raw = await fs.readFile(file, 'utf8')
   } catch {
     // No history for this vault yet, which is the ordinary first-run case.
     chatCache = {}
@@ -8120,7 +8191,7 @@ ipcMain.handle('ai:history:load', (event) => {
        disk for anyone who wants to pick them out by hand. */
     console.error('chat history unreadable', err)
     try {
-      fsSync.renameSync(file, `${file}.corrupt`)
+      await fs.rename(file, `${file}.corrupt`)
     } catch { /* if it cannot be moved, it will simply be overwritten */ }
     chatCache = {}
     chatCacheFile = file
@@ -8979,11 +9050,10 @@ app.whenReady().then(async () => {
        to move, so every launch but one would be paying a whole-vault pass at
        the moment the window is being asked for. */
     migrateNoteTags().catch(() => {})
-    /* And the litter a killed write left beside a note — swept on a switch of
-       vault below, and until now never on the launch that simply reopens the
-       one from last time, which is the launch after the force-quit that made
-       the litter. */
-    sweepTemporaryFiles(vaultPath, { recursive: true }).catch(() => {})
+    /* The litter a killed write left beside a note is swept after the first
+       paint — see `app:painted` — rather than here: this is the launch after
+       the force-quit that made it, and a recursive walk of the vault on the
+       way to `createWindow` would compete with the window for the disk. */
     watchVault()
   }
 

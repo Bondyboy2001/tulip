@@ -115,8 +115,8 @@ function shiftOnly (tr, fences) {
     if (fromA <= line.from + indent) { ok = false; return }
 
     for (const fence of fences) {
-      if (line.number >= doc.lineAt(fence.from).number - 1 &&
-          line.number <= doc.lineAt(fence.to).number + 1) { ok = false; return }
+      if (line.number >= fence.fromLine - 1 &&
+          line.number <= fence.toLine + 1) { ok = false; return }
     }
   })
 
@@ -144,7 +144,12 @@ function shiftOnly (tr, fences) {
 export function fenceField (build, { also } = {}) {
   const make = (state, previous) => ({
     deco: build(state, previous),
-    fences: fenceList(state).map(({ node }) => ({ from: node.from, to: node.to }))
+    fences: fenceList(state).map(({ node }) => ({
+      from: node.from,
+      to: node.to,
+      fromLine: state.doc.lineAt(node.from).number,
+      toLine: state.doc.lineAt(node.to).number
+    }))
   })
 
   return StateField.define({
@@ -160,9 +165,13 @@ export function fenceField (build, { also } = {}) {
       if (shiftOnly(tr, value.fences)) {
         return {
           deco: value.deco.map(tr.changes),
+          /* shiftOnly passed: no newline was inserted, so mapped fence positions
+             cannot leave the line they were on and its number is still right. */
           fences: value.fences.map((f) => ({
             from: tr.changes.mapPos(f.from),
-            to: tr.changes.mapPos(f.to)
+            to: tr.changes.mapPos(f.to),
+            fromLine: f.fromLine,
+            toLine: f.toLine
           }))
         }
       }

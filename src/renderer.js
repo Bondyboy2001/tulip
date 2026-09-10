@@ -7004,9 +7004,15 @@ function jumpToHeading (anchor) {
 
 let outlineHeadings = []
 let outlineRows = []
+/* The row currently wearing `is-here`, or -1 when none is. Scrolling used to
+   toggle the class on every row to move the mark; holding the index makes it
+   two toggles. It is an index into `outlineRows`, so it is reset wherever they
+   are rebuilt — a stale one would name a different row, and skipping the add
+   would leave the new one unmarked. */
+let outlineMarked = -1
 
 /* Collapsed branches belong to the note, not to the Outline pane itself. Keep
-   them for the life of the window so switching panes or opening another note
+   them for the life of the vault so switching panes or opening another note
    does not unfold the map the reader just arranged. The key is structural —
    heading ancestry plus sibling occurrence — so typing prose above a heading
    does not lose its state merely because its line number moved. */
@@ -7067,9 +7073,12 @@ function visibleOutlineIndex (index) {
 
 function markOutlineRow (index) {
   const visible = visibleOutlineIndex(index)
-  for (const [i, item] of outlineRows.entries()) {
-    item.row.classList.toggle('is-here', i === visible)
-  }
+  if (visible === outlineMarked) return
+  const was = outlineRows[outlineMarked]
+  if (was) was.row.classList.remove('is-here')
+  outlineMarked = visible
+  const now = outlineRows[visible]
+  if (now) now.row.classList.add('is-here')
 }
 
 /* The row the reader asked for, and where that request left the view.
@@ -7400,6 +7409,9 @@ function renderOutline () {
     outlineHeadings = []
     outlineRows = []
     outlinePin = null
+    outlineMarked = -1
+    pdfMarkedSection = -1
+    pdfMarkedPage = -1
     const empty = document.createElement('p')
     empty.className = 'outline-empty'
     empty.textContent = viewingWhiteboard()
@@ -7442,8 +7454,12 @@ function renderOutline () {
   outlineRows = []
   el.outlineList.replaceChildren()
   // The rows are about to be rebuilt, so an index into the old ones means
-  // nothing — a heading typed above the pinned one would shift it.
+  // nothing — a heading typed above the pinned one would shift it, and the
+  // tracked here-mark is one of those indexes too.
   outlinePin = null
+  outlineMarked = -1
+  pdfMarkedSection = -1
+  pdfMarkedPage = -1
 
   if (!outlineHeadings.length) {
     const empty = document.createElement('p')
@@ -7522,11 +7538,20 @@ function renderOutline () {
  * publisher's table of contents or your own highlights — usually both.
  */
 let pdfOutlineRows = []
+/* What the PDF branch marked on its last call: a contents row index, or -1,
+   and the page whose highlights are lit. The rows carry one class between
+   them, so these two say which writes can be skipped. Cleared wherever the
+   rows are rebuilt; see the resets in `renderPdfOutline`. */
+let pdfMarkedSection = -1
+let pdfMarkedPage = -1
 
 function renderPdfOutline () {
   outlineHeadings = []
   outlineRows = []
   pdfOutlineRows = []
+  outlineMarked = -1
+  pdfMarkedSection = -1
+  pdfMarkedPage = -1
   // The panel no longer holds the rows the note signature describes, so the
   // next note render must not be talked out of rebuilding them.
   outlineSig = ''
@@ -7670,8 +7695,25 @@ function markOutlinePlace () {
     for (const [i, row] of pdfOutlineRows.entries()) {
       if (row.contents && row.page <= at) section = i
     }
-    for (const [i, row] of pdfOutlineRows.entries()) {
-      row.el.classList.toggle('is-here', row.contents ? i === section : row.page === at)
+    /* Only the rows whose answer moved are touched. A full pass per scroll
+       frame toggled every entry and highlight with the same classes it had
+       just written; the two values marked last time are enough to write each
+       one once. */
+    if (section !== pdfMarkedSection) {
+      const was = pdfOutlineRows[pdfMarkedSection]
+      if (was) was.el.classList.remove('is-here')
+      const now = pdfOutlineRows[section]
+      if (now) now.el.classList.add('is-here')
+      pdfMarkedSection = section
+    }
+    if (at !== pdfMarkedPage) {
+      for (const row of pdfOutlineRows) {
+        if (!row.contents && row.page === pdfMarkedPage) row.el.classList.remove('is-here')
+      }
+      for (const row of pdfOutlineRows) {
+        if (!row.contents && row.page === at) row.el.classList.add('is-here')
+      }
+      pdfMarkedPage = at
     }
     return
   }
@@ -7689,11 +7731,20 @@ function markOutlinePlace () {
   }
   outlinePin = null
 
-  // The last heading at or above the fold is the one being read.
+  /* The last heading at or above the fold is the one being read. The list is
+     in document order, so a binary search finds it in log time; this runs on
+     every frame of a scroll. */
   let active = -1
-  for (let i = 0; i < outlineHeadings.length; i++) {
-    if (outlineHeadings[i].line <= line + 1) active = i
-    else break
+  let lo = 0
+  let hi = outlineHeadings.length - 1
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1
+    if (outlineHeadings[mid].line <= line + 1) {
+      active = mid
+      lo = mid + 1
+    } else {
+      hi = mid - 1
+    }
   }
 
   /* Except at the very end, which is inside the last section whatever the fold
@@ -8031,6 +8082,23 @@ let spellingPaneWas = false
    this fills quickly and then stays useful; it is dropped whole when the
    dictionary changes, which is the only thing that can change an answer. */
 const spellKnown = new Map()
+/* A long session over a large vault keeps meeting words for the first time,
+   though, and without a bound this would hold every one of them until the
+   window closed. So it is capped: when it fills, the oldest half goes — Map
+   iterates in insertion order — and a word that comes back is simply asked of
+   the dictionary again, which gives the same answer it did the first time. */
+const SPELL_KNOWN_LIMIT = 50_000
+function rememberSpelling (word, misspelled) {
+  if (spellKnown.size >= SPELL_KNOWN_LIMIT) {
+    let oldest = SPELL_KNOWN_LIMIT / 2
+    for (const key of spellKnown.keys()) {
+      if (oldest <= 0) break
+      spellKnown.delete(key)
+      oldest--
+    }
+  }
+  spellKnown.set(word, misspelled)
+}
 /* The note's words, line by line, kept between passes. A pass half a second
    after a pause in typing differs from the last one by the line that was typed
    into, and this is what lets it cost that rather than the note. */
@@ -8151,7 +8219,7 @@ async function renderSpelling () {
   try {
     if (unknown.length) {
       const bad = new Set(await api.spell.check(unknown))
-      for (const word of unknown) spellKnown.set(word, bad.has(word))
+      for (const word of unknown) rememberSpelling(word, bad.has(word))
     }
     flagged = new Set()
     for (const [lower, word] of distinct) if (spellKnown.get(word)) flagged.add(lower)
@@ -9388,12 +9456,23 @@ function commandList () {
       { id: 'export-whiteboard-svg', title: 'Export whiteboard as SVG…' }
       )
   }
+  /* What the filter below asks of the note, taken once. This runs on every
+     keystroke in the palette, and each question used to be a fresh whole-note
+     scan — twice over for the two heading rows and the two code-block rows. */
+  const text = noteText()
+  const hasBookmark = bookmarkLineOf(text) > 0
+  /* Through the editor's own index, which the decoration pass keeps filled
+     (see `headingsFor`), the way the outline asks; only a note read with no
+     editor pays for the string scan. */
+  const hasHeadings = (editor ? headingsFor(editor.state.doc) || [] : headings(text)).length > 0
+  const hasCodeBlocks = noteCodeBlocks().length > 0
+
   // Availability is shared by the resting list and every search result.
   const applicable = commands.filter(({ id }) => {
     if (id === 'open-beside') return canShowBeside(state.current?.path)
-    if (id === 'go-to-bookmark') return bookmarkLineOf(noteText()) > 0
-    if (['fold-all-headings', 'unfold-all-headings'].includes(id)) return headings(noteText()).length > 0
-    if (['run-all-blocks', 'clear-block-outputs'].includes(id)) return noteCodeBlocks().length > 0
+    if (id === 'go-to-bookmark') return hasBookmark
+    if (['fold-all-headings', 'unfold-all-headings'].includes(id)) return hasHeadings
+    if (['run-all-blocks', 'clear-block-outputs'].includes(id)) return hasCodeBlocks
     if (['lint-file', 'set-bookmark', 'insert-template', 'import-cards'].includes(id)) return !readOnlyHere()
     return true
   })
@@ -14043,6 +14122,13 @@ api.on('vault:opened', async (vault) => {
     state.assetsKey = ''
     state.assets = []
     state.resolveAsset = () => null
+    /* The copilot's baselines and pending reviews are keyed by vault-relative
+       note paths, and the outline's folded branches likewise: all three
+       describe the folder being left, so a path from it would name a
+       different file here. */
+    agentBefore.clear()
+    pendingAgentDiffs.clear()
+    outlineCollapsed.clear()
     el.vaultLabel.textContent = vault.name
     // The first vault is also the way off the landing page.
     paintLanding()

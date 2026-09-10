@@ -85,7 +85,15 @@ const equationId = (label) => `eq-${encodeURIComponent(label).replaceAll('%', '_
 
 /** Labels and the numbers/tags they display, in document order. */
 export function equationIndex (text) {
-  return indexEquations(findMath(String(text || '')))
+  const source = String(text || '')
+  if (scanCache.source !== source) {
+    /* `findMath` leaves the cache untouched when the text cannot hold maths,
+       so check again before indexing what it left behind. */
+    const spans = findMath(source)
+    if (scanCache.source !== source) return indexEquations(spans)
+  }
+  if (!scanCache.equations) scanCache.equations = indexEquations(scanCache.spans)
+  return scanCache.equations
 }
 
 /* The indexing itself, over spans that have already been found. Split out so
@@ -354,8 +362,30 @@ export function mathPlugin (md) {
 
 /* -------------------------------------------------- live preview widget */
 
+/* One scan, keyed on the text itself. `findMath` is a whole-document pass, and
+   the string callers want the same answer about the same note: `prepareMath`
+   asks first — and only for its length — then `equationIndex` asks, and a
+   re-render asks again. The document cache below is the other half of this;
+   this one answers the callers that arrive by string. Keyed on contents rather
+   than identity, so a rebuilt-but-equal string still hits, and one entry, so
+   the memory is bounded by one note. Nothing that receives `spans` or
+   `equations` mutates them — every caller indexes, filters, maps or compares —
+   so the cached values are handed back directly. */
+/** @type {{ source: string, spans: Array<{ from: number, to: number, tex: string, display: boolean }>, equations: Map<string, { label: string, tag: string }> | null }} */
+let scanCache = {
+  source: '',
+  spans: /** @type {any} */ ([]),
+  equations: /** @type {any} */ (null)
+}
+
 /** Every $…$ and $$…$$ span in the document, in order. */
 export function findMath (text) {
+  const source = String(text || '')
+  /* A text without `$` or `\` cannot hold maths: every delimiter of both
+     notations is built from one of the two characters. */
+  if (!source.includes('$') && !source.includes('\\')) return []
+  if (scanCache.source === source) return scanCache.spans
+
   const spans = []
 
   /* Display maths is a block, and the reading view's block rule treats it as
@@ -373,11 +403,11 @@ export function findMath (text) {
      typeset the middle inline, which is the exact disagreement between the two
      scanners this module exists to prevent. */
   const CONTAINER = /^ {0,3}(?:> ?)*(?:(?:[-*+]|\d{1,9}[.)]) +)? {0,3}$/
-  const lineStart = (i) => text.lastIndexOf('\n', i - 1) + 1
-  const opensLine = (i) => CONTAINER.test(text.slice(lineStart(i), i))
+  const lineStart = (i) => source.lastIndexOf('\n', i - 1) + 1
+  const opensLine = (i) => CONTAINER.test(source.slice(lineStart(i), i))
   const closesLine = (i) => {
-    const to = text.indexOf('\n', i)
-    return /^[ \t]*$/.test(text.slice(i, to === -1 ? text.length : to))
+    const to = source.indexOf('\n', i)
+    return /^[ \t]*$/.test(source.slice(i, to === -1 ? source.length : to))
   }
 
   /* The other notation, `\(…\)` and `\[…\]`, taken on the same terms as the
@@ -385,73 +415,74 @@ export function findMath (text) {
      over lines. Unlike `$$`, a `\[` need not open its line — the reading view
      typesets one inside a sentence too, so both views agree. */
   const delimited = (i) => {
-    const opener = text[i + 1]
+    const opener = source[i + 1]
     if (opener !== '(' && opener !== '[') return null
-    if (i > 0 && text[i - 1] === '\\') return null           // an escaped backslash
+    if (i > 0 && source[i - 1] === '\\') return null           // an escaped backslash
     const display = opener === '['
     const close = display ? '\\]' : '\\)'
     let end = i + 2
-    while (end < text.length && !text.startsWith(close, end)) {
-      if (!display && text[end] === '\n') return null
+    while (end < source.length && !source.startsWith(close, end)) {
+      if (!display && source[end] === '\n') return null
       end++
     }
-    if (end >= text.length) return null
-    return { from: i, to: end + 2, tex: text.slice(i + 2, end), display }
+    if (end >= source.length) return null
+    return { from: i, to: end + 2, tex: source.slice(i + 2, end), display }
   }
 
   let i = 0
-  while (i < text.length) {
-    const ch = text[i]
+  while (i < source.length) {
+    const ch = source[i]
     if (ch === '\\') {
       const span = delimited(i)
       if (!span) { i++; continue }
       let { tex } = span
-      if (span.display && tex.includes('\n') && /^ {0,3}(?:> ?)+/.test(text.slice(lineStart(i), i))) {
+      if (span.display && tex.includes('\n') && /^ {0,3}(?:> ?)+/.test(source.slice(lineStart(i), i))) {
         tex = tex.replace(/\n[ \t]*>[ \t]?/g, '\n')
       }
       if (tex.trim()) spans.push({ ...span, tex })
       i = span.to
       continue
     }
-    if (ch !== '$' || (i > 0 && text[i - 1] === '\\')) { i++; continue }
+    if (ch !== '$' || (i > 0 && source[i - 1] === '\\')) { i++; continue }
 
-    const display = text[i + 1] === '$'
+    const display = source[i + 1] === '$'
     /* A `$$` that does not begin its line is no opener at all: the reading
        view leaves the first `$` as text and lets the second try its luck as
        an inline delimiter, so the same step is taken here. */
     if (display && !opensLine(i)) { i++; continue }
     const open = display ? i + 2 : i + 1
-    if (!display && /\s/.test(text[open] || ' ')) { i++; continue }
+    if (!display && /\s/.test(source[open] || ' ')) { i++; continue }
     const close = display ? '$$' : '$'
     let end = open
 
-    while (end < text.length) {
-      if (text.startsWith(close, end) && text[end - 1] !== '\\' &&
+    while (end < source.length) {
+      if (source.startsWith(close, end) && source[end - 1] !== '\\' &&
           (!display || closesLine(end + 2))) break
-      if (!display && text[end] === '\n') break
+      if (!display && source[end] === '\n') break
       end++
     }
-    if (end >= text.length || !text.startsWith(close, end)) { i++; continue }
+    if (end >= source.length || !source.startsWith(close, end)) { i++; continue }
 
     /* The same two tests the markdown-it rule applies, so the editor and the
        reading view agree about what is maths: "$ x $" is not an expression,
        and a digit on the far side of the closing "$" means the pair was two
        prices rather than one span. */
-    if (!display && /\s/.test(text[end - 1])) { i++; continue }
-    if (!display && /\d/.test(text[end + close.length] || '')) { i++; continue }
+    if (!display && /\s/.test(source[end - 1])) { i++; continue }
+    if (!display && /\d/.test(source[end + close.length] || '')) { i++; continue }
 
-    let tex = text.slice(open, end)
+    let tex = source.slice(open, end)
     /* A block opened inside a blockquote or callout carries that container's
        marker down its left edge, and the marker is not part of the expression —
        markdown-it never sees it, because the block parser strips each line's
        prefix before this rule reads it. Stripped here too, so both views
        typeset the same TeX. */
-    if (display && tex.includes('\n') && /^ {0,3}(?:> ?)+/.test(text.slice(lineStart(i), i))) {
+    if (display && tex.includes('\n') && /^ {0,3}(?:> ?)+/.test(source.slice(lineStart(i), i))) {
       tex = tex.replace(/\n[ \t]*>[ \t]?/g, '\n')
     }
     if (tex.trim()) spans.push({ from: i, to: end + close.length, tex, display })
     i = end + close.length
   }
+  scanCache = { source, spans, equations: null }
   return spans
 }
 

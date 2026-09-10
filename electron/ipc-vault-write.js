@@ -145,13 +145,16 @@ function makeVaultWriteDomain (ctx) {
       try { return await next } finally { if (writes.get(key) === next) writes.delete(key) }
     })
 
-    async function writeFile (p, content, metadata) {
-      /* Fully resolved, exactly as `file:read` resolves it: content flows through
-         the last component here, so a link standing where the note should be would
+    async function writeFile (abs, content, metadata) {
+      /* Already resolved by the handler above, which is the one `realSafePath`
+         call for this write: this runs on every autosave, and the second
+         resolution was a second syscall for the same answer.
+
+         Resolved exactly as `file:read` resolves it: content flows through the
+         last component here, so a link standing where the note should be would
          put the note's text wherever it points. The two handlers agreeing also
          means a note this refuses to write is a note `file:read` already refused
          to open. */
-      const abs = await realSafePath(p)
 
       /* Is this still the file the caller read?
 
