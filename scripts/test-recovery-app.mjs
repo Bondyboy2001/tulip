@@ -6,7 +6,7 @@ const executable = process.argv[2]
 if (!executable) { console.log('recovery app: skipped until a built executable is supplied'); process.exit(0) }
 const app = await appSession({ executable, files: { 'Note.md': '# Note\n\nSaved original.\n', 'Atomic.txt': 'original' }, config: { tabs: ['Note.md'], tabIndex: 0, view: 'edit' } })
 async function waitFor (expression) {
-  for (let i = 0; i < 100; i++) { if (await app.evaluate(expression)) return; await delay(100) }
+  for (let i = 0; i < 300; i++) { if (await app.evaluate(expression)) return; await delay(100) }
   throw new Error(`Timed out: ${expression}`)
 }
 try {

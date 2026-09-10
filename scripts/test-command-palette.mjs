@@ -10,6 +10,10 @@ const app = await appSession({ executable, files: {
   'Paper.pdf': pdfFixture(),
   'Source.py': 'print("hello")\n'
 }, config: { tabs: ['Note.md'], tabIndex: 0 } })
+const waitFor = async (expression, tries = 120) => {
+  for (let i = 0; i < tries; i++) { if (await app.evaluate(expression)) return; await delay(50) }
+  throw new Error('Timed out: ' + expression)
+}
 async function palette (query = '') {
   await app.evaluate(`window.__tulip.runCommand('commands'); true`)
   if (query) await app.evaluate(`(() => {
@@ -29,6 +33,11 @@ async function palette (query = '') {
 try {
   for (const [file, grid] of [['Table.csv', true], ['Paper.pdf', false], ['Note.md', false], ['Source.py', false], ['Table.csv', true], ['Paper.pdf', false]]) {
     await app.evaluate(`window.__tulip.openNote(${JSON.stringify(file)})`)
+    /* The palette's context comes from what is on screen, and the viewer is
+       loaded lazily: asking before the grid has mounted is asking about the
+       document before it existed, which CI did under load. */
+    await waitFor(`window.__tulip.state.current?.path === ${JSON.stringify(file)}`)
+    if (grid) await waitFor(`!!document.querySelector('.csv-frame')`)
     const names = await palette()
     assert.match(names, /Settings/)
     assert.match(names, /Open logs.md/)

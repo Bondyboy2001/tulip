@@ -109,7 +109,11 @@ app.whenReady().then(async () => {
        wait whatever else is true. */
     const results = await win.webContents.executeJavaScript(
       'new Promise((resolve, reject) => {' +
-      '  const STEP = 50, IDLE = 20000, CAP = 180000, STALL = 1000, FORGIVE = 60000;' +
+      /* A minute without progress, not twenty seconds: on a hosted Windows
+         runner a scenario can spend longer than that in one drag, and the
+         harness called a live test stalled. FORGIVE still returns starved
+         renderer time, so this ceiling only matters when nothing is moving. */
+      '  const STEP = 50, IDLE = 60000, CAP = 180000, STALL = 1000, FORGIVE = 60000;' +
       '  const begun = Date.now();' +
       '  let mark = "", since = begun, polled = begun, given = 0;' +
       '  const look = () => {' +

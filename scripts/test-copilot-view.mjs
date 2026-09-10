@@ -62,7 +62,7 @@ app.whenReady().then(async () => {
   win.webContents.on('did-fail-load', (_e, code, desc) => said.push('load failed: ' + code + ' ' + desc))
   try {
     await win.loadFile(${JSON.stringify(path.resolve('node_modules/.cache/copilot-page.html'))})
-    for (let wait = 0; wait < 200; wait++) {
+    for (let wait = 0; wait < 400; wait++) {
       const probe = await win.webContents.executeJavaScript(\`
         (async () => {
           if (!window.__done) return { stage: 'the page module never loaded' }
@@ -74,7 +74,7 @@ app.whenReady().then(async () => {
         })()\`)
       if (probe && !probe.stage) { win.destroy(); return say(probe) }
       await new Promise((resolve) => setTimeout(resolve, 250))
-      if (wait === 199) {
+      if (wait === 399) {
         say({ error: 'timed out waiting for the copilot scenario — reached: ' +
           (probe && probe.stage) + (said.length ? '\\n' + said.slice(-12).join('\\n') : '') })
       }

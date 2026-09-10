@@ -96,7 +96,7 @@ app.whenReady().then(async () => {
       win.focus()
     }
     win.webContents.focus()
-    for (let wait = 0; wait < 200; wait++) {
+    for (let wait = 0; wait < 400; wait++) {
       const probe = await win.webContents.executeJavaScript(\`
         (async () => {
           if (!window.__done) return { stage: 'the page module never loaded' }
@@ -108,7 +108,7 @@ app.whenReady().then(async () => {
         })()\`)
       if (probe && !probe.stage) { win.destroy(); return say(probe) }
       await new Promise((resolve) => setTimeout(resolve, 250))
-      if (wait === 199) {
+      if (wait === 399) {
         say({ error: 'timed out waiting for the notebook scenario — reached: ' +
           (probe && probe.stage) + (said.length ? '\\n' + said.slice(-12).join('\\n') : '') })
       }

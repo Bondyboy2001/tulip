@@ -12,9 +12,15 @@ const waitFor = async (expression) => {
 }
 try {
   await app.evaluate('window.__tulip.jumpToHeading("Destination"); true')
-  await delay(300)
-  const trail = await app.evaluate('window.__tulip.state.tabs[0].history')
-  assert.ok(trail.length >= 2 && trail.at(-1).path === trail.at(-2).path)
+  /* The jump records its location through the same path an ordinary open
+     does; wait for the entry rather than a fixed moment on a loaded runner. */
+  let trail = []
+  for (let attempt = 0; attempt < 100; attempt++) {
+    trail = await app.evaluate('window.__tulip.state.tabs[0].history')
+    if (trail.length >= 2 && trail.at(-1).path === trail.at(-2).path) break
+    await delay(50)
+  }
+  assert.ok(trail.length >= 2 && trail.at(-1).path === trail.at(-2).path, JSON.stringify(trail))
   await app.evaluate('window.__tulip.goHistory(-1)')
   await delay(400)
   assert.ok(await app.evaluate('window.__tulip.viewportLine() < 20'))

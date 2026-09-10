@@ -5931,9 +5931,12 @@ function extractPdfTextOffThread (pdf, relPath, pageNumber = 0) {
         name: path.basename(relPath),
         extractor: appAsset('pdf-text.cjs'),
         ocr: appAsset('pdf-ocr'),
-        fonts: path.join(appAsset('pdfjs'), 'standard_fonts') + path.sep,
-        cmaps: path.join(appAsset('pdfjs'), 'cmaps') + path.sep,
-        wasm: path.join(appAsset('pdfjs'), 'wasm') + path.sep
+        /* Always a forward slash: pdf.js validates that its factory URLs end
+           in `/`, and `path.sep` is `\` on Windows, where every PDF with a
+           character map or a JPX stream failed to read. */
+        fonts: path.join(appAsset('pdfjs'), 'standard_fonts') + '/',
+        cmaps: path.join(appAsset('pdfjs'), 'cmaps') + '/',
+        wasm: path.join(appAsset('pdfjs'), 'wasm') + '/'
       })
     })
   })

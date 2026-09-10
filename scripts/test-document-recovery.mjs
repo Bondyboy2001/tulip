@@ -7,7 +7,7 @@ import { appSession, delay } from './lib/app-session.mjs'
 const { backupVault } = createRequire(import.meta.url)('../electron/vault-backup')
 const app = await appSession({ executable: process.argv[2], files: { 'Note.md': '# Note\n\nOriginal backup.\n', 'Other.md': 'Other' }, config: { tabs: ['Note.md'], tabIndex: 0, view: 'edit' } })
 async function waitFor (expression) {
-  for (let i = 0; i < 100; i++) { if (await app.evaluate(expression)) return; await delay(100) }
+  for (let i = 0; i < 300; i++) { if (await app.evaluate(expression)) return; await delay(100) }
   throw new Error('Timed out: ' + expression)
 }
 try {

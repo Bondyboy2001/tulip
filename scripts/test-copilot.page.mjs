@@ -303,6 +303,11 @@ export async function run () {
   stage('failed save')
   const warnsBeforeFailure = seen.warned.length
   api.failSaves = true
+  /* Dirty the store with the failure armed. Whether the previous turn's write
+     had already landed by now was a race between the debounce and the runner,
+     and a flush on a clean store has nothing to fail. */
+  await say('One more?')
+  await reply('Answer.')
   await panel.flush()
   result.saveFailureSaid = seen.warned.length > warnsBeforeFailure
   // The same note goes out with the next write, once the disk is back.

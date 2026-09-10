@@ -17,6 +17,17 @@ for (const mode of ['edit', 'raw']) {
     for (const type of ['mousePressed', 'mouseReleased']) {
       await app.command('Input.dispatchMouseEvent', { type, ...point, button: 'left', clickCount: 1, modifiers })
     }
+    /* Let the editor settle the selection before the next click: on a loaded
+       runner the events alone are quicker than the layout they act on. */
+    await app.evaluate('new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+  }
+  /* The selection the click asked for, once the editor has had its say. */
+  const rangesEventually = async (n, what) => {
+    for (let i = 0; i < 60; i++) {
+      if (await ranges() === n) return
+      await delay(50)
+    }
+    assert.equal(await ranges(), n, what)
   }
   const ranges = () => app.evaluate('window.__tulip.editor.state.selection.ranges.length')
   const text = () => app.evaluate('window.__tulip.editor.state.doc.toString()')
@@ -27,7 +38,7 @@ for (const mode of ['edit', 'raw']) {
     await click(5)
     await click(10, 1)
     await click(16, 1)
-    assert.equal(await ranges(), 3, `${mode}: Option-click adds cursors`)
+    await rangesEventually(3, `${mode}: Option-click adds cursors`)
     await app.command('Input.insertText', { text: '!' })
     assert.equal(await text(), 'alpha!\nbeta!\ngamma!\n')
     await app.command('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 })
@@ -35,11 +46,11 @@ for (const mode of ['edit', 'raw']) {
     await delay(600)
     await app.command('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 })
     await delay(100)
-    assert.equal(await ranges(), 1, `${mode}: Escape returns to one cursor`)
+    await rangesEventually(1, `${mode}: Escape returns to one cursor`)
     await click(5, 1)
-    assert.equal(await ranges(), 2)
+    await rangesEventually(2, `${mode}: Option-click adds a second cursor`)
     await click(10)
-    assert.equal(await ranges(), 1, `${mode}: ordinary click resets cursors`)
+    await rangesEventually(1, `${mode}: ordinary click resets cursors`)
     console.log(`${mode}: multiple cursors, typing, deletion, Escape and ordinary click passed`)
   } finally { await app.dispose() }
 }

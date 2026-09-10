@@ -24,7 +24,12 @@ export async function appSession ({ executable = null, files = {}, config = {} }
   let commandId = 0
   let tail = ''
   function launch () {
-    child = spawn(executable || electron, [...(executable && !executable.includes('node_modules/electron/') ? [] : ['.']), `--user-data-dir=${profile}`, `--remote-debugging-port=${port}`, '--disable-gpu'], {
+    /* The project's own Electron runs the app in the working directory; a
+       packaged executable is the app. A Windows electron path uses
+       backslashes, and reading it as a packaged binary launched Electron with
+       no path at all — the usage banner and a 45-second wait. */
+    const dev = !executable || /node_modules[\\/]electron[\\/]/.test(executable)
+    child = spawn(executable || electron, [...(dev ? ['.'] : []), `--user-data-dir=${profile}`, `--remote-debugging-port=${port}`, '--disable-gpu'], {
       detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, TULIP_TEST_WINDOW_HIDDEN: '1' }
     })
@@ -63,7 +68,10 @@ export async function appSession ({ executable = null, files = {}, config = {} }
   }
   async function ready () {
     let last
-    for (let i = 0; i < 180; i++) {
+    /* Two minutes, not 45 seconds: a hosted Windows runner under Defender
+       takes longer to bring the window up than a developer machine, and tests
+       that failed on the clock were reported as app failures. */
+    for (let i = 0; i < 480; i++) {
       try { if (await evaluate('Boolean(window.__tulip && document.querySelector("#boot-screen")?.hidden)')) return } catch (error) { last = error }
       if (child.exitCode != null || child.signalCode != null) throw new Error(`App exited: ${tail}`)
       await delay(250)
