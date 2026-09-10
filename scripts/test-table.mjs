@@ -113,7 +113,10 @@ app.whenReady().then(async () => {
          runner a scenario can spend longer than that in one drag, and the
          harness called a live test stalled. FORGIVE still returns starved
          renderer time, so this ceiling only matters when nothing is moving. */
-      '  const STEP = 50, IDLE = 60000, CAP = 180000, STALL = 1000, FORGIVE = 60000;' +
+      /* CAP is ten minutes: the whole suite on a hosted Windows runner took
+         over three, each contenteditable scenario slower than the last. IDLE
+         stays a minute, so only a suite that is genuinely moving gets here. */
+      '  const STEP = 50, IDLE = 60000, CAP = 600000, STALL = 1000, FORGIVE = 60000;' +
       '  const begun = Date.now();' +
       '  let mark = "", since = begun, polled = begun, given = 0;' +
       '  const look = () => {' +

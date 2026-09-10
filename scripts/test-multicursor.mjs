@@ -9,16 +9,24 @@ for (const mode of ['edit', 'raw']) {
   async function click (pos, modifiers = 0) {
     await app.evaluate('window.__tulip.editor.focus()')
     await delay(100)
-    const point = await app.evaluate(`(() => {
+    /* DOM events, not CDP input: on a hosted runner an offscreen window did
+       not route `Input.dispatchMouseEvent` to the editor at all, and the
+       modifier is then ours to state rather than the platform's to infer. */
+    await app.evaluate(`(() => {
       const editor = window.__tulip.editor
       const rect = editor.coordsAtPos(${pos})
-      return { x: rect.left, y: (rect.top + rect.bottom) / 2 }
+      const init = {
+        bubbles: true, cancelable: true, view: window, detail: 1,
+        clientX: rect.left + 1, clientY: (rect.top + rect.bottom) / 2,
+        button: 0, buttons: 1,
+        altKey: ${modifiers === 1}, ctrlKey: false, metaKey: false, shiftKey: false
+      }
+      editor.contentDOM.dispatchEvent(new MouseEvent('mousedown', init))
+      editor.contentDOM.dispatchEvent(new MouseEvent('mouseup', { ...init, buttons: 0 }))
+      editor.contentDOM.dispatchEvent(new MouseEvent('click', { ...init, buttons: 0 }))
+      return true
     })()`)
-    for (const type of ['mousePressed', 'mouseReleased']) {
-      await app.command('Input.dispatchMouseEvent', { type, ...point, button: 'left', clickCount: 1, modifiers })
-    }
-    /* Let the editor settle the selection before the next click: on a loaded
-       runner the events alone are quicker than the layout they act on. */
+    /* Let the editor settle the selection before the next click. */
     await app.evaluate('new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
   }
   /* The selection the click asked for, once the editor has had its say. */
@@ -27,7 +35,8 @@ for (const mode of ['edit', 'raw']) {
       if (await ranges() === n) return
       await delay(50)
     }
-    assert.equal(await ranges(), n, what)
+    const seen = await app.evaluate('({ ranges: window.__tulip.editor.state.selection.ranges.map((r) => [r.anchor, r.head]), focused: window.__tulip.editor.hasFocus })')
+    assert.equal(await ranges(), n, `${what} — ${JSON.stringify(seen)}`)
   }
   const ranges = () => app.evaluate('window.__tulip.editor.state.selection.ranges.length')
   const text = () => app.evaluate('window.__tulip.editor.state.doc.toString()')

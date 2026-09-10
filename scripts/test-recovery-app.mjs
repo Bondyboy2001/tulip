@@ -4,7 +4,12 @@ import path from 'node:path'
 import { appSession, delay } from './lib/app-session.mjs'
 const executable = process.argv[2]
 if (!executable) { console.log('recovery app: skipped until a built executable is supplied'); process.exit(0) }
-const app = await appSession({ executable, files: { 'Note.md': '# Note\n\nSaved original.\n', 'Atomic.txt': 'original' }, config: { tabs: ['Note.md'], tabIndex: 0, view: 'edit' } })
+/* Broken.md ships with the vault: the health scan below reads it from the
+   index, and a file written into a running vault waits on the watcher — which
+   on a hosted Windows runner had not delivered it after thirty seconds. What
+   this test is about is the scan and the scratch tab, not the watcher's
+   latency, so the fixture is there when the app starts. */
+const app = await appSession({ executable, files: { 'Note.md': '# Note\n\nSaved original.\n', 'Atomic.txt': 'original', 'Broken.md': '# Broken\n\n[[Missing note]]\n\n![](absent.png)\n\n[@unknown]\n' }, config: { tabs: ['Note.md'], tabIndex: 0, view: 'edit' } })
 async function waitFor (expression) {
   for (let i = 0; i < 300; i++) { if (await app.evaluate(expression)) return; await delay(100) }
   throw new Error(`Timed out: ${expression}`)
@@ -63,7 +68,6 @@ try {
   assert.ok(atomic === 'original' || atomic === 'X'.repeat(12000000), 'interrupted save is old or complete, never partial')
   await app.restart()
   console.log('ok - interrupted atomic replacement preserves a complete file and app restarts')
-  await writeFile(path.join(app.vault, 'Broken.md'), '# Broken\n\n[[Missing note]]\n\n![](absent.png)\n\n[@unknown]\n')
   await waitFor('(async () => { const page = await window.tulip.vault.notes({ offset: 0, limit: 100 }); return (page.notes || page).some(n => n.path === "Broken.md") })()')
   const before = await readdir(app.vault)
   await app.evaluate('window.__tulip.runCommand("vault-health"); true')

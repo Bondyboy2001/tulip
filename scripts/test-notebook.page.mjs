@@ -285,8 +285,12 @@ export async function run () {
   result.addedIsChosen = chosen()
 
   scroller.focus()
-  await commandKey('d')
-  await commandKey('d')                       // twice, close together
+  /* Twice, close together: the two presses are dispatched in the same tick
+     because `commandKey` awaits a frame, and two frames on a loaded runner
+     can exceed the 700ms double-key window between them. */
+  key('d')
+  key('d')
+  await settled()
   result.afterDelete = sections().length
 
   /* A single `d` is not a delete. Delete is the one command here that throws
