@@ -236,9 +236,28 @@ function outputState (extra = {}) {
   }
 }
 
+/* What one panel will hold, per stream. Main enforces the same bounds before
+   anything is sent (see MAX_RUN_BYTES and MAX_PPM_BYTES in electron/main.js),
+   so in ordinary operation this guard never fires. It exists for the same
+   reason the cap does: a sender that forgot to count must not grow the
+   session store — and the panel behind it — without bound. A PPM image is
+   the one stdout allowed past a megabyte, and it announces itself up front,
+   which is why the two streams keep different ceilings. */
+const MAX_PANEL_STDOUT = 32 * 1024 * 1024
+const MAX_PANEL_STDERR = 1024 * 1024
+
 function appendOutput (state, stream, text) {
   if (stream !== 'stdout' && stream !== 'stderr') return
-  state[stream] += stripAnsiChunk(state.ansi[stream], text)
+  const chunk = stripAnsiChunk(state.ansi[stream], text)
+  if (!chunk) return
+  const limit = stream === 'stdout' ? MAX_PANEL_STDOUT : MAX_PANEL_STDERR
+  if (state[stream].length >= limit) {
+    state.truncated = true
+    return
+  }
+  const room = limit - state[stream].length
+  state[stream] += room >= chunk.length ? chunk : chunk.slice(0, room)
+  if (chunk.length > room) state.truncated = true
 }
 
 function finishOutput (state) {
@@ -356,6 +375,7 @@ function adopt (id, state) {
     state.stdout += box.stdout
     state.stderr += box.stderr
     state.ansi = box.ansi
+    if (box.truncated) state.truncated = true
     if (box.done) {
       finishOutput(state)
       Object.assign(state, box.done, { status: 'done' })

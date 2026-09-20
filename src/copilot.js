@@ -77,11 +77,11 @@ export function mountCopilot ({
 }) {
   const state = {
     open: false,
-    /* The default level of the model's own ladder, not the top of it: high
-       reasoning burns thinking tokens on every turn — including turns that
-       only want a summary — and ⌃T is one keystroke away for the turns that
-       do want it. */
-    effort: 'medium',
+    /* The default level of the model's own ladder: extra-high reasoning, for
+       the turns that want it — ⌘T is one keystroke away for the ones that
+       only want a summary, and a model that never offered xhigh settles to
+       the nearest level it does. */
+    effort: 'xhigh',
     /* One choice, not two: `provider:id` names the CLI and the model together,
        so the panel has a single control where it used to have a pair. Empty
        until Settings says otherwise — there is no model nobody chose. */
@@ -96,7 +96,7 @@ export function mountCopilot ({
        model, the effort, the permission mode. Nothing restarts on the spot: a
        conversation whose process was started at an older reading is replaced at
        its next message, when the wait is expected anyway. Restarting on the
-       change itself made a held-down ⌃T kill and respawn a CLI per keystroke.
+       change itself made a held-down ⌘T kill and respawn a CLI per keystroke.
 
        A generation rather than the single `stale` flag this replaces: there is
        a copilot per conversation now, and one flag could only ever describe
@@ -345,9 +345,13 @@ export function mountCopilot ({
    * The transcript is the record either way; this only answers the question
    * being asked from the other application — has it finished — which otherwise
    * costs a trip back to the window to find out that it has not.
+   *
+   * `quiet` is a turn the app ended itself, with no answer behind it: the
+   * ending is worth settling and nothing else. Every sentence this can say is
+   * about a reply, and there is not one to have arrived.
    */
-  function announce (run, to, trouble = '') {
-    if (!run.busy || !run.at || Date.now() - run.at < NOTIFY_AFTER) return
+  function announce (run, to, trouble = '', quiet = false) {
+    if (quiet || !run.busy || !run.at || Date.now() - run.at < NOTIFY_AFTER) return
     if (document.hasFocus()) {
       /* In front, but with the panel shut — a Fix button asks with the panel
          closed, and so does ⌘⇧A pressed to get it out of the way of the
@@ -666,6 +670,7 @@ export function mountCopilot ({
    */
   function draw (msg) {
     if (msg.t === 'review') return drawReview(msg)
+    if (msg.t === 'proposal') return drawProposal(msg)
     // Both kinds of live step are buttons: one goes to the edit it made, the
     // other opens what the tool said. A row that answers a click is a control,
     // and the keyboard should reach it like one.
@@ -903,27 +908,27 @@ export function mountCopilot ({
       })
     })
     actions.append(reject)
-    const keep = element('button', 'ai-review-keep', msg.accepted ? 'Accepted' : 'Accept changes')
+    const keep = element('button', 'ghost is-compact is-accent ai-review-keep', 'Accept')
     keep.type = 'button'
     keep.disabled = !!msg.accepted
     keep.addEventListener('click', () => {
       msg.accepted = true
       node.querySelector('.ai-review-applied').textContent = 'Applied · reviewed'
       node.classList.add('is-accepted')
-      keep.textContent = 'Accepted'
+      keep.textContent = 'Accept'
       keep.disabled = true
       Promise.resolve(onAccept?.(operation))
         .then(save)
         .catch((err) => {
           /* Put back. Accepting only clears the diff marks, so nothing is lost
-             when it fails — but a button that says "Accepted" over changes
+             when it fails — but a button that says "Accept" over changes
              that were not is the transcript telling the reader something
              untrue, and it is the record they come back to. Reported the same
              way Reject reports, rather than swallowed. */
           msg.accepted = false
           node.querySelector('.ai-review-applied').textContent = 'Applied · awaiting review'
           node.classList.remove('is-accepted')
-          keep.textContent = 'Accept changes'
+          keep.textContent = 'Accept'
           keep.disabled = false
           onWarn?.(reason(err, 'Those changes could not be accepted.'))
         })
@@ -934,6 +939,138 @@ export function mountCopilot ({
        weight than the actual file. */
     head.append(actions)
     node.append(head, files)
+    msg.node = node
+    return node
+  }
+
+  /**
+   * A propose-mode card: the changes exist only in memory in main, so unlike
+   * the review card the buttons are what makes them real — Apply writes them
+   * through the same save path a manual edit takes, Discard drops them.
+   *
+   * The card keeps only the file list; the before/after texts stay in main
+   * until the Diff button asks for them, the same fetch-on-open the review
+   * card makes of the history.
+   */
+  function drawProposal (msg) {
+    const node = element('section', classOf(msg))
+    const head = element('div', 'ai-review-head')
+    const summary = element(
+      'strong', '',
+      `${msg.files.length} proposed change${msg.files.length === 1 ? '' : 's'}`
+    )
+    const state = element('span', 'ai-review-applied', '')
+    head.append(summary, state)
+    const files = element('div', 'ai-review-files')
+    const rowFor = new Map()
+    for (const file of msg.files) {
+      const row = element('div', 'ai-review-file')
+      const path = element('span', 'ai-review-path', file.path + (file.create ? ' (new file)' : ''))
+      path.title = file.path
+      row.append(path)
+      rowFor.set(file.path, row)
+      files.append(row)
+    }
+
+    const statusOf = () =>
+      msg.status === 'applied' ? 'Applied' :
+      msg.status === 'discarded' ? 'Discarded' :
+      msg.status === 'partly' ? 'Partly applied — some files changed on disk' :
+      'Awaiting review'
+
+    const settle = () => {
+      state.textContent = statusOf()
+      /* 'partly' leaves conflicted changes in the proposal: Apply would only
+         conflict again — the file moved — but Discard still clears them. */
+      const open = !msg.status
+      for (const control of actions.querySelectorAll('button')) {
+        if (control.classList.contains('ai-review-diff')) continue
+        control.disabled = control === discard ? !(open || msg.status === 'partly') : !open
+      }
+      node.className = classOf(msg)
+    }
+
+    const actions = element('div', 'ai-review-actions')
+    const diff = element('button', 'ghost is-compact ai-review-diff', 'Diff')
+    diff.type = 'button'
+    diff.title = msg.files.length === 1
+      ? 'Show what would change'
+      : `Show what would change in all ${msg.files.length} files`
+    diff.addEventListener('click', async () => {
+      const open = files.querySelector('.history-diff, .ai-review-gone')
+      if (open) {
+        for (const shown of files.querySelectorAll('.history-diff, .ai-review-gone')) shown.remove()
+        diff.classList.remove('is-open')
+        return
+      }
+      const detail = await api.ai.proposal(msg.id).catch(() => null)
+      diff.classList.add('is-open')
+      for (const [path, row] of rowFor) {
+        const change = detail?.changes.find((item) => item.path === path)
+        row.append(change
+          ? diffBlock(change)
+          : element('div', 'ai-review-gone',
+              detail ? 'That change is no longer proposed.'
+                     : 'The proposal is no longer there — the window or vault has moved on.'))
+      }
+    })
+    actions.append(diff)
+
+    const apply = element('button', 'ghost is-compact is-accent', 'Apply')
+    apply.type = 'button'
+    apply.title = 'Write these changes to the vault'
+    apply.addEventListener('click', async () => {
+      apply.disabled = true
+      try {
+        const result = await api.ai.applyProposal(msg.id)
+        /* A proposal evicted from main's bound, or dropped by a vault switch,
+           answers as gone rather than as applied — the card says so and the
+           buttons close, because there is nothing left to decide. */
+        if (result?.gone) {
+          msg.status = 'discarded'
+          settle()
+          state.textContent = 'No longer available'
+          save()
+          onWarn?.(result.error || 'That proposal is no longer there.')
+          return
+        }
+        for (const path of result?.applied || []) {
+          rowFor.get(path)?.classList.add('is-accepted')
+        }
+        for (const path of result?.conflicts || []) {
+          const row = rowFor.get(path)
+          if (row && !row.querySelector('.ai-review-gone')) {
+            row.classList.add('is-rejected')
+            row.append(element('div', 'ai-review-gone',
+              'Changed on disk since the proposal — not written.'))
+          }
+        }
+        msg.status = result?.conflicts?.length ? 'partly' : 'applied'
+      } catch (error) {
+        apply.disabled = false
+        onWarn?.(reason(error, 'Those changes could not be applied.'))
+        return
+      }
+      settle()
+      save()
+    })
+    actions.append(apply)
+
+    const discard = element('button', 'ghost is-compact is-danger', 'Discard')
+    discard.type = 'button'
+    discard.title = 'Drop these proposed changes'
+    discard.addEventListener('click', async () => {
+      discard.disabled = true
+      await api.ai.discardProposal(msg.id).catch(() => {})
+      msg.status = 'discarded'
+      settle()
+      save()
+    })
+    actions.append(discard)
+
+    head.append(actions)
+    node.append(head, files)
+    settle()
     msg.node = node
     return node
   }
@@ -1449,6 +1586,16 @@ export function mountCopilot ({
       push({ t: 'review', operation: event.operation, accepted: false }, to)
       save(to.path)
     },
+    /* A propose-mode turn's staged writes — nothing has been saved yet; the
+       card's Apply is what makes them real. See drawProposal. */
+    proposal (event, to) {
+      push({ t: 'proposal', id: event.id, files: event.files || [], status: '' }, to)
+      save(to.path)
+    },
+    'proposal-failed' (event, to) {
+      note(event.message || 'The Copilot proposal could not be completed.', 'warn', to)
+      onWarn?.(event.message || 'The Copilot proposal could not be completed.')
+    },
     // The process is gone — it exited, or was never there to begin with.
     // Forgetting it here is what lets the next message start a fresh one
     // instead of talking to a corpse.
@@ -1475,7 +1622,7 @@ export function mountCopilot ({
       if (event.lostThread) forgetThread(to)
       if (event.error) failed(event.error, to)
       // Before `settleBusy`, which is what lets go of the turn this is about.
-      announce(to.run, to, event.error || '')
+      announce(to.run, to, event.error || '', event.quiet)
       settleBusy(to.run)
       /* The deltas since the last tool call are only in memory until now.
          Named, because `settleBusy` has just let go of the turn: the reader
@@ -1525,7 +1672,11 @@ export function mountCopilot ({
       model: id,
       effort: state.effort,
       mode: state.mode,
-      write: state.mode !== COPILOT_MODES.READ,
+      /* `write` is the legacy of `mode` — main reads the mode first, so this
+         only has to not lie: a propose turn cannot write files itself, its
+         staged changes go through Tulip on Apply. */
+      write: /** @type {string} */ (state.mode) === COPILOT_MODES.ASK ||
+        /** @type {string} */ (state.mode) === COPILOT_MODES.AUTO,
       resume: resumeFor(convo, provider),
       /* Where this conversation had got to. A session is replaced whenever the
          model, the effort or the note changes, and without this the context
@@ -1592,19 +1743,9 @@ export function mountCopilot ({
          so there is something to show before a word is typed. */
       run: () => { quote('/model '); offerMenu() }
     },
-    { name: 'stop', hint: 'Stop the turn running in this chat', run: () => { if (visibleRun().busy) halt() } },
-    {
-      name: 'mode',
-      hint: 'Permission — Read, Ask or Auto',
-      run: () => {
-        const at = COPILOT_MODE_ORDER.indexOf(state.mode)
-        chooseMode(COPILOT_MODE_ORDER[(at + 1) % COPILOT_MODE_ORDER.length])
-        note(`Permission is now ${copilotModeLabel(state.mode)}. /mode again for ${copilotModeLabel(COPILOT_MODE_ORDER[(COPILOT_MODE_ORDER.indexOf(state.mode) + 1) % COPILOT_MODE_ORDER.length])}.`)
-      }
-    },
     {
       name: 'effort',
-      hint: 'Thinking level — the next step up (⌃T)',
+      hint: 'Thinking level — the next step up (⌘T)',
       run: () => {
         cycleEffort(1)
         if (levels().length) note(`Thinking is now ${effortLabel(state.effort)}.`)
@@ -1952,7 +2093,7 @@ export function mountCopilot ({
   }
 
   /* `/model`, with or without a name after it. The space is what separates the
-     command being *typed* from the command being *used*: `/mode` is still on
+     command being *typed* from the command being *used*: `/model` is still on
      its way to being a word and belongs in the command list, while `/model `
      has been said and its own rows take the menu over. */
   const MODEL = /^\/model(?:\s+([^\n]*))?$/i
@@ -2821,7 +2962,7 @@ export function mountCopilot ({
        neither of which is a control, so this text is the only place either one
        is written down. */
     const about = hasEffort
-      ? 'Thinking level — ⌃T to step through it · /model to change the model'
+      ? 'Thinking level — ⌘T to step through it · /model to change the model'
       : '/model to change the model'
     /* And whether who is answering can actually answer — said only when it is
        something other than ready, and named as the doctor's finding rather
@@ -2887,7 +3028,7 @@ export function mountCopilot ({
    *
    * Not a fixed four: a model offers the variants it was published with, and
    * most of the catalogue has no such dial at all — in which case there is
-   * nothing to step through and ⌃T says so rather than moving something.
+   * nothing to step through and ⌘T says so rather than moving something.
    *
    * There is no control for it in the panel. It was a slider in a popover, which meant a
    * chord for the people who knew it and three gestures for everyone else,
@@ -2921,7 +3062,7 @@ export function mountCopilot ({
   }
 
   /**
-   * ⌃T walks the model's ladder, a step at a time, wrapping at the top.
+   * ⌘T walks the model's ladder, a step at a time, wrapping at the top.
    *
    * The level is the setting that changes mid-conversation — a question you
    * expected to be cheap turns out to be hard, and the answer is one more step
@@ -2935,7 +3076,10 @@ export function mountCopilot ({
    * Only while the panel is open, because that is the only time the setting is
    * on screen: a chord that silently changes an unseen setting is a chord that
    * gets pressed by accident. The panel's own text fields would otherwise take
-   * ⌃T as transpose-characters, which is what `preventDefault` is for.
+   * ⌃T as transpose-characters, which is what `preventDefault` is for. ⌘T
+   * never reaches the page at all — it is the menu's New Tab accelerator —
+   * so while the panel is open main forwards it as a `copilot-effort` menu
+   * command instead; see the before-input-event hook in electron/main.js.
    */
   function cycleEffort (by = 1) {
     const offered = levels()
@@ -2961,8 +3105,11 @@ export function mountCopilot ({
   el.config.addEventListener('animationend', () => el.config.classList.remove('is-bumped'))
 
   document.addEventListener('keydown', (event) => {
-    if (!event.ctrlKey || event.metaKey || event.altKey) return
-    // `code`, not `key`: ⌃⇧T is `T` on one keyboard layout and `t` on another.
+    /* Either modifier: ⌃T reaches the page directly, while ⌘T arrives here
+       only where there is no menu to swallow it first. Both spellings step
+       the same ladder. */
+    if ((!event.ctrlKey && !event.metaKey) || event.altKey) return
+    // `code`, not `key`: ⌘⇧T is `T` on one keyboard layout and `t` on another.
     if (event.code !== 'KeyT') return
     if (el.app.dataset.ai !== 'open') return
     event.preventDefault()
@@ -3014,6 +3161,7 @@ export function mountCopilot ({
     const label = copilotModeLabel(mode)
     const visibleLabel = {
       [COPILOT_MODES.READ]: 'Read only',
+      [COPILOT_MODES.PROPOSE]: 'Propose',
       [COPILOT_MODES.ASK]: 'Ask first',
       [COPILOT_MODES.AUTO]: 'Auto'
     }[mode]
@@ -3177,15 +3325,16 @@ export function mountCopilot ({
      Until then the built-in list is what the controls read, which is what makes
      the first paint correct without it. The doctor's readiness rides along —
      the same moments ask both questions, and the probes are short. */
-  let catalogued = false
+  /* Main holds the catalogue answer for minutes, so asking on every opening is
+     cheap: only an expired hold queries the CLIs again. And it has to be every
+     opening — an opening that arrived while the service was down falls back to
+     the plain model list, which carries no thinking levels, and serving that
+     list for the rest of the window's life is how a transient failure becomes
+     levels that cannot be switched to. A load that failed is simply asked for
+     again on the next opening. */
   function readCatalogue () {
     readDoctor()
-    if (catalogued) return
-    catalogued = true
-    // A load that failed — the CLI mid-install, a PATH not there yet — is not
-    // an answer: let the next opening ask again rather than serving the
-    // built-in list for the rest of the window's life.
-    loadModels().catch(() => { catalogued = false })
+    loadModels().catch(() => {})
   }
 
   function open () {
@@ -3313,6 +3462,14 @@ export function mountCopilot ({
     },
 
     applyConfig,
+
+    /* Step the thinking level from outside the panel. ⌘T is the menu's New
+       Tab accelerator and never reaches the page, so while the panel is open
+       main forwards it as a `copilot-effort` menu command instead — see the
+       before-input-event hook in electron/main.js. Guarded on the panel being
+       open, for the same reason the chord is: a press that silently changes
+       an unseen setting is one that gets pressed by accident. */
+    cycleEffort: (by = 1) => { if (state.open) cycleEffort(by) },
 
     /**
      * Get the transcripts to disk, now, and say when they are there.

@@ -57,9 +57,6 @@
     <aside class="sidebar" id="sidebar" aria-label="Vault">
       <span class="app-version" id="app-version" aria-label="Tulip version"></span>
       <header class="sidebar-head">
-        <button class="vault-name" id="vault-name" title="Switch vault">
-          <span id="vault-label">No vault</span>
-        </button>
         <div class="sidebar-actions">
           <button class="icon-btn" id="btn-new-note" title="New note (⌘N)" aria-label="New note">
             <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M8 3.2v9.6M3.2 8h9.6" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
@@ -75,7 +72,7 @@
                apart to open it. Which it is now is read from the tree itself in
                paintFoldToggle, so it can never offer the thing that just
                happened. The tree is always on screen now, so it always is. -->
-          <button class="icon-btn" id="btn-fold-all" title="Collapse all folders"
+          <button class="icon-btn fold-toggle" id="btn-fold-all" title="Collapse all folders"
                   aria-label="Collapse all folders">
             <svg class="fold-ico-collapse" viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M4.8 2.8 8 5.6l3.2-2.8M4.8 13.2 8 10.4l3.2 2.8" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/></svg>
            <svg class="fold-ico-expand" viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M4.8 5.6 8 2.8l3.2 2.8M4.8 10.4 8 13.2l3.2-2.8" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -118,14 +115,26 @@
       <div class="pane-split" id="pane-split" hidden>
         <div class="pane-split-grip" id="pane-split-grip" role="separator" tabindex="0"
              aria-orientation="horizontal" aria-label="Resize the lower panel"
-             title="Drag to resize · double-click to fit contents"></div>
-        <nav class="pane-tabs is-lower" id="pane-tabs-below" role="tablist"
-             aria-label="Lower panel">
-          <button class="pane-tab" id="pane-outline-tab" role="tab" data-pane="outline" aria-selected="false">Outline</button>
-          <button class="pane-tab" id="pane-links-tab" role="tab" data-pane="links" aria-selected="false">Links</button>
-          <button class="pane-tab" id="pane-spelling-tab" role="tab" data-pane="spelling" aria-selected="false">Spelling</button>
-          <button class="pane-tab" id="pane-info-tab" role="tab" data-pane="info" aria-selected="false">Info</button>
-        </nav>
+             aria-valuemin="15" aria-valuemax="88" aria-valuenow="40"
+             title="Drag to resize · double-click to fit contents · Enter expands it"></div>
+        <div class="pane-strip">
+          <nav class="pane-tabs is-lower" id="pane-tabs-below" role="tablist"
+               aria-label="Lower panel">
+            <button class="pane-tab" id="pane-outline-tab" role="tab" data-pane="outline" aria-selected="false">Outline</button>
+            <button class="pane-tab" id="pane-links-tab" role="tab" data-pane="links" aria-selected="false">Links</button>
+            <button class="pane-tab" id="pane-spelling-tab" role="tab" data-pane="spelling" aria-selected="false">Spelling</button>
+            <button class="pane-tab" id="pane-info-tab" role="tab" data-pane="info" aria-selected="false">Info</button>
+          </nav>
+          <!-- The outline's own fold-all — the same paired marks the vault
+               header carries for folders. It acts on the panel rather than
+               choosing it, so it sits outside the tablist, and only while the
+               outline is the pane on show is there anything for it to fold. -->
+          <button class="icon-btn fold-toggle" id="btn-outline-fold-all" type="button"
+                  title="Collapse all headings" aria-label="Collapse all headings" hidden>
+            <svg class="fold-ico-collapse" viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M4.8 2.8 8 5.6l3.2-2.8M4.8 13.2 8 10.4l3.2 2.8" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <svg class="fold-ico-expand" viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M4.8 5.6 8 2.8l3.2 2.8M4.8 10.4 8 13.2l3.2-2.8" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+        </div>
       </div>
 
       <!-- Drag the panel's own edge. Arrow keys nudge it, double-click fits
@@ -205,6 +214,10 @@
                 <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M5.9 4.3 2.6 8l3.3 3.7M10.1 4.3 13.4 8l-3.3 3.7" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
                 <span class="view-option-label">Raw</span>
               </button>
+              <!-- The same switch, said: aria-pressed moving on a button does
+                   not announce what was switched *to*, so the mode change is
+                   spoken here instead. See updateViewControl. -->
+              <span class="visually-hidden" id="view-announce" role="status" aria-live="polite"></span>
             </div>
             <!-- Why the two editing views are greyed out. An indicator, not a
                  control: the lock is put on and taken off from the command
@@ -513,8 +526,8 @@
              aria-label="Run output" hidden></div>
       </div>
 
-      <!-- A tab holding nothing has to say it is holding nothing, so it carries
-           the ways out of it. There is no second answer here for "no vault":
+      <!-- With no tab showing the pane has to say so, so it carries the ways
+           out of it. There is no second answer here for "no vault":
            without one the landing page below stands in front of the whole app,
            and this pane is never reached. -->
       <div class="empty" id="empty">
@@ -617,9 +630,9 @@
             </span>
 
             <!-- A readout, not a control: both settings it names are changed
-                 by typing or by chord — `/model` at the message box, ⌃T for
+                 by typing or by chord — `/model` at the message box, ⌘T for
                  the thinking level — so there is nothing here to press. It
-                 flashes when ⌃T steps the level, which is the whole of its
+                 flashes when ⌘T steps the level, which is the whole of its
                  feedback. -->
             <span class="ai-config" id="ai-config">
               <span id="ai-config-model">Default model</span>
@@ -660,8 +673,6 @@
              screen reader on a text box that silently changed something. -->
         <input id="panel-input" class="panel-input" type="text" autocomplete="off" spellcheck="false"
                role="combobox" aria-expanded="true" aria-autocomplete="list" aria-controls="panel-list" />
-        <button type="button" class="panel-filter-toggle" id="panel-filter-toggle"
-                aria-expanded="false" aria-controls="panel-chips">Filters</button>
         <div class="panel-chips" id="panel-chips" hidden>
           <button type="button" class="panel-chip" id="opt-case" aria-pressed="false"
                   title="Match case" aria-label="Match case">Aa</button>
@@ -737,7 +748,11 @@
            reveal-by-space still lands somewhere focusable. -->
       <div class="study-card" id="study-card" tabindex="0">
         <span class="study-prompt" id="study-prompt">Word</span>
-        <strong class="study-word" id="study-word"></strong>
+        <!-- dir="auto" on every surface that holds card text: which side of a
+             card is Arabic and which is English changes with the kind — a
+             Produce card's prompt is English and its answer is not — so the
+             direction belongs to the text, not the card. -->
+        <strong class="study-word" id="study-word" dir="auto"></strong>
         <!-- A dictation card has nothing written on it on purpose: the sound is
              the question. This is what stands in for the word, and on every
              other card it is the way to hear it again. -->
@@ -751,12 +766,12 @@
         </span>
         <!-- The language's word is the prompt; its English meaning is typed. -->
         <input class="study-input" id="study-input" type="text" hidden
-               autocomplete="off" autocapitalize="off" autocorrect="off"
+               autocomplete="off" autocapitalize="off" autocorrect="off" dir="auto"
                spellcheck="false" aria-label="Your answer" placeholder="Type it">
         <span class="study-feedback" id="study-feedback" role="status" aria-live="polite" hidden></span>
-        <span class="study-verdict" id="study-verdict" hidden></span>
-        <span class="study-english" id="study-english" hidden></span>
-        <span class="study-aside" id="study-aside" hidden></span>
+        <span class="study-verdict" id="study-verdict" dir="auto" hidden></span>
+        <span class="study-english" id="study-english" dir="auto" hidden></span>
+        <span class="study-aside" id="study-aside" dir="auto" hidden></span>
         <div class="study-summary" id="study-summary" aria-label="First attempt results" hidden>
           <span class="study-summary-result is-correct">
             <span class="study-summary-mark" aria-hidden="true">✓</span>
@@ -931,7 +946,7 @@
         one you already have, or an empty one to start in.</p>
       <button class="landing-connect" id="btn-connect-vault" type="button">Connect a vault…</button>
       <p class="landing-note">Tulip reopens it each time. Connect a different
-        folder whenever you like, from the vault's name in the sidebar or ⇧⌘O.</p>
+        folder whenever you like with ⇧⌘O.</p>
     </div>
   </section>
 

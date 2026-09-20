@@ -171,7 +171,9 @@ function shortAuthor (entry) {
   return `${people[0]} et al.`
 }
 
-function citationLabel (entry, key) {
+/* Exported for the insert-citation picker, whose rows name each reference the
+   same way a rendered citation does. */
+export function citationLabel (entry, key) {
   const who = shortAuthor(entry) || entry?.organization || key
   return `${who} ${entry?.year || 'n.d.'}`
 }

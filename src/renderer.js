@@ -34,18 +34,21 @@ import { highlightInto } from './highlight.js'
 /* `el` is this module's own name for the DOM registry, so blocks.js's element
    builder comes in under another — the same aliasing settings.js and copilot.js
    do. */
-import { codeCopilotButton, copyButton } from './blocks.js'
+import { codeCopilotButton, codeCopyButton } from './blocks.js'
 import { svgIcon, el as node, guardModalBackground, reason, trapModalFocus } from './dom.js'
 import { keyLabel, localiseShortcuts, revealLabel } from './platform.js'
 import { loadFeatureStyles } from './lazy-styles.js'
 import { fileIcon } from './file-icons.js'
 import {
   enhanceFlashcards, flashcardMarkdown, parseFlashcards, flashcardTags,
-  buildFlashcardQueue
+  flashcardCards
 } from './flashcards.js'
+import { buildQueue } from './review-queue.js'
+import { AGAIN, GOOD, grade as gradeCard } from './srs.js'
+import { makeReviewSink } from './review-sink.js'
 import { makeLineScanner } from './spelling.js'
 import { prepareMath, equationIndex, equationsFor, docText } from './math.js'
-import { dressCitations } from './citations.js'
+import { dressCitations, parseBibTeXCached, citationLabel } from './citations.js'
 import { THEMES, resolveTheme, isDarkTheme } from './themes.js'
 import { FONTS, FONT_ROLES, fontStack, fontLabel, isFont } from './fonts.js'
 import {
@@ -60,6 +63,7 @@ import {
   initSidePane, openToSide, closeSidePane, sideDoc, refreshSidePane
 } from './sidepane.js'
 import { routeFragmentClick, activateFocusedWikilink } from './links.js'
+import { fuzzy, matchItem, markHits, markWords } from './match.js'
 import { openPackages } from './packages.js'
 import { settled, repin, othersOf, rightOf } from './tabstrip.js'
 import { safeCut } from './reading-split.js'
@@ -237,7 +241,6 @@ const el = {
   app: /** @type {HTMLElement} */ ($('app')),
   sidebar: /** @type {HTMLElement} */ ($('sidebar')),
   tree: /** @type {HTMLElement} */ ($('tree')),
-  vaultLabel: /** @type {HTMLElement} */ ($('vault-label')),
   tabs: /** @type {HTMLElement} */ ($('tabs')),
   navBack: /** @type {HTMLButtonElement} */ ($('nav-back')),
   navForward: /** @type {HTMLButtonElement} */ ($('nav-forward')),
@@ -309,6 +312,7 @@ const el = {
   orphansClose: /** @type {HTMLButtonElement} */ ($('orphans-close')),
   ctx: /** @type {HTMLElement} */ ($('ctx')),
   viewSwitch: /** @type {HTMLElement} */ ($('view-switch')),
+  viewAnnounce: /** @type {HTMLElement} */ ($('view-announce')),
   lockMark: /** @type {HTMLElement} */ ($('lock-mark')),
   docRun: /** @type {HTMLButtonElement} */ ($('doc-run')),
   fileRunOut: /** @type {HTMLElement} */ ($('file-run-out')),
@@ -333,7 +337,6 @@ const el = {
   panelReplaceInput: /** @type {HTMLInputElement} */ ($('panel-replace-input')),
   panelReplaceGo: /** @type {HTMLButtonElement} */ ($('panel-replace-go')),
   panelSaveSearch: /** @type {HTMLButtonElement} */ ($('panel-save-search')),
-  panelFilterToggle: /** @type {HTMLButtonElement} */ ($('panel-filter-toggle')),
   panelFilterPresets: /** @type {HTMLElement} */ ($('panel-filter-presets')),
   savedSearches: /** @type {HTMLElement} */ ($('saved-searches')),
   askDetail: /** @type {HTMLElement} */ ($('ask-detail')),
@@ -409,6 +412,7 @@ const el = {
   pdfToolMark: /** @type {HTMLButtonElement} */ ($('pdf-tool-mark')),
   pdfPens: /** @type {HTMLElement} */ ($('pdf-pens')),
   foldAll: /** @type {HTMLButtonElement} */ ($('btn-fold-all')),
+  outlineFoldAll: /** @type {HTMLButtonElement} */ ($('btn-outline-fold-all')),
   site: /** @type {HTMLElement} */ ($('site')),
   htmlview: /** @type {HTMLElement} */ ($('htmlview')),
   siteTools: /** @type {HTMLElement} */ ($('site-tools')),
@@ -1021,7 +1025,8 @@ function ensurePdf () {
       onAsk: (quote) => {
         copilot.open()
         copilot.quote(quoteFor(quote))
-      }
+      },
+      onNote: (mark) => openOverlay('append-to', { mark })
     })
 
     /* The compiled half of a TeX workspace. It deliberately has no highlight
@@ -2015,8 +2020,18 @@ async function setBookmark () {
     ? doc.line(Math.max(1, Math.min(target, doc.lines)))
     : doc.lineAt(view.state.selection.main.head)
   const had = bookmarkLineOf(doc.toString())
-  const { anchor, ...change } = bookmarkInsertion(doc.toString(), at.number)
-  view.dispatch({ changes: change, selection: { anchor }, userEvent: 'input.bookmark' })
+  const edit = bookmarkInsertion(doc.toString(), at.number)
+  /* The caret stays on its own text and the viewport stays where it was:
+     forcing the selection to the bookmark's line scrolled the page out from
+     under the reader on every placement. Let CodeMirror map the selection
+     through the edit instead, and do not scroll to it. */
+  if (edit.from !== edit.to || edit.insert) {
+    view.dispatch({
+      changes: { from: edit.from, to: edit.to, insert: edit.insert },
+      scrollIntoView: false,
+      userEvent: 'input.bookmark'
+    })
+  }
   saveNow()
   toast(had ? 'Bookmark moved here.' : 'Bookmarked.')
 }
@@ -2487,7 +2502,27 @@ function toggleAllFolders () {
      the whole truth about the tree that is actually on screen. */
   state.expanded = shutting ? new Set() : new Set(folders)
   api.config.set({ expanded: [...state.expanded] })
-  renderTree()
+  if (shutting) {
+    /* Closing draws nothing: every open container empties and every open row
+       drops its mark. Rebuilding here would construct a thousand rows — icons,
+       listeners and all — only to put them behind folders that are shut. */
+    for (const kids of el.tree.querySelectorAll('.children.is-open')) {
+      kids.classList.remove('is-open')
+      kids.replaceChildren()
+    }
+    for (const row of el.tree.querySelectorAll('.row.is-open')) {
+      row.classList.remove('is-open')
+      row.setAttribute('aria-expanded', 'false')
+    }
+    /* The invariants a rebuild would have left: one row still tabbable, the
+       fold-all reading the tree it now governs. */
+    restoreTreeTabStop()
+    paintFoldToggle()
+  } else {
+    /* Opening is the reverse trade: every row does have to be drawn, which is
+       what a rebuild is. */
+    renderTree()
+  }
   // Shutting the tree can take the open note's row off screen with it; the row
   // is still the active one, and scrolling back to it is not wanted here.
   markActiveRow()
@@ -2706,17 +2741,17 @@ function clearPicked () {
 
 /**
  * Opening from the tree, the way a file manager does it: the click adds a tab
- * rather than taking the document being read out from under it. A blank tab is
- * already waiting to hold a document, though, so use it instead of stranding a
- * "New tab" beside the file. A file already on the strip is a tab to go back
- * to, not a second copy of itself — which is also what keeps a walk through a
- * folder from stacking the same note twice.
+ * rather than taking the document being read out from under it. A file already
+ * on the strip is a tab to go back to, not a second copy of itself — which is
+ * also what keeps a walk through a folder from stacking the same note twice.
  */
 async function openFromTree (path) {
   const at = state.tabs.findIndex((tab) => tab.path === path)
-  if (at === state.tabIndex) return
-  if (at >= 0) return selectTab(at)
-  return openNote(path, { newTab: !!(activeTab()?.path || activeTab()?.memory) })
+  if (at >= 0) {
+    if (at === state.tabIndex) return
+    return selectTab(at)
+  }
+  return openNote(path, { newTab: true })
 }
 
 /**
@@ -3188,13 +3223,20 @@ function enterDoc (path, { history, newTab }) {
   closeMemoryDocument()
   markPlace()
 
-  if (newTab || !state.tabs.length) {
+  /* Only files become lasting tabs. A temporary tab (logs.md) is never reused
+     for a file — the file opens beside it — and with no file placeholder the
+     empty strip simply gains its first tab. The one exception is the singleton
+     "New tab": an open of any file while it is showing fills it, so a tree
+     click from it does not strand an empty tab beside the file. */
+  const reuse = state.tabs.length && (isNewTab(activeTab()) || (!newTab && !activeTab()?.memory))
+  if (!reuse) {
     // Opened beside the tab it came from rather than at the end of the strip:
     // a link followed into a new tab belongs next to what linked to it.
-    state.tabs.splice(state.tabIndex + 1, 0, blankTab())
-    state.tabIndex++
+    const tab = { path: null, history: [], historyAt: -1, base: null, pinned: false }
+    const at = state.tabs.length ? state.tabIndex + 1 : 0
+    state.tabs.splice(at, 0, tab)
+    state.tabIndex = at
   }
-  delete activeTab().memory
   activeTab().path = path
   if (history) pushHistory(path)
 
@@ -3566,10 +3608,10 @@ async function openViewed (path, { focus = true, history = true, place = null, n
     const at = opened ? state.tabs.indexOf(opened) : -1
     if (at !== -1) {
       state.tabs.splice(at, 1)
-      state.tabIndex = Math.min(indexBefore, Math.max(0, state.tabs.length - 1))
+      state.tabIndex = state.tabs.length ? Math.min(indexBefore, state.tabs.length - 1) : -1
     }
     const tab = activeTab()
-    if (tab) tab.path = previous?.path || null
+    if (tab && previous?.path) tab.path = previous.path
     state.current = previous ? noteRef(previous.path) : null
     /* `settleDoc` above asked for the document before it was known to be
        readable, and the answer almost always beats the failure. Given up here
@@ -4107,9 +4149,15 @@ function openTimedMedia (spec) {
 
 const activeTab = () => state.tabs[state.tabIndex] || null
 
-/** A tab holding nothing — what ⌘T opens, and what is left standing when the
- *  last note is closed, so the strip is never empty. */
-const blankTab = () => ({ path: null, history: [], historyAt: -1, base: null, pinned: false })
+/* Only files (and the temporary logs.md tab) persist: closing the last file
+   tab leaves the strip empty. A single transient "New tab" may stand on the
+   strip beside them — see `newTab` — and it is never written down. */
+
+/** A transient empty tab: no file, no temporary document. Only one may exist. */
+const isNewTab = (tab) => !!tab && !tab.path && !tab.memory
+
+/** Where the singleton "New tab" stands, or -1 when there is none. */
+const findNewTab = () => state.tabs.findIndex(isNewTab)
 
 /* The version a tab's buffer diverged from — set whenever the buffer and the
    disk are known to agree: on opening a note, on saving one, and when the
@@ -4301,9 +4349,6 @@ function showTabContextMenu (event, i) {
      copied. */
   if (tab.path) {
     const found = state.files.find((f) => f.path === tab.path)
-    if (canShowBeside(tab.path)) {
-      items.push({ label: 'Open to the side', run: () => openToSide(tab.path) })
-    }
     items.push({ label: 'Open in new window', run: () => openInNewWindow(tab.path) })
     if (found) items.push({ label: 'Rename…', run: () => beginTabRename(i, found) })
     /* "Show in explorer" sat directly above "Reveal in Finder", and the two
@@ -4311,14 +4356,13 @@ function showTabContextMenu (event, i) {
        the other means the desktop's file manager. Named after the pane it
        actually opens. */
     items.push({ label: 'Show in Files pane', run: () => showInFileExplorer(tab.path) })
-    /* The three below are what the tree's row offers for the same document.
-       This menu's own comment has always said a tab "offers what a row in the
-       Files pane offers for one", and until now it did not: history, moving and
-       trashing were reachable only from a tree the reader may have scrolled
-       away from or closed altogether. */
-    if (isEditableTextPath(tab.path)) {
-      items.push({ label: 'Recover this document…', run: () => recoveryPanel.show(tab.path).catch(error => toast(error.message)) })
-    }
+    /* Moving and trashing are what the tree's row offers for the same
+       document. This menu's own comment has always said a tab "offers what a
+       row in the Files pane offers for one", and until now it did not: the
+       two were reachable only from a tree the reader may have scrolled away
+       from or closed altogether. Recovery and opening beside went the other
+       way — out of both menus, into the palette, where an action reached for
+       once in a while belongs. */
     items.push({ label: 'Move to…', run: () => openMovePicker([tab.path]) })
     items.push({ label: revealLabel(), run: () => api.file.reveal(tab.path) })
     items.push({ label: 'Copy path', run: () => copyPaths([tab.path]) })
@@ -4403,11 +4447,13 @@ async function closeTabs (doomed, keeper) {
   // The keeper is spared by construction; a strip that somehow lost it falls
   // back to the nearest tab rather than to an index that is no longer a tab.
   const already = to === state.tabIndex
-  state.tabIndex = to === -1 ? Math.min(state.tabIndex, state.tabs.length - 1) : to
+  state.tabIndex = to === -1 ? (state.tabs.length ? Math.min(state.tabIndex, state.tabs.length - 1) : -1) : to
   if (already) { renderTabs(); rememberTabs(); return }
 
   const next = activeTab()
-  if (!next?.path) { await showBlank(); return }
+  if (!next) { await showEmpty(); return }
+  if (next.memory) { await showMemoryDocument(next); return }
+  if (isNewTab(next)) { closeCurrentNote(); copilot.setNote(''); rememberTabs(); return }
   await openNote(next.path, { history: false, place: tabPlace(next) })
   revealInTree(next.path)
 }
@@ -4583,7 +4629,10 @@ function rememberTabs () {
      leave nothing announced. The rest of the strip already carries the place
      each tab was last marked at. */
   markPlace()
-  const savedTabs = state.tabs.filter((tab) => !tab.memory)
+  /* The transient tabs are never written down: logs.md is rebuilt on demand,
+     and the singleton "New tab" is a place to start from rather than a strip
+     to come back to. */
+  const savedTabs = state.tabs.filter((tab) => !tab.memory && tab.path)
   sessionOnly({
     tabs: savedTabs.map((t) => t.path),
     tabIndex: Math.max(0, savedTabs.indexOf(activeTab())),
@@ -4612,22 +4661,44 @@ async function selectTab (i) {
   markPlace()
   state.tabIndex = i
 
-  if (!tab.path) { await showBlank(); return true }
+  if (tab.memory) { await showMemoryDocument(tab); return true }
+  /* The singleton empty tab shows the same empty pane as having no tabs at
+     all. Saved and marked above, like every other selection; torn down below,
+     the way opening a file tears its viewer down on the way in. */
+  if (isNewTab(tab)) { closeCurrentNote(); copilot.setNote(''); rememberTabs(); return true }
   await openNote(tab.path, { history: false, place: tabPlace(tab) })
   revealInTree(tab.path)
   return true
 }
 
+/**
+ * The singleton "New tab", on ⌘T.
+ *
+ * A second press while one stands finds it instead of stacking another: the
+ * strip never holds two tabs with nothing in them. Opening any file while it
+ * is showing fills it — see `enterDoc` — so it is a place to start from
+ * rather than a tab to keep.
+ */
 async function newTab () {
+  const at = findNewTab()
+  if (at >= 0) {
+    if (at !== state.tabIndex) await selectTab(at)
+    return true
+  }
+  if (state.dirty && !await saveNow()) return false
   markPlace()
-  state.tabs.splice(state.tabIndex + 1, 0, blankTab())
-  state.tabIndex++
-  await showBlank()
+  const tab = { path: null, history: [], historyAt: -1, base: null, pinned: false }
+  const insert = state.tabs.length ? state.tabIndex + 1 : 0
+  state.tabs.splice(insert, 0, tab)
+  state.tabIndex = insert
+  closeCurrentNote()
+  copilot.setNote('')
+  rememberTabs()
+  return true
 }
 
 /* The tabs closed this session, newest last, so ⌘⇧T can walk back through
-   them. Only tabs that held a document — reopening a blank is opening
-   nothing. Tabs closed because their file went away are left out to keep a
+   them. Tabs closed because their file went away are left out to keep a
    folder delete from flushing the stack; reopenTab would refuse them anyway. */
 const closedTabs = []
 
@@ -4651,12 +4722,11 @@ async function closeTab (i, { record = true } = {}) {
     site?.forget(tab.path)
   }
 
-  // The strip always holds at least one tab: closing the last note leaves an
-  // empty one rather than a window with no place to put anything.
+  // Closing the last tab leaves the strip empty and the pane in its empty
+  // state. Only files become tabs, so there is no blank placeholder.
   if (!state.tabs.length) {
-    state.tabs.push(blankTab())
-    state.tabIndex = 0
-    await showBlank()
+    state.tabIndex = -1
+    await showEmpty()
     return true
   }
 
@@ -4666,7 +4736,8 @@ async function closeTab (i, { record = true } = {}) {
   // The one that was showing has gone; its neighbour takes the screen.
   state.tabIndex = Math.min(i, state.tabs.length - 1)
   const next = state.tabs[state.tabIndex]
-  if (!next.path) { await showBlank(); return true }
+  if (next.memory) { await showMemoryDocument(next); return true }
+  if (isNewTab(next)) { closeCurrentNote(); copilot.setNote(''); rememberTabs(); return true }
   await openNote(next.path, { history: false, place: tabPlace(next) })
   revealInTree(next.path)
   return true
@@ -4699,16 +4770,11 @@ async function reopenTab () {
   revealInTree(snap.tab.path)
 }
 
-/** Put the pane back to its empty state, with the current tab holding nothing. */
-async function showBlank () {
-  const tab = activeTab()
-  if (tab?.memory) return showMemoryDocument(tab)
+/** Put the pane back to its empty state when no tab is showing. */
+async function showEmpty () {
   /* Edits are saved, not dropped, before the note is abandoned — the same
-     promise selectTab and closeTab make. Without it a ⌘T fired while the
-     merge panel was up (which has refused the autosave) would lose the buffer
-     that autosave was supposed to protect. */
+     promise selectTab and closeTab make. */
   if (state.dirty && !await saveNow()) return false
-  if (tab) tab.path = null
   closeCurrentNote()
   copilot.setNote('')
   rememberTabs()
@@ -6354,7 +6420,11 @@ function paintFlashcardBank () {
 function closeFlashcardStudy () {
   if (el.fcStudy.hidden) return
   el.fcStudy.hidden = true
+  const study = fcStudy
   fcStudy = null
+  /* Answers owed to the vault go before the overlay is gone — the same barrier
+     the language session closes behind. */
+  study?.sink?.settle().catch((error) => reportFailure('saving review', error))
   el.studyStart.focus()
 }
 
@@ -6381,6 +6451,18 @@ function answerFlashcardStudy (selected) {
   const right = selected === card.correct
   if (right) study.correct++
   else study.wrong++
+
+  /* Multiple choice is a recognise card: a right answer is GOOD, a wrong one
+     AGAIN — and an AGAIN comes back inside the session, because a card just
+     failed is one not learned yet. The store's id is the card's own, so the
+     same schedule follows the question wherever the bank's file moves. */
+  const now = Date.now()
+  const grade = right ? GOOD : AGAIN
+  const next = gradeCard(study.states[card.id], grade, now, state.cfg.studyRetention)
+  study.states[card.id] = next
+  study.sink?.offer({ id: card.id, at: now, grade, state: next })
+  study.done++
+  if (!right) study.queue.push(card)
   const buttons = [...el.fcStudyOptions.querySelectorAll('button')]
   buttons.forEach((button, index) => {
     button.disabled = true
@@ -6406,9 +6488,16 @@ function paintFlashcardStudy () {
   if (!card) {
     el.fcStudyCard.hidden = true
     el.fcStudyFinished.hidden = false
-    el.fcStudyProgress.textContent = `${study.queue.length} cards · ${study.tag || 'All areas'}`
+    /* A session that answered nothing was one with nothing due — say so, rather
+       than reporting a score of zero as though cards had been studied. */
+    el.fcStudyProgress.textContent = study.done
+      ? `${study.done} reviewed · ${study.tag || 'All areas'}`
+      : 'Nothing due — every card is scheduled for later'
     el.fcStudyScore.textContent = `${study.correct} correct · ${study.wrong} missed`
-    el.fcStudyAgain.focus()
+    el.fcStudyScore.hidden = !study.done
+    el.fcStudyAgain.hidden = !study.done
+    if (study.done) el.fcStudyAgain.focus()
+    else el.fcStudyClose.focus()
     return
   }
 
@@ -6446,27 +6535,60 @@ function resetFlashcardStudy (tag = fcStudy?.tag || '') {
   const study = fcStudy
   if (!study) return
   study.tag = tag
-  study.queue = buildFlashcardQueue(study.cards, tag)
+  const wanted = tag.replace(/^#/, '').toLocaleLowerCase()
+  const pool = wanted
+    ? study.cards.filter((card) => (card.tags || []).some((item) => item.toLocaleLowerCase() === wanted))
+    : study.cards
+  study.queue = buildQueue(pool, study.states, Date.now(), { newPerDay: state.cfg.studyNewPerDay })
   study.index = 0
+  study.done = 0
   study.correct = 0
   study.wrong = 0
   paintFlashcardStudyTags()
   paintFlashcardStudy()
 }
 
-function openFlashcardStudy (tag = '') {
-  if (!viewingFlashcardBank()) return
-  const cards = parseFlashcards(noteText())
+/* The deck a session is built from: this bank's cards, or every .fc bank in
+   the vault — the same split the language study's own/vault-wide modes make. */
+async function dealFlashcardStudy (cards, title, tag = '') {
   if (!cards.length) { toast('Add at least one complete flashcard before studying.'); return }
-  fcStudy = { cards, tag, queue: [], index: 0, correct: 0, wrong: 0, answered: false }
-  el.fcStudyTitle.textContent = `Study ${state.current.name}`
+  let states = {}
+  try {
+    states = await api.review.all()
+  } catch (error) {
+    reportFailure('loading review state', error)
+  }
+  fcStudy = {
+    cards, tag, queue: [], index: 0, done: 0,
+    correct: 0, wrong: 0, answered: false, states,
+    sink: makeReviewSink({ record: api.review.record, unrecord: api.review.unrecord })
+  }
+  el.fcStudyTitle.textContent = title
   el.fcStudy.hidden = false
   resetFlashcardStudy(tag)
 }
 
+function openFlashcardStudy (tag = '') {
+  if (!viewingFlashcardBank()) return
+  const cards = flashcardCards(noteText(), state.current.path)
+  dealFlashcardStudy(cards, `Study ${state.current.name}`, tag)
+    .catch((error) => reportFailure('flashcard study', error))
+}
+
+/* Every bank at once: the vault-wide counterpart of the study button, reached
+   from the command palette wherever the user happens to be. */
+function openFlashcardStudyAll () {
+  api.flashcards.banks()
+    .then((banks) => dealFlashcardStudy(
+      banks.flatMap((bank) => flashcardCards(bank.text, bank.path)),
+      'Study all due flashcards'
+    ))
+    .catch((error) => reportFailure('flashcard study', error))
+}
+
 /* The button beside the tabs serves whichever dedicated study document is on
-   screen: language tables keep their scheduled recall flow; .fc banks use the
-   shuffled multiple-choice cycle above. */
+   screen: language tables run their typed-answer session; .fc banks run the
+   scheduled multiple-choice queue above. Both keep the same calendar. */
 el.studyStart.addEventListener('click', () => {
   if (viewingFlashcardBank()) { openFlashcardStudy(); return }
   ensureLanguageRuntime()
@@ -7057,6 +7179,41 @@ function applyOutlineCollapse () {
     }
     parents.push({ level: item.heading.level, collapsed: folded })
   }
+  paintOutlineFoldToggle()
+}
+
+/**
+ * Which way the outline's fold-all points, and whether there is anything for
+ * it to do — the same contract the tree's keeps. A heading row is foldable
+ * only when it has children, so an outline of flat rows leaves the button
+ * hidden outright, as does every document the pane cannot map: a PDF's
+ * contents rows carry no folds, and the other kinds hold no headings at all.
+ */
+function paintOutlineFoldToggle () {
+  if (!el.outlineFoldAll) return
+  const foldable = outlineRows.filter((row) => row.hasChildren)
+  const collapsed = collapsedOutlineKeys()
+  const anyOpen = foldable.some((row) => !collapsed.has(row.key))
+  el.outlineFoldAll.hidden = !outlineOpen() || !foldable.length
+  el.outlineFoldAll.classList.toggle('is-shut', !anyOpen)
+  const label = anyOpen ? 'Collapse all headings' : 'Expand all headings'
+  el.outlineFoldAll.title = label
+  el.outlineFoldAll.setAttribute('aria-label', label)
+}
+
+/** Every foldable heading shut, or every one open — whichever the map is not. */
+function toggleAllOutline () {
+  const foldable = outlineRows.filter((row) => row.hasChildren)
+  if (!foldable.length) return
+  const collapsed = collapsedOutlineKeys()
+  const shutting = foldable.some((row) => !collapsed.has(row.key))
+  /* The set answers per heading, so "all" is written the same way the reader
+     would by hand: shutting adds every foldable key, opening clears them —
+     the branch keeps its smaller arrangement either way once it reopens. */
+  if (shutting) for (const row of foldable) collapsed.add(row.key)
+  else collapsed.clear()
+  applyOutlineCollapse()
+  markOutlinePlace()
 }
 
 /* A current heading can sit inside a folded branch. In that case the visible
@@ -7177,9 +7334,14 @@ function setPaneBelow (pane, remember = true) {
      split button, or the shortcut that opened it. Selection follows focus in
      this tablist, and a tab that closed the strip it lives in would take the
      focus with it. */
+  const opening = !paneBelow()
   state.paneBelow = PANES[pane] && sidebarPaneAvailable(pane) ? pane : null
   if (remember) setSetting('paneBelow', state.paneBelow || undefined)
-  if (state.paneBelow) setPaneBelowHeight(savedPaneBelowHeight(state.paneBelow), false)
+  /* The divider's height is the split's own, not the pane's: choosing a
+     different tab leaves it where it is. A saved height is read back only
+     when the panel reappears — the live --pane-below already carries it
+     through every switch. */
+  if (state.paneBelow && opening) setPaneBelowHeight(savedPaneBelowHeight(), false)
   renderPanes()
 }
 
@@ -7217,6 +7379,7 @@ function renderPanes () {
   paintOutlineTab()
   if (below) PANES[below].paint()
   paintFoldToggle()
+  paintOutlineFoldToggle()
 }
 
 el.paneSplitToggle.addEventListener('click', () => {
@@ -7236,23 +7399,43 @@ el.paneTabsBelow.addEventListener('click', (event) => {
 const PANE_BELOW_DEFAULT = 0.4
 const PANE_BELOW_MIN = 0.15
 const PANE_BELOW_MAX = 0.75
+/* Where Expand takes it: most of the sidebar, past the drag's own ceiling —
+   a drag that could reach 90% would leave the tree two rows tall too easily,
+   while a chosen expansion says exactly that. */
+const PANE_BELOW_EXPANDED = 0.88
 
-function savedPaneBelowHeight (pane = paneBelow()) {
-  const saved = pane ? state.cfg.paneBelowHeights?.[pane] : 0
-  return Number(saved) ||
-    Number(state.cfg.paneBelowHeight) || PANE_BELOW_DEFAULT
+function savedPaneBelowHeight () {
+  return Number(state.cfg.paneBelowHeight) || PANE_BELOW_DEFAULT
+}
+
+function paneBelowShare () {
+  return parseFloat(el.sidebar.style.getPropertyValue('--pane-below')) / 100 || PANE_BELOW_DEFAULT
 }
 
 function setPaneBelowHeight (share, remember = true) {
-  const held = Math.min(PANE_BELOW_MAX, Math.max(PANE_BELOW_MIN, share))
+  const held = Math.min(PANE_BELOW_EXPANDED, Math.max(PANE_BELOW_MIN, share))
   el.sidebar.style.setProperty('--pane-below', `${held * 100}%`)
+  el.paneSplitGrip.setAttribute('aria-valuenow', String(Math.round(held * 100)))
   if (remember) {
-    const pane = paneBelow()
-    const heights = pane
-      ? { ...(state.cfg.paneBelowHeights || {}), [pane]: held }
-      : { ...(state.cfg.paneBelowHeights || {}) }
-    state.cfg = { ...state.cfg, paneBelowHeight: held, paneBelowHeights: heights }
-    api.config.set({ paneBelowHeight: held, paneBelowHeights: heights })
+    state.cfg = { ...state.cfg, paneBelowHeight: held }
+    api.config.set({ paneBelowHeight: held })
+  }
+}
+
+/* The share Expand left behind — what Collapse puts back. In memory rather
+   than config: expansion is a moment's need, not a shape the panel keeps. */
+/** @type {number | null} */
+let paneBelowHeld = null
+
+/** Expand the lower panel to fill the sidebar, or put back what it had. */
+function togglePaneBelowExpand () {
+  if (!paneBelow()) return
+  if (paneBelowShare() >= PANE_BELOW_EXPANDED - 0.01 && paneBelowHeld !== null) {
+    setPaneBelowHeight(paneBelowHeld)
+    paneBelowHeld = null
+  } else {
+    paneBelowHeld = paneBelowShare()
+    setPaneBelowHeight(PANE_BELOW_EXPANDED, false)
   }
 }
 
@@ -7267,8 +7450,10 @@ el.paneSplitGrip.addEventListener('pointerdown', (event) => {
 
   const shareAt = (clientY) => {
     const box = el.sidebar.getBoundingClientRect()
-    // Measured from the bottom, because that is the edge the lower panel owns.
-    return box.height ? (box.bottom - clientY) / box.height : PANE_BELOW_DEFAULT
+    /* Measured from the bottom, because that is the edge the lower panel owns.
+       A drag stays under PANE_BELOW_MAX; the wider room above it is Expand's,
+       which a pointer could only reach by leaving the tree two rows tall. */
+    return box.height ? Math.min(PANE_BELOW_MAX, (box.bottom - clientY) / box.height) : PANE_BELOW_DEFAULT
   }
   const move = (moved) => setPaneBelowHeight(shareAt(moved.clientY), false)
   const done = (ended) => {
@@ -7296,8 +7481,9 @@ function fitPaneBelow () {
 el.paneSplitGrip.addEventListener('dblclick', fitPaneBelow)
 
 el.paneSplitGrip.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') { togglePaneBelowExpand(); event.preventDefault(); return }
   const step = event.shiftKey ? 0.08 : 0.02
-  const now = parseFloat(el.sidebar.style.getPropertyValue('--pane-below')) / 100 || PANE_BELOW_DEFAULT
+  const now = paneBelowShare()
   if (event.key === 'ArrowUp') setPaneBelowHeight(now + step)
   else if (event.key === 'ArrowDown') setPaneBelowHeight(now - step)
   else return
@@ -7389,6 +7575,10 @@ function sameHeadings (a, b) {
 function renderOutline () {
   // Before the early return: the tab is on screen in either pane.
   paintOutlineTab()
+  /* So is the fold-all beside it — and when the outline is not the pane on
+     show, hiding it here is what lets the branches below stay silent about
+     a control they never reach. */
+  paintOutlineFoldToggle()
   if (!outlineOpen()) return
   if (viewingPdf()) { renderPdfOutline(); return }
 
@@ -7424,6 +7614,7 @@ function renderOutline () {
                   ? 'A notebook has no outline here.'
                   : 'A website has no outline here.'
     el.outlineList.replaceChildren(empty)
+    paintOutlineFoldToggle()
     return
   }
 
@@ -7466,6 +7657,7 @@ function renderOutline () {
     empty.className = 'outline-empty'
     empty.textContent = state.current ? 'This note has no headings.' : 'No note is open.'
     el.outlineList.append(empty)
+    paintOutlineFoldToggle()
     return
   }
 
@@ -7545,6 +7737,83 @@ let pdfOutlineRows = []
 let pdfMarkedSection = -1
 let pdfMarkedPage = -1
 
+/* ------------------------------------------------- highlights into notes
+
+   A highlight is a quotation whose source is a place in a document. Keeping it
+   as a note keeps both halves: the passage as a blockquote, and the place as
+   the same `[[doc.pdf#page=N]]` link the embed syntax already understands, so
+   the note can always walk back to the paper it came from. */
+
+/**
+ * The Markdown a passage is saved as: the quote, then the link back to the
+ * page it was read on.
+ */
+function pdfMarkBlock (mark, pdfPath) {
+  const page = mark.rects?.[0]?.page || 1
+  const quote = String(mark.text || '')
+    .split('\n').map((line) => `> ${line}`).join('\n')
+  return `${quote}\n\n— [[${pdfPath}#page=${page}]]`
+}
+
+/** The note a PDF's passages gather into by default: a companion beside it. */
+function pdfHighlightsPath (pdfPath) {
+  const dir = pdfPath.split('/').slice(0, -1).join('/')
+  const base = (pdfPath.split('/').pop() || 'document').replace(/\.pdf$/i, '')
+  return `${dir ? `${dir}/` : ''}${base} highlights.md`
+}
+
+/**
+ * Append the mark to `path` — creating the file when it is not there yet, so
+ * "the highlights note" and "any note I pick" are one operation.
+ *
+ * The write carries the stamp of the version read: a note that moved while
+ * the picker was open is refused rather than clobbered, and the user is told
+ * instead of being handed a silent merge.
+ */
+async function appendMarkToNote (mark, path) {
+  const block = pdfMarkBlock(mark, state.current?.path || '')
+  let head = ''
+  let expect = null
+  try {
+    const got = await api.file.readStamped(path)
+    head = got.text || ''
+    expect = got.stamp
+  } catch {
+    /* Absent or unreadable-as-text. A missing file is the create half of this
+       action; anything else (a refused path, a binary) stops it — writing
+       into a file we could not read would blindside whatever it holds. */
+    const exists = state.files.some((item) => item.path === path)
+    if (exists) { toast(`Could not read ${docLabel(path)}.`); return }
+  }
+  const body = head.trimEnd()
+  const text = `${body}${body ? '\n\n' : ''}${block}\n`
+  try {
+    const wrote = await api.file.write(path, text, expect ? { expect } : null)
+    if (wrote?.stale || wrote === false) {
+      toast(`${docLabel(path)} changed while the passage was being added — nothing was written.`)
+      return
+    }
+    toast(`Added to ${docLabel(path)}.`)
+  } catch (error) {
+    reportFailure('saving the passage', error)
+  }
+}
+
+/** The mark as a card draft: the passage becomes the question the reader
+    shapes, and the explanation keeps where it came from. The path is taken
+    before the bank opens — afterwards `state.current` is the bank, not the
+    paper. */
+function openMarkAsFlashcard (mark, bankPath) {
+  const page = mark.rects?.[0]?.page || 1
+  const pdfPath = state.current?.path || ''
+  openNote(bankPath).then(() => {
+    openFlashcardComposer(null, {
+      question: mark.text || '',
+      explanation: `From [[${pdfPath}#page=${page}]]`
+    })
+  }).catch((error) => reportFailure('opening the bank', error))
+}
+
 function renderPdfOutline () {
   outlineHeadings = []
   outlineRows = []
@@ -7556,6 +7825,7 @@ function renderPdfOutline () {
   // next note render must not be talked out of rebuilding them.
   outlineSig = ''
   el.outlineList.replaceChildren()
+  paintOutlineFoldToggle()
 
   /* `openViewed` claims the tab before the route-specific viewer has loaded.
      The outline is painted during that hand-off, while `ensurePdf` may still
@@ -7645,6 +7915,10 @@ function renderPdfOutline () {
           // Electron's clipboard: `navigator.clipboard` refuses when the
           // window is not focused, and the old optional chain hid the refusal.
           { label: 'Copy passage', run: () => api.copy(mark.text) },
+          /* A passage is only worth keeping where it can be found again —
+             the note gets the quote and the page link, the card the question. */
+          { label: 'Save to a note…', run: () => openOverlay('append-to', { mark }) },
+          { label: 'Make a flashcard…', run: () => openOverlay('flashcard-to', { mark }) },
           {
             label: 'Ask the copilot',
             run: () => {
@@ -8758,7 +9032,7 @@ function dressCodeBlocks (root) {
       tools.classList.add('is-floating')
       wrap.prepend(tools)
     }
-    tools.append(codeCopilotButton(lang, source), copyButton(source))
+    tools.append(codeCopilotButton(lang, source), codeCopyButton(lang, source))
   }
 
   startReadingHighlights(root)
@@ -9082,7 +9356,17 @@ function updateViewControl () {
         : `${VIEW_NAMES[view]} view (⌘${VIEWS.indexOf(/** @type {string} */ (view)) + 1})`
   }
   el.lockMark.hidden = !locked
+  /* The switch said out loud: pressing a button announces the press but not
+     the mode it moved to, so a change is spoken here — but only a change. The
+     boot-time pass that marks the resting view announces nothing. */
+  if (announcedView && announcedView !== state.view) {
+    el.viewAnnounce.textContent = `${VIEW_NAMES[state.view]} view`
+  }
+  announcedView = state.view
 }
+
+/** @type {string | null} */
+let announcedView = null
 
 /** The locked set, written down. One place, so the config and `state.cfg`
  *  cannot end up disagreeing about which files are held. */
@@ -9315,6 +9599,7 @@ el.reading.addEventListener('click', (e) => {
 /** Keep palette-only workflows here; menus, tab menus and Settings own their direct actions. */
 const COMMANDS = [
   { id: 'new-file', title: 'New file…', scope: 'vault', key: '›' },
+  { id: 'open-beside', title: 'Open document beside this one', scope: 'file', keywords: 'side pane split second reference' },
   { id: 'recover-document', title: 'Recover this document…', scope: 'vault', keywords: 'history versions backup restore draft conflict' },
   { id: 'recovery-inbox', title: 'Recovery inbox…', scope: 'vault', keywords: 'failed save conflict unsaved restore draft' },
   { id: 'vault-health', title: 'Open logs.md', scope: 'vault', keywords: 'health report check scan broken links missing embeds citations empty duplicate output' },
@@ -9333,6 +9618,7 @@ const COMMANDS = [
   { id: 'manage-packages', title: 'Manage code packages…', scope: 'markdown', keywords: 'python rust javascript typescript node go julia pip npm install dependencies environment' },
     { id: 'toggle-spellcheck', title: 'Toggle spellcheck', scope: 'markdown' },
     { id: 'insert-template', title: 'Insert template…', scope: 'markdown' },
+    { id: 'insert-citation', title: 'Insert citation…', scope: 'markdown', keywords: 'cite reference bibliography bibtex paper' },
   { id: 'export-pdf', title: 'Export as PDF…', scope: 'markdown' },
   { id: 'export-html', title: 'Export as HTML…', scope: 'markdown' },
   { id: 'export-markdown', title: 'Export as Markdown…', scope: 'markdown' },
@@ -9341,9 +9627,11 @@ const COMMANDS = [
     { id: 'browse-tags', title: 'Browse tags…', scope: 'vault' },
   { id: 'settings', title: 'Settings…', key: '⌘,', keywords: 'preferences options configuration' },
       { id: 'open-recent-vault', title: 'Open recent vault…', keywords: 'switch folder workspace' },
-  { id: 'review-stats', title: 'Review statistics…', scope: 'language' },
-    { id: 'study-all', title: 'Study all due words', scope: 'language' },
+  { id: 'review-stats', title: 'Review statistics…', scope: 'study' },
+    { id: 'study-all', title: 'Study all due words', scope: 'studywords' },
+    { id: 'study-flashcards', title: 'Study all due flashcards', scope: 'studyfc', keywords: 'quiz cards review bank' },
     { id: 'import-cards', title: 'Import cards from CSV…', scope: 'language' },
+    { id: 'export-cards', title: 'Export cards as CSV…', scope: 'language', keywords: 'anki spreadsheet deck vocabulary' },
   { id: 'check-for-updates', title: 'Check for updates…', keywords: 'upgrade version download release' },
   { id: 'report-problem', title: 'Report a problem…', keywords: 'bug issue github crash broken support' },
     { id: 'shortcuts', title: 'Keyboard shortcuts…', key: '⌘/' },
@@ -9386,6 +9674,15 @@ function commandList () {
     vault: () => Boolean(state.vault),
     text: () => Boolean(state.current && isEditableTextPath(state.current.path)),
     language: () => viewingLanguageTable(),
+    /* The vault-wide study commands describe data that outlives the open
+       document — a vault holding tables or banks owes them wherever the user
+       is standing, not only over the file that happens to be open. */
+    studywords: () => viewingLanguageTable() ||
+      state.files.some((item) => isLanguageTablePath(item.path)),
+    studyfc: () => viewingFlashcardBank() ||
+      state.files.some((item) => isFlashcardBankPath(item.path)),
+    study: () => viewingLanguageTable() || viewingFlashcardBank() ||
+      state.files.some((item) => isLanguageTablePath(item.path) || isFlashcardBankPath(item.path)),
     file: () => Boolean(state.current),
     // A page, and one that has actually arrived: neither command means
     // anything over a website file still waiting to be told an address — or
@@ -9446,6 +9743,12 @@ function commandList () {
   if (heldHere()) {
     commands.push({ id: 'edit-here', title: 'Edit here (take it over from the other window)' })
   }
+  /* The lower panel's third act — after drag and double-click, the verb a
+     keyboard or a palette reader reaches for when a deep outline wants the
+     whole sidebar. Only offered while there is a lower panel to expand. */
+  if (paneBelow()) {
+    commands.push({ id: 'expand-pane', title: 'Expand or collapse the lower panel', keywords: 'sidebar outline links info taller bigger resize' })
+  }
   if (viewingWhiteboard()) {
     commands.push(
       { id: 'whiteboard-add-note', title: 'Add note to whiteboard…' },
@@ -9498,19 +9801,90 @@ function templateItems () {
  *
  * Deliberately few, and all answerable from what the app already knows — a
  * template language is a program, and this is a note with today's date in it.
- * `{{title}}` is the note being written into, not the template.
+ * `{{title}}` is the note being written into, not the template. `prompts` is
+ * the answers collected for `{{prompt:Label}}` — see insertTemplate.
  */
-function fillTemplate (text, title) {
+function fillTemplate (text, title, prompts = {}) {
   const now = new Date()
   const pad = (n) => String(n).padStart(2, '0')
+  const day = (offset) => {
+    const d = new Date(now)
+    d.setDate(d.getDate() + offset)
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+  }
+  /* The ISO week: the Thursday of this week fixes both the week number and
+     the year it belongs to, which is why a plain "days so far ÷ 7" gets the
+     turn of the year wrong. */
+  const thursday = new Date(now)
+  thursday.setDate(now.getDate() + (3 - ((now.getDay() + 6) % 7)))
+  const week = Math.ceil(1 + (thursday.getTime() - new Date(thursday.getFullYear(), 0, 4).getTime()) / (7 * 864e5))
   const values = {
-    date: `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`,
+    date: day(0),
+    yesterday: day(-1),
+    tomorrow: day(1),
     time: `${pad(now.getHours())}:${pad(now.getMinutes())}`,
+    weekday: now.toLocaleDateString(undefined, { weekday: 'long' }),
+    week: `${thursday.getFullYear()}-W${pad(week)}`,
     title
   }
-  return String(text).replace(/\{\{\s*(date|time|title)\s*\}\}/gi, (whole, name) => {
-    const value = values[name.toLowerCase()]
-    return value === undefined ? whole : value
+  return String(text).replace(
+    /\{\{\s*(date|yesterday|tomorrow|time|weekday|week|title)\s*\}\}|\{\{\s*prompt\s*:\s*([^}]+?)\s*\}\}/gi,
+    (whole, name, prompt) => {
+      if (prompt !== undefined) {
+        const answer = prompts[prompt.trim().toLowerCase()]
+        return answer === undefined ? whole : answer
+      }
+      const value = values[name.toLowerCase()]
+      return value === undefined ? whole : value
+    })
+}
+
+/** The `{{prompt:Label}}` questions a template asks, in order, once each. */
+function templatePrompts (text) {
+  const seen = new Set()
+  const out = []
+  for (const m of String(text).matchAll(/\{\{\s*prompt\s*:\s*([^}]+?)\s*\}\}/gi)) {
+    const label = m[1].trim().toLowerCase()
+    if (label && !seen.has(label)) { seen.add(label); out.push(m[1].trim()) }
+  }
+  return out
+}
+
+/**
+ * Ask for a template's `{{prompt:…}}` values before it is inserted.
+ * Answers with the map, or null when the dialog is cancelled — a cancelled
+ * question inserts nothing rather than inserting the braces unanswered.
+ */
+function askTemplatePrompts (labels) {
+  return new Promise((resolve) => {
+    const dialog = document.createElement('dialog')
+    dialog.className = 'workspace-tools template-prompts'
+    const heading = document.createElement('h2')
+    heading.textContent = 'This template asks a few things first.'
+    const inputs = new Map()
+    dialog.append(heading)
+    for (const label of labels) {
+      const row = document.createElement('label')
+      row.textContent = label[0].toUpperCase() + label.slice(1)
+      const input = document.createElement('input')
+      input.setAttribute('aria-label', label)
+      inputs.set(label.toLowerCase(), input)
+      row.append(input)
+      dialog.append(row)
+    }
+    const insert = document.createElement('button')
+    insert.textContent = 'Insert template'
+    const cancel = document.createElement('button')
+    cancel.textContent = 'Cancel'
+    const finish = (values) => { dialog.close(); resolve(values) }
+    insert.onclick = () => finish(Object.fromEntries([...inputs].map(([k, i]) => [k, i.value])))
+    cancel.onclick = () => finish(null)
+    dialog.addEventListener('cancel', () => resolve(null))
+    dialog.append(insert, cancel)
+    document.body.append(dialog)
+    dialog.addEventListener('close', () => dialog.remove())
+    dialog.showModal()
+    inputs.values().next().value?.focus()
   })
 }
 
@@ -9527,7 +9901,10 @@ async function insertTemplate (path) {
   const title = state.current?.path
     ? state.current.path.split('/').pop().replace(/\.md$/i, '')
     : ''
-  const filled = fillTemplate(text, title)
+  const labels = templatePrompts(text)
+  const prompts = labels.length ? await askTemplatePrompts(labels) : {}
+  if (prompts === null) return
+  const filled = fillTemplate(text, title, prompts)
   // Inserting is editing, and the palette is open in the reading view too.
   const view = await ensureEditor()
   const at = view.state.selection.main
@@ -9542,6 +9919,13 @@ async function insertTemplate (path) {
 
 function openOverlay (mode, meta = {}) {
   if (!state.vault && !VAULTLESS.has(mode)) { connectVault(); return }
+  /* At a window narrow enough for the side panels to be drawers, one left
+     open sits over this panel — --z-drawer outranks --z-modal — with the
+     field it just offered underneath. Opening the panel takes the drawer
+     away first, the same trade the Copilot toggle already makes. */
+  if (window.innerWidth <= 1040 && el.app.dataset.side === 'open') closeSidePane()
+  if (window.innerWidth <= 760 && sidebarOpen()) toggleSidebar(false)
+  if (window.innerWidth <= 760 && el.app.dataset.ai === 'open') copilot.close()
   // One picker opening straight over another never reaches closeOverlay, so
   // the outgoing one's preview is undone here instead.
   revertPreview(state.overlay?.mode)
@@ -9587,13 +9971,10 @@ function openOverlay (mode, meta = {}) {
   // Only the vault search has switches to qualify, and only it can rewrite.
   const searching = mode === 'search'
   el.panelChips.hidden = !searching
-  el.panelFilterToggle.hidden = !searching
   el.panelFilterPresets.hidden = !searching
   el.panelSaveSearch.hidden = !searching
   el.panelReplace.hidden = !(searching && replacing)
   el.panel.classList.toggle('is-search', searching)
-  el.panel.classList.remove('filters-open')
-  el.panelFilterToggle.setAttribute('aria-expanded', 'false')
   // A pattern left half-typed dimmed the field; the panel opening again is a
   // fresh query, so it must not open already looking wrong.
   el.panel.classList.remove('is-bad')
@@ -9624,7 +10005,8 @@ function closeOverlay () {
   revertPreview(state.overlay?.mode)
   state.overlay = null
   el.overlay.hidden = true
-  el.panel.classList.remove('is-search', 'is-searching', 'filters-open')
+  el.panel.classList.remove('is-search', 'is-searching')
+  searchPreviewArmed = false
   previewSearchResult()
   el.panelList.removeAttribute('aria-busy')
   el.panelInput.removeAttribute('aria-activedescendant')
@@ -9687,16 +10069,6 @@ el.panelSaveSearch.addEventListener('click', () => {
   if (!query) return
   toast(savedSearches.save(query) ? 'Saved as a smart folder' : 'That search is already saved')
   el.panelInput.focus()
-})
-
-/* At a narrow zoom the qualification switches move under one Filters button,
-   leaving the query field a useful width. On a wide panel CSS keeps the
-   switches visible and this button out of the way. */
-el.panelFilterToggle.addEventListener('click', () => {
-  const open = !el.panel.classList.contains('filters-open')
-  el.panel.classList.toggle('filters-open', open)
-  el.panelFilterToggle.setAttribute('aria-expanded', String(open))
-  if (!open) el.panelInput.focus()
 })
 
 function paintSearchPresets () {
@@ -9763,80 +10135,6 @@ el.panelFilterPresets.addEventListener('click', (event) => {
   el.panelInput.setSelectionRange(el.panelInput.value.length, el.panelInput.value.length)
 })
 
-/** Subsequence match; consecutive hits and word starts score higher. */
-/**
- * How well `text` answers `query`, or null if it does not answer it at all.
- *
- * Whole runs, not scattered letters. A subsequence matcher — every letter of
- * the query somewhere in the text, in order — finds "gre" in "Guernsey" and in
- * "Singapore", and a list where four real answers sit among a dozen
- * coincidences is a list that has to be read rather than glanced at. Every
- * term has to appear whole.
- *
- * The looseness that is kept is the useful kind: the query is split on spaces
- * and the terms may appear in any order and anywhere apart, so "index reading"
- * still finds "Reading Index" and "gre" finds "St. Vincent & Grenadines".
- *
- * Where a term lands is most of the score — the start of the name beats the
- * start of a word beats the middle of one — because that is the difference
- * between the thing you meant and the thing that merely contains it.
- */
-const WORD_EDGE = /[\s/\\_\-–—.,:;([{&]/
-
-/* The query, split up. One pass of the quick switcher runs `fuzzy` against
-   every note in the vault with the *same* query, and each call was lowercasing
-   and re-splitting it — thousands of times per keystroke for a string that is
-   the one thing common to all of them. One entry is the whole cache this
-   wants: the pass moves on when the query changes. */
-/** @type {any} */
-let termCache = { query: null, terms: [] }
-
-function queryTerms (query) {
-  const text = String(query || '')
-  if (termCache.query !== text) {
-    termCache = { query: text, terms: text.toLowerCase().split(/\s+/).filter(Boolean) }
-  }
-  return termCache.terms
-}
-
-function fuzzy (query, text) {
-  const terms = queryTerms(query)
-  if (!terms.length) return { score: 0, hits: [] }
-  const t = String(text || '').toLowerCase()
-
-  const hits = []
-  let score = 0
-
-  for (const term of terms) {
-    const at = t.indexOf(term)
-    if (at === -1) return null
-
-    const wordStart = at === 0 || WORD_EDGE.test(t[at - 1])
-    score += 10 + (at === 0 ? 8 : wordStart ? 4 : 0)
-    // Earlier is better, but only ever as a tie-break between equals — and it
-    // stops counting past a point, so one long name does not outrank another
-    // purely for being longer.
-    score -= Math.min(at, 40) * 0.05
-
-    for (let i = at; i < at + term.length; i++) hits.push(i)
-  }
-
-  // A short name that matches is a better answer than a long one carrying the
-  // same run somewhere inside it.
-  score -= Math.max(0, t.length - query.length) * 0.02
-  return { score, hits }
-}
-
-/**
- * An item against the query: its own label, or failing that the short code
- * shown beside it.
- *
- * The codes are on screen — GR, GD, VC down the right-hand side of the country
- * list — so they are a thing people type, and a list that displays a key it
- * refuses to match on is a list that lies about itself. A code match scores
- * below every label match and marks nothing, because the letters it matched
- * are not in the text being shown.
- */
 /* Every note as something the switcher can score, built once per tree.
 
    ⌘O deliberately does not debounce — the list is in memory and the reader is
@@ -9856,74 +10154,77 @@ function switcherItems () {
   return switcherCache.items
 }
 
-function matchItem (query, item) {
-  const code = item.code?.toLowerCase()
-  /* Typed in full, a code is not a guess. Someone entering "GD" at a list whose
-     right-hand column is codes means Grenada, and should not be answered first
-     with the United Kin(gd)om — which is a real match on the label, just not
-     the one they asked for. */
-  if (code && code === query.trim().toLowerCase()) return { score: 1000, hits: [] }
-
-  const onLabel = fuzzy(query, item.label)
-  if (onLabel) return onLabel
-  /* Palette synonyms find the command without highlighting letters that are
-     not in its visible title. They rank below a title match, every time. */
-  if (item.keywords) {
-    const onKeywords = fuzzy(query, item.keywords)
-    if (onKeywords) return { score: onKeywords.score - 20, hits: [] }
+/* The notes a PDF passage can join. Plain Markdown only: a quote block in a
+   .fc bank parses as a broken card, and a .lang file is a table, not prose —
+   offering either would write something that means nothing where it lands.
+   The companion "highlights" note leads the list, and is offered whether or
+   not it exists yet: picking a name that is not a file is the create half of
+   the action. */
+function appendTargets () {
+  const items = []
+  const companion = viewingPdf() ? pdfHighlightsPath(state.current?.path || '') : ''
+  if (companion) {
+    const existing = state.files.some((item) => item.path === companion)
+    items.push({
+      path: companion,
+      name: docLabel(companion),
+      label: existing ? docLabel(companion) : `${docLabel(companion)} — new`,
+      dir: companion.split('/').slice(0, -1).join('/')
+    })
   }
-  if (!code) return null
-  const onCode = fuzzy(query, item.code)
-  return onCode ? { score: onCode.score - 100, hits: [] } : null
+  for (const item of state.files) {
+    if (item.path === companion) continue
+    if (!NOTE_EXT.test(item.path) || isLanguageTablePath(item.path) || isFlashcardBankPath(item.path)) continue
+    items.push({ ...item, label: item.name })
+  }
+  return items
 }
 
-function markHits (text, hits) {
-  const set = new Set(hits)
-  const frag = document.createDocumentFragment()
-  let buf = ''
-  let marking = false
-
-  const flush = () => {
-    if (!buf) return
-    if (marking) {
-      const m = document.createElement('mark')
-      m.textContent = buf
-      frag.append(m)
-    } else frag.append(document.createTextNode(buf))
-    buf = ''
-  }
-
-  for (let i = 0; i < text.length; i++) {
-    const on = set.has(i)
-    if (on !== marking) { flush(); marking = on }
-    buf += text[i]
-  }
-  flush()
-  return frag
+/* The banks a flashcard can be made in — `.fc` files are the whole of it. */
+function flashcardTargets () {
+  return state.files
+    .filter((item) => isFlashcardBankPath(item.path))
+    .map((item) => ({ ...item, label: item.name }))
 }
 
-/**
- * The query's words, marked where they land in a result's snippet.
- *
- * `hit.text` is the matched line trimmed to a useful length but not to the
- * match, so which part of it answered the query was left to the reader; the
- * words come back from main — the parser that actually ran — rather than
- * being guessed at here, and an empty answer leaves the text unmarked.
- */
-function markWords (text, words) {
-  const list = Array.isArray(words) ? words.filter((word) => word) : []
-  if (!list.length) return document.createTextNode(text)
-  const lower = text.toLowerCase()
-  const marked = new Set()
-  for (const word of list) {
-    const needle = String(word).toLowerCase()
-    let at = lower.indexOf(needle)
-    while (at !== -1) {
-      for (let i = at; i < at + needle.length; i++) marked.add(i)
-      at = lower.indexOf(needle, at + needle.length)
-    }
+/* ---------------------------------------------------- the citation picker */
+
+/* Every reference in the note's bibliography, labelled the way a rendered
+   citation reads — author and year first, the title after, the key on the row
+   for the person who knows it. */
+async function openCitationPicker () {
+  const bib = state.resolveAsset?.('references.bib', state.current?.dir || '')
+  if (!bib) {
+    toast('No references.bib beside this note — add one to cite from it.')
+    return
   }
-  return marked.size ? markHits(text, marked) : document.createTextNode(text)
+  let entries
+  try {
+    entries = parseBibTeXCached(await api.file.read(bib))
+  } catch {
+    toast('The bibliography could not be read.')
+    return
+  }
+  if (!entries.size) {
+    toast('The bibliography has no entries to cite.')
+    return
+  }
+  openOverlay('cite', { entries })
+}
+
+/* `[@key]`, where the caret is. The palette opens from the reading view too,
+   so the note is put into its editor first — the same courtesy inserting a
+   template already extends. */
+async function insertCitation (key) {
+  const view = await ensureEditor()
+  const at = view.state.selection.main
+  const cite = `[@${key}]`
+  view.dispatch({
+    changes: { from: at.from, to: at.to, insert: cite },
+    selection: { anchor: at.from + cite.length },
+    scrollIntoView: true
+  })
+  view.focus()
 }
 
 let searchToken = 0
@@ -9952,6 +10253,7 @@ async function runOverlayQuery (query) {
   if (mode === 'switcher' || mode === 'commands' || mode === 'new-files' ||
       mode === 'new-source' || mode === 'tags' ||
       mode === 'themes' || mode === 'countries' || mode === 'move-to' ||
+      mode === 'append-to' || mode === 'flashcard-to' || mode === 'cite' ||
       mode === 'templates' || mode === 'vaults' || FONT_MODES[mode]) {
     const source = mode === 'vaults'
       ? (state.overlay.vaults || [])
@@ -9961,6 +10263,17 @@ async function runOverlayQuery (query) {
       ? (state.overlay.tags || []).map((t) => ({ ...t, label: `#${t.tag}` }))
       : mode === 'move-to'
       ? moveDestinations(state.overlay.paths || [])
+      : mode === 'append-to'
+      ? appendTargets()
+      : mode === 'flashcard-to'
+      ? flashcardTargets()
+      : mode === 'cite'
+      ? [...(state.overlay.entries || new Map())].map(([key, entry]) => ({
+          /* The key rides as the row's code: typed in full it outranks a
+             fuzzy label hit, the way a country code does. */
+          id: key, code: key,
+          label: `${citationLabel(entry, key)} — ${entry.title || key}`
+        }))
       : mode === 'templates'
       ? templateItems()
       : mode === 'switcher'
@@ -9981,7 +10294,7 @@ async function runOverlayQuery (query) {
                   : commandList())
                   .map((c) => ({ ...c, label: c.title }))
 
-    const scored = []
+    let scored = []
     for (const item of source) {
       const match = query ? matchItem(query, item) : { score: 0, hits: [] }
       if (match) scored.push({ item, ...match })
@@ -9990,6 +10303,19 @@ async function runOverlayQuery (query) {
        their curated serif, sans, mono grouping, and tags arrive most-used
        first, which is the order worth keeping. Filtering is a different
        matter: once there is a query, the best answer goes first. */
+    /* Commands at rest lead with what was run lately: the alphabetical list
+       answers "what can this do", and the Recent group answers "the thing I
+       did a moment ago", which is the commoner question. A recent id that no
+       longer applies — or no longer exists — is simply not in `scored`. */
+    if (mode === 'commands' && !query) {
+      const rank = new Map((state.cfg.recentCommands || []).map((id, i) => [id, i]))
+      const recent = scored.filter((s) => rank.has(s.item.id))
+      if (recent.length) {
+        recent.sort((a, b) => (rank.get(a.item.id) ?? 0) - (rank.get(b.item.id) ?? 0))
+        for (const s of recent) s.item.recent = true
+        scored = recent.concat(scored.filter((s) => !rank.has(s.item.id)))
+      }
+    }
     const curated = mode === 'themes' || mode === 'tags' || FONT_MODES[mode] ||
       (mode === 'commands' && !query)
     if (!curated || query) {
@@ -10016,7 +10342,7 @@ async function runOverlayQuery (query) {
     if (!query.trim()) {
       state.overlay.items = []
       state.overlay.index = 0
-      renderOverlayList('Type to search, or filter with type:pdf, type:highlight, tag:, path:, file:, or prop:.')
+      renderOverlayList('Type to search — note → type:note · pdf → type:pdf · highlight → type:highlight · tag → tag: · folder → path: · file → file: · property → prop:')
       return
     }
 
@@ -10070,6 +10396,16 @@ async function runOverlayQuery (query) {
       }
     )
     announceResults(state.overlay.items.length, results.length)
+    /* The document ⌘ may peek at is parsed and drawn with the results, so
+       holding the key over the top row is a swap of a finished picture, not
+       a wait for the file to open and rasterise. */
+    const peekable = state.overlay.items.find(({ item }) => item.kind === 'pdf' || item.kind === 'highlight')
+    if (peekable) {
+      const { item: peek } = peekable
+      previewPdfDoc(peek.path)
+        .then((doc) => peekCanvas(doc, peek.path, Math.min(Math.max(1, peek.hit.page || 1), doc.numPages), peekWidth()))
+        .catch(() => {})
+    }
   }
 }
 
@@ -10253,10 +10589,23 @@ function renderOverlayList (emptyMessage = 'Nothing matches.') {
      list starts painting. */
   const fill = ++overlayFillToken
   const CHUNK = 80
+  /* A quiet label over a run of rows — the Recent/All commands split. Not a
+     `[role="option"]` row: it is not a thing to choose, so it carries no
+     index and the arrows and activedescendant never see it. */
+  const groupLabel = (text) => {
+    const li = document.createElement('li')
+    li.className = 'panel-group'
+    li.textContent = text
+    li.setAttribute('aria-hidden', 'true')
+    return li
+  }
   const paint = (from) => {
     const stop = Math.min(items.length, from + CHUNK)
     const frag = document.createDocumentFragment()
     for (let i = from; i < stop; i++) {
+      const recent = !!items[i].item.recent
+      if (recent && (i === 0 || !items[i - 1].item.recent)) frag.append(groupLabel('Recent'))
+      if (!recent && i > 0 && items[i - 1].item.recent) frag.append(groupLabel('All commands'))
       frag.append(overlayRow(items[i], i, mode, index))
     }
     el.panelList.append(frag)
@@ -10281,6 +10630,7 @@ function overlayRow ({ item, hits }, i, mode, index) {
   li.setAttribute('role', 'option')
   li.setAttribute('aria-selected', String(i === index))
   li.dataset.index = String(i)
+  if (item.recent) li.setAttribute('aria-description', 'recently used')
 
   /* File rows use the same marks as the explorer. The extension remains the
      source of truth for existing files, so a language table found by search
@@ -10386,21 +10736,209 @@ searchPreview.id = 'search-result-preview'
 searchPreview.hidden = true
 searchPreview.setAttribute('aria-label', 'Selected search result excerpt')
 el.panelList.after(searchPreview)
+
+/* The two halves of a fast peek: parsed documents and rendered pages, both
+   kept on a short leash. A fresh `getDocument` per row parsed the same PDF
+   on every pass of the pointer, and a fresh canvas per hover rasterised the
+   same page — the lag each one cost was spent on work already done. */
+/** @type {Map<string, { loading: any, doc: Promise<any> }>} */
+const previewPdfs = new Map()
+/** @type {Map<string, HTMLCanvasElement>} */
+const previewPages = new Map()
+/* Which page the card is already showing: arming back onto the same row can
+   unhide it as-is rather than waiting on a render of what is up. */
+let previewShownKey = null
+
+function dropPreviewCache () {
+  for (const entry of previewPdfs.values()) entry.loading?.destroy().catch(() => {})
+  previewPdfs.clear()
+  previewPages.clear()
+  previewShownKey = null
+  peekObserver?.disconnect()
+  peekObserver = null
+}
+
+async function previewPdfDoc (path) {
+  let entry = previewPdfs.get(path)
+  if (entry) {
+    previewPdfs.delete(path)
+    previewPdfs.set(path, entry)
+    return entry.doc
+  }
+  const { loadPdfjs, PDF_DATA } = await import('./pdf.js')
+  /** @type {{ loading: any, doc: Promise<any> }} */
+  const record = { loading: null, doc: Promise.resolve(null) }
+  record.doc = (async () => {
+    const [source, lib] = await Promise.all([api.pdf.source(path), loadPdfjs()])
+    record.loading = lib.getDocument({ url: source, ...PDF_DATA })
+    return record.loading.promise
+  })()
+  previewPdfs.set(path, record)
+  if (previewPdfs.size > 3) {
+    const [oldPath, old] = previewPdfs.entries().next().value
+    previewPdfs.delete(oldPath)
+    old.loading?.destroy().catch(() => {})
+  }
+  return record.doc
+}
+
+/* The page card answers a tap of ⌘ — down and up with nothing in between —
+   and stays until the next tap. A chord is not a tap: ⌘C still copies and
+   leaves the card alone, which is what makes a bare modifier safe to use as
+   a switch. Arming is a search gesture, so a tap with no panel open is no
+   gesture at all. */
+let searchPreviewArmed = false
+let metaHeld = false
+let metaChored = false
+const armSearchPreview = (armed) => {
+  if (searchPreviewArmed === armed) return
+  if (armed && !state.overlay) return
+  searchPreviewArmed = armed
+  previewSearchResult()
+}
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Meta') { metaHeld = true; metaChored = false; return }
+  if (metaHeld) metaChored = true
+})
+window.addEventListener('keyup', (e) => {
+  if (e.key !== 'Meta') return
+  metaHeld = false
+  if (!metaChored) armSearchPreview(!searchPreviewArmed)
+})
+window.addEventListener('blur', () => { metaHeld = false; armSearchPreview(false) })
+
+/* The page fills the card's width — the card scrolls, so nothing is squeezed
+   to fit a height. A thin scrollbar's worth is taken off so the sheet does
+   not slide under it. The width is the one `.is-page` declares. */
+const peekWidth = () => Math.min(920, window.innerWidth * 0.92) - 10
+
+/* The rendered bitmap of one page, kept so a re-visit costs nothing. The
+   width is in the key: a card resized with the window wants a new bitmap,
+   not the old one stretched. */
+async function peekCanvas (doc, path, p, width) {
+  const key = `${path}#${p}@${width}`
+  let canvas = previewPages.get(key)
+  if (canvas) {
+    previewPages.delete(key)
+    previewPages.set(key, canvas)
+    return canvas
+  }
+  const { renderPageToCanvas } = await import('./pdf.js')
+  const proxy = await doc.getPage(p)
+  const base = proxy.getViewport({ scale: 1 })
+  ;({ canvas } = await renderPageToCanvas(proxy, width / base.width))
+  previewPages.set(key, canvas)
+  if (previewPages.size > 16) previewPages.delete(previewPages.keys().next().value)
+  return canvas
+}
+
+/* The live observer: nothing renders until a page scrolls into reach. */
+/** @type {IntersectionObserver | null} */
+let peekObserver = null
+
+/**
+ * The card as a small reader: the hit page first, then every other page as
+ * it scrolls into reach. Slots carry the page's shape from the start so the
+ * scroll bar is truthful before anything is drawn.
+ */
+async function paintPdfPeek (item) {
+  const doc = await previewPdfDoc(item.path)
+  const hit = Math.min(Math.max(1, item.hit.page || 1), doc.numPages)
+  const width = peekWidth()
+  const hitBase = (await doc.getPage(hit)).getViewport({ scale: 1 })
+  const stack = document.createElement('div')
+  stack.className = 'peek-pages'
+  const slots = []
+  for (let p = 1; p <= doc.numPages; p++) {
+    const slot = document.createElement('div')
+    slot.className = 'peek-slot'
+    slot.style.aspectRatio = `${hitBase.width} / ${hitBase.height}`
+    slot.dataset.page = String(p)
+    stack.append(slot)
+    slots.push(slot)
+  }
+  searchPreview.replaceChildren(stack)
+  const generation = searchPreviewGeneration
+  const renderPeekPage = async (slot, p) => {
+    const canvas = await peekCanvas(doc, item.path, p, width)
+    if (generation !== searchPreviewGeneration) return
+    slot.style.aspectRatio = `${canvas.width} / ${canvas.height}`
+    canvas.className = 'peek-page'
+    slot.replaceChildren(canvas)
+  }
+  peekObserver?.disconnect()
+  const io = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (!e.isIntersecting) continue
+      io.unobserve(e.target)
+      renderPeekPage(e.target, Number(/** @type {HTMLElement} */ (e.target).dataset.page)).catch(() => {})
+    }
+  }, { root: stack, rootMargin: '150%' })
+  peekObserver = io
+  for (const slot of slots) io.observe(slot)
+  /* The page asked for first and on its own — the observer's margin is for
+     the pages scrolled towards, not the one being read now. */
+  io.unobserve(slots[hit - 1])
+  await renderPeekPage(slots[hit - 1], hit)
+  if (generation !== searchPreviewGeneration) return
+  searchPreview.hidden = false
+  slots[hit - 1].scrollIntoView({ block: 'start' })
+  previewShownKey = item.path
+}
+
 function previewSearchResult () {
   const generation = ++searchPreviewGeneration
   clearTimeout(searchPreviewTimer ?? undefined)
   const item = state.overlay?.mode === 'search' ? state.overlay.items[state.overlay.index]?.item : null
-  searchPreview.hidden = !item
-  el.panel.classList.toggle('has-search-preview', !!item)
-  if (!item) return
-  searchPreview.textContent = `${item.path}\nLoading passage…`
+  const page = !!item && (item.kind === 'pdf' || item.kind === 'highlight')
+  /* A text excerpt is cheap enough to answer on every selection; a page is
+     not — it renders only while ⌘ is held. */
+  const show = !!item && (!page || searchPreviewArmed)
+  searchPreview.classList.toggle('is-page', show && page)
+  /* The page card is a sheet over the panel rather than a second column in
+     it; the text excerpt is still what widens it. */
+  el.panel.classList.toggle('has-search-preview', show && !page)
+  if (!item) {
+    searchPreview.hidden = true
+    dropPreviewCache()
+    return
+  }
+  if (!show) { searchPreview.hidden = true; return }
+  if (page) {
+    /* Already showing this document's stack: arming back onto it is a jump
+       to the page the row names, not a rebuild. */
+    if (previewShownKey === item.path) {
+      searchPreview.hidden = false
+      const hit = Math.min(Math.max(1, item.hit.page || 1), 9999)
+      searchPreview.querySelector(`[data-page="${hit}"]`)
+        ?.scrollIntoView({ block: 'start' })
+      return
+    }
+    /* The card appears whole: a "Loading…" first paint made every peek read
+       as two flashes — text, then the page. It stays hidden until the hit
+       page is drawn. */
+    searchPreview.hidden = true
+    peekObserver?.disconnect()
+    searchPreviewTimer = setTimeout(async () => {
+      try {
+        await paintPdfPeek(item)
+      } catch (error) {
+        if (generation !== searchPreviewGeneration) return
+        previewShownKey = null
+        searchPreview.textContent = error.message
+        searchPreview.hidden = false
+      }
+    }, 50)
+    return
+  }
+  previewShownKey = null
+  searchPreview.hidden = false
+  searchPreview.textContent = `${item.path}\nLoading…`
   searchPreviewTimer = setTimeout(async () => {
     try {
-      const passage = item.kind === 'pdf' || item.kind === 'highlight'
-        ? await api.pdf.passage(item.path, item.hit.page || 1)
-        : ['note', 'code'].includes(item.kind)
-          ? sourcePassage(await api.file.read(item.path), { line: item.hit.line })
-          : { text: item.hit.text || item.hit.preview || 'Open the document to inspect this result.' }
+      const passage = ['note', 'code'].includes(item.kind)
+        ? sourcePassage(await api.file.read(item.path), { line: item.hit.line })
+        : { text: item.hit.text || item.hit.preview || 'Open the document to inspect this result.' }
       if (generation !== searchPreviewGeneration) return
       searchPreview.textContent = `${item.path}\n\n${passage.text}`
     } catch (error) { if (generation === searchPreviewGeneration) searchPreview.textContent = error.message }
@@ -10437,11 +10975,14 @@ function syncSelection () {
 async function chooseOverlayItem (i) {
   const entry = state.overlay?.items[i]
   if (!entry) return
-  const { mode, dir, paths } = state.overlay
+  const { mode, dir, paths, mark } = state.overlay
   const { item } = entry
   closeOverlay()
 
   if (mode === 'move-to') { await moveInto(item.path, paths); return }
+  if (mode === 'append-to') { await appendMarkToNote(mark, item.path); return }
+  if (mode === 'flashcard-to') { openMarkAsFlashcard(mark, item.path); return }
+  if (mode === 'cite') { await insertCitation(item.id); return }
   if (mode === 'vaults') { await openVaultAt(item.path); return }
   if (mode === 'templates') { await insertTemplate(item.path); return }
   if (mode === 'themes') { commitTheme(item.id); return }
@@ -10724,16 +11265,10 @@ function showContextMenu (event, node) {
     items.push(...explorerCreateItems(node.path, true))
     items.push({ sep: true })
   }
-  if (node.type !== 'folder' && canShowBeside(node.path)) {
-    items.push({ label: 'Open to the side', run: () => openToSide(node.path) })
-  }
   if (node.type !== 'folder') {
     items.push({ label: 'Open in new window', run: () => openInNewWindow(node.path) })
   }
   items.push({ label: 'Rename…', key: '↵', run: () => beginRename(node) })
-  if (node.type !== 'folder' && isEditableTextPath(node.path)) {
-    items.push({ label: 'Recover this document…', run: () => recoveryPanel.show(node.path).catch(error => toast(error.message)) })
-  }
   items.push({
     label: state.marks[node.path] ? 'Change icon…' : 'Add icon…',
     run: () => showIconMenu(event, [node.path])
@@ -11395,8 +11930,9 @@ async function showVaultHealth () {
     if (!await saveNow()) return
     let tab = state.tabs.find((item) => item.memory?.kind === 'vault-health')
     if (!tab) {
-      tab = { ...blankTab(), memory: { kind: 'vault-health', title: 'logs.md', text: '' } }
-      state.tabs.splice(state.tabIndex + 1, 0, tab)
+      tab = { path: null, history: [], historyAt: -1, base: null, pinned: false, memory: { kind: 'vault-health', title: 'logs.md', text: '' } }
+      const at = state.tabs.length ? state.tabIndex + 1 : 0
+      state.tabs.splice(at, 0, tab)
     }
     tab.memory.text = formatHealthLog(report)
     tab.memory.selection = 0
@@ -11422,7 +11958,7 @@ el.emptyActions.addEventListener('click', (e) => {
 function closeCurrentNote () {
   closeMemoryDocument()
   /* Closing is leaving. `leaveDoc` gives the claim up on the way to another
-     document, but this is the way out of one to nothing at all — ⌘T, the last
+     document, but this is the way out of one to nothing at all — the last
      tab closed, a deleted file's tabs dropped — and without it the window goes
      on holding a document it is not showing, locking every other window out of
      a file nobody is editing. */
@@ -11620,7 +12156,20 @@ function onWhiteboard (act) {
   else toast('That is a whiteboard command — open a whiteboard first.')
 }
 
+/* The palette's Recent section: what was run, newest first, capped at the
+   handful the section holds. Written to config — which a relaunch reads back —
+   rather than to memory, so the first palette of a new session still answers
+   "the things I was just doing". */
+const RECENT_COMMANDS = 6
+function rememberCommand (id) {
+  const rest = (state.cfg.recentCommands || []).filter((x) => x !== id)
+  const recentCommands = [id, ...rest].slice(0, RECENT_COMMANDS)
+  state.cfg = { ...state.cfg, recentCommands }
+  api.config.set({ recentCommands })
+}
+
 function runCommand (id, dir = state.current?.dir || '') {
+  rememberCommand(id)
   switch (id) {
     case 'new-file': openOverlay('new-files', { dir }); break
     case 'getting-started': openGettingStarted(); break
@@ -11654,6 +12203,10 @@ function runCommand (id, dir = state.current?.dir || '') {
     case 'new-tab': newTab(); break
     case 'close-tab': closeTab(state.tabIndex); break
     case 'reopen-tab': reopenTab(); break
+    /* ⌘T while the copilot panel is open: the menu's New Tab accelerator
+       never reaches the page, so main forwards the key as this command
+       instead — see the before-input-event hook in electron/main.js. */
+    case 'copilot-effort': loadCopilot().then((c) => c.cycleEffort(1)).catch(() => {}); break
     case 'next-tab': cycleTab(1); break
     case 'prev-tab': cycleTab(-1); break
     /* Whatever the tree has selected, or — when it has nothing — the note on
@@ -11758,15 +12311,18 @@ function runCommand (id, dir = state.current?.dir || '') {
         .then(() => toast('Diagnostics copied.'))
         .catch(() => toast('Could not gather diagnostics.'))
       break
-    case 'new-window': api.window.open(); break
-    case 'open-in-new-window': openInNewWindow(state.current?.path); break
     case 'review-stats': loadReviewStats().then((panel) => panel.show()); break
     case 'study-all':
       ensureLanguageRuntime()
         .then(({ languageStudy }) => languageStudy.open({ all: true }))
         .catch((error) => reportFailure('language study', error))
       break
+    case 'study-flashcards': openFlashcardStudyAll(); break
+    case 'insert-citation':
+      openCitationPicker().catch((error) => reportFailure('insert citation', error))
+      break
     case 'import-cards': importLanguageCsv(); break
+    case 'export-cards': exportLanguageCsv(); break
     case 'insert-template': {
       /* An empty templates folder is the ordinary state of a vault that has
          never used one, so it explains itself rather than opening a picker
@@ -11794,6 +12350,7 @@ function runCommand (id, dir = state.current?.dir || '') {
     case 'lock-file':
     case 'unlock-file': toggleLock(); break
     case 'edit-here': takeDocument(); break
+    case 'expand-pane': togglePaneBelowExpand(); break
     case 'reading': setView(reading() ? 'edit' : 'read'); break
     case 'view-edit': setView('edit'); break
     case 'view-read': setView('read'); break
@@ -11874,7 +12431,6 @@ function runCommand (id, dir = state.current?.dir || '') {
     case 'zoom-reset': zoomDoc('fit'); break
     case 'undo': stepHistory(false); break
     case 'redo': stepHistory(true); break
-    case 'open-vault': connectVault(); break
     case 'settings': api.settings?.open ? api.settings.open() : settings.open(); break
     case 'export-pdf': exportPdf(); break
     case 'export-html': exportHtml(); break
@@ -11925,11 +12481,10 @@ function exportCurtain (saying) {
 }
 
 /* Print shows the whole article at once, and some of it only exists after it
-   has been looked at: diagram stages fill in after a parse, pictures finish
-   loading, and a fenced scene draws when it scrolls into sight. Walking the
-   column through its own length wakes the last of them, then the wait is for
-   every stage and image to report itself done — bounded, because a broken
-   block should not hold an export hostage. */
+   has been looked at: pictures finish loading, and a fenced scene draws when
+   it scrolls into sight. Walking the column through its own length wakes the
+   last of them, then the wait is for every image to report itself done —
+   bounded, because a broken block should not hold an export hostage. */
 async function settleReadingForExport () {
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
   await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
@@ -11941,9 +12496,8 @@ async function settleReadingForExport () {
 
   const deadline = Date.now() + 8000
   while (Date.now() < deadline) {
-    const stages = [...box.querySelectorAll('.diagram-stage')].filter((s) => !s.childElementCount)
     const images = [...box.querySelectorAll('img')].filter((img) => !img.complete)
-    if (!stages.length && !images.length) return
+    if (!images.length) return
     await wait(120)
   }
 }
@@ -12139,6 +12693,41 @@ async function importLanguageCsv () {
     `${edit.skipped ? ` — ${edit.skipped} already in the table` : ''}.`)
 }
 
+/* The open language table as a CSV file — the round trip `importCards`
+   completes. The table read is the deck's own (`exportCards`) and the CSV
+   dialect is the grid's (`formatSeparated`), so the file another app gets is
+   the same vocabulary the cards were built from — header and all, which is
+   what an import on the other side names its columns from. */
+async function exportLanguageCsv () {
+  if (!state.current || !isLanguageTablePath(state.current.path)) {
+    toast('Open a language table first.')
+    return
+  }
+  const view = await ensureEditor()
+  const [{ formatSeparated }, { exportCards }] = await Promise.all([
+    import('./csv.js'),
+    import('./language-table.js')
+  ])
+  const grid = exportCards(view.state.doc.toString())
+  if (!grid || !grid.rows.length) {
+    toast('This table has no cards to export yet.')
+    return
+  }
+  const name = state.current.path.split('/').pop().replace(/\.[^.]+$/, '')
+  let result
+  try {
+    result = await api.review.saveCsv(name, formatSeparated([grid.header, ...grid.rows]))
+  } catch (err) {
+    toast(reason(err, 'The file could not be written.'))
+    return
+  }
+  if (!result?.ok) {
+    if (result?.error) toast(reason(result, 'The file could not be written.'))
+    return
+  }
+  toast(`Exported ${grid.rows.length} ${grid.rows.length === 1 ? 'card' : 'cards'}.`)
+}
+
 /* ---------------------------------------------------------- flashcard form */
 
 let flashcardPreviousView = 'edit'
@@ -12252,8 +12841,12 @@ function closeFlashcardComposer ({ restore = true } = {}) {
 }
 
 /** @param {{card: ReturnType<typeof parseFlashcards>[number], from: number,
- *  to: number, source: string} | null} editTarget */
-function openFlashcardComposer (editTarget = null) {
+ *  to: number, source: string} | null} editTarget
+ *  @param {{ question?: string, explanation?: string } | null} [prefill]
+ *  Seeds a fresh form — a PDF passage arrives as the question, its source as
+ *  the explanation. Only a new card takes it: an edit target already has its
+ *  text. */
+function openFlashcardComposer (editTarget = null, prefill = null) {
   if (!state.current || !NOTE_EXT.test(state.current.path) || isLanguageTablePath(state.current.path)) {
     toast('Open a Markdown note or flashcard bank to add a flashcard.')
     return
@@ -12293,6 +12886,9 @@ function openFlashcardComposer (editTarget = null) {
       input.value = options[index] || ''
     })
     el.flashcardExplanation.value = editTarget.card.explanation
+  } else if (prefill) {
+    el.flashcardQuestion.value = prefill.question || ''
+    el.flashcardExplanation.value = prefill.explanation || ''
   }
   flashcardError('')
   el.flashcardComposer.hidden = false
@@ -12587,7 +13183,7 @@ function applySettings (cfg) {
   const wanted = cfg.paneBelow || (cfg.outline ? 'outline' : null)
   const resolved = PANES[wanted] && sidebarPaneAvailable(wanted) ? wanted : null
   if (!panesSettled || resolved !== state.paneBelow) setPaneBelow(wanted, false)
-  else setPaneBelowHeight(savedPaneBelowHeight(resolved), false)
+  else setPaneBelowHeight(savedPaneBelowHeight(), false)
   panesSettled = true
 }
 
@@ -13669,11 +14265,11 @@ async function connectVault () {
 el.connectVault.addEventListener('click', connectVault)
 el.bootConnect.addEventListener('click', connectVault)
 el.bootRetry.addEventListener('click', () => boot())
-$('vault-name').addEventListener('click', openRecentVault)
 $('btn-new-note').addEventListener('click', () => createNote(state.current?.dir || ''))
 $('btn-new-folder').addEventListener('click', () => createFolder(state.current?.dir || ''))
 $('btn-search').addEventListener('click', () => openOverlay('search'))
 el.foldAll.addEventListener('click', toggleAllFolders)
+el.outlineFoldAll.addEventListener('click', toggleAllOutline)
 el.viewSwitch.addEventListener('click', (event) => {
   const button = /** @type {any} */ (event.target).closest('.view-option')
   if (button && !button.disabled) setView(button.dataset.view)
@@ -14129,7 +14725,6 @@ api.on('vault:opened', async (vault) => {
     agentBefore.clear()
     pendingAgentDiffs.clear()
     outlineCollapsed.clear()
-    el.vaultLabel.textContent = vault.name
     // The first vault is also the way off the landing page.
     paintLanding()
 
@@ -14153,13 +14748,13 @@ api.on('vault:opened', async (vault) => {
     site?.closeAll()
     knownSitesAt = null
     closedTabs.length = 0
-    state.tabs = [blankTab()]
-    state.tabIndex = 0
-    await showBlank()
+    state.tabs = []
+    state.tabIndex = -1
+    await showEmpty()
     renderTabs()
     await loadTree()
     /* First run: an empty vault opens the Getting Started guide once, so a
-       new user lands on something to read rather than a blank tab. Flag is
+       new user lands on something to read rather than an empty pane. Flag is
        per vault path in localStorage; opt-out by simply closing it. */
     try {
       const seenKey = `tulip.seenGettingStarted.${vault?.path || vault?.name || ''}`
@@ -14345,20 +14940,29 @@ api.on('app:flush', async () => {
     // beforeunload cannot wait for either IPC call, so they belong in the same
     // close barrier as the editor and transcript.
     await languageStudy?.flush()
+    // The flashcard session owes the same barrier: its answers batch exactly
+    // like the language session's.
+    await fcStudy?.sink?.settle()
     await pdf?.flush()
     rememberTabs()
     await api.config.set({ sideScroll: (el.sidepaneBody.querySelector('.embed-pdf-pages') || el.sidepaneBody).scrollTop })
   } catch { ok = false } finally { clearInterval(alive); api.flushed({ ok }) }
 })
 
-window.addEventListener('beforeunload', () => { if (state.dirty) saveNow() })
+window.addEventListener('beforeunload', () => {
+  if (state.dirty) saveNow()
+  /* The flashcard sink's owed answers — a reload is a close the flush barrier
+     never hears about, and beforeunload cannot await the write it starts. */
+  const owed = fcStudy?.sink?.owed() || []
+  if (owed.length) api.review.record(owed)
+})
 document.addEventListener('visibilitychange', async () => {
   if (!document.hidden) return
   if (state.dirty) await saveNow()
   await api.durability.flush()
 })
 
-// Handle for the DevTools console and the scripts/drive.mjs test harness.
+// Handle for the DevTools console and ad-hoc test harnesses.
 // The harness handle below writes a property tsc cannot see on `window`.
  // @ts-ignore — a DevTools/test-harness handle, not part of the DOM
 window.__tulip = {
@@ -14367,7 +14971,7 @@ window.__tulip = {
   /* Null until the first website opens — see ensureSite. */
   get site () { return site }, copilot, copilotContext,
   viewportLine, scrollToLine, goHistory,
-  newTab, closeTab, selectTab, cycleTab, settings, toggleOutline, jumpToHeading,
+  closeTab, selectTab, cycleTab, settings, toggleOutline, jumpToHeading,
   exportPdf
 }
 
@@ -14443,7 +15047,6 @@ async function boot () {
      still assembled and still un-hidden — connecting a vault has to leave a
      working window behind, and `vault:opened` fills it in from here. */
   if (!vault) {
-    el.vaultLabel.textContent = 'No vault'
     paintLanding()
     paintBootReady()
     prefetchFeatureStyles()
@@ -14457,7 +15060,6 @@ async function boot () {
   }
 
   state.vault = vault
-  el.vaultLabel.textContent = vault.name
   paintLanding()
   /* The tree alone: the stored conversations arrive after the paint, so the
      note is on screen before the history read lands rather than beside it. */
@@ -14485,7 +15087,7 @@ async function boot () {
      holds open a note nobody asked to keep, and lets go of the one they did. */
   const stored = (Array.isArray(session.tabs) ? session.tabs : [])
     .map((path, at) => ({ path, line: Number(places[at]) || 1, pinned: !!pins[at], trail: session.tabHistories?.[at] }))
-    .filter(({ path }) => path === null || known.has(path))
+    .filter(({ path }) => known.has(path))
 
   state.tabs = stored.map(({ path, line, pinned, trail }) => {
     const entries = Array.isArray(trail?.entries) ? trail.entries.slice(-HISTORY_MAX).filter((entry) => entry && known.has(entry.path)) : []
@@ -14494,25 +15096,25 @@ async function boot () {
     const restored = at >= 0 && entries[at].path === path
     return {
       path,
-      history: restored ? entries.map((entry) => ({ ...entry })) : path ? [{ path, at: 0, top: 0, line }] : [],
-      historyAt: restored ? at : path ? 0 : -1,
+      history: restored ? entries.map((entry) => ({ ...entry })) : [{ path, at: 0, top: 0, line }],
+      historyAt: restored ? at : 0,
       base: null,
-      pinned: pinned && !!path
+      pinned: !!pinned
     }
   })
 
   if (!state.tabs.length) {
-    // Nothing stored: the note last open stands as the single tab, which is
-    // what every earlier version of Tulip did.
+    // Nothing stored: the note last open stands as the single tab, if there
+    // is one — otherwise the strip starts empty. Only files become tabs.
     /* And in a second window, nothing at all: `lastNote` is the session's too,
-       and a window opened from the Window menu opens on a blank tab. */
+       and a window opened from the Window menu opens with no tab. */
     const last = cfg.lastNote && known.has(cfg.lastNote) ? cfg.lastNote : null
-    state.tabs = [last
-      ? { path: last, history: [{ path: last, at: 0, top: 0, line: 1 }], historyAt: 0, base: null, pinned: false }
-      : blankTab()]
+    state.tabs = last
+      ? [{ path: last, history: [{ path: last, at: 0, top: 0, line: 1 }], historyAt: 0, base: null, pinned: false }]
+      : []
   }
 
-  state.tabIndex = Math.min(Math.max(0, Number(session.tabIndex) || 0), state.tabs.length - 1)
+  state.tabIndex = state.tabs.length ? Math.min(Math.max(0, Number(session.tabIndex) || 0), state.tabs.length - 1) : -1
   /* Only ever a settled strip is written out, so this normally moves nothing.
      It is here for the config that was edited by hand or written by a version
      that did not know about pins, where the alternative is a strip that breaks
@@ -14521,14 +15123,14 @@ async function boot () {
      note than the one the window was left showing. */
   const showing = state.tabs[state.tabIndex]
   state.tabs = settled(state.tabs)
-  state.tabIndex = Math.max(0, state.tabs.indexOf(showing))
+  state.tabIndex = state.tabs.length ? Math.max(0, state.tabs.indexOf(showing)) : -1
   renderTabs()
   /* Persist the strip after pruning vanished paths and repairing its index.
      This also clears stale sessions left by older builds whose config
      validator rejected a strip containing a blank (null) tab. */
   rememberTabs()
 
-  const opening = state.tabs[state.tabIndex].path
+  const opening = state.tabs[state.tabIndex]?.path
 
   /* Establish the saved view before opening the note. Opening used to render
      the default Reading view first and then set the saved view, which rendered

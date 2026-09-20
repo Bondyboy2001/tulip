@@ -14,7 +14,8 @@
  * One document at a time. Opening another replaces what is showing, the way
  * the main view does — the pane is a place, not a stack.
  *
- * Ways in: ⌥-click any wikilink, or Open to the side on a file row or a tab.
+ * Ways in: ⌥-click any wikilink, or Open document beside this one in the
+ * command palette.
  */
 
 import { renderTransclusion } from './transclude.js'

@@ -17,9 +17,11 @@
 
    Effort is not one scale, and that is the other thing this file owns: most of
    the catalogue has no such dial at all, and the models that do offer their own
-   ladder of variants. So the levels are data on the model, read from the CLI
-   that offers it, and every control asks the model rather than knowing any
-   levels of its own.
+   ladder of variants. So the levels are data on the model, read from the
+   service's model list, and every control asks the model rather than knowing
+   any levels of its own. A catalogue read the other way — the plain `models`
+   fallback, or a service that cannot answer — lists ids only, and then the
+   seeds in ai-models.json are the only models that name their levels.
    ================================================================== */
 
 /* The CLI and what it offers before it is asked, shared with the main process —
@@ -38,9 +40,10 @@ const PROVIDER = Object.fromEntries(PROVIDERS.map((p) => [p.id, p]))
    paint is never empty. */
 export const DEFAULT_CATALOGUE = CATALOGUE.fallbacks
 
-/* Ticked for someone who has never opened the settings pane. opencode is the
-   one that is not: its four hundred-odd entries are exactly what the setting
-   exists to keep out of the dropdown. */
+/* Ticked for someone who has never opened the settings pane. opencode's full
+   catalogue runs to hundreds of entries — exactly what the setting exists to
+   keep out of the dropdown — so only the fallback seeds are ticked, not the
+   whole list the CLI answers with once asked. */
 const offerByDefault = (provider) => !!PROVIDER[provider]?.offerByDefault
 
 function keyOf (provider, id) { return `${provider}:${id}` }
@@ -103,9 +106,13 @@ export function allModels (catalogue) {
 }
 
 /** Ticked by default, spelled out — what the settings pane shows before the
- *  user has chosen anything. */
+ *  user has chosen anything: the fallback seeds, not the hundreds of entries
+ *  the CLI answers with once asked. Spelled as the seeds' keys so the default
+ *  stays a shortlist after the real catalogue loads rather than becoming all
+ *  of it. */
+const seedKeys = new Set(allModels(DEFAULT_CATALOGUE).map((model) => model.key))
 const defaultModels = (catalogue) =>
-  allModels(catalogue).filter((model) => offerByDefault(model.provider))
+  allModels(catalogue).filter((model) => seedKeys.has(model.key) && offerByDefault(model.provider))
 
 export const defaultEnabled = (catalogue) =>
   defaultModels(catalogue).map((model) => model.key)
@@ -171,14 +178,21 @@ export function offeredModels (catalogue, enabled, selected) {
 function computeOffered (catalogue, enabled, selected) {
   const fallback = defaultModels(catalogue)
   const all = allModels(catalogue)
+  /* A provider catalogue with nothing ticked by default (opencode's hundreds
+     of entries are exactly what the ticks exist to keep out) left both the
+     fallback and the wanted set empty, and the dropdown with nothing in it at
+     all. The whole catalogue is a heavy menu but an empty one is a copilot
+     with nobody to answer — so when no default survives, everything is
+     offered rather than nothing. */
+  const seed = fallback.length ? fallback : all
   const selectedModel = selected
     ? all.find((model) => model.key === selected) || placeholderFor(selected)
     : null
-  const wanted = new Set(enabled?.length ? enabled : fallback.map((model) => model.key))
+  const wanted = new Set(enabled?.length ? enabled : seed.map((model) => model.key))
   if (selected) wanted.add(selected)
 
   const offered = all.filter((model) => wanted.has(model.key))
-  if (!selectedModel) return offered.length ? offered : fallback
+  if (!selectedModel) return offered.length ? offered : seed
   return [selectedModel, ...offered.filter((model) => model.key !== selectedModel.key)]
 }
 
@@ -257,6 +271,10 @@ export const providerGrant = (provider, mode) => {
    when write access is handed over and in what comes with it. */
 export const COPILOT_MODES = Object.freeze({
   READ: 'read',
+  /* Between reading and writing: the agent describes changes but cannot make
+     them — its edits are staged and the reader applies or discards them.
+     See electron/copilot-write.js. */
+  PROPOSE: 'propose',
   ASK: 'ask',
   AUTO: 'auto'
 })
@@ -274,12 +292,14 @@ export const CONTEXT_MODES = Object.freeze({
 
 export const COPILOT_MODE_ORDER = [
   COPILOT_MODES.READ,
+  COPILOT_MODES.PROPOSE,
   COPILOT_MODES.ASK,
   COPILOT_MODES.AUTO
 ]
 
 export const copilotModeLabel = (mode) => ({
   [COPILOT_MODES.READ]: 'Read',
+  [COPILOT_MODES.PROPOSE]: 'Propose',
   [COPILOT_MODES.ASK]: 'Ask',
   [COPILOT_MODES.AUTO]: 'Auto'
 }[mode] || 'Read')

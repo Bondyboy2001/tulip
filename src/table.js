@@ -2636,6 +2636,12 @@ function buildGridRow (view, data, r) {
     if (r === 0) cell.scope = 'col'
     cell.setAttribute('aria-rowindex', String(r + 1))
     cell.setAttribute('aria-colindex', String(c + 1))
+    /* A language table's Word column is Arabic or Hebrew about as often as it
+       is Greek — let each cell pick its own direction rather than forcing the
+       page's on a script that reads the other way. Scoped to the language
+       table: an ordinary note's cell that merely *starts* with a digit or a
+       dash should not flip its alignment over it. */
+    if (data.language) cell.dir = 'auto'
     if (data.aligns[c]) cell.style.textAlign = data.aligns[c]
     renderTableCell(view, cell, decode(data.cells[r]?.[c] ?? ''))
     if (r === 0) {

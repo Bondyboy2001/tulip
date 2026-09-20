@@ -629,20 +629,20 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
 .boot-action {
   min-height: 32px;
   padding: 7px 12px;
-  border: 1px solid var(--line);
-  border-radius: 5px;
-  background: var(--surface);
-  color: var(--ink-soft);
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted);
   font: 600 11.5px/1 var(--font-ui);
   cursor: pointer;
 }
-.boot-action:hover { border-color: var(--accent); color: var(--ink); }
+.boot-action:hover { background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--ink); }
 .boot-action.is-primary {
-  border-color: var(--accent);
+  border-color: transparent;
   background: var(--accent);
-  color: #fff;
+  color: var(--paper);
 }
-.boot-action.is-primary:hover { background: color-mix(in srgb, var(--accent) 86%, var(--ink)); }
+.boot-action.is-primary:hover { filter: brightness(1.08); background: var(--accent); color: var(--paper); }
 .boot-action:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 @keyframes boot-breathe {
   0%, 100% { opacity: .55; transform: translateY(0); }
@@ -812,46 +812,32 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
 .sidebar-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
   padding: 46px 12px 10px 14px;
   -webkit-app-region: drag;
 }
 .sidebar-head > * { -webkit-app-region: no-drag; }
 
-.vault-name {
+.sidebar-actions {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  padding: 3px 6px 3px 4px;
-  margin-left: -4px;
-  border-radius: 5px;
-  font-size: 12.5px;
-  font-weight: 600;
-  letter-spacing: .006em;
-  color: var(--ink);
-  transition: background .12s;
+  flex: 1;
+  justify-content: space-between;
 }
-.vault-name:hover { background: var(--hover); }
-.vault-name span:last-child {
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.sidebar-actions { display: flex; gap: 1px; }
 
 .icon-btn {
   display: grid;
   place-items: center;
   width: 26px;
   height: 26px;
-  border-radius: 5px;
+  border-radius: 9px;
   color: var(--muted);
   transition: background .12s, color .12s;
 }
-.icon-btn:hover { background: var(--hover); color: var(--ink); }
-.icon-btn[aria-pressed="true"] { color: var(--accent); background: var(--accent-dim); }
+.icon-btn:hover { background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--ink); }
+.icon-btn[aria-pressed="true"] {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  box-shadow: none;
+}
 
 /* ------------------------------------------------------- sidebar panes */
 
@@ -869,15 +855,27 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
 
    One strip, at the top of the lower panel, naming what is in it. The file
    tree above has none, because it is not one of the choices: it is what the
-   sidebar is. */
-.pane-tabs {
+   sidebar is.
+
+   The strip is a row of two: the tablist, and the active pane's own control
+   — the outline's fold-all — which a tab could never be. The hairline and the
+   insets live on the strip so they run unbroken under both. */
+.pane-strip {
   display: flex;
   align-items: stretch;
-  flex: none;
   padding: 0 8px;
   margin-bottom: 2px;
   border-bottom: 1px solid var(--line-soft);
 }
+.pane-tabs {
+  display: flex;
+  align-items: stretch;
+  flex: 1;
+  min-width: 0;
+}
+/* The panel's verb, beside the tabs that choose it: it borrows the header's
+   icon button rather than dressing as a sixth tab. */
+#btn-outline-fold-all { flex: none; align-self: center; }
 .pane-tab {
   position: relative;
   flex: 1 1 0;
@@ -1179,33 +1177,37 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
   height: 26px;
   width: 26px;
   padding: 0;
-  border: 1px solid var(--line-soft);
-  border-radius: 7px;
-  background: var(--sunk);
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
   color: var(--muted);
   font: 600 10.5px/1 var(--font-ui);
   cursor: pointer;
 }
-.sidebar-open:hover { background: var(--hover); color: var(--ink); }
+.sidebar-open:hover { background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--ink); }
 .sidebar-open:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.app[data-sidebar="open"] .sidebar-open { background: var(--accent-dim); color: var(--accent); }
+.app[data-sidebar="open"] .sidebar-open {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+  box-shadow: none;
+}
 
 /* Back and forward, to the left of the strip. A disabled arrow stays in place
    but fades — the pair reads as one control, and a vanishing half would make
    the tabs jump sideways. */
-.nav-arrows { display: flex; align-items: center; gap: 2px; flex: none; }
+.nav-arrows { display: flex; align-items: center; gap: 6px; flex: none; }
 .nav-arrow {
   display: flex;
   align-items: center;
   justify-content: center;
   width: 26px; height: 26px;
   border: 0;
-  border-radius: 6px;
+  border-radius: 9px;
   background: none;
   color: var(--muted);
   cursor: pointer;
 }
-.nav-arrow:hover:not(:disabled) { background: var(--hover); color: var(--ink-soft); }
+.nav-arrow:hover:not(:disabled) { background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--ink-soft); }
 .nav-arrow:disabled { color: var(--faint); cursor: default; }
 
 /* ---------------------------------------------------------------- tabs
@@ -1243,15 +1245,20 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
   border-radius: 6px;
 }
 
+/* The floor is "enough of the name to still read it": the dot and the × are
+   held at their own sizes, so a tab allowed below this does not squeeze the
+   label — it overflows its own box and the × lands outside it. What does not
+   fit scrolls instead; that is what the strip's overflow-x and the edge fade
+   it earns are for. */
 .tab {
   display: flex;
   align-items: center;
   gap: 6px;
   max-width: 190px;
-  min-width: 0;
+  min-width: 84px;
   padding: 5px 7px 5px 10px;
   border: 0;
-  border-radius: 6px;
+  border-radius: 9px;
   background: none;
   color: var(--muted);
   font-family: var(--font-ui);
@@ -1261,14 +1268,13 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
   flex: 0 1 auto;
   -webkit-app-region: no-drag;
 }
-.tab:hover { background: var(--hover); color: var(--ink-soft); }
-/* The one you are in is the one with a surface under it — the same device the
-   sidebar's active row uses, so "here" reads the same in both. The fill is
-   kept light and the hairline does the rest: a single tab is a label, not a
-   slab, and at this size a heavy tint reads as a button to press. */
+.tab:hover { background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--ink-soft); }
+/* The one you are in is the one with a tint under it — the same device the
+   sidebar's active row uses, so "here" reads the same in both. No ring: at
+   this size a heavy treatment reads as a button to press. */
 .tab.is-active {
-  background: color-mix(in srgb, var(--accent) 9%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent);
+  background: color-mix(in srgb, var(--ink) 7%, transparent);
+  box-shadow: none;
   color: var(--ink);
   font-weight: 550;
 }
@@ -1278,7 +1284,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
    at the same size, so the strip does not jump as the name is typed. */
 .tab-input {
   max-width: 190px;
-  min-width: 0;
+  min-width: 84px;
   flex: none;
   padding: 5px 8px;
   border: 1px solid var(--accent);
@@ -1313,7 +1319,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
   opacity: 0;
 }
 .tab:hover .tab-close, .tab.is-active .tab-close { opacity: 1; }
-.tab-close:hover { background: var(--hover); color: var(--accent); }
+.tab-close:hover { background: color-mix(in srgb, var(--ink) 12%, transparent); color: var(--accent); }
 
 /* A single tab cannot be closed away to nothing, so it does not offer to be —
    and with no × on the right, the padding goes back to even. */
@@ -1450,13 +1456,13 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: def
   font-family: var(--font-ui);
   font-size: 12px;
   padding: 6px 12px;
-  border-radius: 7px;
-  border: 1px solid var(--line-soft);
-  background: var(--paper);
+  border-radius: 9px;
+  border: 0;
+  background: color-mix(in srgb, var(--ink) 7%, transparent);
   color: var(--ink);
   cursor: pointer;
 }
-.reading-more-go:hover, .reading-more-edit:hover { border-color: var(--line); }
+.reading-more-go:hover, .reading-more-edit:hover { background: color-mix(in srgb, var(--ink) 12%, transparent); }
 .reading-more-go:focus-visible, .reading-more-edit:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
@@ -2205,14 +2211,17 @@ ol.tk-ordered-list > li > .tk-olnum {
    (including the restored note) is ready. */
 .app[data-booting] { visibility: hidden; }
 
-/* An empty tab has to say it is empty. Left blank it read as a window that had
-   not finished loading rather than as a canvas waiting — so the pane carries
-   the few things there are to do from a tab holding nothing, set as plain
+/* With no tab showing the pane has to say so. Left blank it read as a window
+   that had not finished loading rather than as a canvas waiting — so the pane
+   carries the few things there are to do with nothing open, set as plain
    words in the accent. No logo and no keyboard legend: this is a place you
    pass through, and anything bigger reads as an interstitial. */
 .empty {
   position: absolute;
-  inset: 0;
+  /* Below the top bar rather than over it: a new tab still needs its tabs,
+     back/forward and view controls, and covering them left no way back
+     except a shortcut. 46px is the .doc-head height above. */
+  inset: 46px 0 0 0;
   display: grid;
   place-items: center;
   background: var(--paper);
@@ -2300,7 +2309,7 @@ ol.tk-ordered-list > li > .tk-olnum {
   height: 34px;
   padding: 0 18px;
   border: 1px solid transparent;
-  border-radius: 9px;
+  border-radius: 5px;
   background: var(--accent);
   color: var(--paper);
   font-family: var(--font-ui);
@@ -2309,7 +2318,7 @@ ol.tk-ordered-list > li > .tk-olnum {
   cursor: pointer;
   transition: background .12s;
 }
-.landing-connect:hover { background: color-mix(in srgb, var(--accent) 86%, var(--ink)); }
+.landing-connect:hover { filter: brightness(1.08); }
 .landing-connect:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* What happens after the button, in the smallest voice the palette has: it is
@@ -2324,12 +2333,12 @@ ol.tk-ordered-list > li > .tk-olnum {
 
 .ghost {
   padding: 6px 12px;
-  border-radius: 5px;
+  border-radius: 9px;
   font-size: 13px;
   color: var(--muted);
   transition: color .12s, background .12s;
 }
-.ghost:hover { color: var(--ink); background: var(--hover); }
+.ghost:hover { color: var(--ink); background: color-mix(in srgb, var(--ink) 7%, transparent); }
 /* The same button at list size — inside history rows and the chat's review
    block, where a full-height button would outweigh the row it acts on. */
 .ghost.is-compact {
@@ -2391,6 +2400,11 @@ ol.tk-ordered-list > li > .tk-olnum {
   animation: rise .16s var(--ease);
 }
 @keyframes rise { from { opacity: 0; transform: translateY(-6px) } }
+
+/* A search is a question asked about the page behind the overlay: blurring
+   that page hides the very thing the results are about. The wash stays for
+   the panel's contrast; the blur goes. */
+.overlay:has(> .panel.is-search) { backdrop-filter: none; }
 
 /* The three previewing pickers — theme, markdown font, interface font — out of
    the corner of the eye.
@@ -2457,23 +2471,6 @@ ol.tk-ordered-list > li > .tk-olnum {
   padding-right: 10px;
   flex: none;
 }
-.panel-filter-toggle {
-  display: none;
-  flex: none;
-  height: 30px;
-  margin-right: 10px;
-  padding: 0 9px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: none;
-  color: var(--muted);
-  font: 550 11px/1 var(--font-ui);
-  cursor: pointer;
-}
-.panel-filter-toggle:hover,
-.panel-filter-toggle[aria-expanded="true"] { background: var(--hover); color: var(--ink); }
-.panel-filter-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.panel-filter-toggle[hidden],
 .panel-filter-presets[hidden] { display: none; }
 
 /* The common filters are examples that work. Choosing one writes the same
@@ -2493,17 +2490,17 @@ ol.tk-ordered-list > li > .tk-olnum {
   flex: none;
   height: 25px;
   padding: 0 9px;
-  border: 1px solid var(--line-soft);
+  border: 0;
   border-radius: 999px;
-  background: var(--surface);
+  background: color-mix(in srgb, var(--ink) 7%, transparent);
   color: var(--muted);
   font: 550 10.5px/1 var(--font-ui);
   cursor: pointer;
 }
-.panel-filter-presets button:hover { border-color: var(--line); color: var(--ink); }
+.panel-filter-presets button:hover { background: color-mix(in srgb, var(--ink) 12%, transparent); color: var(--ink); }
 .panel-filter-presets button[aria-pressed="true"] {
-  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
-  background: var(--accent-dim);
+  border-color: transparent;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
   color: var(--accent);
 }
 .panel-filter-presets button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
@@ -2555,9 +2552,9 @@ ol.tk-ordered-list > li > .tk-olnum {
   flex: none;
   height: 27px;
   padding: 0 11px;
-  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
-  border-radius: 7px;
-  background: var(--accent-dim);
+  border: 0;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
   color: var(--accent);
   font-family: var(--font-ui);
   font-size: 12.5px;
@@ -2566,7 +2563,7 @@ ol.tk-ordered-list > li > .tk-olnum {
   cursor: pointer;
   transition: background .12s;
 }
-.panel-replace-go:hover { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+.panel-replace-go:hover { background: color-mix(in srgb, var(--accent) 20%, transparent); }
 .panel-replace-go:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 /* What the field understands, said in the footer where the keys are said. It
@@ -2590,6 +2587,20 @@ ol.tk-ordered-list > li > .tk-olnum {
   cursor: pointer;
 }
 .panel-list li[aria-selected="true"] { background: var(--accent-dim); }
+/* The label over a run of rows — "Recent" over the commands run lately. Not
+   a row itself: it shares the list's insets, but none of a row's padding,
+   pointer, or selection. */
+.panel-list li.panel-group {
+  display: block;
+  padding: 8px 11px 3px;
+  border-radius: 0;
+  cursor: default;
+  font: 600 10.5px/1.3 var(--font-ui);
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.panel-list li.panel-group:hover { background: none; }
 .panel-list li.has-file-icon { align-items: flex-start; }
 .panel-list li .file-ico { margin-top: 1px; }
 /* The column that holds a result's name, its matching line and its folder.
@@ -2647,6 +2658,28 @@ ol.tk-ordered-list > li > .tk-olnum {
 }
 .empty-hint { padding: 14px 11px; color: var(--muted); font-size: 13px; }
 
+/* Search is a field and its results. The switches, preset filters and hint
+   stay in the markup — the query language they wrote (type:, tag:, path:,
+   prop:) still works typed — but the panel shows none of them. The foot is
+   clipped rather than removed: its count is the live answer a screen reader
+   announces, and that answer is not chrome. */
+.panel.is-search .panel-chips,
+.panel.is-search .panel-filter-presets,
+.panel.is-search .panel-replace,
+.panel.is-search .empty-hint { display: none; }
+.panel.is-search .panel-foot {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+.panel.is-search .panel-input { padding: 12px 16px; }
+.panel.is-search .panel-list:empty { padding: 0; }
+
 .panel-foot {
   padding: 8px 14px;
   border-top: 1px solid var(--line-soft);
@@ -2675,22 +2708,10 @@ ol.tk-ordered-list > li > .tk-olnum {
 .panel.is-searching .panel-list { opacity: .55; }
 .panel-list { transition: opacity .12s var(--ease); }
 
-/* Browser zoom reduces the effective CSS viewport. Keep the query as the
-   first full-width job and put its less-frequent switches behind one named
-   control instead of clipping the words being searched for. */
+/* Browser zoom reduces the effective CSS viewport. The panel narrows and the
+   syntax legend in the foot steps aside. */
 @media (max-width: 620px) {
   .panel { width: min(560px, calc(100vw - 24px)); }
-  .panel-head { flex-wrap: wrap; }
-  .panel-filter-toggle { display: inline-flex; align-items: center; justify-content: center; }
-  .panel-chips {
-    display: none;
-    flex: 0 0 100%;
-    justify-content: flex-end;
-    padding: 7px 10px;
-    border-top: 1px solid var(--line-soft);
-    background: var(--sunk);
-  }
-  .panel.filters-open .panel-chips { display: flex; }
   .panel-syntax { display: none; }
 }
 
@@ -3303,22 +3324,22 @@ ol.tk-ordered-list > li > .tk-olnum {
 .ask-buttons {
   display: flex;
   justify-content: flex-end;
-  gap: 7px;
+  gap: 8px;
 }
 .ask-btn {
   height: 27px;
   padding: 0 12px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--paper);
-  color: var(--ink-soft);
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted);
   font-family: var(--font-ui);
   font-size: 12.5px;
   font-weight: 550;
   cursor: pointer;
   transition: background .12s, border-color .12s, color .12s;
 }
-.ask-btn:hover { border-color: var(--faint); color: var(--ink); }
+.ask-btn:hover { background: color-mix(in srgb, var(--ink) 7%, transparent); border-color: transparent; color: var(--ink); }
 .ask-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 /* The one that does the thing carries the accent, so which button is which is
    answered before the labels are read. */
@@ -3327,17 +3348,18 @@ ol.tk-ordered-list > li > .tk-olnum {
   background: var(--accent);
   color: var(--paper);
 }
-.ask-btn.is-go:hover { background: color-mix(in srgb, var(--accent) 86%, var(--ink)); color: var(--paper); }
-/* Destructive, but never the default: outlined in the accent rather than
-   filled with it, so it reads as a decision and not as "continue". */
+.ask-btn.is-go:hover { filter: brightness(1.08); background: var(--accent); color: var(--paper); }
+/* Destructive, but never the default: danger text with no fill, so it reads
+   as a decision and not as "continue". */
 .ask-btn.is-danger {
-  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-  color: var(--accent);
+  border-color: transparent;
+  background: transparent;
+  color: var(--code-removed);
 }
 .ask-btn.is-danger:hover {
-  border-color: var(--accent);
-  background: var(--accent-dim);
-  color: var(--accent);
+  border-color: transparent;
+  background: color-mix(in srgb, var(--code-removed) 12%, transparent);
+  color: var(--code-removed);
 }
 .ask-btn:disabled { opacity: .45; pointer-events: none; }
 
@@ -3418,15 +3440,15 @@ ol.tk-ordered-list > li > .tk-olnum {
 }
 .flashcard-image-add {
   padding: 4px 8px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--surface);
+  border: 0;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--ink) 7%, transparent);
   color: var(--muted);
   font: 550 11px/1.35 var(--font-ui);
 }
 .flashcard-image-add:hover,
 .flashcard-image-add:focus-visible {
-  border-color: var(--faint);
+  background: color-mix(in srgb, var(--ink) 12%, transparent);
   color: var(--ink);
 }
 .flashcard-image-add:focus-visible,
@@ -3535,11 +3557,12 @@ ol.tk-ordered-list > li > .tk-olnum {
   gap: 7px;
 }
 .flashcard-submit {
-  border-color: var(--ink-soft);
-  background: var(--ink);
+  border-color: transparent;
+  background: var(--accent);
   color: var(--paper);
+  font-weight: 600;
 }
-.flashcard-submit:hover { background: var(--ink-soft); color: var(--paper); }
+.flashcard-submit:hover { filter: brightness(1.08); background: var(--accent); color: var(--paper); }
 
 /* ---------------------------------------------------- orphaned images
 
@@ -3902,9 +3925,9 @@ ol.tk-ordered-list > li > .tk-olnum {
 .find-btn {
   height: 27px;
   padding: 0 11px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--paper);
+  border: 0;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--ink) 7%, transparent);
   color: var(--ink-soft);
   font-family: var(--font-ui);
   font-size: 12.5px;
@@ -3913,8 +3936,8 @@ ol.tk-ordered-list > li > .tk-olnum {
   cursor: pointer;
   transition: background .12s, border-color .12s, color .12s;
 }
-.find-btn:hover { border-color: var(--faint); color: var(--ink); }
-.find-btn:active { background: var(--selected); }
+.find-btn:hover { background: color-mix(in srgb, var(--ink) 12%, transparent); color: var(--ink); }
+.find-btn:active { background: color-mix(in srgb, var(--ink) 12%, transparent); }
 
 /* The options read as pressed or not pressed. `Aa`, `.*` and `ab|` are the
    marks the same three switches carry everywhere else; the words are in the
@@ -3927,8 +3950,8 @@ ol.tk-ordered-list > li > .tk-olnum {
   min-width: 27px;
   height: 27px;
   padding: 0 6px;
-  border: 1px solid transparent;
-  border-radius: 7px;
+  border: 0;
+  border-radius: 9px;
   background: none;
   color: var(--muted);
   font-family: var(--font-mono);
@@ -3936,10 +3959,10 @@ ol.tk-ordered-list > li > .tk-olnum {
   cursor: pointer;
   transition: background .12s, border-color .12s, color .12s;
 }
-.find-chip:hover, .panel-chip:hover { background: var(--hover); color: var(--ink-soft); }
+.find-chip:hover, .panel-chip:hover { background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--ink-soft); }
 .find-chip[aria-pressed="true"], .panel-chip[aria-pressed="true"] {
-  background: var(--accent-dim);
-  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-color: transparent;
   color: var(--accent);
 }
 
@@ -3950,7 +3973,7 @@ ol.tk-ordered-list > li > .tk-olnum {
   width: 26px;
   height: 26px;
   border: none;
-  border-radius: 7px;
+  border-radius: 9px;
   background: none;
   color: var(--muted);
   font-size: 13px;
@@ -3958,7 +3981,7 @@ ol.tk-ordered-list > li > .tk-olnum {
   cursor: pointer;
   transition: background .12s, color .12s;
 }
-.find-step:hover, .find-twist:hover { background: var(--hover); color: var(--ink); }
+.find-step:hover, .find-twist:hover { background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--ink); }
 
 /* The twist points at the row it opens: right when it is folded, down when the
    replace row is out. */
@@ -3975,7 +3998,7 @@ ol.tk-ordered-list > li > .tk-olnum {
   color: var(--faint);
   font-size: 15px;
 }
-.find-close:hover { background: var(--hover); color: var(--ink); }
+.find-close:hover { background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--ink); }
 
 /* Only the buttons take a focus ring. The text fields carry theirs on the box
    around them, and a ring as well made the two boxes the field is not. */
@@ -4535,7 +4558,7 @@ ol.tk-ordered-list > li > .tk-olnum {
   line-height: 1;
   color: var(--muted);
   padding: 3px 8px;
-  border-radius: 4px;
+  border-radius: 999px;
   transition: color .12s var(--ease), background .12s var(--ease);
 }
 .run-btn.is-icon {
@@ -4546,8 +4569,12 @@ ol.tk-ordered-list > li > .tk-olnum {
   padding: 0;
 }
 .run-icon { display: block; width: 15px; height: 15px; }
-.run-btn:hover { color: var(--accent); background: var(--accent-dim); }
-.run-btn.is-running { color: var(--accent); background: var(--accent-dim); }
+.run-btn:hover { color: var(--ink); background: color-mix(in srgb, var(--ink) 7%, transparent); }
+.run-btn.is-running {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  box-shadow: none;
+}
 
 /* A compact prompt under the header and above the source. It stays in the code
    block's flow, so neither the source nor the preceding document is covered.
@@ -4820,6 +4847,15 @@ ol.tk-ordered-list > li > .tk-olnum {
   color: color-mix(in oklab, var(--code-removed) 55%, var(--ink-soft));
 }
 .tk-run .run-out-stream.is-empty { color: var(--faint); font-style: italic; }
+
+/* A runaway block can print a megabyte — half a million short lines — and
+   laying out every one of them to paint the first froze the window. Offscreen
+   lines skip layout until they are scrolled to; what is on screen reads the
+   same, and the intrinsic size keeps the scrollbar truthful meanwhile. */
+.run-out-stream {
+  content-visibility: auto;
+  contain-intrinsic-block-size: auto 120px;
+}
 
 /* ---------------------------------------------------------------- html runs
    A run ```html block's page. In the editing view it sits in the run output's
@@ -5405,12 +5441,12 @@ ol.tk-ordered-list > li > .tk-olnum {
 .doc-control-cluster {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 6px;
 }
 .view-switch {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 6px;
 }
 .view-option,
 .doc-tool {
@@ -5419,9 +5455,9 @@ ol.tk-ordered-list > li > .tk-olnum {
   width: 28px;
   height: 28px;
   padding: 0;
-  border-radius: 7px;
+  border-radius: 999px;
   color: var(--muted);
-  transition: color .14s var(--ease), transform .1s var(--ease);
+  transition: color .14s var(--ease), transform .1s var(--ease), background .12s var(--ease), box-shadow .12s var(--ease);
 }
 .view-option {
   display: inline-flex;
@@ -5431,18 +5467,35 @@ ol.tk-ordered-list > li > .tk-olnum {
   padding: 0 7px;
   font: 600 11px/1 var(--font-ui);
 }
-.view-option[aria-pressed="true"] { background: var(--accent-dim); }
+.view-option[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+  box-shadow: none;
+}
 .view-option-label { white-space: nowrap; }
 
-@media (max-width: 820px) {
-  .view-option { width: 28px; padding: 0; justify-content: center; }
-  .view-option-label { display: none; }
+/* What only a screen reader should hear. An element has to be *somewhere* to
+   be announced, so the standard clip — present in the accessibility tree,
+   absent from the page. */
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap;
 }
-.view-option:hover:not(:disabled) { color: var(--ink); }
-.doc-tool:hover { color: var(--ink); background: var(--hover); }
+
+@media (max-width: 820px) {
+  /* Narrow is where the labels matter most: the three icons — a book, an eye,
+     brackets — are the ambiguous part of the control, not the expendable one.
+     Icon-and-label at width, label-only when it is tight; never icons alone. */
+  .view-option { padding: 0 6px; }
+  .view-option svg { display: none; }
+}
+.view-option:hover:not(:disabled) { color: var(--ink); background: color-mix(in srgb, var(--ink) 7%, transparent); }
+.doc-tool:hover { color: var(--ink); background: color-mix(in srgb, var(--ink) 7%, transparent); }
 .view-option[aria-pressed="true"],
 .doc-tool[aria-pressed="true"] {
   color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  box-shadow: none;
 }
 .view-option:focus-visible,
 .doc-tool:focus-visible {
@@ -5499,17 +5552,17 @@ ol.tk-ordered-list > li > .tk-olnum {
   gap: 6px;
   height: 24px;
   padding: 0 10px;
-  border-radius: 8px;
-  color: var(--accent);
-  background: var(--accent-dim);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent);
+  border-radius: 999px;
+  color: var(--paper);
+  background: var(--accent);
   font-size: 11.5px;
   font-weight: 600;
-  transition: background .14s var(--ease), box-shadow .14s var(--ease);
+  transition: filter .14s var(--ease);
 }
 .study-start:hover {
-  background: color-mix(in srgb, var(--accent) 20%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
+  filter: brightness(1.08);
+  background: var(--accent);
+  color: var(--paper);
 }
 .study-start:active { transform: translateY(.5px); }
 
@@ -5949,7 +6002,8 @@ ol.tk-ordered-list > li > .tk-olnum {
    there, and a blinking caret over text that cannot be typed into reads as an
    invitation; so in a language note the editor's own caret and active-line
    paint are off everywhere, and only a cell shows one. */
-#app[data-kind="language"] .cm-editor .cm-cursorLayer {
+#app[data-kind="language"] .cm-editor .cm-cursorLayer,
+#app[data-kind="language"] .cm-editor .tk-code-caret {
   display: none !important;
 }
 #app[data-kind="language"] .cm-editor > .cm-scroller > .cm-content {
@@ -6154,17 +6208,75 @@ ol.tk-ordered-list > li > .tk-olnum {
    it the long line moves alone and the block shears. The room is left padding,
    set from codeBlockScroll, which measures the block.
 
-   Inline, and padding rather than a width, because the caret at the end of a
-   line takes its rectangle from the last thing on that line — which inside a
-   fence is this. An inline box's rectangle is the line's own text box, so the
-   caret comes out exactly as tall as it is on any other line, in the same
-   place. A zero-height inline-block was the first shape this took, and it gave
-   the caret a rectangle of no height at all: no cursor at the end of any line
-   of code, and none at all in an empty block, which then read as a box that
-   could not be typed in. Padding an inline box does not touch the line's
-   height, and takes up the same horizontal room a width did. */
+   Inline, and padding rather than a width — the shape this has always had, for
+   a reason worth keeping even now that the caret it was chosen for is drawn
+   elsewhere. The browser's caret at the end of a line took its rectangle from
+   the last thing on that line, which inside a fence was this: an inline box's
+   rectangle is the line's own text box, so that caret came out exactly as tall
+   as it was on any other line, where the zero-height inline-block this started
+   as left it with no rectangle at all. Room to scroll into is still not a box
+   in the line, so the shape stands: no height of its own, nothing painted. */
 .tk-code-run { display: inline; }
 .cm-content .cm-line.tk-code-block::-webkit-scrollbar { display: none; }
+
+/* The caret on a line that scrolls is drawn by the editor, inside the line, as
+   a widget at the caret's position — see the caret note in src/codeblock.js.
+   The editor's own drawn caret lives in a layer of the editor's scroller, which
+   a line's sideways scroll never moves, and the browser's own is one pixel that
+   no stylesheet can widen; the line's own child has neither fault.
+
+   Inline, with the beam's width taken back as margins, so the caret takes up no
+   room at all: the code after it does not shift by a pixel, and the beam stands
+   centred on the position instead of hanging to one side of it. Its height is
+   the code line's own (1.62em), and the half-leading is taken off behind that,
+   so it is as tall as any other caret in the app beside the text it marks. */
+.tk-code-caret {
+  display: inline-block;
+  width: 0;
+  height: 1.62em;
+  vertical-align: -0.5em;
+  margin: 0 -1px;
+  border-left: 2px solid var(--accent);
+  pointer-events: none;
+}
+/* The layer's caret is hidden while the class is set — its own beam would sit
+   where the line's caret was before the last scroll — and the transparent
+   caret-color drawSelection puts on every line stays transparent, so only one
+   caret is ever on screen. Only the primary cursor is suppressed, so a
+   secondary caret in prose still draws; and the caret is only shown in an
+   editor that has the keyboard, the same rule CodeMirror's own caret follows. */
+.cm-editor.has-code-caret .cm-cursor-primary { display: none !important; }
+.cm-editor:not(.cm-focused) .tk-code-caret,
+.cm-editor.has-table-cell-focus .tk-code-caret,
+.cm-editor.has-table-source-selection .tk-code-caret {
+  display: none;
+}
+/* CodeMirror sizes every selection band from the *first* .cm-line in the
+   content: its padding, added to the content box's own edges (see
+   `rectanglesForRange` in @codemirror/view, and the note on the theme's
+   .cm-line in src/editor.js, which exists for exactly this reason). A code
+   line declares 12px — the frame keeps it to itself — so a note that opens
+   with a fence answered 12 too, and every band through that block reached 12px
+   past the frame on both sides, out over the paper.
+
+   So the header declares the column's padding like every other line, and takes
+   it straight back off its own content: what is on screen does not move, and
+   what CodeMirror measures is the column the frame sits on. Only the header
+   needs it, because only a header can be the first line of a block; a quoted
+   or callout block is left alone, its frame being an inset of a card rather
+   than the column itself.
+
+   The 12px comes back as a zero-width lead-in with a margin that pulls the
+   rest of the line in behind it — text-indent would have done it in one
+   declaration, except that the same measurement reads it and subtracts it
+   again. */
+.cm-content .cm-line.tk-code-block.tk-code-top:not(.tk-quote):not(.tk-callout) {
+  padding-inline: 24px;
+}
+.cm-content .cm-line.tk-code-block.tk-code-top:not(.tk-quote):not(.tk-callout)::before {
+  content: "";
+  margin-left: -12px;
+}
 .cm-content .cm-line.tk-code-top {
   padding-top: 11px;
   padding-bottom: 18px;
@@ -6184,6 +6296,16 @@ ol.tk-ordered-list > li > .tk-olnum {
    The fence keeps a real height for that reason. Collapsed to nothing it read
    as tidy and clicked as a hairline. */
 .cm-content .cm-line.tk-code-last { padding-bottom: 10px; }
+
+/* The caret's line inside a block keeps the block's surface. The theme paints
+   the active line with a wash *instead of* a colour, and on a code line the
+   colour it replaced was the frame itself: the line under the caret came out
+   through the middle of the block as a lighter strip. So the wash is a layer
+   over the surface here, as the theme's own prose rule has it underneath. */
+.cm-content .cm-line.tk-code-block.cm-activeLine {
+  background-color: var(--sunk);
+  background-image: linear-gradient(var(--active-line), var(--active-line));
+}
 
 /* The last line's padding belongs to the block, not to the line under the
    caret. Paint its active band as a layer that stops before that padding, with
@@ -6822,17 +6944,28 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   font-family: var(--font-ui);
 }
 .transclude-edit-controls button {
-  border: 1px solid var(--line);
+  border: 1px solid transparent;
   border-radius: 5px;
   padding: 4px 10px;
-  background: var(--surface);
+  background: transparent;
   color: var(--muted);
   font: 11.5px/1.3 var(--font-ui);
   cursor: pointer;
 }
+.transclude-edit-controls button:hover:not(:disabled) {
+  background: var(--surface);
+  color: var(--ink);
+}
 .transclude-edit-controls button.is-primary {
-  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
-  color: var(--accent);
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--paper);
+  font-weight: 600;
+}
+.transclude-edit-controls button.is-primary:hover:not(:disabled) {
+  filter: brightness(1.08);
+  background: var(--accent);
+  color: var(--paper);
 }
 .transclude-edit-controls button:disabled { opacity: .5; cursor: default; }
 .transclude-edit-message {
@@ -7117,7 +7250,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   aspect-ratio: 3 / 2;
   object-fit: contain;
 }
-/* Placement only: appearance is the same outlined chip as `.ghost` and the
+/* Placement only: appearance is the same borderless button as `.ghost` and the
    other chrome in src/controls.css. */
 .tk-embed-control {
   position: absolute;
@@ -8224,13 +8357,13 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   flex: none;
   width: 27px;
   height: 27px;
-  border-radius: 8px;
-  border: 1px solid transparent;
+  border-radius: 9px;
+  border: 0;
   background: none;
   color: var(--muted);
   cursor: pointer;
 }
-.ai-chip:hover { background: var(--hover); color: var(--ink); }
+.ai-chip:hover { background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--ink); }
 .ai-chip.ai-mode {
   display: flex;
   gap: 4px;
@@ -8269,8 +8402,9 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
    would compete with the send button beside it. */
 .ai-chip[aria-pressed="true"] {
   color: var(--accent);
-  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-  box-shadow: 0 0 0 2px var(--accent-dim);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-color: transparent;
+  box-shadow: none;
 }
 
 /* The one control for a copilot that cannot answer: an outline, not a filled
@@ -8280,18 +8414,18 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   flex: none;
   padding: 5px 8px;
   border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
-  border-radius: 8px;
+  border-radius: 9px;
   background: none;
   color: var(--accent);
   font: 500 11.5px/1 var(--font-ui);
   white-space: nowrap;
   cursor: pointer;
 }
-.ai-setup:hover { background: var(--accent-dim); color: var(--accent); }
+.ai-setup:hover { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); }
 .ai-setup:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 /* What is answering, and how hard. A readout and nothing more: the model is
-   chosen by name at the message box and the level is stepped with ⌃T, so there
+   chosen by name at the message box and the level is stepped with ⌘T, so there
    is no hover state and no press — a thing that lights up under the pointer
    promises something to click. */
 .ai-config {
@@ -8313,7 +8447,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 #ai-config-model.is-none { color: var(--faint); }
 .ai-config-sep { opacity: .5; }
 .ai-config-effort { color: var(--faint); }
-/* ⌃T changes a word in the corner of a panel nobody is looking at. The flash is
+/* ⌘T changes a word in the corner of a panel nobody is looking at. The flash is
    what carries the change to the eye — the readout lights the accent and lets
    go of it, so the level that has just been stepped to is the thing that moved.
    Short, and once per press: a control that keeps pulsing reads as a warning. */
@@ -9306,20 +9440,28 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 .ai-doctor-about { grid-column: 1 / -1; margin: 0; }
 .settings-row[data-setting="environments"] .ai-doctor-provider { grid-template-columns: minmax(0, 1fr) auto auto auto; }
 .settings .env-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-/* Consent given once, listed where it can be taken back. */
-.trusted-vaults { display: grid; gap: 8px; min-width: 0; }
-.trusted-list { display: grid; gap: 6px; min-width: 0; }
-.trusted-row {
+/* The environment behind a note's code blocks — a quiet line of text, the
+   whole of which is the button into the package manager. */
+.env-list { display: grid; gap: 2px; min-width: 0; }
+.env-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 10px;
-  min-height: 32px;
+  gap: 4px 16px;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
 }
-.trusted-named { display: grid; min-width: 0; }
-.trusted-name { color: var(--ink); font: 500 13px/1.4 var(--font-ui); }
-.trusted-path { color: var(--muted); font: 11.5px/1.4 ui-monospace, monospace; overflow-wrap: anywhere; }
-.trusted-current { color: var(--muted); font: 12px/1.4 var(--font-ui); }
+.env-row:hover { background: var(--hover); }
+.env-named { display: grid; gap: 1px; min-width: 0; }
+.env-name { color: var(--ink); font: 500 13px/1.4 var(--font-ui); overflow-wrap: anywhere; }
+.env-path { color: var(--muted); font: 11.5px/1.4 ui-monospace, monospace; overflow-wrap: anywhere; }
+.env-meta { color: var(--muted); font: 12px/1.4 var(--font-ui); white-space: nowrap; }
 .settings-label { min-width: 0; }
 .settings-name {
   display: flex;
@@ -9446,27 +9588,28 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 
 .seg {
   display: flex;
-  gap: 1px;
-  padding: 2px;
-  border-radius: 7px;
-  background: var(--sunk);
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
 }
 .seg button {
-  padding: 5px 11px;
+  padding: 7px 15px;
   border: 0;
-  border-radius: 5px;
+  border-radius: 999px;
   background: none;
   color: var(--muted);
   font-family: var(--font-ui);
   font-size: 12.5px;
   cursor: pointer;
 }
-.seg button:hover { color: var(--ink); }
+.seg button:hover { background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--ink); }
 .seg button[aria-checked="true"] {
-  background: var(--surface);
-  color: var(--ink);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
   font-weight: 600;
-  box-shadow: 0 1px 2px rgb(0 0 0 / .1);
+  box-shadow: none;
 }
 
 .field {
@@ -9603,23 +9746,24 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 .stepper {
   display: flex;
   align-items: center;
-  gap: 1px;
-  padding: 2px;
-  border-radius: 7px;
-  background: var(--sunk);
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
 }
 .stepper button {
   min-width: 30px;
   padding: 5px 10px;
   border: 0;
-  border-radius: 5px;
+  border-radius: 999px;
   background: none;
-  color: var(--ink-soft);
+  color: var(--muted);
   font-family: var(--font-ui);
   font-size: 12.5px;
   cursor: pointer;
 }
-.stepper button:hover:not(:disabled) { background: var(--hover); color: var(--ink); }
+.stepper button:hover:not(:disabled) { background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--ink); }
 .stepper button:disabled { color: var(--faint); }
 .stepper-value { min-width: 54px; font-variant-numeric: tabular-nums; }
 
@@ -9775,15 +9919,15 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 .model-refresh {
   flex: none;
   padding: 4px 9px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--surface);
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
   font: 500 11.5px/1.35 var(--font-ui);
-  color: var(--ink-soft);
+  color: var(--muted);
   cursor: pointer;
-  transition: border-color .12s, color .12s;
+  transition: background .12s, color .12s;
 }
-.model-refresh:hover:not(:disabled) { border-color: var(--accent); color: var(--ink) }
+.model-refresh:hover:not(:disabled) { background: var(--surface); color: var(--ink); }
 .model-refresh:disabled { color: var(--faint); cursor: default; }
 /* Bounded, and scrolling on its own: the pane behind it scrolls too, which is
    normally worth avoiding — but the alternative is the search box scrolling out
@@ -10230,7 +10374,10 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   cursor: pointer;
 }
 .pdf-pop-btn:hover { background: var(--hover); color: var(--ink); }
-.pdf-pop-btn.is-danger:hover { background: var(--accent-dim); color: var(--accent); }
+.pdf-pop-btn.is-danger:hover {
+  background: color-mix(in srgb, var(--code-removed) 12%, transparent);
+  color: var(--code-removed);
+}
 
 .pdf-swatch {
   width: 19px;
@@ -10274,7 +10421,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 .pdf-bar-group {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 6px;
 }
 
 .pdf-bar-btn {
@@ -10283,21 +10430,21 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   width: 27px;
   height: 25px;
   border: 0;
-  border-radius: 6px;
+  border-radius: 9px;
   background: none;
   color: var(--muted);
   cursor: pointer;
   transition: background .12s, color .12s;
 }
-.pdf-bar-btn:hover { background: var(--hover); color: var(--ink); }
-.pdf-bar-btn:active { background: var(--selected); }
+.pdf-bar-btn:hover { background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--ink); }
+.pdf-bar-btn:active { background: color-mix(in srgb, var(--ink) 12%, transparent); }
 
 /* -------------------------------------------------- the arrow and the pen */
 
 /* The middle of the toolbar: what a selection does. The tool in hand is filled
    rather than merely tinted — a mode the reader is in has to be visible at a
    glance, from further away than a change of colour carries. */
-.pdf-bar-group.is-tools { gap: 4px; }
+.pdf-bar-group.is-tools { gap: 6px; }
 
 .pdf-bar-line {
   width: 1px;
@@ -10312,15 +10459,15 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   width: 27px;
   height: 25px;
   border: 0;
-  border-radius: 6px;
+  border-radius: 9px;
   background: none;
   color: var(--muted);
   cursor: pointer;
   transition: background .12s, color .12s;
 }
-.pdf-tool:hover { background: var(--hover); color: var(--ink); }
+.pdf-tool:hover { background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--ink); }
 .pdf-tool.is-on {
-  background: var(--accent-dim);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
   color: var(--accent);
 }
 
@@ -10387,7 +10534,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   height: 25px;
   padding: 0 8px;
   border: 0;
-  border-radius: 6px;
+  border-radius: 9px;
   background: none;
   color: var(--ink-soft);
   font-family: inherit;
@@ -10397,7 +10544,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   cursor: pointer;
   transition: background .12s, color .12s;
 }
-.pdf-scale:hover { background: var(--hover); color: var(--ink); }
+.pdf-scale:hover { background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--ink); }
 .pdf-scale.is-set { color: var(--accent); }
 
 /* ------------------------------------------------- the sidebar and panel */
@@ -10561,20 +10708,26 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 .pdf-password-btn {
   height: 26px;
   padding: 0 12px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--surface);
-  color: var(--ink-soft);
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
   font-family: inherit;
   font-size: 12px;
   font-weight: 550;
   cursor: pointer;
 }
-.pdf-password-btn:hover { background: var(--hover); color: var(--ink); }
+.pdf-password-btn:hover { background: var(--surface); color: var(--ink); }
 .pdf-password-btn.is-primary {
-  border-color: var(--accent);
+  border-color: transparent;
   background: var(--accent);
-  color: #fff;
+  color: var(--paper);
+  font-weight: 600;
+}
+.pdf-password-btn.is-primary:hover:not(:disabled) {
+  filter: brightness(1.08);
+  background: var(--accent);
+  color: var(--paper);
 }
 
 /* ------------------------------------------------------- the thumbnails
@@ -10690,7 +10843,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 .site-bar-group {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 6px;
   flex: none;
 }
 
@@ -10700,7 +10853,7 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   width: 27px;
   height: 25px;
   border: 0;
-  border-radius: 6px;
+  border-radius: 9px;
   background: none;
   color: var(--muted);
   font: inherit;
@@ -10713,8 +10866,8 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
   font-size: 11.5px;
   font-weight: 550;
 }
-.site-btn:hover:not(:disabled) { background: var(--hover); color: var(--ink); }
-.site-btn:active:not(:disabled) { background: var(--selected); }
+.site-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--ink); }
+.site-btn:active:not(:disabled) { background: color-mix(in srgb, var(--ink) 12%, transparent); }
 /* Dimmed rather than removed. Back and forward are a pair, and a pair that
    loses a member as you browse is a toolbar that moves under the pointer. */
 .site-btn:disabled { opacity: .35; }
@@ -10954,17 +11107,24 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
 .fileview-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
 .fileview-btn {
   padding: 5px 12px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--paper);
-  color: var(--ink-soft);
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
   font: inherit;
   cursor: pointer;
 }
-.fileview-btn:hover { color: var(--ink); border-color: var(--line-strong, var(--line)); }
-.fileview-btn.is-primary { color: var(--accent); border-color: var(--accent); }
+.fileview-btn:hover { color: var(--ink); background: var(--surface); }
+.fileview-btn.is-primary {
+  background: var(--accent);
+  border-color: transparent;
+  color: var(--paper);
+  font-weight: 600;
+}
 .fileview-btn.is-primary:hover {
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  filter: brightness(1.08);
+  background: var(--accent);
+  color: var(--paper);
 }
 
 /* -------------------------------------------------- word documents
@@ -11132,7 +11292,7 @@ h4.docx-h, h5.docx-h, h6.docx-h { font-size: 1.05em; }
 }
 .docx-bar[hidden] { display: none; }
 
-.docx-bar-group { display: flex; align-items: center; gap: 2px; }
+.docx-bar-group { display: flex; align-items: center; gap: 6px; }
 /* Pushed to the far end, away from the controls that change the document. */
 .docx-bar-group.is-end { margin-left: auto; }
 
@@ -11140,7 +11300,7 @@ h4.docx-h, h5.docx-h, h6.docx-h { font-size: 1.05em; }
   width: 1px;
   height: 18px;
   background: var(--line-soft);
-  margin: 0 2px;
+  margin: 0 4px;
 }
 
 .docx-btn {
@@ -11150,7 +11310,7 @@ h4.docx-h, h5.docx-h, h6.docx-h { font-size: 1.05em; }
   height: 25px;
   padding: 0 4px;
   border: 0;
-  border-radius: 6px;
+  border-radius: 9px;
   background: none;
   color: var(--muted);
   font: inherit;
@@ -11159,10 +11319,10 @@ h4.docx-h, h5.docx-h, h6.docx-h { font-size: 1.05em; }
 }
 .docx-btn.is-wide { padding: 0 8px; }
 .docx-btn b, .docx-btn i, .docx-btn u, .docx-btn s { font-size: 13px; line-height: 1; }
-.docx-btn:hover { background: var(--hover); color: var(--ink); }
-.docx-btn:active { background: var(--selected); }
+.docx-btn:hover { background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--ink); }
+.docx-btn:active { background: color-mix(in srgb, var(--ink) 12%, transparent); }
 .docx-btn[aria-pressed="true"] {
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
   color: var(--accent);
 }
 /* A control that cannot do anything where the caret is — the row and column
@@ -12444,10 +12604,11 @@ h4.docx-h, h5.docx-h, h6.docx-h { font-size: 1.05em; }
 .site-card-go:hover { background: var(--hover); border-color: var(--faint); }
 
 /* Collapse-all / expand-all: one button carrying both marks, showing the one
-   that applies — so it never changes size as the tree opens and shuts. */
+   that applies — so it never changes size as the tree opens and shuts. The
+   file tree's button and the outline's share the pair through .fold-toggle. */
 .fold-ico-expand { display: none; }
-#btn-fold-all.is-shut .fold-ico-collapse { display: none; }
-#btn-fold-all.is-shut .fold-ico-expand { display: block; }
+.fold-toggle.is-shut .fold-ico-collapse { display: none; }
+.fold-toggle.is-shut .fold-ico-expand { display: block; }
 
 /* ------------------------------------------- the title's flag, at full size
 
@@ -12768,20 +12929,22 @@ h4.docx-h, h5.docx-h, h6.docx-h { font-size: 1.05em; }
   border-bottom: 1px solid var(--line-soft);
 }
 .merge-where { color: var(--faint); font: 600 9.5px/1 var(--font-ui); letter-spacing: .1em; text-transform: uppercase; }
-.merge-choice { display: flex; gap: 2px; padding: 2px; background: color-mix(in srgb, var(--line) 26%, transparent); border-radius: 6px; }
+.merge-choice { display: flex; gap: 6px; padding: 0; background: transparent; border: 0; border-radius: 0; }
 .merge-choice button {
   padding: 2px 8px;
   border: 0;
-  border-radius: 4px;
+  border-radius: 999px;
   background: transparent;
   color: var(--muted);
   font: 550 10.5px/1.5 var(--font-ui);
   cursor: pointer;
 }
+.merge-choice button:hover:not(:disabled) { background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--ink); }
 .merge-choice button.is-active {
-  background: var(--paper);
-  color: var(--ink);
-  box-shadow: 0 0 0 1px var(--line-soft);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+  font-weight: 600;
+  box-shadow: none;
 }
 
 /* The two candidates, side by side; the chosen one takes the accent's family
@@ -12915,14 +13078,10 @@ h4.docx-h, h5.docx-h, h6.docx-h { font-size: 1.05em; }
    src/settings.js. The rows are the doctor's shape; only the footer differs,
    because this one can have two buttons in it. */
 .env-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.ai-review-keep {
-  padding: 2px 8px;
-  border-radius: 4px;
-  color: var(--paper);
-  background: var(--accent);
-  font: 600 10.5px/1.4 var(--font-ui);
-}
-.ai-review-keep:disabled { opacity: .6; }
+/* Sizing and fill come from `ghost is-compact is-accent` so Accept matches
+   Diff and Reject exactly; only the disabled wash differs. Stronger than the
+   generic `button:disabled` rule in controls.css. */
+:root body button.ai-review-keep:disabled { opacity: .6; }
 /* The review block borrows the history panel's diff, so a change looks the
    same whether it is met in the chat or found again a week later. */
 .ai-review-file .history-diff { grid-column: 1 / -1; min-width: 0; margin: 2px 0 4px; }
@@ -12931,6 +13090,17 @@ h4.docx-h, h5.docx-h, h6.docx-h { font-size: 1.05em; }
   border-color: var(--line);
   background: transparent;
 }
+/* A proposal card settles the same way once decided — applied or discarded,
+   the accent wash lifts and only the file list stays. A row whose change
+   landed keeps its colour quiet rather than struck through: the strike is
+   rejection's mark, and an applied line is not a rejected one. */
+.msg-proposal.is-applied,
+.msg-proposal.is-discarded,
+.msg-proposal.is-partly {
+  border-color: var(--line);
+  background: transparent;
+}
+.ai-review-file.is-accepted .ai-review-path { color: var(--faint); }
 
 /* ------------------------------------------------------------ export
 
@@ -13226,6 +13396,8 @@ h4.docx-h, h5.docx-h, h6.docx-h { font-size: 1.05em; }
 .workspace-tools button { display: block; width: 100%; text-align: left; padding: 10px 12px; border: 0; border-radius: 6px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
 .workspace-tools button:hover, .workspace-tools button:focus-visible { background: var(--hover, #8882); }
 .workspace-tools input, .shortcuts-search { display: block; box-sizing: border-box; width: 100%; padding: 10px; margin: 10px 0; border: 1px solid var(--line, #ccc); border-radius: 6px; background: transparent; color: inherit; font: inherit; }
+.template-prompts label { display: block; font-size: 12.5px; color: var(--muted, #666); }
+.template-prompts label input { margin: 6px 0 14px; font-size: 14px; color: var(--ink, #222); }
 .shortcuts-search { width: calc(100% - 40px); margin: 12px 20px; }
 .shortcuts-row[hidden], .shortcuts-group[hidden] { display: none; }
 .sidepane-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
@@ -13247,6 +13419,39 @@ h4.docx-h, h5.docx-h, h6.docx-h { font-size: 1.05em; }
 .ai-review-applied { display: block; font-size: 11px; opacity: .7; }
 .ai-note-source { color: var(--accent); font: inherit; background: transparent; border: 0; padding: 0; text-decoration: underline; cursor: pointer; }
 #search-result-preview { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 30vh; overflow: auto; padding: 14px; margin: 0; font: inherit; font-size: 13px; user-select: text; }
+/* A PDF result previews as the document itself — a reader that holds every
+   page, scrolled while ⌘ is held. It is positioned against the overlay rather
+   than the panel: `.panel` is static and overflow-hidden, so an absolute
+   child escapes it entirely. And it is sized to sit over the panel whole —
+   list, field and all — because a row left showing beside the card is a row
+   the pointer can slip onto, and hovering a row takes the selection and the
+   document with it. The page fills the card edge to edge; a hairline between
+   pages is all the separation a continuous scroll needs. */
+#search-result-preview.is-page {
+  position: absolute;
+  left: 50%;
+  top: 9vh;
+  transform: translateX(-50%);
+  z-index: 2;
+  width: min(920px, 92vw);
+  max-height: 82vh;
+  padding: 0;
+  overflow: hidden;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 16px 50px -10px #00000045;
+  user-select: none;
+}
+#search-result-preview .peek-pages {
+  overflow-y: auto;
+  max-height: 82vh;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+#search-result-preview .peek-slot { width: 100%; background: #fff; }
+#search-result-preview .peek-slot + .peek-slot { border-top: 1px solid var(--line); }
+#search-result-preview .peek-page { display: block; width: 100%; height: auto; }
 @media (min-width: 1000px) {
   .panel.has-search-preview { width: min(980px, 90vw); display: grid; grid-template-columns: 1fr 1fr; }
   .panel.has-search-preview > :not(.panel-list):not(#search-result-preview) { grid-column: 1 / -1; }

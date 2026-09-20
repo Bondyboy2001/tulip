@@ -320,6 +320,10 @@ export function createMarkdown ({ resolveEmbedSrc }) {
     const token = tokens[i]
     if (token.map && token.nesting !== -1) token.attrSet('data-line', String(token.map[0]))
     if (token.type === 'ordered_list_open') token.attrJoin('class', 'tk-ordered-list')
+    /* A cell of Arabic or Hebrew reads right-to-left wherever it appears —
+       reading view is where a vocabulary table's own grid is not, so the
+       direction is the cell's to decide. LTR cells are unaffected. */
+    if (token.type === 'td_open' || token.type === 'th_open') token.attrSet('dir', 'auto')
     return renderToken(tokens, i, options)
   }
 

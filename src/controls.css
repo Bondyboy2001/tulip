@@ -1,103 +1,144 @@
 /* Shared control treatment for the document window and Settings.
-   Component styles still own sizing and layout; these rules own appearance. */
+   Component styles still own sizing and layout; these rules own appearance.
+
+   One system (radius 9px, pills for groups, "soft tonal"):
+   - idle actions are borderless text in var(--muted);
+   - hover lays an ink tint under an var(--ink) label;
+   - exactly one primary per view is a solid var(--accent) chip;
+   - a pressed choice is an accent-soft fill with an accent label, no ring;
+   - groups are detached: no shared track, a 6px rhythm between standalone
+     pills, so nothing reads as joined cells;
+   - danger is var(--code-removed) text, which every theme already defines. */
 :root {
-  --control-radius: 4px;
-  --control-border: var(--line);
-  --control-selected: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  --control-radius: 9px;
+  --control-pill: 999px;
+  --control-tint: color-mix(in srgb, var(--ink) 7%, transparent);
+  --control-tint-hover: color-mix(in srgb, var(--ink) 12%, transparent);
+  --control-accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
+  --control-selected: var(--control-tint);
 }
 
-/* Actions and closed dropdowns use one flat, outlined surface. */
+/* Ordinary actions are borderless; the tint on hover is their shape.
+   (Closed dropdowns keep their field border in styles.css, so .dd-button
+   is deliberately absent here.) */
 :root body :is(.ghost, .model-refresh, .ask-btn, .boot-action, .fileview-btn,
-  .find-btn, .landing-connect, .study-start, .pdf-password-btn, .dd-button, .ai-go, .flashcard-submit,
+  .find-btn, .landing-connect, .pdf-password-btn, .flashcard-submit,
   .tk-embed-control) {
-  border: 1px solid var(--control-border);
+  border: 0;
   border-radius: var(--control-radius);
-  background: var(--surface);
-  color: var(--ink-soft);
+  background: transparent;
+  color: var(--muted);
   box-shadow: none;
   font-weight: 500;
-  transition: background .12s, border-color .12s, color .12s;
+  transition: background .12s, border-color .12s, color .12s, filter .12s;
 }
 :root body :is(.ghost, .model-refresh, .ask-btn, .boot-action, .fileview-btn,
-  .find-btn, .landing-connect, .study-start, .pdf-password-btn, .dd-button, .ai-go, .flashcard-submit,
+  .find-btn, .landing-connect, .pdf-password-btn, .flashcard-submit,
   .tk-embed-control):hover:not(:disabled) {
-  background: var(--hover);
-  border-color: var(--muted);
+  background: var(--control-tint);
+  border-color: transparent;
   color: var(--ink);
 }
+/* The run / study actions and the send button are pills even when they stand
+   alone, so a detached group and a lone action speak the same language. */
+:root body :is(.study-start, .ai-go):is(button) {
+  border-radius: var(--control-pill);
+}
+/* The one action per view that moves things forward is a solid accent chip.
+   No black, no tint-with-border: the fill is the signal. */
 :root body :is(.is-primary, .is-go, .ghost.is-accent, .landing-connect, .study-start, .ai-go, .flashcard-submit):is(button) {
-  background: var(--control-selected);
-  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
-  color: var(--accent);
+  background: var(--accent);
+  border-color: transparent;
+  color: var(--paper);
+  font-weight: 600;
   box-shadow: none;
+}
+:root body :is(.is-primary, .is-go, .ghost.is-accent, .landing-connect, .study-start, .ai-go, .flashcard-submit):is(button):hover:not(:disabled) {
+  background: var(--accent);
+  border-color: transparent;
+  color: var(--paper);
+  filter: brightness(1.08);
 }
 :root body :is(.ghost, .ask-btn, .pdf-pop-btn).is-danger {
   color: var(--code-removed);
-  border-color: color-mix(in srgb, var(--code-removed) 30%, var(--line));
+  border-color: transparent;
+  background: transparent;
 }
 :root body :is(.ghost, .ask-btn, .pdf-pop-btn).is-danger:hover:not(:disabled) {
   color: var(--code-removed);
-  background: color-mix(in srgb, var(--code-removed) 9%, var(--surface));
+  border-color: transparent;
+  background: color-mix(in srgb, var(--code-removed) 12%, transparent);
 }
 
-/* Connected choices have dividers and an accent underline, never a raised pill. */
+/* Detached choices: no track, no dividers, no shared box. Each option is its
+   own pill with room to breathe, one tonal hover, and an accent-soft fill
+   for whatever is pressed — never a ring. */
 :root body :is(.seg, .merge-choice, .view-switch, .stepper) {
-  gap: 0;
+  gap: 6px;
   padding: 0;
-  border: 1px solid var(--control-border);
-  border-radius: var(--control-radius);
+  border: 0;
+  border-radius: 0;
   background: transparent;
   box-shadow: none;
 }
 :root body :is(.seg, .merge-choice, .view-switch, .stepper) > button {
   margin: 0;
   border: 0;
-  border-bottom: 2px solid transparent;
-  border-radius: 0;
+  border-radius: var(--control-pill);
   background: transparent;
   color: var(--muted);
   box-shadow: none;
   font-weight: 500;
-}
-:root body :is(.seg, .merge-choice, .view-switch, .stepper) > button + button {
-  border-left: 1px solid var(--control-border);
+  transition: background .12s, color .12s, box-shadow .12s;
 }
 :root body :is(.seg, .merge-choice, .view-switch, .stepper) > button:hover:not(:disabled) {
-  background: var(--hover);
+  background: var(--control-tint);
   color: var(--ink);
 }
 :root body :is(.seg, .merge-choice, .view-switch) > button:is([aria-checked="true"], [aria-pressed="true"], .is-active) {
-  border-bottom-color: var(--accent);
-  background: var(--control-selected);
+  background: var(--control-accent-soft);
   color: var(--accent);
+  font-weight: 600;
   box-shadow: none;
 }
 
 /* Compact toolbar controls keep their existing hit areas and icon sizing. */
 :root body :is(.icon-btn, .doc-tool, .run-btn, .nav-arrow, .zoom, .pdf-bar-btn,
   .pdf-tool, .pdf-scale, .docx-btn, .site-btn, .msg-action, .packages-close,
-  .pdf-pop-btn, .settings-tab, .tab-close, .tab-pin, .vault-name,
+  .pdf-pop-btn, .settings-tab, .tab-close, .tab-pin,
   .sidebar-open, .workspace-tools-open, .ai-chip, .shortcuts-close, .find-close,
   .media-dock-close, .ai-attachment-remove, .ai-attachment-dialog-close) {
+  border: 0;
   border-radius: var(--control-radius);
+  background: transparent;
+  color: var(--muted);
+  box-shadow: none;
+  transition: background .12s, color .12s, box-shadow .12s;
+}
+:root body :is(.icon-btn, .doc-tool, .run-btn, .nav-arrow, .zoom, .pdf-bar-btn,
+  .pdf-tool, .pdf-scale, .docx-btn, .site-btn, .msg-action, .packages-close,
+  .pdf-pop-btn, .settings-tab, .tab-close, .tab-pin,
+  .sidebar-open, .workspace-tools-open, .ai-chip, .shortcuts-close, .find-close,
+  .media-dock-close, .ai-attachment-remove, .ai-attachment-dialog-close):hover:not(:disabled) {
+  background: var(--control-tint);
+  color: var(--ink);
+}
+/* Every toolbar toggle lights the same way: an accent-soft fill with an
+   accent glyph, no ring. The sidebar's pane tabs are deliberately
+   absent: their state is a hairline of their own. */
+:root body :is(.icon-btn, .doc-tool, .run-btn, .pdf-tool, .docx-btn):is([aria-pressed="true"], .is-running) {
+  background: var(--control-accent-soft);
+  color: var(--accent);
   box-shadow: none;
 }
-/* Every toolbar toggle lights the same way, with the app's one pressed tint —
-   the same colour `.pdf-tool.is-on` and the icon buttons already use, so no
-   two toolbars answer the pointer differently. The sidebar's pane tabs are
-   deliberately absent: their state is a hairline of their own. */
-:root body :is(.icon-btn, .doc-tool, .run-btn, .pdf-tool, .docx-btn):is([aria-pressed="true"], .is-running) {
-  background: var(--accent-dim);
-  color: var(--accent);
-}
-:root body .switch { border-radius: var(--control-radius); box-shadow: none; }
-:root body .switch-thumb { border-radius: 2px; box-shadow: none; }
+:root body .switch { border-radius: var(--control-pill); box-shadow: none; }
+:root body .switch-thumb { border-radius: 50%; box-shadow: none; }
 :root body :is(.packages-dialog, .settings-window) :is(input:not([type="checkbox"]), select) { border-radius: var(--control-radius); box-shadow: none; }
 :root body button:focus-visible, :root body summary:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
-:root body button:disabled { opacity: .45; cursor: default; }
+:root body button:disabled { opacity: .4; cursor: default; }
 
 :root body .tab { border-radius: var(--control-radius); border-bottom: 2px solid transparent; box-shadow: none; }
-:root body .tab.is-active { border-bottom-color: var(--accent); background: var(--control-selected); color: var(--accent); box-shadow: none; }
+:root body .tab.is-active { border-bottom-color: var(--accent); background: var(--control-selected); color: var(--ink); box-shadow: none; }

@@ -107,6 +107,12 @@ const action = (kind, label, mark) =>
  */
 export function classOf (msg) {
   if (msg.t === 'review') return `msg msg-review${msg.accepted ? ' is-accepted' : ''}`
+  /* A staged proposal wears the review card's look — it is the same kind of
+     object (a set of named changes awaiting a decision), only earlier. */
+  if (msg.t === 'proposal') {
+    return ['msg msg-review msg-proposal',
+            msg.status && `is-${msg.status}`].filter(Boolean).join(' ')
+  }
   if (msg.t === 'step') {
     return ['msg msg-step', msg.error && 'is-error', running(msg) && 'is-running',
             jumps(msg) && 'can-open is-edit',

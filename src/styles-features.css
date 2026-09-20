@@ -177,7 +177,7 @@
 /* Compact package inspector. Advanced actions stay behind disclosures. */
 .packages-dialog { box-sizing: border-box; width: min(460px, calc(100vw - 32px)); max-height: 80vh; overflow: auto; padding: 20px; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 18px 60px #0003; font: 13px/1.5 var(--font-ui); }
 .packages-dialog::backdrop { background: #0004; }
-.packages-head, .packages-toolbar, .packages-row, .packages-add-fields, .packages-action-buttons { display: flex; align-items: center; gap: 10px; }
+.packages-head, .packages-toolbar, .packages-row, .packages-add-fields, .packages-actions { display: flex; align-items: center; gap: 10px; }
 .packages-head, .packages-toolbar { justify-content: space-between; }
 .packages-head h2 { margin: 0; font-size: 17px; font-weight: 600; }
 .packages-close { width: 28px; height: 28px; padding: 0; border: 0; border-radius: 6px; color: var(--muted); background: transparent; font: 22px/1 var(--font-ui); cursor: pointer; }
@@ -191,7 +191,7 @@
 .packages-add { margin: 12px 0; padding: 12px; border: 1px solid var(--line); border-radius: 8px; }
 .packages-add-fields input { min-width: 0; flex: 1; }
 .packages-mapping { margin-top: 9px; }
-.packages-mapping summary, .packages-actions > summary { color: var(--muted); cursor: pointer; font-size: 11px; }
+.packages-mapping summary { color: var(--muted); cursor: pointer; font-size: 11px; }
 .packages-mapping input { width: 100%; margin-top: 8px; }
 .packages-list { border-top: 1px solid var(--line); }
 .packages-list > p { color: var(--muted); font-size: 12px; margin: 18px 0; }
@@ -203,8 +203,9 @@
 .packages-menu > summary::-webkit-details-marker { display: none; }
 .packages-menu[open] > summary, .packages-menu > summary:hover { background: var(--hover); color: var(--ink); }
 .packages-menu-items { position: absolute; z-index: 2; right: 0; top: 26px; min-width: 100px; display: grid; padding: 4px; background: var(--surface); border: 1px solid var(--line); border-radius: 7px; box-shadow: 0 6px 18px #0002; }
+.packages-menu-items.is-up { top: auto; bottom: calc(100% + 6px); }
 .packages-menu-items button { text-align: left; }
-.packages-actions { margin-top: 14px; }
-.packages-action-buttons { flex-wrap: wrap; margin-top: 8px; }
+.packages-actions { flex-wrap: wrap; margin-top: 14px; }
+.packages-actions .is-danger { margin-left: auto; }
 .packages-status { margin: 10px 0 0; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
 .packages-status:empty { display: none; }

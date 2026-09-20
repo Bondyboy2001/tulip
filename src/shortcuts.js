@@ -48,7 +48,7 @@ const SHORTCUTS = [
     ['⌘⇧K', 'Toggle backlinks'],
     ['⌘⇧I', 'Toggle info'],
     ['⌘⇧A', 'Toggle copilot'],
-    ['⌃T', 'Copilot thinking level'],
+    ['⌘T', 'Copilot thinking level, when its panel is open'],
     ['⌘⇧L', 'Toggle theme']
   ]],
   ['The window', [

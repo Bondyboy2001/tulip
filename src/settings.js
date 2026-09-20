@@ -1,4 +1,4 @@
-import { openPackages } from './packages.js'
+import { openPackages, LANGUAGE_LABELS } from './packages.js'
 /* ============================================================= settings
    A compact sidebar and quiet detail rows, following Rose’s settings layout.
 
@@ -60,13 +60,6 @@ const SECTIONS = [
         key: 'defaultVaultPath',
         type: 'default-vault',
         name: 'Default vault',
-      },
-      {
-        /* Consent given at the first run, listed where it can be taken back:
-           a vault trusted a year ago otherwise keeps the privilege silently. */
-        key: 'trustedVaults',
-        type: 'trusted',
-        name: 'Code execution',
       }
     ]
   },
@@ -496,60 +489,39 @@ export function mountSettings ({ el, api, values, onChange }) {
   }
 
   const CONTROLS = {
+    /* Every environment the vault's code has built — one quiet row for each,
+       read eagerly since the records are a handful of small files. A row
+       opens the same manager the palette's "Manage packages" does, and
+       closing that reads the records again, since it may have changed them. */
     packages () {
-      const wrap = node('div', 'env-actions')
-      const show = node('button', 'ghost', 'Show notes')
-      show.addEventListener('click', async () => {
-        show.disabled = true
-        try {
-          const records = await api.packages.list()
-          wrap.replaceChildren()
-          if (!records.length) wrap.append(node('span', 'settings-hint', 'No environments.'))
-          for (const record of records) {
-            const button = node('button', 'ghost', `${record.note || 'Scratch code'} · ${record.language}`)
-            button.addEventListener('click', () => openPackages(record.note, record.language))
-            wrap.append(button)
-          }
-        } catch (error) { show.textContent = error.message; show.disabled = false }
-      })
-      wrap.append(show)
-      return wrap
-    },
-    trusted () {
-      const wrap = node('div', 'trusted-vaults')
-      const said = node('p', 'settings-hint',
-        'Vaults whose code blocks, notebook cells and Copilot write modes may run. Tulip asks the first time one runs something.')
-      const list = node('div', 'trusted-list')
-      const paint = (vaults) => {
-        list.replaceChildren()
-        if (!vaults.length) {
-          list.append(node('span', 'settings-hint', 'No vault is trusted to run code.'))
+      const wrap = node('div', 'env-list')
+      function paint (records) {
+        wrap.replaceChildren()
+        if (!records.length) {
+          wrap.append(node('span', 'settings-hint', 'No environments.'))
           return
         }
-        for (const vault of vaults) {
-          const row = node('div', 'trusted-row')
-          const named = node('div', 'trusted-named')
-          named.append(
-            node('span', 'trusted-name', vault.name),
-            node('span', 'trusted-path', vault.path)
-          )
-          row.append(named)
-          if (vault.current) row.append(node('span', 'trusted-current', 'open now'))
-          const revoke = node('button', 'ghost is-compact is-danger', 'Revoke')
-          revoke.type = 'button'
-          revoke.setAttribute('aria-label', `Revoke code execution for ${vault.name}`)
-          revoke.addEventListener('click', async () => {
-            revoke.disabled = true
-            try { paint(await api.run.untrust(vault.path)) } catch { revoke.disabled = false }
-          })
-          row.append(revoke)
-          list.append(row)
+        const shown = [...records].sort((a, b) =>
+          String(a.note || '').localeCompare(String(b.note || '')) ||
+          String(a.language).localeCompare(String(b.language)))
+        for (const record of shown) {
+          const note = record.note || ''
+          const named = node('span', 'env-named')
+          named.append(node('span', 'env-name', note ? note.split('/').at(-1).replace(/\.md$/, '') : 'Scratch code'))
+          if (note.includes('/')) named.append(node('span', 'env-path', note))
+          const count = Object.keys(record.packages || {}).length
+          const meta = `${LANGUAGE_LABELS[record.language] || record.language} · ${count === 1 ? '1 package' : `${count || 'no'} packages`}`
+          const row = node('button', 'env-row')
+          row.type = 'button'
+          row.append(named, node('span', 'env-meta', meta))
+          row.addEventListener('click', () => openPackages(record.note, record.language, load))
+          wrap.append(row)
         }
       }
-      Promise.resolve(api.run.trustedVaults()).then(paint).catch(() => {
-        list.replaceChildren(node('span', 'settings-hint', 'Could not read the trusted vaults.'))
+      const load = () => api.packages.list().then(paint).catch(() => {
+        wrap.replaceChildren(node('span', 'settings-hint', 'Could not read the environments.'))
       })
-      wrap.append(said, list)
+      load()
       return wrap
     },
     doctor () {
@@ -853,7 +825,7 @@ export function mountSettings ({ el, api, values, onChange }) {
              memory; see `settleEffort` in copilot.js. */
           const model = allModels(modelCatalogue).find((entry) => entry.key === key)
           if (model && effortsFor(model).length) {
-            const settled = nearestEffort(model, values().aiEffort || 'medium')
+            const settled = nearestEffort(model, values().aiEffort || 'xhigh')
             if (settled && values().aiEffort !== settled) onChange('aiEffort', settled)
           }
           change(row, key)
@@ -865,7 +837,7 @@ export function mountSettings ({ el, api, values, onChange }) {
 
     /**
      * The default model's thinking level — the same `aiEffort` the panel steps
-     * with ⌃T and carries per chat. The levels are the default model's own, so
+     * with ⌘T and carries per chat. The levels are the default model's own, so
      * the control follows it: a model with no such dial says so instead of
      * offering one, and a stored level the model does not take is shown at the
      * nearest one it does — the panel's `nearestEffort` reading, not a second
@@ -881,7 +853,7 @@ export function mountSettings ({ el, api, values, onChange }) {
       return dropdown({
         label: 'Thinking level',
         options: levels.map((level) => ({ value: level, label: effortLabel(level) })),
-        value: nearestEffort(model, values().aiEffort || 'medium'),
+        value: nearestEffort(model, values().aiEffort || 'xhigh'),
         onChange: (value) => change(row, value)
       }).root
     },
@@ -1184,7 +1156,8 @@ export function mountSettings ({ el, api, values, onChange }) {
       // A full-width control reads better under its label than squeezed
       // beside it — the theme grid and the model list are both of those.
       if (row.type === 'themes' || row.type === 'models' || row.type === 'catalogue' ||
-          row.type === 'hotkeys' || row.type === 'languages' || row.type === 'trusted') line.classList.add('is-stacked')
+          row.type === 'hotkeys' || row.type === 'languages' ||
+          row.type === 'packages') line.classList.add('is-stacked')
       if (row.enabledBy && values()[row.enabledBy] === false) {
         line.classList.add('is-disabled')
         control?.querySelectorAll('button, input, select').forEach((item) => { item.disabled = true })

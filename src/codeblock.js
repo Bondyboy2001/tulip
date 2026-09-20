@@ -5,21 +5,51 @@
    ================================================================== */
 
 import { keymap, ViewPlugin, Decoration, WidgetType, EditorView } from '@codemirror/view'
-import { Prec, StateEffect, StateField } from '@codemirror/state'
+import { Prec, StateEffect, StateField, EditorState } from '@codemirror/state'
 import { syntaxTree, indentUnit } from '@codemirror/language'
 import { markdownLanguage } from '@codemirror/lang-markdown'
 
 /**
  * Bracket closing belongs to code, not to prose — a sentence that sprouts ")"
- * every time you open a parenthesis is worse than no help at all. Language
- * data is resolved at the caret, so emptying markdown's set leaves prose alone
- * while a fenced block still gets its own language's full set.
+ * every time you open a parenthesis is worse than no help at all.
  *
  * "[" is the exception worth keeping: it makes [[wikilinks]] fall out of two
  * keystrokes.
  */
 export const proseBrackets = markdownLanguage.data.of({
   closeBrackets: { brackets: ['['] }
+})
+
+/**
+ * The full set, for inside a fence.
+ *
+ * Markdown's nested parsers arrive as parsers, not as languages, so the inner
+ * language's own `closeBrackets` data never reaches `languageDataAt` — without
+ * this every position in the note, code or not, answers `['[']` (see
+ * `proseBrackets` above) and `{` `(` `"` stay single. This provider runs before
+ * the markdown language's own, so its answer wins where it has one and it
+ * stays silent in prose, where `proseBrackets` is the only voice.
+ *
+ * `before` adds the quotes to the defaults: typing `{` in the middle of `""`
+ * should still open the pair with the caret between them. Triple quotes and
+ * the Python string prefixes come along so `'''` and `f"..."` keep working in
+ * any fence.
+ */
+export const codeBrackets = EditorState.languageData.of((state, pos) => {
+  if (!fenceAt(state, pos)) return []
+  // The fence markers themselves are not code; leave them to prose.
+  try {
+    const line = state.doc.lineAt(pos)
+    if (/^\s*(```|~~~)/.test(line.text)) return []
+  } catch { /* a position past the end is still code */ }
+  return [{
+    closeBrackets: {
+      brackets: ['(', '[', '{', "'", '"', '`', "'''", '"""'],
+      before: ')]}:;>"\'`',
+      stringPrefixes: ['f', 'fr', 'rf', 'r', 'u', 'b', 'br', 'rb',
+        'F', 'FR', 'RF', 'R', 'U', 'B', 'BR', 'RB']
+    }
+  }]
 })
 
 const PAIRS = { '{': '}', '[': ']', '(': ')' }
@@ -339,6 +369,7 @@ const codeBlockScroll = ViewPlugin.fromClass(
       // is held by handler, to be taken off again in destroy().
       this.bound = new Map()
       this.busy = false
+      this.view = view
       this.schedule(view)
     }
 
@@ -460,12 +491,114 @@ const codeBlockScroll = ViewPlugin.fromClass(
       // eslint-disable-next-line tulip/no-layout-thrash
       for (const other of behind) other.scrollLeft = to
       this.busy = false
+      /* A scroll the editor never sees still moves what its overlay layers
+         painted: a selection band or a secondary caret keeps the coordinates
+         its text had before the scroll. The editor answers a document re-
+         render with docViewUpdate, which is what makes those layers measure
+         again — calling it here does the same for a scroll. The primary caret
+         does not need it: on a code line the caret is a child of the line
+         itself, so the scroll carries it with the code and nothing has to be
+         told about it. */
+      this.view.docViewUpdate?.()
     }
   }
 )
 
-/* The numbers and the scrolling are one feature, not two: the plugin below
-   sizes the spacers the plugin above emits, so half of this in a view and half
-   out is a code block that scrolls out of step with itself. They are named
-   together here so nowhere else has to remember they travel together. */
-export const codeBlockView = [codeLineNumbers, codeBlockScroll]
+/* ------------------------------------------------------------ the caret
+
+   The caret a note shows is drawn, not native: a div in .cm-cursorLayer,
+   which hangs off the editor's own scroller. A scroll on a code line never
+   reaches that scroller, so the drawn caret keeps the screen position its
+   character had before the scroll — sliding across the code instead of
+   travelling with it, and still on screen long after its character has
+   clipped out of the line.
+
+   So on a line that scrolls the caret is drawn inside the line instead: a
+   widget at the caret's position, in the same scroller as the text it marks,
+   which travels with the scroll and clips at the line's edge for free. That
+   much is the bargain a table cell makes with the browser's own caret for its
+   contenteditable — and the other half of it is the half the browser cannot
+   keep: its caret is one pixel and no stylesheet can widen it, while this
+   app's caret is two. So the line gets a caret of the app's own, sized by
+   .tk-code-caret, rather than the browser's.
+
+   The class says when (.cm-editor.has-code-caret — the stylesheet hides the
+   layer's caret and shows this one while it is set); the plugin below supplies
+   the widget, and decides both in one place so they cannot disagree. */
+
+/**
+ * Whether pos stands on a line a block lets scroll — every line of a fence
+ * but the fence markers themselves, which never move. Same edge arithmetic
+ * the decorations in editor.js use to hand out tk-code-top and tk-code-fence.
+ */
+function onScrollingLine (state, pos) {
+  const node = fenceAt(state, pos)
+  if (!node) return false
+  const n = state.doc.lineAt(pos).number
+  if (n === state.doc.lineAt(node.from).number) return false
+  const last = state.doc.lineAt(node.to)
+  return n !== last.number || !/^\s*(```|~~~)\s*$/.test(last.text)
+}
+
+class CodeCaretWidget extends WidgetType {
+  eq () { return true }
+  toDOM () {
+    const span = document.createElement('span')
+    span.className = 'tk-code-caret'
+    /* Decoration, not content: it is not in the document, and it has nothing
+       to say to a screen reader. */
+    span.setAttribute('aria-hidden', 'true')
+    return span
+  }
+  /* A click on it is a click on the line under it, which is where the caret
+     goes — the same answer the line number and the room at the end of a line
+     give. */
+  ignoreEvent () { return true }
+}
+
+const codeCaret = ViewPlugin.fromClass(
+  class {
+    constructor (view) {
+      this.view = view
+      this.decorations = Decoration.none
+      this.mark(view.state)
+    }
+
+    /* Both answers are "is the caret on a scrolling line", which only a move of
+       the caret or a change under it can change. */
+    update (update) {
+      if (update.selectionSet || update.docChanged) this.mark(update.state)
+    }
+
+    mark (state) {
+      const { main } = state.selection
+      const scrolling = onScrollingLine(state, main.head)
+      this.view.dom.classList.toggle('has-code-caret', scrolling)
+      /* Only a caret. A selection is drawn as a band, and a caret standing at
+         one end of it would be a second mark saying what the band's own edge
+         already says. */
+      this.decorations = scrolling && main.empty
+        ? Decoration.set([
+            /* Side 0, between the line number at -1 and the room at the end of
+               the line at 1: at the head of a line the caret belongs on the
+               text's side of the number, and at the end of one on the text's
+               side of the room — never after the room, which would put it a
+               line's width away from the code it marks. */
+            Decoration.widget({ widget: new CodeCaretWidget(), side: 0 }).range(main.head)
+          ])
+        : Decoration.none
+    }
+
+    destroy () {
+      this.view.dom.classList.remove('has-code-caret')
+    }
+  },
+  { decorations: (v) => v.decorations }
+)
+
+/* The numbers, the scrolling and the caret are one feature, not three: the
+   plugins below size the spacers the first emits and mark the caret the lines
+   carry, so part of this in a view and part out is a code block that scrolls
+   out of step with itself. They are named together here so nowhere else has
+   to remember they travel together. */
+export const codeBlockView = [codeLineNumbers, codeBlockScroll, codeCaret]

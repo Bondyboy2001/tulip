@@ -19,7 +19,10 @@ export const OVERLAY_PROMPT = {
   'move-to': 'Move to a folder…',
   templates: 'Insert a template…',
   vaults: 'Open a vault Tulip knows…',
-  tags: 'Filter tags…'
+  tags: 'Filter tags…',
+  'append-to': 'Add the passage to a note…',
+  'flashcard-to': 'Choose a flashcard bank…',
+  cite: 'Cite a reference…'
 }
 
 export const OVERLAY_LABEL = {
@@ -35,5 +38,8 @@ export const OVERLAY_LABEL = {
   'move-to': 'Move to a folder',
   vaults: 'Recent vaults',
   templates: 'Insert a template',
-  tags: 'Tags'
+  tags: 'Tags',
+  'append-to': 'Add passage to a note',
+  'flashcard-to': 'Flashcard bank',
+  cite: 'Insert citation'
 }

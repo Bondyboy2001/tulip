@@ -10,7 +10,17 @@ const files = {
   'Analysis.ipynb': JSON.stringify({ nbformat: 4, nbformat_minor: 5, metadata: {}, cells: Array.from({ length: 50 }, (_, i) => ({ id: `c${i}`, cell_type: 'code', metadata: {}, execution_count: i, source: [`print(${i})`], outputs: [{ output_type: 'stream', name: 'stdout', text: [`${i}\n`] }] })) }),
   'Board.excalidraw': JSON.stringify({ type: 'excalidraw', version: 2, source: 'tulip', elements: [], appState: {}, files: {} })
 }
-const app = await appSession({ executable: process.argv.find((arg) => arg.startsWith('--app='))?.slice(6), files, config: { tabs: ['Home.md'], tabIndex: 0, view: 'read' } })
+/* A sizeable tree, fully expanded, so the sidebar work — fold-all, snapshot
+   patching — is measured against the shape that used to make it slow. Thirty
+   folders of ten notes is small next to a real archive and large enough that
+   a whole-tree rebuild is a stall, not a blink. */
+const folders = Array.from({ length: 30 }, (_, i) => `Areas/Folder ${String(i).padStart(2, '0')}`)
+for (const dir of folders) {
+  for (let n = 0; n < 10; n++) files[`${dir}/Note ${String(n).padStart(2, '0')}.md`] = `# Note ${n}\n\nIn ${dir}.\n`
+}
+/* `expanded` needs `Areas` as well as its children — a folder whose parent is
+   shut never draws, and the tree would start this bench nearly empty. */
+const app = await appSession({ executable: process.argv.find((arg) => arg.startsWith('--app='))?.slice(6), files, config: { tabs: ['Home.md'], tabIndex: 0, view: 'read', expanded: ['Areas', ...folders] } })
 const samples = []
 try {
   async function sample (cycle) {
@@ -69,8 +79,24 @@ try {
     return times;
   })()`)
   await app.evaluate('window.__tulip.openNote("Home.md")')
+  /* The sidebar on a fully-expanded 330-row tree: fold-all collapses and
+     re-expands, then a file landing is patched in. Both measured around the
+     click — the work is synchronous, so the number is the stall itself. */
+  const treeTimings = await app.evaluate(`(async () => {
+    const fold = document.querySelector('#btn-fold-all')
+    if (!fold || fold.hidden) return { collapseMs: -1, expandMs: -1, patchMs: -1 }
+    const raf = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))
+    const rows = () => document.querySelectorAll('#tree .row').length
+    const t0 = performance.now(); fold.click(); await raf()
+    const collapseMs = performance.now() - t0
+    const collapsed = rows()
+    const t1 = performance.now(); fold.click(); await raf()
+    const expandMs = performance.now() - t1
+    const expanded = rows()
+    return { collapseMs, expandMs, collapsed, expanded }
+  })()`)
   const percentile = (values) => [...values].sort((a,b) => a-b)[Math.min(values.length - 1, Math.floor(values.length * .95))]
-  const responsiveness = { pdfNavigationP95Ms: percentile(pageTimings), typingP95Ms: percentile(inputTimings) }
+  const responsiveness = { pdfNavigationP95Ms: percentile(pageTimings), typingP95Ms: percentile(inputTimings), treeCollapseMs: treeTimings.collapseMs, treeExpandMs: treeTimings.expandMs, treeRows: treeTimings.expanded }
   const final = await sample(cycles)
   await app.command('Performance.enable')
   const cpuBefore = (await app.command('Performance.getMetrics')).metrics.find((m) => m.name === 'TaskDuration').value
@@ -90,6 +116,10 @@ try {
   if (process.argv.includes('--check')) {
     assert.ok(responsiveness.pdfNavigationP95Ms < 250, 'PDF page navigation yields a frame within 250ms')
     assert.ok(responsiveness.typingP95Ms < 50, 'long-note typing frame delay stays below 50ms')
+    if (treeTimings.expanded > 0) {
+      assert.ok(treeTimings.collapseMs < 150, 'collapsing the whole tree is a patch, not a rebuild')
+      assert.ok(treeTimings.expandMs < 500, 'expanding the whole tree stays under half a second')
+    }
     for (const timing of Object.values(result.timings)) assert.ok(timing.p95Ms < 500, 'document switching p95 stays below 500ms')
     assert.ok(result.retainedGrowthMB < 20, 'retained heap grows by less than 20 MB after warm-up')
     assert.ok(final.nodes < globalThis.baseline.nodes + 1000, 'closed viewers do not accumulate DOM')

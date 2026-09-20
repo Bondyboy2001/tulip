@@ -326,6 +326,7 @@ const uid = () => `h${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).
  * @param {()=>void} o.onZoom               told when the viewer zooms itself
  * @param {()=>void} o.onStuck              the document stopped answering
  * @param {(quote:object)=>void} o.onAsk    the reader wants the copilot
+ * @param {(mark:object)=>void} o.onNote    the reader wants the highlight in a note
  * @param {()=>void} o.onTool               told when the tool or the pen changes
  * @param {(message:string)=>void} o.onError  something failed that the reader
  *                                            would otherwise learn from a lost
@@ -335,7 +336,8 @@ const uid = () => `h${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).
 export function mountPdf ({
   host, api,
   onDoc = () => {}, onPage = () => {}, onMarks = () => {}, onZoom = () => {},
-  onStuck = () => {}, onAsk = () => {}, onTool = () => {}, onError = () => {},
+  onStuck = () => {}, onAsk = () => {}, onNote = () => {},
+  onTool = () => {}, onError = () => {},
   selectionMenu = true
 }) {
   const state = {
@@ -1691,10 +1693,16 @@ export function mountPdf ({
       pick: (color) => { recolour(mark, color); hidePop() },
       copy: mark.text,
       copyHint: 'Copy this passage',
-      extra: [button('Remove', 'Remove this highlight', () => {
-        removeMark(mark.id)
-        hidePop()
-      }, 'is-danger')]
+      extra: [
+        button('Note', 'Save this passage to a note', () => {
+          onNote(mark)
+          hidePop()
+        }),
+        button('Remove', 'Remove this highlight', () => {
+          removeMark(mark.id)
+          hidePop()
+        }, 'is-danger')
+      ]
     })
   }
 

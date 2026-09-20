@@ -37,7 +37,7 @@ import { tags as t } from '@lezer/highlight'
 import { equationsFor } from './math.js'
 import { mathPreview } from './math-editor.js'
 import { moneyPreview } from './money-editor.js'
-import { codeBlockKeymap, proseBrackets, codeBlockView, codeAiForm, setCodeAiForm } from './codeblock.js'
+import { codeBlockKeymap, proseBrackets, codeBrackets, codeBlockView, codeAiForm, setCodeAiForm } from './codeblock.js'
 import { runBlocks } from './runblocks.js'
 import { propertiesPreview } from './properties.js'
 import {
@@ -140,9 +140,18 @@ const tulipTheme = EditorView.theme({
   // CodeMirror's base theme paints a black caret and injects itself after our
   // stylesheet, so on a dark background the cursor disappeared entirely. Theme
   // rules outrank the base theme, which is why these live here and not in CSS.
+  //
+  // Two pixels, and the same two in .tk-code-caret, which draws the caret
+  // on a line that scrolls — one decision about one caret, stated twice
+  // because the caret is drawn in two places. See the caret note in
+  // src/codeblock.js.
   '.cm-cursor, .cm-dropCursor': {
     borderLeftColor: 'var(--accent)',
-    borderLeftWidth: '2px'
+    borderLeftWidth: '2px',
+    // The base theme's own 1.2px beam is centred with -0.6px, half of itself.
+    // The number has to follow the width, or the caret hangs off one side of
+    // the character it marks rather than standing on the position.
+    marginLeft: '-1px'
   },
   '&.cm-focused .cm-cursor': { borderLeftColor: 'var(--accent)' },
   /* A rendered table replaces its source lines with one block widget, but
@@ -2790,6 +2799,10 @@ export function createEditor ({
            one after it honoured it. */
         search(findConfig),
         EditorView.lineWrapping,
+        /* Before the markdown language itself: `languageDataAt` takes the
+           first answer, so inside a fence this wins and in prose it stays
+           silent and `proseBrackets` answers. See src/codeblock.js. */
+        codeBrackets,
         sourceLanguage.of(MD_SOURCE),
         sourceTitle.of(titleField),
         sourceColor.of(highlighting),
