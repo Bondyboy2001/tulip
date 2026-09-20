@@ -15,7 +15,7 @@ import { prepareMath, equationIndex } from '../src/math.js'
 import { installHeadingFolds } from '../src/headings.js'
 import { markImageCells } from '../src/assets.js'
 import { languageChip } from '../src/languages.js'
-import { codeCopilotButton, copyButton } from '../src/blocks.js'
+import { codeCopilotButton, codeCopyButton } from '../src/blocks.js'
 import { el as node } from '../src/dom.js'
 
 const median = (values) => [...values].sort((a, b) => a - b)[values.length >> 1]
@@ -74,7 +74,7 @@ function dressCodeHeaders (root) {
       tools.classList.add('is-floating')
       wrap.prepend(tools)
     }
-    tools.append(codeCopilotButton(lang, source), copyButton(source))
+    tools.append(codeCopilotButton(lang, source), codeCopyButton(lang, source))
   }
 }
 

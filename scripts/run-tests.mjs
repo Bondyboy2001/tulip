@@ -59,6 +59,7 @@ const WINDOWED = new Set([
   'test:a11y',
   'test:trust',
   'test:multicursor',
+  'test:codeblock-caret',
   'test:agent-diff',
   'test:docx-view',
   'test:flashcards-render',

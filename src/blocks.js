@@ -27,15 +27,15 @@ import { el, svgIcon } from './dom.js'
 const bridge = () => /** @type {any} */ (globalThis).window.tulip
 
 /**
- * The control that puts a block's source on the clipboard, for both views'
- * code headers. One face for the ask and one brief tick for the answer — the
- * copy itself is silent, so the button is the only place the page can say it
- * happened.
+ * The control that puts text on the clipboard: a run's output, and a block's
+ * code (through codeCopyButton below). One face for the ask and one brief tick
+ * for the answer — the copy itself is silent, so the button is the only place
+ * the page can say it happened.
  *
- * The text is captured, not looked up: both callers rebuild this button
- * whenever the block's code changes, so what it holds is what is on screen.
- * A caller whose text is still arriving — a run's output panel — passes a
- * function instead, and the clipboard gets whatever it answers at the click.
+ * The text is captured, not looked up: a caller whose text has arrived passes
+ * it, and what the button holds is what is on screen. A caller whose text is
+ * still arriving — a run's output panel — passes a function instead, and the
+ * clipboard gets whatever it answers at the click.
  */
 export function copyButton (text, label = 'Copy code') {
   const face = () => svgIcon(
@@ -72,6 +72,36 @@ export function copyButton (text, label = 'Copy code') {
     }, 1300)
   })
   return button
+}
+
+/**
+ * The same control for a fenced block, which puts the block on the clipboard
+ * as it was written: the fence, its language, then the code. The block is what
+ * the reader selected — pasted into a note, a chat or an issue it should
+ * arrive as a code block again, and the language is what makes it highlight
+ * when it gets there.
+ */
+export function codeCopyButton (lang, code) {
+  return copyButton(fenced(lang, code))
+}
+
+/**
+ * A block's source with its fence around it, as markdown.
+ *
+ * The fence is made longer than any the code opens a line with, because a run
+ * of backticks at the head of a line is exactly what ends a block early — and
+ * a note about markdown holds a fence inside a fence. CommonMark closes on any
+ * line, indented by up to three spaces, whose backtick run is at least as long
+ * as the opener's.
+ */
+function fenced (lang, code) {
+  let inside = 0
+  for (const line of code.split('\n')) {
+    const run = /^ {0,3}(`+)/.exec(line)
+    if (run) inside = Math.max(inside, run[1].length)
+  }
+  const fence = '`'.repeat(Math.max(3, inside + 1))
+  return `${fence}${lang}\n${code}\n${fence}`
 }
 
 /** Ask the renderer to open the focused Copilot prompt for one fenced block.
