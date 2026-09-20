@@ -19,6 +19,7 @@
 import { el as node } from './dom.js'
 import { summarize, LEECH_LAPSES } from './review-stats.js'
 import { languageCards } from './language-table.js'
+import { flashcardCards } from './flashcards.js'
 
 const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 
@@ -92,14 +93,22 @@ export function mountReviewStats ({ toast, openNote, api }) {
     backdrop = null
   }
 
-  /** Every card id the vault currently contains — what `prune` compares against. */
+  /** Every card id the vault currently contains — what `prune` compares
+      against. Both kinds of deck, because a list built only from the tables
+      would name every flashcard's state deleted. */
   async function currentCardIds () {
-    const decks = await api.language.decks().catch(() => [])
+    const [decks, banks] = await Promise.all([
+      api.language.decks().catch(() => []),
+      api.flashcards?.banks?.().catch(() => []) || Promise.resolve([])
+    ])
     const ids = []
     for (const deck of decks) {
       for (const card of languageCards(deck.text, deck.path, { speaks: true })) {
         ids.push(card.id)
       }
+    }
+    for (const bank of banks) {
+      for (const card of flashcardCards(bank.text, bank.path)) ids.push(card.id)
     }
     return ids
   }
@@ -130,7 +139,7 @@ export function mountReviewStats ({ toast, openNote, api }) {
     head.append(node('h2', 'stats-title', 'Review'))
     head.append(node('span', 'stats-sub', stats.counts.total
       ? `${stats.counts.total} card${stats.counts.total === 1 ? '' : 's'} across the vault`
-      : 'No cards yet — a language note with a table makes some.'))
+      : 'No cards yet — a language table or a flashcard bank makes some.'))
     panel.append(head)
 
     const tiles = node('div', 'stats-tiles')

@@ -7,6 +7,7 @@
    ================================================================== */
 
 import { el as node } from './dom.js'
+import { RECOGNISE } from './review-queue.js'
 
 /** The slash-menu snippet. Tab stops make the card writable without learning
  *  the callout syntax, and the checked choice is the answer on disk. */
@@ -142,6 +143,35 @@ export function flashcardTags (cards) {
   return normaliseFlashcardTags((cards || []).flatMap((card) => card.tags || []))
 }
 
+/**
+ * Every card in a bank, each carrying the id the review store schedules it
+ * under.
+ *
+ * The id's three parts match the language cards' — `path|term|kind` — so one
+ * store, one prune and one statistics pass serve both kinds of deck. `kind`
+ * is 'f': the scheduler's unlock gate opens unconditionally for it (see
+ * `unlocked` in language-table.js), which is what a standalone card wants —
+ * there is no easier sibling card to earn first.
+ *
+ * A bank may ask the same question twice. The id still has to name one card,
+ * so the second and later occurrences carry `#2`, `#3`… inside the id's term
+ * part — a scheduling detail, never the question shown.
+ */
+export function flashcardCards (markdown, notePath = '') {
+  const seen = new Map()
+  return parseFlashcards(markdown).map((card) => {
+    const ordinal = (seen.get(card.question) || 0) + 1
+    seen.set(card.question, ordinal)
+    return {
+      ...card,
+      id: `${notePath}|${ordinal === 1 ? card.question : `${card.question}#${ordinal}`}|${RECOGNISE}`,
+      path: notePath,
+      term: card.question,
+      kind: RECOGNISE
+    }
+  })
+}
+
 /** A shuffled, non-repeating study cycle, optionally narrowed to one tag. */
 export function buildFlashcardQueue (cards, tag = '', random = Math.random) {
   const wanted = oneLine(tag).replace(/^#/, '').toLocaleLowerCase()
@@ -180,6 +210,10 @@ export function enhanceFlashcards (root) {
       [...child.children].some((item) => item.matches('li.task-item') && item.querySelector('input.task')))
     if (!list) continue
 
+    /* The question is the callout's title; an Arabic one reads the other way. */
+    const question = card.querySelector('.callout-title')
+    if (question) question.dir = 'auto'
+
     const items = [...list.children].filter((item) =>
       item.matches('li.task-item') && item.querySelector('input.task'))
     const correct = items.findIndex((item) => item.querySelector('input.task')?.checked)
@@ -190,6 +224,8 @@ export function enhanceFlashcards (root) {
     const buttons = items.map((item, index) => {
       const button = node('button', 'quiz-option')
       button.type = 'button'
+      // An option in an RTL script keeps its own direction inside the card.
+      button.dir = 'auto'
       button.classList.add(`is-tone-${index % 4}`)
       button.setAttribute('aria-pressed', 'false')
       button.append(...optionContent(item))
@@ -222,6 +258,7 @@ export function enhanceFlashcards (root) {
     if (explanation) {
       explanation.textContent = explanation.textContent.trim().replace(EXPLANATION, '')
       explanation.classList.add('quiz-explanation')
+      explanation.dir = 'auto'
       explanation.hidden = true
     }
 
