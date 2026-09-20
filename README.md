@@ -175,8 +175,8 @@ The keyboard shortcut sheet has a search field.
 
 ### Reading beside a document
 
-Choose **Open document beside this one** from the command palette, **Open to the side** from a
-file or tab menu, or Option-click a note link. The existing side pane displays a
+Choose **Open document beside this one** from the command palette or
+Option-click a note link. The existing side pane displays a
 note or PDF with independent scrolling. Drag its divider to resize it, use
 **Swap** to exchange the main and side documents, or close it with its × button.
 Its width and reading position return with the window's session.
@@ -184,14 +184,18 @@ Its width and reading position return with the window's session.
 ## Templates
 
 A note in a `templates/` folder at the root of the vault is a template. **Insert
-template…** in the command palette puts one in at the caret, expanding three
+template…** in the command palette puts one in at the caret, expanding
 placeholders on the way:
 
 | | |
 | --- | --- |
 | `{{title}}` | the name of the note being written into |
 | `{{date}}` | today, as `2026-08-06` |
+| `{{yesterday}}` / `{{tomorrow}}` | the days either side, same format |
 | `{{time}}` | now, as `14:30` |
+| `{{weekday}}` | today, as `Thursday` |
+| `{{week}}` | the ISO week, as `2026-W32` |
+| `{{prompt:Label}}` | asked for in a small dialog before the note is written |
 
 Templates are ordinary notes, so a vault carried to another app keeps them as
 readable files.
@@ -222,7 +226,9 @@ Missing local modules and unsupported imports remain errors. When a registry
 cannot resolve a name, use Manage code packages… to select the distribution explicitly.
 Automatic retries may execute the code preceding the failed import again.
 Versions are retained between runs; exporting the environment records the native
-manifests and locks for sharing (Tulip does not yet import environment exports).
+manifests and locks for sharing, and **Import environment…** in the same panel
+restores one — the manifests are installed by the native manager, while the
+export's own machine paths are rebuilt for the note importing it.
 
 ## Switching vaults
 
@@ -311,10 +317,11 @@ packages both, on every push.
 ## Not planned
 
 Tulip is deliberately smaller than the apps it resembles. There is no graph
-view, no kanban board, and no calendar or daily notes. Export works one note
-at a time — **Export as PDF…**, **Export as HTML…** (one self-contained file)
-and **Export as Markdown…** (the note with its attachments copied beside it) —
-rather than as a whole-vault operation.
+view, no kanban board, and no calendar or daily notes. Notes export one at a
+time — **Export as PDF…**, **Export as HTML…** (one self-contained file) and
+**Export as Markdown…** (the note with its attachments copied beside it) —
+while **Export vault as Markdown…** copies every note to a folder and
+**Import Markdown folder…** brings one back in without overwriting.
 
 There is one vault open at a time, and the sidebar splits in two and no
 further. Tulip makes no network request unless asked: the only one it can
@@ -366,9 +373,8 @@ Vault health checks links to headings and blocks in indexed Markdown notes.
 
 ### Recover one document
 
-**Recover this document…** in the command palette or a text document's tab/file
-menu brings together saved versions, backup copies, and unresolved drafts or
-conflicts for that document. Expand a saved version or backup to compare its
+**Recover this document…** in the command palette brings together saved
+versions, backup copies, and unresolved drafts or conflicts for that document. Expand a saved version or backup to compare its
 text. Restoring a saved version keeps a restore point; restoring a backup or a
 draft creates a separate copy and preserves the current file. **Show recovery
 for all documents** returns to the full inbox.

@@ -18,3 +18,4 @@ release/
 .commandcode/
 .claude/
 .devin/
+.perf-audit/

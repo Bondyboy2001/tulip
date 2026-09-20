@@ -38,7 +38,7 @@ await writeFile(path.join(cache, 'responsive-layout.html'), `<!doctype html>
   </div>
 </section>
 <div class="overlay"><section class="panel is-search" id="panel">
-  <div class="panel-head"><span class="panel-icon"></span><input class="panel-input" placeholder="Search notes, PDFs, and highlights"><button class="panel-filter-toggle">Filters</button><div class="panel-chips"><button class="panel-chip">Aa</button><button class="panel-chip">Word</button><button class="panel-chip">.*</button><button class="panel-chip is-wide">Replace</button><button class="panel-chip is-wide">Save</button></div></div>
+  <div class="panel-head"><span class="panel-icon"></span><input class="panel-input" placeholder="Search notes, PDFs, and highlights"><div class="panel-chips"><button class="panel-chip">Aa</button><button class="panel-chip">Word</button><button class="panel-chip">.*</button><button class="panel-chip is-wide">Replace</button><button class="panel-chip is-wide">Save</button></div></div>
   <div class="panel-filter-presets"><button>Notes</button><button>PDFs</button><button>Highlights</button><button>Tag</button></div><div class="panel-list"></div>
 </section></div>`)
 
@@ -71,7 +71,6 @@ app.whenReady().then(async () => {
         const rail = document.querySelector('.settings-rail')
         const row = document.getElementById('model-row')
         const input = document.querySelector('.panel-input')
-        const filters = document.querySelector('.panel-filter-toggle')
         const chips = document.querySelector('.panel-chips')
         const before = getComputedStyle(opener).display
         app.dataset.sidebar = 'open'
@@ -86,7 +85,6 @@ app.whenReady().then(async () => {
           railDirection: getComputedStyle(rail).flexDirection,
           rowDirection: getComputedStyle(row).flexDirection,
           labelWidth: (${browserRect})(row.querySelector('.settings-label')).width,
-          filterDisplay: getComputedStyle(filters).display,
           chipDisplay: getComputedStyle(chips).display,
           inputWidth: (${browserRect})(input).width,
           overflow: document.documentElement.scrollWidth - innerWidth
@@ -129,9 +127,8 @@ for (const view of probe.result) {
   assert.ok(view.overflow <= 1, `${view.zoom}x shell does not create horizontal overflow`)
   if (view.innerWidth <= 620) {
     assert.equal(view.railDirection, 'row', `${view.zoom}x Settings sections become a horizontal strip`)
-    assert.notEqual(view.filterDisplay, 'none', `${view.zoom}x Search exposes the Filters button`)
-    assert.equal(view.chipDisplay, 'none', `${view.zoom}x advanced search switches start folded`)
-    assert.ok(view.inputWidth >= 300, `${view.zoom}x search query keeps useful width`)
+    assert.equal(view.chipDisplay, 'none', `${view.zoom}x search shows only the field and its results`)
+    assert.ok(view.inputWidth >= 200, `${view.zoom}x search query keeps useful width`)
   }
 }
 

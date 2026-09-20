@@ -343,9 +343,18 @@ jobs:
       # The only write this workflow asks for anywhere, and only on a tag.
       contents: write
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+
+      # The cask and winget manifests are restatements of this release — the
+      # tag's version and these assets' checksums — so they are generated from
+      # the artifacts rather than kept anywhere they could drift. They land in
+      # the release for whoever publishes them to a tap or to winget-pkgs.
+      - name: Package-manager manifests
+        run: node scripts/release-manifests.mjs --version ${{ github.ref_name }} --owner ${{ github.repository_owner }} --repo ${{ github.event.repository.name }} --dir artifacts --out manifests
 
       - name: Publish
         uses: softprops/action-gh-release@v2
@@ -354,6 +363,7 @@ jobs:
             artifacts/Tulip-macos/Tulip-macos.dmg
             artifacts/Tulip-macos/Tulip-macos.zip
             artifacts/Tulip-windows/*.zip
+            manifests/**
           # Both builds are ad-hoc signed unless the signing secrets are set,
           # and a download that has to be argued past Gatekeeper should say so
           # where somebody will read it rather than in a README they have not
@@ -368,6 +378,10 @@ jobs:
 
             **Windows** — unzip the portable build anywhere and run `Tulip.exe`.
             It is Authenticode-signed when the repository certificate is configured.
+
+            **Package managers** — `manifests/` holds a Homebrew cask (`Casks/tulip.rb`,
+            for a tap) and the winget manifest set (`winget/`, a submission for
+            winget-pkgs or `winget install --manifest`).
 
             If a signing secret is absent, CI deliberately falls back to the
             ad-hoc/unsigned build; Gatekeeper or SmartScreen will then warn.

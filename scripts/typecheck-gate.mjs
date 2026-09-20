@@ -36,6 +36,7 @@ const CLEAN = [
   'electron/chat-history.js',
   'electron/config-keys.js',
   'electron/copilot-rename.js',
+  'electron/copilot-request.js',
   'electron/copilot-restore.js',
   'electron/copilot-search.js',
   'electron/docx.js',

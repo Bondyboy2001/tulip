@@ -12,6 +12,7 @@ const renderer = read(source ? 'src' : 'dist', 'renderer.js')
 const panelState = source ? read('src', 'panel-state.js') : renderer
 const copilot = source ? read('src', 'copilot.js') : renderer
 const copilotContext = source ? read('src', 'copilot-context.js') : renderer
+const match = source ? read('src', 'match.js') : renderer
 const settings = source ? read('src', 'settings.js') : renderer
 const ask = source ? read('src', 'ask.js') : renderer
 const runcode = source ? read('src', 'runcode.js') : renderer
@@ -120,7 +121,7 @@ assert.match(preload, /ipcRenderer\.on\('zoom:stage'[\s\S]{0,1800}requestAnimati
 assert.doesNotMatch(preload, /function clearStagedZoom \(\)[\s\S]{0,600}void root\.offsetWidth/,
   'unstaging coalesces with the native zoom instead of forcing a half-swapped paint')
 
-for (const id of ['saved-searches', 'panel-save-search', 'panel-filter-toggle',
+for (const id of ['saved-searches', 'panel-save-search',
   'panel-filter-presets', 'sidebar-open', 'ai-write']) {
   assert.match(html, new RegExp(`id=["']${id}["']`), `${id} is part of the installed shell`)
 }
@@ -216,22 +217,37 @@ if (source) {
   assert.match(renderer, /contextualLine|className = 'search-path'/)
   /* And the match itself is marked in the snippet, from the words the search
      actually parsed rather than a second reading of the query. */
-  assert.match(renderer, /function markWords \(/)
+  assert.match(match, /export function markWords \(/)
   assert.match(renderer, /snippet\.append\(markWords\(item\.hit\.text, state\.overlay\.searchWords\)\)/)
   assert.match(main, /words: q\.words/)
-  /* The lower pane is sized from its separator and restores a separate height
-     for each kind, without another button competing with its tabs. */
+  /* The lower pane is sized from its separator and keeps the one height
+     whichever kind is on show — a saved height is read back only as the panel
+     opens, so choosing a tab never moves the divider. */
   assert.doesNotMatch(html, /id="pane-size-toggle"/)
   assert.match(renderer, /function fitPaneBelow \(\)/)
-  assert.match(renderer, /paneBelowHeights/)
-  /* Commands are a flat list; search uses the same availability rules. */
-  assert.doesNotMatch(renderer, /paletteCommands|rememberPaletteCommand|className = 'panel-group'/)
+  assert.match(renderer, /const opening = !paneBelow\(\)/)
+  assert.doesNotMatch(renderer, /paneBelowHeights/)
+  /* The pane separator is a real separator widget: it sizes by arrow keys,
+     expands on Enter, and reports where it stands. */
+  assert.match(html, /id="pane-split-grip"[^>]*role="separator"[^>]*aria-valuenow/)
+  assert.match(renderer, /togglePaneBelowExpand/)
+  /* At rest the palette leads with the commands run lately, under a group
+     label rather than nested menus — and the recents are a config key so a
+     relaunch does not forget them. */
+  assert.match(renderer, /rememberCommand|recentCommands/)
+  assert.match(renderer, /groupLabel\('Recent'\)/)
+  assert.match(read('electron', 'config-keys.js'), /recentCommands: stringList/)
   assert.match(renderer, /keywords: 'preferences options configuration'/)
   /* Search leaves the query field useful at large zoom, while common query
      syntax is discoverable through controls that write into the real field. */
   assert.match(renderer, /function paintSearchPresets \(\)/)
   assert.match(renderer, /dataSearchFilter|dataset\.searchFilter/)
-  assert.match(flashcardStyles, /@media \(max-width: 620px\)[\s\S]{0,500}\.panel-filter-toggle \{ display: inline-flex;/)
+  /* Search shows only the field and its results: switches, presets, hint and
+     foot are suppressed, while the live count stays reachable to a reader. */
+  assert.doesNotMatch(html, /panel-filter-toggle/)
+  assert.match(flashcardStyles, /\.panel\.is-search \.panel-chips,[\s\S]{0,300}\.panel\.is-search \.empty-hint \{ display: none; \}/)
+  assert.match(flashcardStyles, /\.panel\.is-search \.panel-foot \{[\s\S]{0,300}clip: rect\(0 0 0 0\)/)
+  assert.doesNotMatch(flashcardStyles, /panel-filter-toggle|filters-open/)
   /* Zooming can push a desktop window through the drawer breakpoint while
      macOS's native traffic lights remain fixed. The narrow titlebar must keep
      the same left-side clearance instead of placing navigation beneath them. */
@@ -252,17 +268,30 @@ if (source) {
   assert.match(renderer, /function closeNarrowDrawer \(\)[\s\S]{0,360}dataset\.side === 'open'/)
   assert.match(renderer, /function closeNarrowDrawer \(\)[\s\S]{0,500}dataset\.ai === 'open'/)
   assert.match(renderer, /drawerScrim\.addEventListener\('click', \(\) => \{[\s\S]{0,220}dataset\.ai === 'open'/)
+  /* A drawer paints above the overlay panel, so a picker opened at drawer
+     width takes the open drawers away with it — the field must not open
+     already covered. */
+  assert.match(renderer, /function openOverlay \(mode, meta = \{\}\) \{[\s\S]{0,520}dataset\.side === 'open'\) closeSidePane\(\)/)
+  assert.match(renderer, /function openOverlay \(mode, meta = \{\}\) \{[\s\S]{0,520}sidebarOpen\(\)\) toggleSidebar\(false\)/)
   /* A closed desktop rail has a pointer-visible route back, and Settings
      reflows to a horizontal section strip instead of crushing its labels. */
   assert.match(html, /id="sidebar-open"[^>]*aria-controls="sidebar"/)
   assert.match(renderer, /sidebarOpen\.addEventListener\('click', \(\) => toggleSidebar\(\)\)/)
   assert.match(settings, /row\.type === 'models'/)
   assert.match(flashcardStyles, /@media \(max-width: 620px\)[\s\S]{0,1000}\.settings-box \{[\s\S]{0,160}grid-template-columns: minmax\(0, 1fr\);/)
-  assert.match(flashcardStyles, /@media \(max-width: 820px\)[\s\S]{0,160}\.view-option \{ width: 28px; padding: 0; justify-content: center; \}/)
+  /* Narrow windows keep the words and drop the glyphs: Read/Edit/Raw are the
+     part of the switch that is never ambiguous, the icons are not. */
+  assert.match(flashcardStyles, /@media \(max-width: 820px\)[\s\S]{0,600}\.view-option svg \{ display: none; \}/)
+  assert.doesNotMatch(flashcardStyles, /\.view-option-label \{ display: none; \}/)
   /* Empty space in the tab row drags the window; real tabs remain interactive
      and retain their own tab-reordering drag. */
   assert.match(flashcardStyles, /\.tabs \{[\s\S]{0,420}-webkit-app-region: drag;/)
   assert.match(flashcardStyles, /\.tab \{[\s\S]{0,520}-webkit-app-region: no-drag;/)
+  /* A tab allowed to shrink under its own controls does not squeeze the label
+     away — it overflows its box and the close × lands outside it. The floor
+     keeps a readable sliver of the name; whatever still does not fit is what
+     the strip's overflow-x and edge fade are for. */
+  assert.match(flashcardStyles, /\.tab \{[^}]*min-width: [1-9]/)
   /* The default model picker is the deliberate shortlist; the complete
      catalogue remains one named browse surface. */
   assert.match(settings, /asOptions\(offeredModels\(modelCatalogue, values\(\)\.aiModels, chosen\)\)/)
@@ -311,7 +340,7 @@ if (source) {
   assert.match(build, /splitFeatureStyles/)
   assert.doesNotMatch(renderer, /import \{ mountSettings \} from ['"]\.\/settings\.js['"]/)
   assert.match(renderer, /import\(['"]\.\/settings\.js['"]\)/)
-  /* The thinking level has no popover control of its own any more — ⌃T is the
+  /* The thinking level has no popover control of its own any more — ⌘T is the
      whole of it in the panel (Settings carries the default), so the chord and
      the readout it flashes are the contract. */
   assert.match(copilot, /event\.code !== 'KeyT'/)
@@ -322,10 +351,23 @@ if (source) {
   assert.match(flashcardStyles, /\.code-ai-input \{[^}]*min-height: 76px/s)
   assert.match(renderer, /host: el\.texPdf,\s*selectionMenu: false/)
   assert.match(renderer, /id: 'new-file', title: 'New file…'/)
-  /* A tree click beside a real document opens a tab, but the empty tab already
-     on screen is itself the place for the first file. Always passing true here
-     stranded a permanent "New tab" at the left of the strip. */
-  assert.match(renderer, /openNote\(path, \{ newTab: !!\(activeTab\(\)\?\.path \|\| activeTab\(\)\?\.memory\) \}\)/)
+  /* A tree click opens a new tab beside the document it came from. The one
+     exception is the singleton "New tab": a file opened while it is showing
+     fills it rather than stranding it beside the file. */
+  assert.match(renderer, /openNote\(path, \{ newTab: true \}\)/)
+  /* ⌘T is a singleton: a second press finds the empty tab instead of stacking
+     another, and the empty tab is never written down. */
+  assert.match(renderer, /case 'new-tab': newTab\(\); break/)
+  assert.match(renderer, /const findNewTab = \(\) => state\.tabs\.findIndex\(isNewTab\)/)
+  assert.match(main, /label: 'New Tab'.*command: 'new-tab'/)
+  /* ⌘T steps the copilot's thinking level while its panel is open, and opens
+     a new tab otherwise. A native accelerator never reaches the page, so main
+     sees the key first and forwards it as a command the page answers. */
+  assert.match(main, /before-input-event/)
+  assert.match(main, /sendTo\(win, 'menu', 'copilot-effort'\)/)
+  assert.match(renderer, /case 'copilot-effort':/)
+  assert.match(copilot, /cycleEffort: \(by = 1\) => \{ if \(state\.open\) cycleEffort\(by\) \}/)
+  assert.match(renderer, /state\.tabs\.filter\(\(tab\) => !tab\.memory && tab\.path\)/)
   for (const id of ['fold-all-headings', 'unfold-all-headings', 'lint-file', 'export-pdf', 'set-bookmark', 'go-to-bookmark']) {
     assert.match(renderer, new RegExp(`id: '${id}', title: [^\\n]+scope: 'markdown'`), `${id} is limited to Markdown files`)
   }
@@ -368,10 +410,12 @@ if (source) {
   assert.match(renderer, /dataset\.csvBorders = cfg\.csvBorders === true \? 'on' : 'off'/)
   assert.match(read('src', 'styles.css'), /\[data-csv-borders="on"\] \.csv-frame \.csv-cell/)
   /* A command that cannot act on what is open is not offered: the study record
-     belongs to the language tables, and there is no file to move with nothing
-     open. Both are scopes rather than checks inside the handler, so the row
-     itself disappears. */
-  assert.match(renderer, /id: 'review-stats', title: [^\n]+scope: 'language'/)
+     belongs to vaults that hold decks — language tables or flashcard banks —
+     and there is no file to move with nothing open. Both are scopes rather
+     than checks inside the handler, so the row itself disappears. */
+  assert.match(renderer, /id: 'review-stats', title: [^\n]+scope: 'study'/)
+  assert.match(renderer, /id: 'study-flashcards', title: [^\n]+scope: 'studyfc'/)
+  assert.match(renderer, /id: 'insert-citation', title: [^\n]+scope: 'markdown'/)
   assert.match(renderer, /case 'move-file'/)
   assert.match(renderer, /id: 'toggle-spellcheck', title: [^\n]+scope: 'markdown'/)
   /* The overlay's selection: the ends are ends, and a row arriving under a
@@ -665,7 +709,6 @@ if (source) {
     ['⌘↵', ['the file tree', renderer, /if \(e\.key === 'Enter'\) \{\s*\n\s*e\.preventDefault\(\)\s*\n\s*node\.type === 'folder'/]],
     ['⌥⌘F', ['the grid', csv, /event\.altKey && \(event\.code === 'KeyF'/]],
     ['⌘⏎', ['the grid', csv, /if \(mod\) insertRows\(/]],
-    ['⌃T', ['the copilot', copilot, /if \(event\.code !== 'KeyT'\) return[\s\S]{0,200}cycleEffort\(/]]
   ])
 
   for (const [chord, what] of sheetRows) {
@@ -727,7 +770,12 @@ if (source) {
   assert.match(renderer, /function renumberFlashcardChoices[\s\S]{0,650}Remove other choice \$\{index\}/)
   assert.match(renderer, /options,[\s\S]{0,80}correct: 0/)
   assert.match(renderer, /tags: el\.flashcardTags\.value/)
-  assert.match(renderer, /buildFlashcardQueue\(study\.cards, tag\)/)
+  /* The bank studies through the shared scheduler — the same queue the
+     language session builds — so a wrong answer is a schedule, not just a
+     score. */
+  assert.match(renderer, /buildQueue\(pool, study\.states, Date\.now\(\)/)
+  assert.match(renderer, /study\.sink\?\.offer\(\{ id: card\.id, at: now, grade, state: next \}\)/)
+  assert.match(renderer, /api\.flashcards\.banks\(\)/)
   assert.match(renderer, /el\.reading\.hidden = !text \|\| flashcardOpen/)
   assert.match(renderer, /el\.editorHost\.hidden = !text \|\| flashcardOpen/)
   assert.match(renderer, /button\.addEventListener\('click', \(\) => openFlashcardStudy\(tag\)\)/)
