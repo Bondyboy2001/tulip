@@ -88,7 +88,7 @@ ok('the restored tab strip may include a blank tab', () => {
   assert.deepEqual(sanitizeConfigPatch({ tabs: ['Notes/One.md', 3] }).accepted, {})
 })
 
-ok('lower-panel heights are remembered by pane as finite numbers', () => {
+ok('the retired per-pane heights stay accepted so old configs still load', () => {
   assert.deepEqual(
     sanitizeConfigPatch({ paneBelowHeights: { outline: 0.4, links: 0.6 } }).accepted,
     { paneBelowHeights: { outline: 0.4, links: 0.6 } })

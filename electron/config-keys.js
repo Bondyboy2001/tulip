@@ -86,6 +86,9 @@ const CONFIG_KEYS = {
   /* The optional second sidebar panel, and how much of the height it takes. */
   paneBelow: orCleared(string),
   paneBelowHeight: number,
+  /* No longer read — the split keeps the one paneBelowHeight whichever pane
+     is on show. Kept so a config left by an older version loads rather than
+     being rejected. */
   paneBelowHeights: recordOfNumbers,
   sideDoc: orCleared((v) => v === null || string(v)),
   sideScroll: number,
@@ -130,6 +133,11 @@ const CONFIG_KEYS = {
 
   /* Custom hotkeys: menu command id -> accelerator ('' = no key). */
   hotkeys: orCleared(recordOfStrings),
+
+  /* The commands run most recently, newest first — what the palette's Recent
+     section is built from. Command ids only; the list is filtered against the
+     commands that still exist and apply before it is ever drawn. */
+  recentCommands: stringList,
 
   /* Appearance. */
   theme: string,

@@ -59,6 +59,13 @@ const {
   isRequestPath: isAiSearchRequest,
   parseRequest: parseAiSearchRequest
 } = require('./copilot-search')
+const {
+  REQUEST_PATH: AI_WRITE_REQUEST,
+  isRequestPath: isAiWriteRequest,
+  parseRequest: parseAiWriteRequest,
+  isStaleRequest: isAiWriteStale,
+  applyEdits: applyAiEdits
+} = require('./copilot-write')
 const { makeStore: makeLanguageHistoryStore } = require('./language-history-store')
 const { classifyVaultEvent } = require('./vault-events')
 const { narrowsFrom } = require('./search-narrow')
@@ -150,129 +157,26 @@ const {
   languageTableStem, languageName, languageTableLabel,
   PDF_EXT, isPdf, SITE_EXT, isSite, WHITEBOARD_EXT, isWhiteboard,
   NOTEBOOK_EXT, isNotebook, DOCX_EXT, FLASHCARD_EXT,
-  CODE_EXT, DATA_EXT, isData
+  CODE_EXT, DATA_EXT, isData, isCode
 } = require('./vault-kinds')
-const FINDER_DOCUMENT_EXT = new Set(['.csv', PDF_EXT])
-/* A `.website` file is indexed too, and it is the cheapest entry in the whole
-   table: two short lines. Search used to be unable to find one at all — a site
-   was reachable only by already knowing what its file was called — and now
-   that the file carries the page's title on a `#` line (see `writeAddress` in
-   src/site.js) there is something to find it by. */
-const isIndexedDocumentExt = (ext) =>
-  TEXT_DOCUMENT_EXT.has(ext) || ext === NOTEBOOK_EXT || ext === SITE_EXT
-
-/* Every other text document the Copilot can edit, for the turn review. The
-   review card is built by diffing before/after snapshots, and a snapshot that
-   read only notes and TeX made an agent's write to a notebook, a table or a
-   script invisible — unreviewable, and unrejectable. Kind is decided here;
-   how much of a file is worth holding two copies of is a question of bytes,
-   answered in `readDocumentSnapshot`.
-
-   Stated over an extension rather than a path: the vault walk derives each
-   file's extension once and every consumer of it below shares that answer. */
-const isReviewedDocumentExt = (ext) =>
-  ext === NOTEBOOK_EXT || ext === SITE_EXT || ext === WHITEBOARD_EXT ||
-  CODE_EXT.has(ext) || DATA_EXT.has(ext)
-
-/* Highlights drawn on a PDF, mirroring the vault's own shape:
-   `Papers/thesis.pdf` is annotated in `.annotations/Papers/thesis.pdf.json`.
-
-   In the vault rather than beside the app's config, because a highlight is the
-   reader's work and should travel with the folder it is about — and because the
-   copilot, which has the vault open and nothing else, can then read what the
-   reader marked. Dotted so it stays out of Finder and out of the sidebar. */
-const ANNOTATION_DIR = VAULT_CONTRACT.annotationDirectory
-
-/* Everything a note can embed. Anything outside this set is not offered to the
-   renderer as an attachment, so a vault full of unrelated files does not turn
-   into a list of things to link to.
-
-   Derived from the same table src/assets.js reads, because the two answers have
-   to agree: a format listed here but not there is offered as an attachment and
-   then rendered as an unclickable chip, and the reverse is an embed that never
-   resolves. Adding a format is one edit, in the JSON. */
-const ASSET_KINDS = require('./asset-kinds.json')
-
-const ASSET_EXT = new Set(
-  Object.entries(ASSET_KINDS)
-    .filter(([kind]) => !kind.startsWith('_'))
-    .flatMap(([, exts]) => /** @type {string[]} */ (exts).map((ext) => `.${ext}`))
-)
-
-/* Which viewer a file of no particular kind wants, keyed by the already
-   lower-cased extension the walk measured. The same four words src/assets.js
-   uses for an embed — a picture is a picture whether a note points at it or
-   the tree does — and `file` for everything with nothing to show, which the
-   renderer describes rather than draws. */
-const ASSET_KIND_BY_EXT = new Map(
-  Object.entries(ASSET_KINDS)
-    .filter(([kind]) => !kind.startsWith('_'))
-    .flatMap(([kind, exts]) => /** @type {string[]} */ (exts).map((ext) => [`.${ext}`, kind]))
-)
-
-const showAs = (ext) => {
-  const kind = ASSET_KIND_BY_EXT.get(ext)
-  return kind === 'image' || kind === 'video' || kind === 'audio' ? kind : 'file'
-}
-
-/* The snapshot's file list feeds only these consumers. Do not retain every
-   regular file in a vault just to filter it into four arrays after the walk —
-   attachment folders often contain thumbnails, exports, and other unrelated
-   data.
-
-   Over an extension, so the walk can ask this of a file it has already
-   measured; `isSnapshotFile` is the same test for the callers that still hold
-   a path. */
-const isSnapshotExt = (ext) =>
-  MD_EXT.has(ext) || ASSET_EXT.has(ext) ||
-  ext === TEX_EXT || ext === PDF_EXT || ext === DOCX_EXT ||
-  isReviewedDocumentExt(ext)
-
-const isSnapshotFile = (p) =>
-  isSnapshotExt(path.extname(String(p || '')).toLowerCase())
-
-/* Source and data files are here for one bucket only: `documents`, the list the
-   turn review's before/after snapshot is read from. They are still not
-   *indexed* — every other bucket the snapshot sorts this list into is
-   Markdown-shaped, built from headings, wikilinks, tags and frontmatter, and a
-   Python file has none of those, so none of them can hold one. Dropping them
-   from the walk entirely, which is what this used to do, is what made
-   `documents` permanently empty: an agent could rewrite a `.cpp`, a `.csv` or a
-   notebook and the turn ended with no review card and nothing to reject,
-   however carefully `isReviewedDocumentExt` said otherwise.
-
-   Searching inside them is a real thing to want and a different feature: it
-   needs an index that is about lines rather than about notes. */
-
-/* What each of those is served as. Only the range replies need this — see
-   `_mime_comment` in the JSON — and anything not named there is a download
-   rather than something a page can play. */
-const assetMime = (p) =>
-  ASSET_KINDS._mime[path.extname(p).toLowerCase().slice(1)] || 'application/octet-stream'
-
-/* Everything a note carries with it — pasted pictures, and the videos and
-   drawings rendered out of its own blocks — lands in
-   `<vault>/.attachments/<Note name>/`. Dotted so the folder stays out of
-   Finder and out of the sidebar, because attachments belong *to* the notes
-   rather than beside them, and one folder per note so a vault's files are
-   grouped the way its prose is.
-
-   Named `.images` until 2026-07-28, which was already wrong when a note could
-   render a video into it. Vaults written under the old name are moved on open
-   — see `migrateAttachments` — and the old name is still walked, so a vault
-   the migration could not finish keeps resolving its embeds either way. */
-const LEGACY_ATTACHMENT_DIRS = ['.images']
-
-/** Hidden folders the vault walk descends into anyway, because notes point at
- *  what is inside them. */
-const ATTACHMENT_DIRS = new Set([ATTACHMENT_DIR, ...LEGACY_ATTACHMENT_DIRS])
-
-/* Where a picture pasted into the copilot's message box is filed, inside the
-   attachments folder. Its own folder because it belongs to a conversation and
-   not to a note: dropped into a note's folder it would sit among that note's
-   embeds, and the attachment sweep would have to decide whether an image no
-   note embeds is rubbish. */
-const CHAT_IMAGE_DIR = VAULT_CONTRACT.chatImageDirectory
+/* Which extensions are indexed, reviewed, embeddable and served as what — the
+   tables live in electron/file-kinds.js so the walk, the watcher, search and
+   the turn review read the same sets. The reasoning moved with them; what is
+   here are the names. */
+const {
+  FINDER_DOCUMENT_EXT,
+  isIndexedDocumentExt,
+  isReviewedDocumentExt,
+  ANNOTATION_DIR,
+  ASSET_EXT,
+  showAs,
+  isSnapshotExt,
+  isSnapshotFile,
+  assetMime,
+  LEGACY_ATTACHMENT_DIRS,
+  ATTACHMENT_DIRS,
+  CHAT_IMAGE_DIR
+} = require('./file-kinds')
 
 /* The renderer reaches attachments through this scheme rather than file://,
    which the page's CSP does not admit. It has to be declared before the app is
@@ -385,6 +289,15 @@ function broadcast (channel, payload) {
 /** A command, to the window it is a command about. */
 function toFocused (channel, payload) {
   sendTo(focusedWindow(), channel, payload)
+}
+
+/* Whether a window's copilot panel is open. The panel reports itself through
+   config — `ai: 'open'` among the window's own keys — so main always has a
+   reading without a round trip. */
+function copilotPanelOpen (win) {
+  try {
+    return !!win && !win.isDestroyed() && windowSessions.config(win.webContents.id).ai === 'open'
+  } catch { return false }
 }
 
 /** The window an IPC call came from — for the handlers that answer a window
@@ -917,6 +830,13 @@ async function seedIndexFromCache () {
    being unable to recognise itself rather than by being remembered about. */
 let indexGeneration = 0
 
+/* Which index keys moved since the cache last flushed. The cache can append
+   just those to its delta sidecar instead of serializing the whole vault on
+   every save — see electron/index-cache.js. Replaced wholesale after each
+   save rather than deleted key by key, so a save in flight can never lose a
+   change that landed while it was writing. */
+let indexChangedKeys = new Set()
+
 /**
  * Brings the index back in line with the disk. `indexDirty` is cleared before
  * the walk, not after, so a change that lands mid-walk leaves the flag set and
@@ -926,6 +846,7 @@ async function syncIndex () {
   indexGeneration++
   if (!vaultPath) {
     index.clear()
+    indexChangedKeys.clear()
     whiteboardIndex.clear()
     docxIndex.clear()
     documentIndex.clear()
@@ -984,7 +905,12 @@ async function syncIndex () {
       }
       let stat
       try { stat = await fs.stat(abs) } catch {
-        if (table.delete(key)) changed = true
+        if (table.delete(key)) {
+          changed = true
+          /* Only the notes table feeds the cache's delta — the other tables
+             have no sidecar to write a tombstone into. */
+          if (table === index) indexChangedKeys.add(key)
+        }
         return
       }
       if (!stat.isFile()) { fallBack = true; return }
@@ -993,6 +919,7 @@ async function syncIndex () {
       const entry = await indexEntryFor(abs, stat, ext)
       if (!entry) return
       table.set(key, entry)
+      if (table === index) indexChangedKeys.add(key)
       changed = true
     })
     if (!fallBack) {
@@ -1042,10 +969,16 @@ async function syncIndex () {
       mtime: stat.mtimeMs,
       size: stat.size
     })
+    indexChangedKeys.add(key)
     changed = true
   })
 
-  for (const key of [...index.keys()]) if (!seen.has(key)) { index.delete(key); changed = true }
+  for (const key of [...index.keys()]) {
+    if (seen.has(key)) continue
+    index.delete(key)
+    indexChangedKeys.add(key)
+    changed = true
+  }
 
   const seenWhiteboards = new Set()
   await mapLimit(whiteboards, WALK_LIMIT, async (abs) => {
@@ -1211,7 +1144,11 @@ async function indexEntryFor (abs, stat, ext) {
    dropped from the copy — worth a line in the log, because the symptom (a
    slow first search, every launch) points nowhere. */
 function saveIndexCache () {
-  const saved = indexCache?.save(index)
+  /* Handed the set and then replaced, not cleared: a key added while the
+     flush was still queued belongs to the next save, not this one. */
+  const changed = indexChangedKeys
+  indexChangedKeys = new Set()
+  const saved = indexCache?.save(index, changed)
   if (saved?.dropped) console.warn(`index cache over budget: ${saved.dropped} largest notes left out`)
   else if (saved?.skipped) console.warn('index cache skipped: vault too large to cache at all')
 }
@@ -1352,6 +1289,10 @@ async function touchIndex (absPath, text, stamp) {
       mtime: stat.mtimeMs,
       size: stat.size
     })
+    /* Self-writes change the index without a sync running — the key belongs
+       to the set the cache writes, or the delta would miss the edit every
+       autosave is. */
+    indexChangedKeys.add(rel(absPath))
   } catch {
     indexDirty = true
   }
@@ -2609,6 +2550,10 @@ async function openVault (dir) {
   await migrateAttachments(dir).catch(() => {})
   await migrateNoteTags().catch(() => {})
   index.clear()
+  /* Both vault-scoped copilot leftovers go too: keys of a vault nobody is
+     looking at, and staged writes whose paths name files in it. */
+  indexChangedKeys.clear()
+  aiProposals.clear()
   whiteboardIndex.clear()
   docxIndex.clear()
   documentIndex.clear()
@@ -3051,6 +2996,21 @@ function createWindow ({ open = null, saved = null } = {}) {
 
   windowSessions.add(win, saved, !windows.size)
   windows.add(win)
+
+  /* ⌘T steps the copilot's thinking level while its panel is open, and opens
+     a new tab otherwise. A native accelerator never reaches the page, so the
+     page cannot make that distinction itself: this sees the key before the
+     menu does, and while the panel is open the menu never sees it at all.
+     ⇧ is excluded — ⌘⇧T stays Reopen Closed Tab either way. */
+  win.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown' || (input.key !== 't' && input.key !== 'T')) return
+    const mod = process.platform === 'darwin' ? input.meta : input.control
+    if (!mod || input.shift || input.alt) return
+    if (copilotPanelOpen(win)) {
+      event.preventDefault()
+      sendTo(win, 'menu', 'copilot-effort')
+    }
+  })
 
   /* The native menu follows the frontmost window. Its renderer reports the
      active document separately, so focus only has to rebuild from that saved
@@ -3666,7 +3626,87 @@ function toCopilot (channel, payload) {
  * by run id, and a second window opening the same note has its own block with
  * its own id, so the text would land in a block that did not ask for it.
  */
+
+/* Batching for `run:out`, the renderer's most frequent IPC.
+ *
+ * A program printing in a tight loop (a `println!` on every turn of a `while`
+ * that never advances) delivers hundreds of thousands of tiny `data` events
+ * per second. One IPC message per event flooded the renderer, which appended
+ * each to a growing string — paying quadratic copy cost to rebuild a megabyte
+ * two bytes at a time — and froze the window. Chunks are held here briefly
+ * instead and sent at most once per stream per window below, so a runaway
+ * still streams live without ever sending a two-byte message.
+ *
+ * Per (run, stream): order within a stream is preserved exactly, and the
+ * flush before `run:done` keeps every byte ahead of the verdict. Order
+ * *between* the two streams was never promised — they are separate pipes —
+ * and the panel draws them into separate blocks anyway.
+ */
+const runOutPending = new Map()
+/** @type {ReturnType<typeof setTimeout> | null} */
+let runOutTimer = null
+const RUN_OUT_FLUSH_MS = 60
+const RUN_OUT_FLUSH_BYTES = 32 * 1024
+
+function scheduleRunOutFlush () {
+  if (runOutTimer || !runOutPending.size) return
+  runOutTimer = setTimeout(() => {
+    runOutTimer = null
+    flushRunOut()
+  }, RUN_OUT_FLUSH_MS)
+}
+
+function emitRunOut (entry) {
+  sendTo(runOwners.get(entry.id), 'run:out',
+    { id: entry.id, stream: entry.stream, text: entry.chunks.join('') })
+}
+
+function dropRunOutTimer () {
+  if (!runOutPending.size && runOutTimer) {
+    clearTimeout(runOutTimer)
+    runOutTimer = null
+  }
+}
+
+function flushRunOut (onlyId = null) {
+  for (const [key, entry] of runOutPending) {
+    if (onlyId != null && entry.id !== onlyId) continue
+    runOutPending.delete(key)
+    if (entry.chunks.length) emitRunOut(entry)
+  }
+  dropRunOutTimer()
+}
+
+function queueRunOut (id, stream, text) {
+  if (id == null || (stream !== 'stdout' && stream !== 'stderr') || typeof text !== 'string' || !text) return
+  const key = `${id}\n${stream}`
+  let entry = runOutPending.get(key)
+  if (!entry) {
+    entry = { id, stream, chunks: [], len: 0 }
+    runOutPending.set(key, entry)
+  }
+  entry.chunks.push(text)
+  entry.len += text.length
+  /* High-throughput output should not wait out the window: flush a stream as
+     soon as it has a screenful, and let the timer carry the drips. */
+  if (entry.len >= RUN_OUT_FLUSH_BYTES) {
+    runOutPending.delete(key)
+    emitRunOut(entry)
+    dropRunOutTimer()
+    return
+  }
+  scheduleRunOutFlush()
+}
+
 function toRun (channel, payload) {
+  if (channel === 'run:out') {
+    queueRunOut(payload?.id, payload?.stream, payload?.text)
+    return
+  }
+  /* The verdict travels behind every byte it judges: flushed first, over the
+     same channel order Electron preserves, so no `run:out` can land after it
+     in a panel that has already been told the run is over. */
+  if (channel === 'run:done') flushRunOut(payload?.id)
   sendTo(runOwners.get(payload?.id), channel, payload)
   /* `run:done` is the last thing ever said about a run, so the entry goes with
      it. Without this the map holds a reference to every window that has ever
@@ -4456,7 +4496,10 @@ const vaultWriteDomain = makeVaultWriteDomain({
   maxIndexBytes: MAX_INDEX_BYTES,
   ignoredDirs: IGNORED_DIRS
 })
-vaultWriteDomain.register()
+/* The writer the whole file pipeline is reached through — autosave and the
+   copilot's staged-write apply share it, so a proposal lands with the same
+   version snapshot and index touch as a typed save. */
+const vaultWrites = vaultWriteDomain.register()
 /* The eight "new …" handlers live in electron/ipc-create.js, with the name
    rules they share and the reasoning for each kind's empty file. `indexDirty`
    and the trust store are main's, so they cross as the accessors below. */
@@ -6620,7 +6663,7 @@ const pythonEnvs = makePythonEnvs({
 /** Opt-in: a pasted note can name any PyPI package, so installing on a
  *  traceback is off until the reader turns it on in Settings. */
 const mayInstallPython = () => (readConfig().autoInstallPackages ?? readConfig().autoInstallPythonDeps ?? true) === true
-const { makeCodeEnvs } = require('./code-envs')
+const { makeCodeEnvs, tailBuffer } = require('./code-envs')
 const codeEnvs = makeCodeEnvs({ root: () => app.getPath('userData'), vault: () => vaultPath || '', pathFor: runnerPath, pythonEnvs, autoInstall: mayInstallPython })
 
 /* stdout is a pipe, so Python otherwise block-buffers it and a long-running
@@ -7078,30 +7121,12 @@ function startRun (id, cmd, args, { cwd, timeoutMs, env: extraEnv, quiet = false
      between a block that works and one that never can. The tail, not the
      whole, because the interesting line is the last one — and a run that
      printed a megabyte to stderr has not earned a megabyte of retention. */
-  /* Kept as the last few chunks rather than as one growing string. Rebuilding
-     `tail = (tail + text).slice(-8192)` copies eight kilobytes for every chunk
-     that arrives, so a program that writes a megabyte to stderr in small
-     pieces pays for the tail hundreds of times over. Chunks are pushed and the
-     front is dropped once there is more than a tail's worth; the join happens
-     once, if anyone asks. */
-  const errChunks = []
-  let errHeld = 0
-  const keepStderr = (text) => {
-    errChunks.push(text)
-    errHeld += text.length
-    while (errChunks.length > 1 && errHeld - errChunks[0].length >= STDERR_TAIL_BYTES) {
-      errHeld -= errChunks.shift().length
-    }
-  }
-  const stderrTail = () => {
-    const joined = errChunks.length === 1 ? errChunks[0] : errChunks.join('')
-    return joined.length > STDERR_TAIL_BYTES ? joined.slice(-STDERR_TAIL_BYTES) : joined
-  }
+  const errTail = tailBuffer(STDERR_TAIL_BYTES)
 
   const pipe = (stream, name) => {
     stream.setEncoding('utf8')
     stream.on('data', (text) => {
-      if (name === 'stderr') keepStderr(text)
+      if (name === 'stderr') errTail.push(text)
       if (!isPPMStream && name === 'stdout' && sizes[name] === 0) {
         const head = String(text).trimStart()
         if (head.startsWith('P3\n') || head.startsWith('P3\r') || head.startsWith('P3 ')) isPPMStream = true
@@ -7129,7 +7154,7 @@ function startRun (id, cmd, args, { cwd, timeoutMs, env: extraEnv, quiet = false
       clearTimeout(run.timer)
       clearTimeout(run.killTimer)
       runs.delete(id)
-      resolve({ ms: Date.now() - started, truncated, errTail: stderrTail(), ...payload })
+      resolve({ ms: Date.now() - started, truncated, errTail: errTail.text(), ...payload })
     }
 
     child.on('error', (err) => {
@@ -7573,11 +7598,16 @@ function killAllRuns () {
 /* ------------------------------------------------- managing packages */
 
 ipcMain.handle('packages:list', () => codeEnvs.list())
-ipcMain.handle('packages:manage', async (_event, note, lang, action, name, imported) => {
+ipcMain.handle('packages:manage', async (_event, note, lang, action, name, imported, payload) => {
   if (note != null && (typeof note !== 'string' || note.length > 4096)) throw new Error('Invalid note.')
   if (!['list', 'export'].includes(action) && !executionTrusted()) throw new Error('Trust this vault before managing its packages.')
+  /* An import payload is a whole environment file crossing the bridge — a size
+     cap here keeps a renderer from asking main to hold a boundless object. */
+  if (payload != null && (typeof payload !== 'object' || JSON.stringify(payload).length > 16 * 1024 * 1024)) {
+    throw new Error('That export is too large to be an environment.')
+  }
   await ensureLoginPath()
-  return codeEnvs.manage(note || null, lang, action, name, imported)
+  return codeEnvs.manage(note || null, lang, action, name, imported, payload)
 })
 
 /* The render handlers register here, where the run ids they borrow live
@@ -7770,6 +7800,132 @@ async function consumeAiSearch (event = null) {
   }
 }
 
+/* Changes a propose-mode turn has asked for, held in memory until the reader
+   applies or discards them. In-memory on purpose: a quit abandons them, and
+   that is an honest answer — nothing in the vault was touched, so there is
+   nothing to recover and asking again is the way back. */
+const aiProposals = new Map()
+let aiProposalSeq = 0
+/* Each proposal holds whole before/after texts, so the map is bounded like the
+   trust history is: the oldest un-decided proposal is dropped past the cap —
+   its card then answers Apply with "no longer here", the honest answer. */
+const AI_PROPOSAL_LIMIT = 20
+
+/** Consume the write request a propose-mode turn left: parse it, resolve
+ *  each change against the vault's current text, and stage it for the
+ *  panel's Apply rather than writing anything. The request file is deleted
+ *  either way — a request that failed must not run again on the next watcher
+ *  pass, exactly like the rename and search requests. */
+async function consumeAiWrite (event) {
+  let requestFile
+  try {
+    requestFile = await realSafePath(AI_WRITE_REQUEST)
+    const request = parseAiWriteRequest(await fs.readFile(requestFile, 'utf8'))
+    if (isAiWriteStale(request)) throw new Error('The Copilot write request expired.')
+    if (request.turnId && event?.turnId && request.turnId !== event.turnId) {
+      throw new Error('The Copilot write request belongs to another turn.')
+    }
+    const changes = []
+    for (const write of request.writes) {
+      /* Resolved as `file:write` resolves — full realpath, so a link standing
+         where the note should be refuses rather than writing through it. */
+      const abs = await realSafePath(write.path)
+      const ext = path.extname(abs).toLowerCase()
+      /* The same set `file:write` can meaningfully store as text — a PDF or
+         a Word file is not a string to replace, and a proposal that named
+         one is refused rather than written over a binary. */
+      if (!(MD_EXT.has(ext) || isTex(abs) || isCode(abs) || isData(abs) ||
+            isWhiteboard(abs) || isSite(abs) || isNotebook(abs))) {
+        throw new Error(`Copilot cannot propose changes to ${write.path}.`)
+      }
+      /* "Before" is the file as it stands now: the diff the reader is shown
+         and the version the apply will refuse to move on from. A missing
+         file is a proposal to create it — before is nothing. */
+      let before = ''
+      let create = true
+      try {
+        before = await fs.readFile(abs, 'utf8')
+        create = false
+      } catch (err) {
+        if (err?.code !== 'ENOENT') throw err
+      }
+      const after = typeof write.content === 'string'
+        ? write.content
+        : applyAiEdits(before, write.edits)
+      changes.push({ path: rel(abs), before, after, create })
+    }
+    const id = `p${Date.now().toString(36)}${(++aiProposalSeq).toString(36)}`
+    aiProposals.set(id, { id, turnId: turnId(event?.turnId), changes })
+    while (aiProposals.size > AI_PROPOSAL_LIMIT) {
+      aiProposals.delete(aiProposals.keys().next().value)
+    }
+    toCopilot('ai:event', {
+      k: 'proposal', id, turnId: event?.turnId,
+      files: changes.map((change) => ({ path: change.path, create: change.create }))
+    })
+  } catch (err) {
+    toCopilot('ai:event', {
+      k: 'proposal-failed',
+      message: err?.message || 'The Copilot write request could not be completed.',
+      turnId: event?.turnId
+    })
+  } finally {
+    if (requestFile) {
+      noteSelfWrite(requestFile)
+      await fs.unlink(requestFile).catch(() => {})
+    }
+  }
+}
+
+/**
+ * Write a staged proposal down, through the same path the autosave uses.
+ *
+ * Every change is checked against the file it was proposed from: a file that
+ * has moved since — the reader kept typing while the copilot thought — is
+ * reported as a conflict and left alone rather than overwritten, because
+ * "apply the version the agent saw" is not what Apply means when the file
+ * is no longer that version. The writes that do land go through the
+ * versioned write path, so they are undoable from History like any save —
+ * and they are also recorded as a copilot operation, which is what the
+ * review card's Reject restores.
+ */
+async function applyAiProposal (id) {
+  const proposal = aiProposals.get(id)
+  if (!proposal) return { ok: false, gone: true, error: 'That proposal is no longer here.' }
+  const applied = []
+  const conflicts = []
+  for (const change of proposal.changes) {
+    const abs = await realSafePath(change.path)
+    const stat = await fs.stat(abs).catch(() => null)
+    const current = stat ? await fs.readFile(abs, 'utf8') : ''
+    if (current !== change.before) {
+      conflicts.push({ path: change.path })
+      continue
+    }
+    /* The expect stamp is the same check the write itself would have made:
+       a file that moves between this read and the write is still refused. */
+    const result = await vaultWrites.writeDocument(abs, change.after, stat
+      ? { expect: { mtimeMs: stat.mtimeMs, size: stat.size } }
+      : null)
+    if (result?.ok === false) {
+      conflicts.push({ path: change.path, error: result.error })
+      continue
+    }
+    applied.push(change)
+  }
+  /* The applied half is recorded as a copilot operation — the same shape the
+     turn-end review is built from — so Reject can put every file back even
+     though no turn wrote it. */
+  if (applied.length) {
+    trust?.record({ source: 'copilot',
+      changes: applied.map((change) => ({ path: change.path, before: change.before, after: change.after })) })
+  }
+  if (!conflicts.length) aiProposals.delete(id)
+  else proposal.changes = conflicts.map((one) =>
+    proposal.changes.find((change) => change.path === one.path)).filter(Boolean)
+  return { ok: true, applied: applied.map((change) => change.path), conflicts }
+}
+
 function sendAiReview (id, operation) {
   if (!operation || aiReviewsSent.has(id)) return
   aiReviewsSent.add(id)
@@ -7840,6 +7996,20 @@ function aiService () {
     if (isAiSearchRequest(event?.path)) {
       if (event?.k === 'edited') {
         aiRenameWork = aiRenameWork.then(() => consumeAiSearch(event)).catch(() => {})
+      }
+      return
+    }
+    /* The write request rides the same seam and the same serialization: the
+       staged changes it carries are resolved against a vault that has already
+       absorbed any rename still being consumed ahead of it. */
+    if (isAiWriteRequest(event?.path)) {
+      if (event?.k === 'edited') {
+        aiRenameWork = aiRenameWork.then(() => consumeAiWrite(event)).catch(() => {})
+      } else if (event?.k === 'tool-done' && event.error) {
+        toCopilot('ai:event', {
+          k: 'proposal-failed', message: 'The Copilot could not write its proposal.',
+          turnId: event.turnId
+        })
       }
       return
     }
@@ -8005,6 +8175,24 @@ ipcMain.handle('ai:send', async (event, key, text, context, requestedTurnId) => 
    disagree about what "before" was. See rememberAgentBefore in renderer.js. */
 ipcMain.handle('ai:baseline', (_e, turn, relPath) =>
   aiTurns.baseline(turn, String(relPath || '')))
+
+/* A staged proposal's full texts, fetched on demand like the review card's —
+   the `proposal` event itself stays a list of paths, because a proposal's
+   before/after is the size of the files it names, not the size of a list of
+   them. */
+ipcMain.handle('ai:proposal', (event, id) => {
+  assertCopilotWindow(event)
+  const proposal = aiProposals.get(String(id || ''))
+  return proposal ? { id: proposal.id, changes: proposal.changes } : null
+})
+ipcMain.handle('ai:proposal-apply', async (event, id) => {
+  assertCopilotWindow(event)
+  return applyAiProposal(String(id || ''))
+})
+ipcMain.handle('ai:proposal-discard', (event, id) => {
+  assertCopilotWindow(event)
+  return { ok: aiProposals.delete(String(id || '')) }
+})
 
 ipcMain.handle('ai:announce', (_e, info) => {
   const win = windowOf(_e)
@@ -8280,6 +8468,23 @@ ipcMain.handle('language:decks', async () => {
       folder: path.dirname(key),
       text: entry.text
     })
+  }
+  return out
+})
+
+/* Every flashcard bank in the vault — the `.fc` notes, which are the
+   scheduled deck. Ordinary notes keep their quiz callouts as in-page
+   interaction only: a note *about* flashcards parses as a bank, so letting
+   any Markdown file join the queue would schedule the documentation's
+   examples. The index already holds the texts, so this is a filter, not a
+   walk. */
+ipcMain.handle('flashcards:banks', async () => {
+  if (!vaultPath) return []
+  await ensureIndex()
+  const out = []
+  for (const [key, entry] of index) {
+    if (!key.toLowerCase().endsWith(FLASHCARD_EXT)) continue
+    out.push({ path: key, name: entry.name, text: entry.text })
   }
   return out
 })

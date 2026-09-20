@@ -172,6 +172,157 @@ async function main () {
     assert.equal((await store.load()).size, 0)
   })
 
+  /* ------------------------------------------------------------ delta */
+
+  /* The sidecar path is what every save since this file's tests were written
+     is about: a save that knows which keys moved appends one line each to
+     `<cache>.delta` instead of serializing the vault, and the next load
+     replays the lines over the main file. */
+  await check('a save with a small changed set writes the sidecar, not the vault', async () => {
+    const store = makeIndexCache({ quietMs: 0, dir, vaultPath: '/vaults/Delta' })
+    const entries = new Map([
+      ['a.md', entry('a', 'alpha')], ['b.md', entry('b', 'beta')],
+      ['c.md', entry('c', 'gamma')], ['d.md', entry('d', 'delta')]
+    ])
+    store.save(entries)
+    await store.idle()
+    assert.equal(fs.existsSync(`${store.path}.delta`), false, 'a full save leaves no sidecar')
+
+    entries.set('a.md', entry('a', 'alpha v2'))
+    store.save(entries, new Set(['a.md']))
+    await store.idle()
+    assert.ok(fs.existsSync(`${store.path}.delta`), 'the changed-keys save appends the sidecar')
+    const back = await store.load()
+    assert.equal(back.get('a.md').text, 'alpha v2')
+    assert.equal(back.get('b.md').text, 'beta')
+  })
+
+  await check('a deleted key is a tombstone, replayed as a delete', async () => {
+    const store = makeIndexCache({ quietMs: 0, dir, vaultPath: '/vaults/DeltaGone' })
+    const entries = new Map([
+      ['a.md', entry('a', 'alpha')], ['b.md', entry('b', 'beta')],
+      ['c.md', entry('c', 'gamma')], ['d.md', entry('d', 'delta')]
+    ])
+    store.save(entries)
+    await store.idle()
+    entries.delete('b.md')
+    store.save(entries, new Set(['b.md']))
+    await store.idle()
+    const back = await store.load()
+    assert.equal(back.has('b.md'), false)
+    assert.equal(back.size, 3)
+  })
+
+  await check('a burst of changed saves merges into one append', async () => {
+    const store = makeIndexCache({ quietMs: 30, dir, vaultPath: '/vaults/DeltaBurst' })
+    const entries = new Map([
+      ['a.md', entry('a', 'alpha')], ['b.md', entry('b', 'beta')],
+      ['c.md', entry('c', 'gamma')], ['d.md', entry('d', 'delta')]
+    ])
+    store.save(entries)
+    await store.idle()
+    entries.set('a.md', entry('a', 'a2'))
+    store.save(entries, new Set(['a.md']))
+    entries.set('b.md', entry('b', 'b2'))
+    store.save(entries, new Set(['b.md']))
+    await store.idle()
+    const lines = (await fsp.readFile(`${store.path}.delta`, 'utf8')).trim().split('\n')
+    assert.equal(lines.length, 2, 'both changed keys land as lines')
+    const back = await store.load()
+    assert.equal(back.get('a.md').text, 'a2')
+    assert.equal(back.get('b.md').text, 'b2')
+  })
+
+  await check('a change set naming most of the vault takes the full write', async () => {
+    const store = makeIndexCache({ quietMs: 0, dir, vaultPath: '/vaults/DeltaWide' })
+    const entries = new Map([
+      ['a.md', entry('a', 'alpha')], ['b.md', entry('b', 'beta')]
+    ])
+    store.save(entries)
+    await store.idle()
+    entries.set('a.md', entry('a', 'a2'))
+    entries.set('b.md', entry('b', 'b2'))
+    store.save(entries, new Set(['a.md', 'b.md']))
+    await store.idle()
+    assert.equal(fs.existsSync(`${store.path}.delta`), false,
+      'half the vault changing is a serialize, not a journal')
+    assert.equal((await store.load()).get('b.md').text, 'b2')
+  })
+
+  await check('a sidecar past its budget compacts into the next full write', async () => {
+    /* Each line here is ~63 bytes, so a 100-byte budget lets two appends land
+       and puts the third over — compaction, not the per-entry guard. */
+    const store = makeIndexCache({ quietMs: 0, dir, vaultPath: '/vaults/DeltaFull', deltaMaxBytes: 100 })
+    const entries = new Map([
+      ['a.md', entry('a', 'alpha')], ['b.md', entry('b', 'beta')],
+      ['c.md', entry('c', 'gamma')], ['d.md', entry('d', 'delta')]
+    ])
+    store.save(entries)
+    await store.idle()
+    entries.set('a.md', entry('a', 'a2'))
+    store.save(entries, new Set(['a.md']))
+    await store.idle()
+    entries.set('b.md', entry('b', 'b2'))
+    store.save(entries, new Set(['b.md']))
+    await store.idle()
+    assert.ok(fs.existsSync(`${store.path}.delta`), 'small changes still append')
+    entries.set('c.md', entry('c', 'c2'))
+    store.save(entries, new Set(['c.md']))
+    await store.idle()
+    assert.equal(fs.existsSync(`${store.path}.delta`), false,
+      'the oversized sidecar is folded into a full write')
+    const back = await store.load()
+    assert.equal(back.get('a.md').text, 'a2')
+    assert.equal(back.get('b.md').text, 'b2')
+    assert.equal(back.get('c.md').text, 'c2')
+  })
+
+  await check('a torn last line of the sidecar costs only itself', async () => {
+    const store = makeIndexCache({ quietMs: 0, dir, vaultPath: '/vaults/DeltaTorn' })
+    const entries = new Map([
+      ['a.md', entry('a', 'alpha')], ['b.md', entry('b', 'beta')],
+      ['c.md', entry('c', 'gamma')], ['d.md', entry('d', 'delta')]
+    ])
+    store.save(entries)
+    await store.idle()
+    /* A crash mid-append leaves a partial JSON line. The lines before it —
+       and the main file under them — still answer. */
+    await fsp.writeFile(`${store.path}.delta`,
+      JSON.stringify(['a.md', entry('a', 'a2')]) + '\n' + '["b.md", {"name": "b", "tex')
+    const back = await store.load()
+    assert.equal(back.get('a.md').text, 'a2')
+    assert.equal(back.get('b.md').text, 'beta')
+  })
+
+  await check('a delta save of nothing writes nothing', async () => {
+    const store = makeIndexCache({ quietMs: 0, dir, vaultPath: '/vaults/DeltaEmpty' })
+    const entries = new Map([['a.md', entry('a', 'alpha')]])
+    store.save(entries)
+    await store.idle()
+    const before = fs.statSync(store.path).mtimeMs
+    const result = store.save(entries, new Set())
+    await store.idle()
+    assert.deepEqual(result, { written: 0 })
+    assert.equal(fs.statSync(store.path).mtimeMs, before, 'no flush was scheduled')
+  })
+
+  await check('clearing removes the sidecar too', async () => {
+    const store = makeIndexCache({ quietMs: 0, dir, vaultPath: '/vaults/DeltaClear' })
+    const entries = new Map([
+      ['a.md', entry('a', 'alpha')], ['b.md', entry('b', 'beta')],
+      ['c.md', entry('c', 'gamma')], ['d.md', entry('d', 'delta')]
+    ])
+    store.save(entries)
+    await store.idle()
+    entries.set('a.md', entry('a', 'a2'))
+    store.save(entries, new Set(['a.md']))
+    await store.idle()
+    assert.ok(fs.existsSync(`${store.path}.delta`))
+    await store.clear()
+    assert.equal(fs.existsSync(store.path), false)
+    assert.equal(fs.existsSync(`${store.path}.delta`), false)
+  })
+
   fs.rmSync(dir, { recursive: true, force: true })
   console.log(`\n${passed} checks passed${failed ? `, ${failed} failed` : ''}`)
   if (failed) process.exit(1)

@@ -65,7 +65,7 @@ function narrowsFrom (previous, next, opts, generation) {
 }
 
 function sameFilters (before, now) {
-  for (const kind of ['tag', 'path', 'file']) {
+  for (const kind of ['tag', 'path', 'file', 'type']) {
     const a = before[kind] || []
     const b = now[kind] || []
     if (a.length !== b.length) return false

@@ -15,7 +15,7 @@ const check = (name, got, want) => {
   console.log(`  FAIL ${name} — expected ${want}, got ${got}`)
 }
 
-const NO_FILTERS = { tag: [], path: [], file: [], prop: [] }
+const NO_FILTERS = { tag: [], path: [], file: [], prop: [], type: [] }
 const PLAIN = { regex: false, word: false, caseSensitive: false }
 
 /** A previous answer, with everything not under test held at its default. */
@@ -103,6 +103,22 @@ check('a property filter with a changed value invalidates the answer',
 check('a bare property filter is not one with a value',
   can(answer({ filters: propped({ key: 'status', value: null }) }),
     query(['physi'], propped({ key: 'status', value: 'read' }))), false)
+
+/* `type:` is an exact-kind test — `type:note` and `type:pdf` name disjoint
+   sets, so a changed one must go back to the whole index like any changed
+   filter. Left out of the comparison once, it let `type:no` keep narrowing
+   the empty set `type:n` had already produced, and `type:note` answered
+   nothing in a vault full of notes. */
+const typed = (...kinds) => ({ ...NO_FILTERS, type: kinds })
+
+check('the same type filter narrows',
+  can(answer({ filters: typed('note') }), query(['physi'], typed('note'))), true)
+check('a changed type filter invalidates the answer',
+  can(answer({ words: [], filters: typed('pdf') }), query([], typed('note'))), false)
+check('a type filter grown while typing invalidates the answer',
+  can(answer({ words: [], filters: typed('n') }), query([], typed('note'))), false)
+check('a type filter dropped since invalidates the answer',
+  can(answer({ words: [], filters: typed('note') }), query([])), false)
 
 // --- a filter-only query is a legitimate starting point -----------------
 check('adding words to a filter-only query narrows',

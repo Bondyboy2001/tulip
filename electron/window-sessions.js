@@ -1,7 +1,7 @@
 'use strict'
 const { randomUUID } = require('node:crypto')
 
-const WINDOW_KEYS = new Set(['tabs', 'tabPlaces', 'tabHistories', 'tabPinned', 'tabIndex', 'lastNote', 'view', 'sideDoc', 'sideScroll', 'sideWidth', 'sidebar', 'paneBelow', 'paneBelowHeight', 'paneBelowHeights', 'railWidth', 'chatWidth', 'ai', 'expanded', 'texSourceRatio'])
+const WINDOW_KEYS = new Set(['tabs', 'tabPlaces', 'tabHistories', 'tabPinned', 'tabIndex', 'lastNote', 'view', 'sideDoc', 'sideScroll', 'sideWidth', 'sidebar', 'paneBelow', 'paneBelowHeight', 'railWidth', 'chatWidth', 'ai', 'expanded', 'texSourceRatio'])
 
 // Preferences remain shared; document state and geometry belong to a window.
 function makeWindowSessions ({ readConfig, writeConfig, getVault }) {

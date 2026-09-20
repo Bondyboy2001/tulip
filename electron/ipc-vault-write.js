@@ -138,11 +138,23 @@ function makeVaultWriteDomain (ctx) {
   // A renderer-only queue cannot stop two windows accepting the same stamp.
   const writes = new Map()
   function register () {
-    ipcMain.handle('file:write', async (_e, p, content, metadata = null) => {
-      const key = await realSafePath(p)
+    /* Returned to the caller, not only bound to `file:write`: the copilot's
+       staged-write apply takes this same route through the domain, so every
+       writer — autosave, the panel, a proposal — is on the one per-path
+       serialization rather than only the renderer's. */
+    /**
+     * @param {string} key  the resolved absolute path
+     * @param {string} content
+     * @param {{ expect?: { mtimeMs: number, size: number }, [k: string]: any } | null} [metadata]
+     */
+    function writeDocument (key, content, metadata = null) {
       const next = (writes.get(key) || Promise.resolve()).catch(() => {}).then(() => writeFile(key, content, metadata))
       writes.set(key, next)
-      try { return await next } finally { if (writes.get(key) === next) writes.delete(key) }
+      return next.finally(() => { if (writes.get(key) === next) writes.delete(key) })
+    }
+    ipcMain.handle('file:write', async (_e, p, content, metadata = null) => {
+      const key = await realSafePath(p)
+      return writeDocument(key, content, metadata)
     })
 
     async function writeFile (abs, content, metadata) {
@@ -471,6 +483,8 @@ function makeVaultWriteDomain (ctx) {
       invalidateVaultSnapshot()
       return { imported, skipped, first }
     })
+
+    return { writeDocument }
   }
 
   return { register, renameDocument }

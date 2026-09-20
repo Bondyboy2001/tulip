@@ -187,6 +187,10 @@ contextBridge.exposeInMainWorld('tulip', {
        everything due is built from, rather than of whatever note is open. */
     decks: () => ipcRenderer.invoke('language:decks')
   },
+  flashcards: {
+    /* Every .fc bank, text and all — the vault-wide flashcard queue's deck. */
+    banks: () => ipcRenderer.invoke('flashcards:banks')
+  },
   languageHistory: {
     rows: (path) => ipcRenderer.invoke('language-history:rows', path)
   },
@@ -283,7 +287,10 @@ contextBridge.exposeInMainWorld('tulip', {
 
   packages: {
     list: () => ipcRenderer.invoke('packages:list'),
-    manage: (note, lang, action = 'list', name, imported) => ipcRenderer.invoke('packages:manage', note, lang, action, name, imported)
+    /* `payload` is for 'import': the parsed environment export. It travels as
+       an object, not a path — the file never enters the vault or the app's
+       folders without the format check in code-envs passing first. */
+    manage: (note, lang, action = 'list', name, imported, payload) => ipcRenderer.invoke('packages:manage', note, lang, action, name, imported, payload)
   },
 
   /* Manim renders to a real file in the vault rather than to the page, so it
@@ -336,6 +343,11 @@ contextBridge.exposeInMainWorld('tulip', {
        announce a Write after the file has already changed; by then the disk is
        the copilot's version and the baseline is the only "before" left. */
     baseline: (turnId, path) => ipcRenderer.invoke('ai:baseline', turnId, path),
+    /* A propose-mode turn's staged writes: fetched whole only when the Diff
+       button asks, applied through Tulip's own save path, or dropped. */
+    proposal: (id) => ipcRenderer.invoke('ai:proposal', id),
+    applyProposal: (id) => ipcRenderer.invoke('ai:proposal-apply', id),
+    discardProposal: (id) => ipcRenderer.invoke('ai:proposal-discard', id),
     // Transcripts, per note, kept with the app's state rather than the vault.
     history: {
       load: () => ipcRenderer.invoke('ai:history:load'),
@@ -351,6 +363,9 @@ contextBridge.exposeInMainWorld('tulip', {
     record: (entries) => ipcRenderer.invoke('review:record', entries),
     unrecord: (entry) => ipcRenderer.invoke('review:unrecord', entry),
     pickCsv: () => ipcRenderer.invoke('review:pick-csv'),
+    /* The same deck, leaving: the table's rows serialised by the renderer and
+       written wherever the save dialog lands. */
+    saveCsv: (name, text) => ipcRenderer.invoke('review:save-csv', name, text),
     prune: (knownIds) => ipcRenderer.invoke('review:prune', knownIds),
     history: () => ipcRenderer.invoke('review:history')
   },

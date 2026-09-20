@@ -65,6 +65,28 @@ function makeReviewDomain (ctx) {
       return { name: path.basename(source), text: await fs.readFile(source, 'utf8') }
     })
 
+    /* The way back out: the table's rows as one CSV file wherever the reader
+       chooses. The text arrives already written — serialising is the grid's
+       (src/csv.js), the way parsing it was on the way in. */
+    ipcMain.handle('review:save-csv', async (_e, name, text) => {
+      if (!getVaultPath()) throw new Error('Open a vault first.')
+      const safe = String(name || 'cards').replace(/[\\/:*?"<>|]/g, '-').trim().slice(0, 120) || 'cards'
+      const parent = /** @type {Electron.BaseWindow} */ (focusedWindow())
+      const chosen = await dialog.showSaveDialog(parent, {
+        title: 'Export cards',
+        defaultPath: `${safe}.csv`,
+        buttonLabel: 'Export',
+        filters: [{ name: 'Comma separated', extensions: ['csv'] }]
+      })
+      if (chosen.canceled || !chosen.filePath) return { ok: false, canceled: true }
+      try {
+        await fs.writeFile(chosen.filePath, String(text || ''), 'utf8')
+        return { ok: true, path: chosen.filePath }
+      } catch (err) {
+        return { ok: false, error: err.message }
+      }
+    })
+
     ipcMain.handle('review:unrecord', async (_e, entry) => {
       if (!getVaultPath()) return { ok: false }
       return review.unrecord(entry)

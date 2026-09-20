@@ -118,13 +118,11 @@ const isNotebook = (p) => path.extname(String(p || '')).toLowerCase() === NOTEBO
    Named here so the tree can give it its own icon and label instead of listing
    it among the files the vault has no view of. */
 const DOCX_EXT = VAULT_CONTRACT.docxExtension
-const isDocx = (p) => path.extname(String(p || '')).toLowerCase() === DOCX_EXT
 
 /* A portable bank of quiz callouts. It is text and participates in the note
    index, but keeps its own kind so the tree and study controls can distinguish
    a bank from a prose note without reading its frontmatter first. */
 const FLASHCARD_EXT = VAULT_CONTRACT.flashcardExtension
-const isFlashcard = (p) => path.extname(String(p || '')).toLowerCase() === FLASHCARD_EXT
 
 /* Source files and data files. Neither is a note — a `.py` is text the vault
    edits but never reads as prose, and a `.csv` is a table rather than a
@@ -180,9 +178,7 @@ module.exports = {
   NOTEBOOK_EXT,
   isNotebook,
   DOCX_EXT,
-  isDocx,
   FLASHCARD_EXT,
-  isFlashcard,
   CODE_EXT,
   isCode,
   DATA_EXT,
