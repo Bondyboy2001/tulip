@@ -8,7 +8,7 @@
  */
 const REQUEST_PATH = '.tulip-copilot-rename.json'
 
-const normal = (value) => String(value || '').replaceAll('\\', '/').replace(/^\.\//, '')
+const { normal, isStaleRequest } = require('./copilot-request')
 const isRequestPath = (value) => normal(value) === REQUEST_PATH
 
 function parseRequest (source) {
@@ -27,11 +27,6 @@ function parseRequest (source) {
   const turnId = typeof value.turnId === 'string' && value.turnId.length <= 120 ? value.turnId : null
   const at = Number(value.at) > 0 ? Number(value.at) : null
   return { path, name, turnId, at }
-}
-
-const REQUEST_TTL_MS = 10 * 60 * 1000
-function isStaleRequest (request, now = Date.now()) {
-  return !!request?.at && (now - request.at > REQUEST_TTL_MS)
 }
 
 module.exports = { REQUEST_PATH, isRequestPath, parseRequest, isStaleRequest }

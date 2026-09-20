@@ -12,7 +12,7 @@
 const REQUEST_PATH = '.tulip-copilot-search.json'
 const RESULTS_PATH = '.tulip-copilot-search-results.json'
 
-const normal = (value) => String(value || '').replaceAll('\\', '/').replace(/^\.\//, '')
+const { normal, isStaleRequest } = require('./copilot-request')
 const isRequestPath = (value) => normal(value) === REQUEST_PATH
 
 function parseRequest (source) {
@@ -41,11 +41,6 @@ function parseRequest (source) {
       regex: value.regex === true
     }
   }
-}
-
-const REQUEST_TTL_MS = 10 * 60 * 1000
-function isStaleRequest (request, now = Date.now()) {
-  return !!request?.at && (now - request.at > REQUEST_TTL_MS)
 }
 
 module.exports = { REQUEST_PATH, RESULTS_PATH, isRequestPath, parseRequest, isStaleRequest }
