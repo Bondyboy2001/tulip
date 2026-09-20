@@ -76,6 +76,11 @@ Use inlined text first; otherwise read the supplied vault paths. Store note asse
 - For ranked vault search across notes and PDFs, write `{"query":"…","turnId":"…","at":…}` to `.tulip-copilot-search.json`; read `.tulip-copilot-search-results.json`. Supports `tag:`, `path:`, `file:`, `prop:` and `"quoted phrases"`. Retry once if results are missing; verify the query and turn id before using them.
 - These request files are consumed by Tulip. Use only the documented request files; do not create other `.tulip-copilot-*.json` files or reuse another turn's results.
 <!-- write-rules:end -->
+<!-- propose-rules:start -->
+- Direct editing is off in this mode: the only file your write tools can create is `.tulip-copilot-write.json`, and no shell is available. To propose changes, put them there as `{"writes":[ … ],"turnId":"…","at":…}` — each entry is either `{"path":"notes/x.md","content":"full new file text"}` for a new or wholly rewritten file, or `{"path":"notes/x.md","edits":[{"find":"exact existing text","replace":"replacement"}]}` for changes inside an existing file, where every `find` must match the current file exactly once. Use the current turn id when known and a current millisecond timestamp.
+- Tulip holds the proposal for the reader to apply or discard — nothing in the vault changes unless they apply it. In your reply, say what you proposed and why.
+- These request files are consumed by Tulip. Use only the documented request file; do not create other `.tulip-copilot-*.json` files.
+<!-- propose-rules:end -->
 <!-- read-rules:start -->
 - Writing is off in this mode. Use tulip_search; fall back to grep and glob. Describe proposed edits.
 <!-- read-rules:end -->

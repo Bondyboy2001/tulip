@@ -11,7 +11,7 @@
  * it, a citation that eats a link.
  *
  * All of it is pure, which is the whole reason this file can exist. The inputs
- * below are copied from real output — `opencode models --verbose` — rather
+ * below are copied from real output — `opencode models` — rather
  * than invented, because a parser tested against a guess about its input is a
  * parser tested against nothing.
  *
@@ -21,6 +21,7 @@ import MarkdownIt from 'markdown-it'
 import { readFileSync } from 'node:fs'
 
 import ai from '../electron/ai.js'
+import copilotWrite from '../electron/copilot-write.js'
 import prompt from '../electron/prompt.js'
 import VAULT_CONTRACT from '../electron/vault-contract.json'
 import { citePlugin } from '../src/cite.js'
@@ -32,6 +33,7 @@ import {
 
 const {
   detailOf, tokensIn, tokensOf, usageOf, readLines, parseOpencode,
+  parseApiModels, parseApiProviders, keptModels, catalogueUsable, opencodeArgs,
   policyEnv, commandCandidates, escapeForCmd, invocation, lostThread
 } = ai.parsers
 const { systemPrompt, turnRules, turnRulesFor, RULES_REMINDER_TURNS, promptFor, nothingSent } = prompt
@@ -611,58 +613,135 @@ same('a runaway line is dropped rather than held',
 
 /* ------------------------------------------------------------- catalogues */
 
-/* Shaped as `opencode models --verbose` answers: an id line, then that model's
-   JSON pretty-printed one token per line. Copied from the real output — the
-   brace-depth scan that finds the block depends on exactly that shape. */
+/* Shaped as `opencode models` answers: one `provider/model` id per line,
+   copied from the real output — gateways nest further (`zenmux/anthropic/…`,
+   `openrouter/~anthropic/…`), so the split the pane groups by is on the first
+   slash only. */
 const opencodeCatalogue = `opencode/big-pickle
-{
-  "id": "big-pickle",
-  "name": "Big Pickle",
-  "limit": {
-    "context": 200000,
-    "output": 32000
-  },
-  "variants": {}
-}
-anthropic/claude-opus-5
-{
-  "id": "claude-opus-5",
-  "name": "Claude Opus 5",
-  "limit": {
-    "context": 1000000
-  },
-  "variants": {
-    "high": {
-      "reasoningEffort": "high"
-    },
-    "max": {
-      "reasoningEffort": "max"
-    }
-  }
-}
+opencode-go/glm-5.2
+zenmux/anthropic/claude-sonnet-5
+openrouter/~anthropic/claude-sonnet-latest
+openrouter/nvidia/nemotron-3.5-lightning:free
+Models:
 `
 
 const opencodeModels = parseOpencode(opencodeCatalogue)
 same('every id line is a model',
-     opencodeModels.map((m) => m.id), ['opencode/big-pickle', 'anthropic/claude-opus-5'])
+     opencodeModels.map((m) => m.id), ['opencode/big-pickle', 'opencode-go/glm-5.2', 'zenmux/anthropic/claude-sonnet-5', 'openrouter/~anthropic/claude-sonnet-latest', 'openrouter/nvidia/nemotron-3.5-lightning:free'])
 /* The provider is half the name — `glm-5.2` alone says nothing about whose
    subscription is paying for it — so the line is the id and the halves are
    what the settings pane groups and labels by. */
-same('the label is the part after the slash and the group the part before',
-     [opencodeModels[1].label, opencodeModels[1].group], ['claude-opus-5', 'anthropic'])
-same('variants become the levels the effort slider offers',
-     opencodeModels[1].efforts, ['high', 'max'])
-check('and `high` is preferred as the default', opencodeModels[1].effort === 'high')
-check('a model with an empty variants block has no levels',
-      opencodeModels[0].efforts.length === 0)
-check('the context limit is carried', opencodeModels[1].context === 1000000)
-
-// The same parser reads the plain output: the id lines are identical in both,
-// and nothing inside the JSON can pass for one.
-same('the non-verbose form is read by the same parser',
-     parseOpencode('opencode/big-pickle\nanthropic/claude-opus-5\n').map((m) => m.id),
-     ['opencode/big-pickle', 'anthropic/claude-opus-5'])
+same('the label is the part after the first slash and the group the part before',
+     [opencodeModels[2].label, opencodeModels[2].group], ['anthropic/claude-sonnet-5', 'zenmux'])
+same('a nested gateway id keeps its whole tail as the label',
+     [opencodeModels[3].label, opencodeModels[3].group], ['~anthropic/claude-sonnet-latest', 'openrouter'])
+/* The plain `models` list is the fallback read — ids and nothing more, so
+   everything arrives with no levels and no size, and price is only what the
+   id itself says. */
+check('plain models carry no levels',
+      opencodeModels.every((m) => m.efforts.length === 0 && m.effort === '' && m.context === 0))
+check('an id ending `:free` reads as free',
+      opencodeModels[4].free === true && opencodeModels[3].free === false)
 same('a line that is not an id is not a model', parseOpencode('Models:\n\n'), [])
+
+/* The full read: `opencode api GET /api/model` answers one JSON document —
+   copied from the real response — carrying the variants and context limits
+   the line format dropped, and `name` rather than the id tail for a label.
+   The id is rebuilt `provider/model`, matching both `models` output and what
+   `run --model` takes. */
+const apiCatalogue = JSON.stringify({ data: [
+  {
+    id: 'muse-spark-1.3-contributor-free', providerID: 'opencode',
+    name: 'Muse Spark 1.3 Free',
+    variants: [{ id: 'minimal' }, { id: 'low' }, { id: 'high' }, { id: 'xhigh' }],
+    status: 'active', enabled: true, limit: { context: 1048576, output: 131072 },
+    cost: [{ input: 0, output: 0, cache: { read: 0, write: 0 } }]
+  },
+  {
+    id: '~anthropic/claude-sonnet-latest', providerID: 'openrouter',
+    name: 'Claude Sonnet Latest',
+    variants: [{ id: 'none' }, { id: 'low' }, { id: 'high' }, { id: 'max' }],
+    status: 'active', enabled: true, limit: { context: 1000000, output: 64000 },
+    cost: [{ input: 3, output: 15, cache: { read: 0.3, write: 3.75 } }]
+  },
+  {
+    id: 'glm-5.2:free', providerID: 'openrouter',
+    name: 'GLM 5.2 (free)',
+    variants: [{ id: 'none' }, { id: 'high' }, { id: 'xhigh' }],
+    status: 'active', enabled: true, limit: { context: 32768, output: 8192 },
+    cost: [{ input: 0, output: 0 }]
+  },
+  { id: 'no-meta', providerID: 'zenmux', status: 'active', enabled: true },
+  { id: '', providerID: 'openrouter', name: 'missing id' },
+  { providerID: 'openrouter', name: 'no id field' }
+] })
+const apiModels = parseApiModels(apiCatalogue)
+same('the api list rebuilds provider/model ids',
+     apiModels.map((m) => m.id),
+     ['opencode/muse-spark-1.3-contributor-free', 'openrouter/~anthropic/claude-sonnet-latest', 'openrouter/glm-5.2:free', 'zenmux/no-meta'])
+same('variants become the levels the effort control offers',
+     apiModels[0].efforts, ['minimal', 'low', 'high', 'xhigh'])
+check('and `high` is preferred as the default', apiModels[0].effort === 'high')
+check('a model with no variants has no levels', apiModels[3].efforts.length === 0)
+check('the context limit is carried', apiModels[1].context === 1000000)
+check('the name labels the model', apiModels[1].label === 'Claude Sonnet Latest')
+check('a missing name falls back to the id', apiModels[3].label === 'no-meta')
+check('entries without provider or id are skipped', apiModels.length === 4)
+/* `cost` is the free signal the `freeOnly` sources filter by: zero in and out
+   on every tier is free, anything else — or nothing said — is not. */
+same('cost decides which models are free',
+     apiModels.map((m) => m.free), [true, false, true, false])
+same('an api answer that is not JSON is no catalogue', parseApiModels('<html>'), [])
+same('an api answer without data is no catalogue', parseApiModels('{"data":null}'), [])
+
+/* The sources the pane offers are a shortlist of what the account can reach:
+   `sources` in ai-models.json names them — opencode (Zen) and openrouter —
+   and a `freeOnly` source keeps only the models that cost nothing. The filter
+   runs on fresh reads and on the saved catalogue alike. */
+const kept = keptModels('opencode', [
+  ...opencodeModels, ...apiModels,
+  { id: 'openrouter/openrouter/auto', free: false },
+  { id: 'anthropic/claude-sonnet-5', free: true },
+  { id: 'google/gemini-4-pro', free: true }
+])
+same('only the sources the catalogue names are offered',
+     [...new Set(kept.map((m) => m.id.split('/')[0]))].sort(),
+     ['opencode', 'openrouter'])
+check('a source the catalogue does not name is dropped, free or not',
+      !kept.some((m) => /^(opencode-go|zenmux|anthropic|google)\//.test(m.id)))
+same('a freeOnly source drops the models that charge',
+     kept.filter((m) => m.id.startsWith('openrouter/')).map((m) => m.id),
+     ['openrouter/nvidia/nemotron-3.5-lightning:free', 'openrouter/glm-5.2:free', 'openrouter/openrouter/auto'])
+check('a seed id stays free without a flag — the seeds are the known free ones',
+      kept.some((m) => m.id === 'opencode/big-pickle' || m.id === 'openrouter/openrouter/auto'))
+same('a provider with no sources keeps everything it is asked about',
+     keptModels('other-cli', [{ id: 'x/y' }]), [{ id: 'x/y' }])
+
+/* `/api/provider` names the shelf each model sits on — `opencode` is
+   "OpenCode Zen" — which is what the settings groups show. */
+const providerNames = parseApiProviders(JSON.stringify({ data: [
+  { id: 'opencode', name: 'OpenCode Zen' },
+  { id: 'opencode-go', name: 'OpenCode Go' },
+  { id: 'openrouter', name: 'OpenRouter' },
+  { name: 'no id' }
+] }))
+same('provider ids map to display names',
+     providerNames, { opencode: 'OpenCode Zen', 'opencode-go': 'OpenCode Go', openrouter: 'OpenRouter' })
+same('a provider answer that is not JSON is an empty map', parseApiProviders('x'), {})
+
+/* A save from a query the service API did not answer must never be served:
+   the plain list carries no thinking levels and no context sizes, and serving
+   it for a day is a day with no levels to switch to, no context ring and
+   raw-id model names. */
+check('a catalogue with levels and sizes is worth serving',
+      catalogueUsable({ opencode: apiModels }))
+check('a plain fallback list is not', !catalogueUsable({ opencode: opencodeModels }))
+check('an empty answer is not', !catalogueUsable({ opencode: [] }))
+check('a missing provider is not', !catalogueUsable({}))
+check('a catalogue that is not an object is not',
+      !catalogueUsable(null) && !catalogueUsable([]))
+check('one model with a size carries the list',
+      catalogueUsable({ opencode: [...opencodeModels, apiModels[1]] }))
 
 /* ------------------------------------------------------------- citations */
 
@@ -755,13 +834,72 @@ check('auto mode allows the notes',
 check('auto mode allows a command that leaves the vault',
       policy('auto').external_directory === 'allow')
 
+/* Propose is fenced tighter than read: no shell at all — `sed -i` is a write
+   the fence cannot see — and `edit`/`write` are denied for every path but the
+   one request file its staged changes ride. */
+check('propose mode denies the shell', policy('propose').bash === 'deny')
+check('propose mode fetches the web', policy('propose').webfetch === 'allow')
+check('propose mode keeps out of other directories',
+      policy('propose').external_directory === 'deny')
+check('propose mode denies writes generally',
+      policy('propose').edit['*'] === 'deny' && policy('propose').write['*'] === 'deny')
+check('propose mode can still write its request file',
+      policy('propose').edit['.tulip-copilot-write.json'] === 'allow' &&
+      policy('propose').write['.tulip-copilot-write.json'] === 'allow')
+
 /* The general form of that bug. A headless `run` has nowhere to put a question,
    so anything left to be asked about is refused — see the note on TOOL_POLICY. */
-for (const mode of ['read', 'ask', 'auto']) {
+for (const mode of ['read', 'ask', 'auto', 'propose']) {
   check(`${mode} mode asks nothing it cannot be answered on`,
-        Object.values(policy(mode)).every((e) => e === 'allow' || e === 'deny'))
+        Object.values(policy(mode))
+          .flatMap((e) => e && typeof e === 'object' ? Object.values(e) : [e])
+          .every((e) => e === 'allow' || e === 'deny'))
 }
 check('an unknown mode is left alone', policy(undefined) === null)
+
+/* The propose-mode request file — the same request-file discipline as the
+   rename's: a malformed or over-reaching one is refused whole, a stale one is
+   dropped, and a `find` that does not pin down one place is a conflict rather
+   than a guess. */
+const writeReq = copilotWrite.parseRequest(JSON.stringify({
+  turnId: 't-1', at: Date.now(),
+  writes: [
+    { path: 'notes/a.md', content: 'whole new text' },
+    { path: 'notes/b.md', edits: [{ find: 'old', replace: 'new' }] }
+  ]
+}))
+same('a write request parses both shapes',
+     writeReq.writes.map((w) => w.path), ['notes/a.md', 'notes/b.md'])
+check('a write request without writes is refused',
+      (() => { try { copilotWrite.parseRequest('{"writes":[]}'); return false } catch { return true } })())
+check('a write request that is not JSON is refused',
+      (() => { try { copilotWrite.parseRequest('not json'); return false } catch { return true } })())
+check('a write with neither content nor edits is refused',
+      (() => {
+        try { copilotWrite.parseRequest('{"writes":[{"path":"a.md"}]}'); return false } catch { return true } })())
+check('an edit with an empty find is refused',
+      (() => {
+        try { copilotWrite.parseRequest('{"writes":[{"path":"a.md","edits":[{"find":"","replace":"x"}]}]}'); return false } catch { return true } })())
+check('a stale write request is expired',
+      copilotWrite.isStaleRequest({ at: Date.now() - 11 * 60 * 1000 }) === true &&
+      copilotWrite.isStaleRequest({ at: Date.now() }) === false)
+check('only the request path is a write request',
+      copilotWrite.isRequestPath('.tulip-copilot-write.json') &&
+      copilotWrite.isRequestPath('./.tulip-copilot-write.json') &&
+      !copilotWrite.isRequestPath('notes/.tulip-copilot-write.json'))
+same('edits apply against the current text',
+     copilotWrite.applyEdits('before old after', [{ find: 'old', replace: 'new' }]),
+     'before new after')
+check('an edit whose find is missing is a conflict, not a guess',
+      (() => {
+        try { copilotWrite.applyEdits('current text', [{ find: 'gone', replace: 'x' }]); return false } catch { return true } })())
+check('an edit whose find matches twice is refused',
+      (() => {
+        try { copilotWrite.applyEdits('same same', [{ find: 'same', replace: 'x' }]); return false } catch { return true } })())
+check('the propose rules tell the agent where its changes go',
+      turnRulesFor('propose').includes('.tulip-copilot-write.json') &&
+      turnRulesFor('propose').includes('apply or discard') &&
+      !turnRulesFor('read').includes('.tulip-copilot-write.json'))
 
 /* A user's own inline config is extended, not replaced: only the keys the fence
    is about are stated on top of it. */
@@ -800,7 +938,7 @@ same('unix names are only ever themselves',
      commandCandidates('opencode', false, ['.EXE']), ['opencode'])
 
 /* The cmd.exe escaping, pinned. A `.cmd` shim is run through cmd.exe, and the
-   vault path rides `--dir` down that line — a space or a quote mishandled is
+   vault path rides the spawn down that line — a space or a quote mishandled is
    a turn run against the wrong directory. The rules are msvcrt's quote dance
    plus cmd's caret pass, doubled for arguments because the shim re-expands
    its `%*` through cmd a second time. */
@@ -820,6 +958,42 @@ const plain = invocation('opencode', ['run', '--format', 'json'])
 check('unix spawns the name as given',
       plain.file === 'opencode' && plain.args.length === 3 &&
       Object.keys(plain.options).length === 0)
+
+/* The flags a turn spawns with, pinned: v2 removed `--dir` and `--variant`,
+   and a plain `run` delegates to a background service that never sees this
+   process's environment — so the tool fence rides `--standalone`, and the
+   thinking level rides `--model` as `#variant`. */
+const turnArgs = (over = {}) => opencodeArgs({
+  model: 'opencode-go/glm-5.2', effort: 'high', write: true, mode: 'auto', thread: '', ...over
+})
+same('a turn runs a private server in json mode',
+     turnArgs().slice(0, 4), ['run', '--standalone', '--format', 'json'])
+check('the level is a variant suffix on the model',
+      turnArgs().includes('--model') &&
+      turnArgs()[turnArgs().indexOf('--model') + 1] === 'opencode-go/glm-5.2#high')
+check('a model without levels asks for none',
+      turnArgs({ effort: '' })[turnArgs({ effort: '' }).indexOf('--model') + 1] === 'opencode-go/glm-5.2')
+check('an effort of none is still a variant the model offered',
+      turnArgs({ effort: 'none' })[turnArgs({ effort: 'none' }).indexOf('--model') + 1] === 'opencode-go/glm-5.2#none')
+check('a model carrying its own variant is not suffixed twice',
+      turnArgs({ model: 'opencode-go/glm-5.2#max' })[turnArgs({ model: 'opencode-go/glm-5.2#max' }).indexOf('--model') + 1] === 'opencode-go/glm-5.2#max')
+check('no flag v2 removed is sent',
+      !turnArgs().includes('--dir') && !turnArgs().includes('--variant'))
+check('a read-only turn runs the plan agent',
+      turnArgs({ mode: 'read', write: false }).includes('--agent') &&
+      turnArgs({ mode: 'read', write: false })[turnArgs({ mode: 'read', write: false }).indexOf('--agent') + 1] === 'plan')
+check('a writing turn asks for no agent',
+      !turnArgs().includes('--agent'))
+/* Propose cannot write either, but the plan agent would refuse its one write
+   surface — the request file — so the agent flag is the mode's, not the
+   write flag's. */
+check('a propose turn keeps the ordinary agent',
+      !turnArgs({ mode: 'propose', write: false }).includes('--agent'))
+check('a thread to resume rides --session',
+      turnArgs({ thread: 'ses_1' }).includes('--session') &&
+      turnArgs({ thread: 'ses_1' })[turnArgs({ thread: 'ses_1' }).indexOf('--session') + 1] === 'ses_1')
+check('thinking is shown for every level but none',
+      turnArgs().includes('--thinking') && !turnArgs({ effort: 'none' }).includes('--thinking'))
 
 /* ------------------------------------------------- a copilot per chat */
 
@@ -906,7 +1080,7 @@ check('key material is caught by suffix', isSecretPath('notes/deploy.key') && is
 check('ordinary notes pass', !isSecretPath('notes/tulip.md') && !isSecretPath('.attachments/photo.png'))
 check('private key content is caught', hasSecretContent('-----BEGIN PRIVATE KEY-----\nabc'))
 check('ordinary prose passes content', !hasSecretContent('hello, how are you?'))
-check('old CLIs are flagged', versionTooOld('opencode 1.2.3 (abc)') && !versionTooOld('opencode 1.18.26'))
+check('old CLIs are flagged', versionTooOld('opencode 1.18.26 (abc)') && !versionTooOld('opencode 2.0.3'))
 ai.stopAll()
 
 /* ----------------------------------------------------------------- report */

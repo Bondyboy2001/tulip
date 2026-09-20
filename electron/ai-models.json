@@ -1,26 +1,33 @@
 {
-  "comment": "The CLI the copilot is, and what it offers before it is asked. Shared because both processes need it: electron/ai.js decides what it will spawn, src/models.js decides what the dropdown shows, and two copies of that is how the two disagree. Same arrangement as vault-contract.json and zoom-steps.json. `command` is the binary spawned — one process per turn, with the vault as its working directory. There is no HTTP client here and no key of ours to keep: every model, and every gateway (OpenRouter, z.ai), is reached by configuring it inside opencode, where its key already lives. `fallbacks` is what the dropdown shows before the CLI has been asked — a seed, not a limit, because the catalogue is an account property this file cannot check a name against, so what the panel offers is what gets spawned. `offerByDefault` is false because opencode's four hundred-odd entries are what the Models-offered setting exists to keep out of the dropdown. `auth` is the argument list that answers whether the CLI is signed in. `grants` is what it can actually do in the read-only or write-capable provider mode, in the user's words: it takes no per-tool allowlist, so it is fenced only by that mode — the UI's Ask and Auto choices decide whether write access is confirmed first.",
+  "comment": "The CLI the copilot is, and what it offers before it is asked. Shared because both processes need it: electron/ai.js decides what it will spawn, src/models.js decides what the dropdown shows, and two copies of that is how the two disagree. Same arrangement as vault-contract.json and zoom-steps.json. `command` is the binary spawned — one process per turn, with the vault as its working directory (cwd plus $PWD, since opencode v2 resolves its project from $PWD). There is no HTTP client here and no key of ours to keep: every model, and every gateway (OpenRouter, ZenMux, z.ai), is reached by configuring it inside opencode, where its key already lives. `fallbacks` is what the dropdown shows before the CLI has been asked — a seed, not a limit, because the catalogue is an account property this file cannot check a name against, so what the panel offers is what gets spawned. `offerByDefault` is true so a fresh install has something to answer with: with a single provider an empty default list left the model dropdown with nothing in it at all. `sources` names which upstream providers the catalogue keeps — the CLI reaches a dozen of them, the pane offers two — and a `freeOnly` source is trimmed to the models that cost nothing. `auth` is the argument list that answers whether the CLI is signed in. `grants` is what it can actually do in the read-only or write-capable provider mode, in the user's words: it takes no per-tool allowlist, so it is fenced only by that mode — the UI's Ask and Auto choices decide whether write access is confirmed first.",
   "providers": [
     {
       "id": "opencode",
       "label": "opencode",
       "command": "opencode",
-      "offerByDefault": false,
+      "offerByDefault": true,
       "auth": [
         "auth",
         "list"
       ],
       "grants": {
         "read": "read and search your notes, and fetch web pages",
+        "propose": "read and search your notes, propose edits for your review, and fetch web pages",
         "ask": "read, edit and create notes, run shell commands inside the vault, and fetch web pages",
         "auto": "read, edit and create notes, run shell commands anywhere on this Mac, and fetch web pages"
+      },
+      "sources": {
+        "opencode": { "freeOnly": true },
+        "openrouter": { "freeOnly": true }
       }
     }
   ],
   "fallbacks": {
     "opencode": [
-      { "id": "opencode/claude-opus-4-6", "label": "claude-opus-4-6", "group": "opencode", "efforts": ["low", "medium", "high"], "effort": "high", "context": 200000 },
-      { "id": "opencode/gpt-5.4", "label": "gpt-5.4", "group": "opencode", "efforts": ["minimal", "low", "medium", "high", "max"], "effort": "high", "context": 400000 }
+      { "id": "opencode/big-pickle", "label": "Big Pickle", "group": "OpenCode Zen", "free": true, "efforts": [], "effort": "", "context": 200000 },
+      { "id": "openrouter/openrouter/auto", "label": "Auto Router", "group": "OpenRouter", "free": true, "efforts": [], "effort": "", "context": 2000000 },
+      { "id": "openrouter/nvidia/nemotron-3.5-lightning:free", "label": "Nemotron 3.5 Lightning (free)", "group": "OpenRouter", "free": true, "efforts": ["none", "thinking"], "effort": "thinking", "context": 1000000 },
+      { "id": "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free", "label": "Nemotron 3 Ultra (free)", "group": "OpenRouter", "free": true, "efforts": ["none", "medium", "high"], "effort": "high", "context": 1000000 }
     ]
   },
   "efforts": [

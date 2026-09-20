@@ -32,7 +32,7 @@ const replace = (source, values) => source.replace(/{{([a-zA-Z]+)}}/g, (_match, 
    for a file only the first Copilot turn needs. The cost of laziness is that
    a missing or mangled prompt.md now surfaces at that first turn instead of
    at boot, with the same message. */
-/** @type {{ turnRules: string, readTurnRules: string, systemTemplate: string } | null} */
+/** @type {{ turnRules: string, proposeTurnRules: string, readTurnRules: string, systemTemplate: string } | null} */
 let loaded = null
 const template = () => {
   if (loaded) return loaded
@@ -51,25 +51,29 @@ const template = () => {
   const TURN_RULES_MATCH = /<!-- turn-rules:start -->([\s\S]*?)<!-- turn-rules:end -->/.exec(PROMPT_TEMPLATE)
   if (!TURN_RULES_MATCH) throw new Error('Tulip Copilot prompt.md has no turn-rules block.')
 
-  /* The rules come in three parts: the ones every mode gets, the ones that
-     only make sense when the agent may write (the rename and search requests
-     are *files it writes*, and a read-only agent that is told to write them
-     fails the attempt and falls back to grep every turn), and the line that
-     stands in for those when it may not. */
+  /* The rules come in sections: the ones every mode gets, then one set per
+     relationship to writing — the full protocol when the agent may write
+     (the rename and search requests are *files it writes*, and a read-only
+     agent that is told to write them fails the attempt and falls back to
+     grep every turn), the request-file-only set for propose, and the line
+     that stands in for those when it may not write at all. */
   const rules = TURN_RULES_MATCH[1]
   const section = (name) => {
     const found = new RegExp(`<!-- ${name}:start -->([\\s\\S]*?)<!-- ${name}:end -->`).exec(rules)
     return found ? found[1].trim() : ''
   }
   const writeRules = section('write-rules')
+  const proposeRules = section('propose-rules')
   const readRules = section('read-rules')
   const shared = rules
     .replace(/<!-- write-rules:start -->[\s\S]*?<!-- write-rules:end -->\n?/, '')
+    .replace(/<!-- propose-rules:start -->[\s\S]*?<!-- propose-rules:end -->\n?/, '')
     .replace(/<!-- read-rules:start -->[\s\S]*?<!-- read-rules:end -->\n?/, '')
     .trim()
 
   loaded = {
     turnRules: [shared, writeRules].filter(Boolean).join('\n'),
+    proposeTurnRules: [shared, proposeRules].filter(Boolean).join('\n'),
     readTurnRules: [shared, readRules].filter(Boolean).join('\n'),
     /* The briefing alone. The turn rules ride each turn via `promptFor` —
        leaving them here as well told every new thread, in its most
@@ -82,9 +86,12 @@ const template = () => {
   return loaded
 }
 
-/** The standing rules for a mode: `read` gets the read-only set, everything
- *  else — `ask`, `auto`, or a caller that does not say — the full one. */
-const turnRulesFor = (mode) => mode === 'read' ? template().readTurnRules : template().turnRules
+/** The standing rules for a mode: `read` gets the read-only set, `propose` the
+ *  request-file-only one, and everything else — `ask`, `auto`, or a caller
+ *  that does not say — the full one. */
+const turnRulesFor = (mode) => mode === 'read' ? template().readTurnRules
+  : mode === 'propose' ? template().proposeTurnRules
+  : template().turnRules
 
 const fillContract = (source) => replace(
   source,

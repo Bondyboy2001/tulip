@@ -154,10 +154,19 @@ ok('a review of several files can reject one of them', () => {
   assert.equal(r.singleFileRejects, 0)
 })
 
-ok('/stop stops the running turn', () => {
+ok('the send button stops the running turn', () => {
   assert.equal(r.stoppedByCommand, 1)
   assert.equal(r.idleAfterStop, true)
   assert.equal(r.stoppedRow, true)
+})
+
+ok('⌘T reaches the thinking ladder (and says when the model has no levels)', () => {
+  assert.equal(r.cmdTReachesThinking, true)
+})
+
+ok('a catalogue that heals on reopen brings the thinking ladder back', () => {
+  assert.equal(r.healedOnReopen, true)
+  assert.equal(r.healedStep, true)
 })
 
 ok('Ask mode asks once per chat, and again for a new chat or after leaving Ask', () => {

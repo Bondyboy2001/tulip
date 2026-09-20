@@ -9,8 +9,8 @@
  * client holding a key. That decision buys the file access for nothing: the
  * agent reads and writes notes through its own tools, Tulip's job is narrowed
  * to relaying what it says and noticing what it touched, and there is no key of
- * ours anywhere in it. Every model, and every gateway — OpenRouter, z.ai — is
- * configured inside that CLI, which is where its key already lives.
+ * ours anywhere in it. Every model, and every gateway — OpenRouter, ZenMux,
+ * z.ai — is configured inside that CLI, which is where its key already lives.
  *
  * Its event stream is translated into one vocabulary of Tulip's own — see
  * `publish` calls for the whole of it — so the renderer never learns whose
@@ -19,6 +19,7 @@
  */
 
 const path = require('node:path')
+const os = require('node:os')
 const fs = require('node:fs/promises')
 /* `accessSync` and the constants below stay synchronous deliberately: resolving
    a command is a couple of existence probes on the spawn path, and making it
@@ -41,15 +42,15 @@ const CATALOGUE = require('./ai-models.json')
    beside each `spawn`, so there is one answer to "what is opencode" and the
    settings pane reads the same one. */
 const PROVIDERS = Object.fromEntries(CATALOGUE.providers.map((p) => [p.id, p]))
-const PERMISSION_MODES = new Set(['read', 'ask', 'auto'])
+const PERMISSION_MODES = new Set(['read', 'ask', 'auto', 'propose'])
 
 /* opencode names its tools in lower case. Mapped here rather than in the
    renderer, so the panel goes on knowing one vocabulary. */
 const OPENCODE_TOOLS = {
-  read: 'Read', edit: 'Edit', write: 'Write', patch: 'Edit',
-  bash: 'Bash', grep: 'Grep', glob: 'Glob', list: 'Glob',
+  read: 'Read', edit: 'Edit', write: 'Write', patch: 'Edit', apply_patch: 'Edit',
+  bash: 'Bash', shell: 'Bash', grep: 'Grep', glob: 'Glob', list: 'Glob',
   todowrite: 'TodoWrite', todoread: 'TodoWrite',
-  webfetch: 'Fetch', task: 'Task'
+  webfetch: 'Fetch', task: 'Task', execute: 'Execute', question: 'Question'
 }
 
 /** Which of the shared tool names mean the file on disk has changed. */
@@ -77,7 +78,7 @@ const lostThread = (self, message) => !!self?.thread && LOST_THREAD.test(String(
  * of the environment, so the policy is spelled there and travels with the
  * spawn rather than being a file written into somebody's vault.
  *
- * What the three modes are actually about is the vault: whether notes change,
+ * What the modes are actually about is the vault: whether notes change,
  * and how far a command may reach. Reading the web is not one of the questions
  * — every mode fetches — and the shell is drawn between looking and doing,
  * not between doing and doing it anywhere.
@@ -107,6 +108,20 @@ const TOOL_POLICY = {
   auto: {
     bash: 'allow', webfetch: 'allow', edit: 'allow', write: 'allow',
     external_directory: 'allow'
+  },
+  /* Propose has no write tools at all: `edit` — which opencode applies to
+     write and patch as well — is denied for every path but the one request
+     file, so a change can be described without a single byte being able to
+     land. No shell either, because `sed -i` is a write this fence cannot see,
+     and a mode whose promise is "nothing changes until you say so" cannot
+     hand out a way around itself. What it keeps is reading: the vault, and
+     the web. The writes it asks for are applied by Tulip, not by the agent —
+     see electron/copilot-write.js. */
+  propose: {
+    bash: 'deny', webfetch: 'allow',
+    edit: { '*': 'deny', '.tulip-copilot-write.json': 'allow', '*.tulip-copilot-write.json': 'allow' },
+    write: { '*': 'deny', '.tulip-copilot-write.json': 'allow', '*.tulip-copilot-write.json': 'allow' },
+    external_directory: 'deny'
   }
 }
 
@@ -611,7 +626,10 @@ function launch (provider, args, onMessage, { self, prompt = null, isRetry = fal
     // The tool fence rides the environment — see `policyEnv`. Taken from the
     // session rather than from an argument, so every turn a session spawns is
     // fenced the same way the mode it was started in says it should be.
-    env: { ...process.env, PATH: resolvePath(), ...policyEnv(self?.mode) },
+    // PWD is set alongside cwd: opencode v2 resolves its working directory
+    // from $PWD rather than the process cwd, so a spawn cwd alone leaves the
+    // turn running in the app's own directory instead of the vault.
+    env: { ...process.env, PWD: vault || undefined, PATH: resolvePath(), ...policyEnv(self?.mode) },
     ...run.options
   }))
 
@@ -700,9 +718,24 @@ function launch (provider, args, onMessage, { self, prompt = null, isRetry = fal
     }
     if (quietFor < TURN_WATCHDOG_MS) return
     clearInterval(starved)
+    /* Closed the way any other turn is closed, and nothing filed about the
+       closing: the panel is told the turn is over — which is what settles the
+       strip, frees the composer and lets a queued question out — and the
+       transcript keeps the shape the turn left it in. A row here would be the
+       app narrating its own watch, and "went quiet for ten minutes" with an
+       Ask again beside it is a sentence about the app rather than about the
+       note. Published before the stop, because `stop` takes the session out of
+       the map and every event after that is gated on the session still being
+       its own. */
+    self.busy = false
     publish({
-      k: 'error',
-      message: `The copilot went quiet for ${Math.round(TURN_WATCHDOG_MS / 60000)} minutes and was stopped.`
+      k: 'turn-end',
+      used: self.used || estimated(self),
+      estimated: !self.used,
+      cost: self.cost || 0,
+      /* An ending rather than an answer: the panel settles it without
+         announcing a reply that never came. */
+      quiet: true
     }, self)
     stop(self.key)
   }, 15000)
@@ -760,25 +793,49 @@ function launch (provider, args, onMessage, { self, prompt = null, isRetry = fal
  * agent is read-only, which is how "don't touch my notes" is made a fact about
  * the process rather than a request the model could talk itself out of.
  */
-function startOpencodeTurn (text, self) {
-  const args = ['run', '--format', 'json', '--dir', vault,
-                '--model', self.model]
-  /* `--thinking` only *shows* the reasoning stream — the spend is `--variant`'s
-     to decide. Without it the reasoning arrives as nothing at all, and a model
-     that thinks for a minute looks hung; at `none` there is no reasoning to
-     show and the flag is noise on the command line. */
-  if (self.effort !== 'none') args.push('--thinking')
-  if (!self.write) args.push('--agent', 'plan')
-  // Spelled as a model variant here. The level came from this model's own
-  // `variants`, so it is a name opencode gave us rather than one we invented.
-  if (self.effort) args.push('--variant', self.effort)
-  if (self.thread) args.push('--session', self.thread)
+/* The arguments a turn spawns with, kept pure so the flag contract is
+   testable — a flag v2 removed fails the spawn with "Unrecognized flag",
+   which read as a copilot that never answers.
 
+   `--standalone` is the one that is not obvious: a plain `run` delegates the
+   turn to the account's background service, a process started long ago that
+   never sees this spawn's `OPENCODE_CONFIG_CONTENT` — so the tool policy and
+   the vault-search MCP would be dropped wholesale, and `plan` alone does not
+   keep the shell out of read mode. A private server inherits the
+   environment, which keeps the fence a fact about the process rather than a
+   request in the prompt. */
+function opencodeArgs (self) {
+  /* `--dir` and `--variant` are gone: the directory is the spawn's cwd + $PWD
+     (set in `launch`), and a level rides `--model` as `#variant`. The suffix
+     is only added when the panel names a level — a variant-less model settles
+     its effort to '' (see `settleEffort`) — and the level always comes from
+     the model's own ladder, `none` included, so it is a name opencode gave
+     us rather than one we invented. A stored model may already carry its own
+     `#variant`, which the suffix must not double. */
+  let model = String(self.model || '')
+  if (!model.includes('#') && self.effort) model += `#${self.effort}`
+  const args = ['run', '--standalone', '--format', 'json',
+                '--model', model]
+  /* `--thinking` only *shows* the reasoning stream. Without it the reasoning
+     arrives as nothing at all, and a model that thinks for a minute looks
+     hung; at `none` there is no reasoning to show and the flag is noise on
+     the command line. */
+  if (self.effort !== 'none') args.push('--thinking')
+  /* The plan agent is read mode's second fence: it is told the mode, not
+     derived from `write`, because propose also cannot write yet must keep an
+     ordinary agent — its one write surface is the request file, which a plan
+     agent would refuse to produce. */
+  if (self.mode === 'read') args.push('--agent', 'plan')
+  if (self.thread) args.push('--session', self.thread)
+  return args
+}
+
+function startOpencodeTurn (text, self) {
   // The prompt goes over stdin. As a positional argument it would ride the
   // command line, which a long question and a quoted selection can overrun.
   // opencode announces no end of turn either; the process ending is the end of
   // turn, which is what `launch` does with an exit anyway.
-  return launch('opencode', args, onOpencodeMessage, { self, prompt: text })
+  return launch('opencode', opencodeArgs(self), onOpencodeMessage, { self, prompt: text })
 }
 
 function onOpencodeMessage (msg, self) {
@@ -1021,61 +1078,154 @@ function ask (command, args, parse) {
   })
 }
 
+/* `opencode api` caps what it writes to a pipe at 256KiB, and the model list
+   is nearer twice that — so the answer cannot come back over a pipe at all.
+   Redirected to a file instead, which the cap does not apply to. The rest is
+   `ask` again: the same timeout, and the same empty answer on failure. */
+let askFileSeq = 0
+function askToFile (command, args, parse) {
+  const run = invocation(command, args)
+  return new Promise((resolve) => {
+    const tmp = path.join(os.tmpdir(), `tulip-ai-${process.pid}-${Date.now()}-${askFileSeq++}.json`)
+    let fd
+    try { fd = fsSync.openSync(tmp, 'w') } catch { resolve([]); return }
+    let settled = false
+    const timer = setTimeout(() => {
+      try { proc.kill('SIGKILL') } catch { /* already gone */ }
+    }, ASK_TIMEOUT_MS)
+    timer.unref?.()
+    const finish = () => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      try { fsSync.closeSync(fd) } catch { /* the write end is already shut */ }
+      fs.readFile(tmp, 'utf8')
+        .then((text) => { try { resolve(parse(text)) } catch { resolve([]) } })
+        .catch(() => resolve([]))
+        .finally(() => fs.unlink(tmp).catch(() => {}))
+    }
+    let proc
+    try {
+      proc = spawn(run.file, run.args, {
+        env: { ...process.env, PATH: resolvePath() },
+        stdio: ['ignore', fd, 'ignore'],
+        windowsHide: true,
+        ...run.options
+      })
+    } catch { finish(); return }
+    proc.on('error', finish)
+    proc.on('close', finish)
+  })
+}
+
 /**
  * opencode answers with one `provider/model` per line, and the provider is
  * half the name: `glm-5.2` alone says nothing about whether it is coming from
  * the user's opencode subscription or their own OpenRouter key. So the line is
  * the id, the part after the first slash is the label, and the part before it
  * groups the list — which is the only thing that makes a catalogue this size
- * navigable in the settings pane.
+ * navigable in the settings pane. Ids may hold further slashes
+ * (`zenmux/anthropic/claude-sonnet-5`); the split is on the first one only.
  *
- * `--verbose` follows each of those lines with the model's JSON, which is where
- * its variants live — the levels that model's `--variant` will take. Most have
- * none, and a model with none is one the effort control has nothing to say
- * about. The same parser reads the plain output too: the id lines are identical
- * in both, and nothing inside the JSON can pass for one.
+ * The fallback read: `models` lists the ids and nothing more. The metadata —
+ * variants, context limits — moved behind the service API in v2 along with
+ * the `--verbose` flag, and `parseApiModels` reads that instead.
  */
 function parseOpencode (stdout) {
-  const lines = stdout.split('\n')
   const models = []
-
-  for (let at = 0; at < lines.length; at++) {
-    const line = lines[at].trim()
+  for (const raw of stdout.split('\n')) {
+    const line = raw.trim()
     if (!/^[^\s/]+\/\S+$/.test(line)) continue
-
     const cut = line.indexOf('/')
-    const model = {
+    models.push({
       id: line,
       label: line.slice(cut + 1),
       group: line.slice(0, cut),
+      /* The one hint the plain list gives about price: free models name
+         themselves — `…:free` on OpenRouter, `…-free` on Zen. */
+      free: /(?::|-)free$/.test(line),
       efforts: /** @type {string[]} */ ([]),
       effort: '',
       context: 0
-    }
-    models.push(model)
-
-    // The block beneath it, if this is the verbose form. Brace depth rather
-    // than a parser: the object is pretty-printed, one token per line.
-    if (lines[at + 1]?.trim() !== '{') continue
-    let depth = 0
-    const block = []
-    while (++at < lines.length) {
-      block.push(lines[at])
-      depth += (lines[at].match(/{/g) || []).length - (lines[at].match(/}/g) || []).length
-      if (depth === 0) break
-    }
-    try {
-      const spec = JSON.parse(block.join('\n'))
-      // Variants arrive as an object in --verbose; tolerate an array or a
-      // single string from future CLI shapes rather than dropping the dial.
-      const raw = spec.variants ?? spec.efforts ?? spec.reasoningLevels
-      const efforts = Array.isArray(raw) ? raw.filter((v) => typeof v === 'string') : Object.keys(raw || {})
-      model.efforts = efforts
-      model.effort = efforts.includes('high') ? 'high' : (efforts[0] || '')
-      model.context = Number(spec.limit?.context ?? spec.context ?? spec.contextWindow ?? 0) || 0
-    } catch { /* a block we cannot read is a model without variants */ }
+    })
   }
   return models
+}
+
+/**
+ * The service's model list — `opencode api GET /api/model` — which is where
+ * the metadata lives now: `variants` is the effort ladder (`--variant`'s
+ * successor, the `#variant` suffix on `--model`), `limit.context` feeds the
+ * context ring, and `providerID` is the same grouping the line format gave
+ * (`opencode`, `opencode-go`, `openrouter`, …). The full id is rebuilt as
+ * `provider/model` so it matches what `run --model` takes and what plain
+ * `models` prints.
+ */
+function parseApiModels (stdout) {
+  let payload
+  try { payload = JSON.parse(stdout) } catch { return [] }
+  const list = Array.isArray(payload?.data) ? payload.data : []
+  const models = []
+  for (const entry of list) {
+    if (!entry?.providerID || !entry?.id) continue
+    /* Variants arrive as objects with an `id`; tolerate plain strings rather
+       than dropping the dial over a shape change. */
+    const efforts = (Array.isArray(entry.variants) ? entry.variants : [])
+      .map((variant) => (typeof variant === 'string' ? variant : variant?.id))
+      .filter((id) => typeof id === 'string' && id)
+    /* `cost` is one row per tier; free means every tier charges nothing for
+       tokens in or out. A model that does not say is not offered as free. */
+    const cost = Array.isArray(entry.cost) ? entry.cost : (entry.cost ? [entry.cost] : [])
+    models.push({
+      id: `${entry.providerID}/${entry.id}`,
+      label: entry.name || entry.id,
+      group: entry.providerID,
+      free: cost.length > 0 &&
+        cost.every((tier) => Number(tier?.input) === 0 && Number(tier?.output) === 0),
+      efforts,
+      effort: efforts.includes('high') ? 'high' : (efforts[0] || ''),
+      context: Number(entry.limit?.context) || 0
+    })
+  }
+  return models
+}
+
+/* Not everything the account can reach is offered: a provider's `sources` in
+   ai-models.json names which upstream providers are — the CLI is signed in to
+   a dozen, the pane shows three — and a `freeOnly` source keeps only the
+   models that cost nothing. `free` travels with each model so a saved
+   catalogue answers the same question on the way back in; where it is missing
+   (a save from before the flag, or a plain `models` read whose id carries no
+   `:free`) the seeds are the known free ones. */
+const FREE_SEEDS = Object.fromEntries(CATALOGUE.providers.map((provider) => [
+  provider.id,
+  new Set((CATALOGUE.fallbacks[provider.id] || [])
+    .filter((model) => model.free).map((model) => model.id))
+]))
+
+function keptModels (provider, list) {
+  const sources = PROVIDERS[provider]?.sources
+  if (!sources) return list
+  const freeSeeds = FREE_SEEDS[provider] || new Set()
+  return list.filter((model) => {
+    const rule = sources[String(model.id).split('/')[0]]
+    return !!rule && (!rule.freeOnly || model.free === true || freeSeeds.has(model.id))
+  })
+}
+
+/**
+ * The service's provider list — `opencode api GET /api/provider` — as a map
+ * from id to the name it is shown under: `opencode` is "OpenCode Zen",
+ * `opencode-go` is "OpenCode Go". The ids sort no better than they read, so
+ * the shelf a model sits on is named the way the CLI itself names it.
+ */
+function parseApiProviders (stdout) {
+  let payload
+  try { payload = JSON.parse(stdout) } catch { return {} }
+  const list = Array.isArray(payload?.data) ? payload.data : []
+  return Object.fromEntries(list
+    .filter((provider) => provider?.id && provider?.name)
+    .map((provider) => [provider.id, provider.name]))
 }
 
 /**
@@ -1119,13 +1269,36 @@ function readCatalogueFile () {
       const saved = JSON.parse(await fs.readFile(file, 'utf8'))
       if (!saved || typeof saved !== 'object') return null
       if (!(Date.now() - Number(saved.at) < CATALOGUE_DISK_TTL)) return null
-      // An empty answer is one the renderer already substitutes a built-in list
-      // for, and is not worth a launch's worth of trust.
-      return Array.isArray(saved.models?.opencode) && saved.models.opencode.length
-        ? saved.models
-        : null
+      /* A save predates the catalogue it describes — the source filter is
+         applied again rather than trusting the file, so a cache written
+         before the list narrowed cannot resurrect what was removed. */
+      const models = Object.fromEntries(Object.entries(saved.models)
+        .filter(([, list]) => Array.isArray(list))
+        .map(([provider, list]) => [provider, keptModels(provider, list)]))
+      // An empty or degraded answer is one the renderer already substitutes a
+      // built-in list for, and is not worth a launch's worth of trust — see
+      // `catalogueUsable`.
+      return catalogueUsable(models) ? models : null
     } catch { return null }
   })()
+}
+
+/**
+ * Whether a catalogue is worth serving from the disk cache.
+ *
+ * A query the service API did not answer falls back to the plain `models`
+ * list — the same ids with no thinking levels, no context limits and raw-id
+ * labels. Served for a day, that save is a day with no thinking levels to
+ * switch to, no context ring and no model names, long after the service is
+ * back: the panel reads the catalogue on opening and every level control
+ * reads the panel. So a save with no levels and no sizes anywhere in it is
+ * not served at all, and the launch queries the CLIs live instead.
+ */
+function catalogueUsable (models) {
+  const list = models?.opencode
+  if (!Array.isArray(list) || !list.length) return false
+  return list.some((model) =>
+    (Array.isArray(model?.efforts) && model.efforts.length > 0) || Number(model?.context) > 0)
 }
 
 function writeCatalogueFile (models) {
@@ -1140,20 +1313,36 @@ function writeCatalogueFile (models) {
     .catch(() => {})
 }
 
-/** Ask the CLI, and remember what it said. */
-function askCatalogue () {
-  return ask('opencode', ['models', '--verbose'], parseOpencode)
-    .then((opencode) => {
-      const models = { opencode }
-      writeCatalogueFile(models)
-      return models
-    })
-    .catch((error) => {
-      // A rejection must not be cached, or the app spends the rest of its life
-      // handing out the same failure.
-      held = null
-      throw error
-    })
+/** Ask the CLI, and remember what it said. The service API carries the whole
+ *  catalogue in one document — `api` brings the background service up if it
+ *  is not running — and the plain `models` list is the fallback when it
+ *  cannot answer: the same ids, without the metadata. */
+async function askCatalogue () {
+  const [names, listed] = await Promise.all([
+    ask('opencode', ['api', 'GET', '/api/provider'], parseApiProviders),
+    askToFile('opencode', ['api', 'GET', '/api/model'], parseApiModels)
+  ])
+  /* The shelf a model sits on is named the way the CLI names it — "OpenCode
+     Go" rather than `opencode-go` — when the provider list answered; the raw
+     id still groups correctly when it did not. */
+  let opencode = listed.map((model) =>
+    names[model.group] ? { ...model, group: names[model.group] } : model)
+  /* The service API is what carries the thinking levels and the context
+     limits. When it cannot answer, the plain `models` list keeps the panel
+     working — but it is served, never written down: caching it is how one
+     failed query becomes a day without thinking levels. See
+     `catalogueUsable`, which refuses to serve such a save. */
+  const apiAnswered = opencode.length > 0
+  if (!apiAnswered) opencode = await ask('opencode', ['models'], parseOpencode)
+  const models = { opencode: keptModels('opencode', opencode) }
+  if (apiAnswered) writeCatalogueFile(models)
+  return models
+}
+
+/* A rejection must not be cached, or the app spends the rest of its life
+   handing out the same failure. */
+function catalogue () {
+  return askCatalogue().catch((error) => { held = null; throw error })
 }
 
 function models ({ fresh = false } = {}) {
@@ -1172,13 +1361,13 @@ function models ({ fresh = false } = {}) {
          real one. Its failure is the saved list's to absorb. */
       const promise = Promise.resolve(cached)
       held = { at: Date.now(), promise }
-      askCatalogue().then((models) => {
+      catalogue().then((models) => {
         if (held?.promise === promise) held = { at: Date.now(), promise: Promise.resolve(models) }
       }).catch(() => {})
       return promise
     }
 
-    const promise = askCatalogue()
+    const promise = catalogue()
     held = { at: Date.now(), promise }
     return promise
   })
@@ -1216,7 +1405,7 @@ function onPath (command) {
 /** A redacted readiness check: only availability, version and whether the
  * provider reports credentials. Account names, tokens and command output never
  * cross IPC. */
-const MIN_OPENCODE_VERSION = [1, 10, 0]
+const MIN_OPENCODE_VERSION = [2, 0, 0]
 function versionTooOld (text) {
   const m = /(\d+)\.(\d+)\.(\d+)/.exec(String(text || ''))
   if (!m) return false
@@ -1277,12 +1466,18 @@ function start ({
   const selectedMode = PERMISSION_MODES.has(/** @type {any} */ (mode))
     ? mode
     : write === true ? 'ask' : 'read'
-  /* Ask/auto can execute and edit: same trust as run blocks. Read mode is
-     fenced to deny shell/edits so it stays usable untrusted. */
+  /* Ask/auto can execute and edit, and propose can have edits applied on its
+     behalf: same trust as run blocks. Read mode is fenced to deny shell/edits
+     so it stays usable untrusted. */
   if (selectedMode !== 'read' && !isTrusted()) {
     return { ok: false, error: 'Trust this vault before using a copilot mode that can run or edit.' }
   }
-  const canWrite = selectedMode !== 'read'
+  /* "Can write" means *the turn* writes: the before/after baseline a review
+     card is diffed against only exists when the agent can touch files itself.
+     A propose turn cannot — its staged changes carry their own before/after
+     and are written by Tulip on Apply, so a whole-vault snapshot pair would
+     buy an empty diff at the price of two walks. */
+  const canWrite = selectedMode === 'ask' || selectedMode === 'auto'
   const session = {
     key: id,
     provider, model: selectedModel, effort, mode: selectedMode, write: canWrite,
@@ -1462,6 +1657,7 @@ module.exports = { setSearchConnection,
   canWrite,
   parsers: {
     detailOf, tokensIn, tokensOf, usageOf, readLines, parseOpencode,
+    parseApiModels, parseApiProviders, keptModels, catalogueUsable, opencodeArgs,
     policyEnv, commandCandidates, escapeForCmd, invocation, lostThread,
     isSecretPath, hasSecretContent, versionTooOld
   }

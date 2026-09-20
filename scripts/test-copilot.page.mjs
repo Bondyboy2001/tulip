@@ -54,15 +54,21 @@ function buildPanel () {
 
 /** The bridge, as a recorder. `sendPlan` scripts what each `ai.send` answers. */
 function buildApi () {
-  const calls = { start: [], send: [], stop: [], saves: [] }
+  const calls = { start: [], send: [], stop: [], saves: [], models: [], config: [] }
   const handlers = new Map()
   const api = {
     calls,
+    /* The catalogue the service is answering with. Degraded at first — the
+       plain list with no levels, as served while the service API is down —
+       and upgraded mid-scenario, the way a later opening re-reads it. */
+    catalogue: {
+      opencode: [{ id: 'test/model', label: 'model', group: 'test', efforts: [], effort: '', context: 100000 }]
+    },
     sendPlan: [],
     on: (channel, fn) => { handlers.set(channel, fn) },
     emit: (channel, event) => handlers.get(channel)?.(event),
     openExternal: () => {},
-    config: { set: () => {} },
+    config: { set: (patch) => calls.config.push(patch) },
     trust: { operation: async () => null },
     ai: {
       start: async (opts) => { calls.start.push(opts); return { ok: true } },
@@ -71,9 +77,7 @@ function buildApi () {
         return api.sendPlan.length ? api.sendPlan.shift() : { ok: true }
       },
       stop: async (key, turnId) => { calls.stop.push({ key, turnId }); return true },
-      models: async () => ({
-        opencode: [{ id: 'test/model', label: 'model', group: 'test', efforts: [], effort: '', context: 100000 }]
-      }),
+      models: async (opts) => { calls.models.push(opts || null); return api.catalogue },
       /* The doctor, as main answers it: the CLI is fine, the credentials are not. */
       doctor: async () => [{ id: 'opencode', label: 'opencode', installed: true, version: '1.0', signedIn: false, status: 'Sign in required' }],
       announce: async () => ({ ok: false }),
@@ -237,15 +241,45 @@ export async function run () {
   await reply('Fixed one.')
   result.singleFileRejects = rows('.msg-review:last-of-type .ai-review-file-reject').length
 
-  /* ---------------------------------------------------------- /stop */
-  stage('/stop')
+  /* -------------------------------------------------- stop the running turn */
+  stage('stop button')
   await say('Take a long time')
   const stopsBefore = api.calls.stop.length
-  await say('/stop')
+  el.send.click()
   await wait(10)
   result.stoppedByCommand = api.calls.stop.length - stopsBefore
   result.idleAfterStop = !busy()
   result.stoppedRow = texts('.msg-note').some((text) => text.startsWith('Stopped'))
+
+  /* ------------------------------------------------- ⌘T steps the thinking */
+  stage('think chord')
+  const warnsBeforeThink = seen.warned.length
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 't', code: 'KeyT', metaKey: true, bubbles: true, cancelable: true }))
+  await wait(5)
+  result.cmdTReachesThinking = seen.warned.length > warnsBeforeThink &&
+    seen.warned[seen.warned.length - 1].includes('no thinking levels')
+
+  /* A catalogue served while the service API was down carries no levels, and
+     ⌘T says so. When the service answers on a later opening, the panel
+     re-reads instead of serving the degraded list for the rest of the window,
+     and the ladder is switchable again — stepped here, and persisted. */
+  stage('catalogue heals')
+  api.catalogue = {
+    opencode: [{ id: 'test/model', label: 'model', group: 'test', efforts: ['none', 'low', 'high'], effort: 'high', context: 100000 }]
+  }
+  const modelsBeforeHeal = api.calls.models.length
+  panel.close()
+  await wait(5)
+  panel.open()
+  await wait(10)
+  await settled()
+  result.healedOnReopen = api.calls.models.length > modelsBeforeHeal && !el.configEffort.hidden
+  const warnsBeforeHeal = seen.warned.length
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 't', code: 'KeyT', metaKey: true, bubbles: true, cancelable: true }))
+  await wait(5)
+  result.healedStep = el.configEffort.textContent === 'Low' &&
+    seen.warned.length === warnsBeforeHeal &&
+    api.calls.config.some((patch) => patch.aiEffort === 'low')
 
   /* ----------------------------------------------- ask mode, once a chat */
   stage('ask mode')
@@ -261,9 +295,13 @@ export async function run () {
   await say('Edit in a new chat')
   await reply('Edited afresh.')
   result.askedAgainForNewChat = seen.permissions
-  await say('/mode')   // ask -> auto
-  await say('/mode')   // auto -> read
-  await say('/mode')   // read -> ask
+  el.write.click()   // ask -> auto
+  await wait(5)
+  el.write.click()   // auto -> read
+  await wait(5)
+  el.write.click()   // read -> propose
+  await wait(5)
+  el.write.click()   // propose -> ask
   await wait(5)
   await say('And after leaving Ask?')
   await reply('Asked again.')
