@@ -195,10 +195,22 @@ async function runOnce (userData) {
         expression: `(() => {
           const nav = performance.getEntriesByType('navigation')[0]
           if (!nav || !nav.loadEventEnd) return null
+          /* Where the launch went, beyond the single DCL figure, all from the
+             same navigation entry: how long the window waited on the main
+             process (response), parsing (domParse), deferred script
+             evaluation (scriptEval — the bundle running, after parsing and
+             before DCL fires), and the DCL event itself (dclGap). Resource
+             timing is empty here on purpose: the shell loads over the app
+             scheme, not HTTP, so there are no resource entries to rank. */
           return JSON.stringify({
             domContentLoaded: nav.domContentLoadedEventEnd - nav.startTime,
             load: nav.loadEventEnd - nav.startTime,
-            transfer: nav.transferSize
+            transfer: nav.transferSize,
+            firstByte: nav.responseStart - nav.startTime,
+            response: nav.responseEnd - nav.startTime,
+            domParse: nav.domInteractive - nav.responseEnd,
+            scriptEval: nav.domContentLoadedEventStart - nav.domInteractive,
+            dclGap: nav.domContentLoadedEventEnd - nav.domContentLoadedEventStart
           })
         })()`,
         returnByValue: true
@@ -245,6 +257,7 @@ try {
      median: including it would average the cost of building the cache into the
      figure that exists to show what the cache saves. */
   const warm = runs.slice(1)
+  const phaseMedian = (key) => round(median(warm.map((r) => r[key] ?? 0)))
   const report = {
     label: LABEL,
     appScheme: !process.env.TULIP_NO_APP_SCHEME,
@@ -255,7 +268,12 @@ try {
     },
     warmMedianMs: {
       domContentLoaded: round(median(warm.map((r) => r.domContentLoaded))),
-      load: round(median(warm.map((r) => r.load)))
+      load: round(median(warm.map((r) => r.load))),
+      firstByte: phaseMedian('firstByte'),
+      response: phaseMedian('response'),
+      domParse: phaseMedian('domParse'),
+      scriptEval: phaseMedian('scriptEval'),
+      dclGap: phaseMedian('dclGap')
     },
     warmRunsMs: warm.map((r) => round(r.domContentLoaded))
   }
