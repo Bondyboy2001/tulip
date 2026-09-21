@@ -412,6 +412,20 @@
   --h6: #DEA895;
 }
 
+/* The inline-code chip, split into a ground and a glyph. It used to be one
+   colour at three strengths — `--code-inline` as the text, as a 13% wash behind
+   it, and as a 28% hairline — which read as a flat block of hue rather than as
+   text on a surface. The ground is now the theme's own neutrals, a step past
+   `--sunk` toward `--line` so it stays findable against paper in either scheme,
+   and the hue is left to the characters alone. Derived here once so a palette
+   never has to remember to restyle a chip; `--code-inline` is pulled slightly
+   toward `--ink` because on a neutral ground it carries the whole signal. */
+:root, [data-theme] {
+  --code-inline-bg: color-mix(in oklab, var(--sunk) 55%, var(--line));
+  --code-inline-line: color-mix(in oklab, var(--line) 88%, var(--ink));
+  --code-inline-text: color-mix(in oklab, var(--code-inline) 88%, var(--ink));
+}
+
 * { box-sizing: border-box; }
 
 /* The browser hides `hidden` with a rule any class of ours outranks, so every
@@ -1663,15 +1677,17 @@ ol.tk-ordered-list > li > .tk-olnum {
 
 /* Inline code, set as a chip. `--sunk` alone was within a few per cent of the
    paper in every theme, so a `code` span read as prose in a different face —
-   findable only by looking for it. Three things now say what it is at a
-   glance: its own hue, a tint of that hue behind it, and a hairline that
-   closes the chip. See --code-inline for why the hue differs by theme. */
+   findable only by looking for it. Three things still say what it is at a
+   glance: a ground a step off the paper, a hairline that closes the chip, and
+   the code hue in the glyphs — which is now the only place the hue appears, so
+   the words no longer vanish into the colour behind them. See the derived
+   `--code-inline-*` tokens above. */
 .reading code {
   font-family: var(--font-mono);
   font-size: .84em;
-  color: var(--code-inline);
-  background: color-mix(in srgb, var(--code-inline) 13%, var(--sunk));
-  border: 1px solid color-mix(in srgb, var(--code-inline) 28%, transparent);
+  color: var(--code-inline-text);
+  background: var(--code-inline-bg);
+  border: 1px solid var(--code-inline-line);
   padding: .1em .34em;
   border-radius: 4px;
   /* A chip that wraps is two chips, each closed on all four sides — without
@@ -4307,9 +4323,9 @@ ol.tk-ordered-list > li > .tk-olnum {
 .tk-inline-code {
   font-family: var(--font-mono);
   font-size: .84em;
-  color: var(--code-inline);
-  background: color-mix(in srgb, var(--code-inline) 13%, var(--sunk));
-  border: 1px solid color-mix(in srgb, var(--code-inline) 28%, transparent);
+  color: var(--code-inline-text);
+  background: var(--code-inline-bg);
+  border: 1px solid var(--code-inline-line);
   border-radius: 4px;
   padding: .1em .3em;
   box-decoration-break: clone;
@@ -7534,9 +7550,9 @@ audio.embed-media { width: 100%; height: revert; border-radius: 999px; }
    its box overflows yours. */
 .msg code {
   font: 11.5px/1.5 var(--font-mono);
-  color: var(--code-inline);
-  background: color-mix(in srgb, var(--code-inline) 13%, var(--sunk));
-  border: 1px solid color-mix(in srgb, var(--code-inline) 26%, transparent);
+  color: var(--code-inline-text);
+  background: var(--code-inline-bg);
+  border: 1px solid var(--code-inline-line);
   padding: 1.5px 4px;
   border-radius: 4px;
 }
@@ -11930,9 +11946,9 @@ h4.docx-h, h5.docx-h, h6.docx-h { font-size: 1.05em; }
 .nb-md code {
   padding: 1px 4px;
   border-radius: 4px;
-  background: var(--sunk);
+  background: var(--code-inline-bg);
   font: .88em var(--font-mono);
-  color: var(--code-inline);
+  color: var(--code-inline-text);
 }
 .nb-md pre {
   overflow-x: auto;
